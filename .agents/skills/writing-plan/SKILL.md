@@ -1,6 +1,6 @@
 ---
 name: writing-plan
-description: Generate a work plan markdown file under .plan/general/ or .plan/issues/ with strict naming conventions. Use when asked to "write a plan" or when starting any non-trivial change. Optionally links plans to GitHub issues.
+description: Generate a work plan markdown file under .plan/general/ with strict naming conventions. Use when asked to "write a plan" or when starting any non-trivial change. Optionally links plans to Jira.
 ---
 
 # writing-plan Skill
@@ -13,7 +13,7 @@ Use this skill when:
 
 ## Inputs (ask if missing)
 - **title** (required): Short human-readable title for the plan.
-- **github_issue** (optional): GitHub issue reference as `123`, `#123`, or an issue URL.
+- **jira** (optional): Jira key or work item URL.
 
 ## Output rules (MUST)
 
@@ -26,32 +26,21 @@ Use this skill when:
   - Collapse repeated `-` and trim leading/trailing `-`.
   - Keep reasonably short (<= 50 chars).
 
-### General plan (No GitHub issue)
+### Plan file
 1. **Ensure directory:** `.plan/general/`
 2. **Check collision:**
    - Target: `.plan/general/<YYYY-MM-DD>-<slug>.md`
    - If target exists, append suffix: `-2`, `-3`, etc. (e.g., `...-slug-2.md`)
 3. **Create File:** `.plan/general/<YYYY-MM-DD>-<slug>.md`
 
-### GitHub issue plan (GitHub issue provided)
-1. **Normalize issue number:**
-   - `123` → `123`
-   - `#123` → `123`
-   - GitHub issue URL → extract the issue number
-2. **Validate issue number:** Must contain digits only after normalization.
-3. **Optional check:** If `gh` is available and repo context exists, run `gh issue view <number>` to verify the issue. If verification fails due to auth, sandbox, or network issues, continue with the normalized number unless the user explicitly asked for verification.
-4. **Ensure directory:** `.plan/issues/`
-5. **Check collision:**
-   - Target: `.plan/issues/<YYYY-MM-DD>-issue-<number>-<slug>.md`
-   - If target exists, append suffix: `-2`, `-3`, etc. (e.g., `...-slug-2.md`)
-6. **Create File:** `.plan/issues/<YYYY-MM-DD>-issue-<number>-<slug>.md`
+4. **Jira linkage:** Jira metadata is optional and does not affect the file path. Do not create or require a GitHub Issue.
 
 ## Plan content (MUST)
 1. **Load template:** Read `assets/PLAN_TEMPLATE.md`.
 2. **Replace placeholders:**
    - `{{DATE}}` → Current date (YYYY-MM-DD)
    - `{{TITLE}}` → User provided title (Keep original language here)
-   - `{{GITHUB_ISSUE_OR_NONE}}` → GitHub issue reference (e.g., `#123`) or string "None"
+   - `{{JIRA_OR_NONE}}` → Jira key or URL, or string "None"
 3. **Fill sections:** Do not delete headers. Add initial thoughts if context is available.
 
 ## Return format (in chat)

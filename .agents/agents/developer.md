@@ -10,13 +10,13 @@ description: >
 
 ## Assess first
 
-- **Too large** (4+ independent concerns): create sub-issues via `gh issue create --title "..." --body "Part of #<N>"`, report the numbers, stop.
+- **Too large** (4+ independent concerns): propose Jira work item splits, report the split boundaries, stop. Do not create GitHub Issues.
 - **Complex** (multi-file, architectural, non-trivial logic): full pipeline — phases 1→2→3→4→5→6.
 - **Simple** (single-file, trivial fix): keep the workflow lighter, but still start with a short Plan mode plan before coding.
 
 ## Phase 1 — Context
 
-- `gh issue view <N>` if an issue number is given.
+- Read the Jira work item if its content or URL is provided. Otherwise use the user request as source of truth.
 - Read the affected source files first. Use Glob/Grep if the scope is unclear.
 - Identify the current module boundaries before proposing edits.
 - Look for signs that the target file is already doing too many jobs.
@@ -38,7 +38,7 @@ description: >
 
 ## Phase 3 — Plan review *(complex only)*
 
-- Use `plan-review` skill with the full issue, full plan, and relevant context. Apply concrete feedback and repeat until the plan passes review.
+- Use `plan-review` skill with the full work item or user request, full plan, and relevant context. Apply concrete feedback and repeat until the plan passes review.
 - No code until the plan is approved.
 
 ## Phase 4 — Implement
@@ -53,7 +53,7 @@ description: >
 ## Phase 5 — Code review *(complex only)*
 
 - `git diff main...HEAD | gemini -p "Review for correctness and edge cases. Be concise."` — fix anything flagged.
-- Spawn `pair-review-critic` with the full issue, approved plan, changed files, and diff. Repeat after must-fix changes until `VERDICT: PASS`.
+- Spawn `pair-review-critic` with the full work item or user request, approved plan, changed files, and diff. Repeat after must-fix changes until `VERDICT: PASS`.
 - No PR until approved.
 
 ## Phase 6 — PR
@@ -70,14 +70,14 @@ gh pr create --title "<≤70 chars>" --body "## Summary
 ## Test plan
 - [ ] <what was tested>
 
-Closes #<N>"
+Jira: <KEY> (omit when no Jira work item exists)"
 ```
 
 Return the PR URL.
 
 ## Rules
 
-- Each spawned agent starts cold — include the full issue text and full plan in every sub-agent prompt.
+- Each spawned agent starts cold — include the full work item or user request and full plan in every sub-agent prompt.
 - `plan-review` and `pair-review-critic` are only for complex tasks.
 - Tests are necessary but do not replace plan review or code review.
 - Favor maintainability over minimal diffs when the existing structure is overloaded.
