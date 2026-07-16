@@ -16,8 +16,13 @@ pipeline {
 
         stage('Test') {
             steps {
-                sh 'python -m pip install -e ".[dev]"'
-                sh 'python -m pytest'
+                sh '''
+                    docker run --rm \
+                    -v $(pwd):/app \
+                    -w /app \
+                    python:3.12-slim \
+                    sh -c 'python -m pip install -e ".[dev]" && python -m pytest'
+                '''
             }
         }
 
