@@ -5,37 +5,37 @@ Fill this document during project initialization. Agents must verify commands ag
 ## Overview
 
 - Product: artel-agent-server
-- Primary users: TODO
-- Core domain: TODO
-- Runtime environment: TODO
+- Primary users: Backend services and operators that request AI agent workflows.
+- Core domain: AI agent orchestration server for scenario generation, QA execution, and bug report workflows.
+- Runtime environment: Python 3.11+ FastAPI application.
 
 ## Architecture
 
-- Entry points: TODO
-- Main modules: TODO
-- Dependency direction: TODO
+- Entry points: `app.main:create_app`, `app.main:app`
+- Main modules: `app/api`, `app/llm`
+- Dependency direction: API routes stay thin; LLM provider clients depend on shared LLM schemas and configuration.
 - External systems: GitHub repository `project-artel/artel-agent-server`
-- Persistent data: TODO
+- Persistent data: None yet.
 
 ## Commands
 
 | Purpose | Command |
 |---|---|
-| Install dependencies | TODO |
-| Run locally | TODO |
+| Install dependencies | `python -m pip install -e ".[dev]"` |
+| Run locally | `python -m uvicorn app.main:app --reload` |
 | Format | TODO |
 | Lint | TODO |
 | Type-check | TODO |
-| Unit tests | TODO |
+| Unit tests | `python -m pytest` |
 | Integration tests | TODO |
 | Build | TODO |
 
 ## Constraints
 
-- Supported platforms:
-- Compatibility requirements:
-- Performance constraints:
-- Security or privacy requirements:
+- Supported platforms: Windows development environment; Linux deployment target not defined yet.
+- Compatibility requirements: Python 3.11 or newer.
+- Performance constraints: TODO
+- Security or privacy requirements: External LLM credentials must be provided through environment/configuration, not committed.
 
 ## Ownership
 
