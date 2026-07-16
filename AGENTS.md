@@ -17,8 +17,6 @@ For non-trivial work, follow:
 
 For tracked Git work, follow:
 
-- `.agents/docs/issue.md`
-- `.agents/docs/branch.md`
 - `.agents/docs/commit.md`
 - `.agents/docs/pull-request.md`
 
