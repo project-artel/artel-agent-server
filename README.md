@@ -34,3 +34,28 @@ Run tests:
 ```powershell
 python -m pytest
 ```
+
+## Container
+
+Build the image:
+
+```powershell
+docker build -t artel-agent-server:local .
+```
+
+Run the container:
+
+```powershell
+docker run --rm -p 8080:8080 -v ${PWD}/.env:/app/.env:ro artel-agent-server:local
+```
+
+## Jenkins
+
+`Jenkinsfile` resolves deployment target from the branch name:
+
+- `main`, `operation` -> `operation`
+- `develop`, `stage` -> `stage`
+
+The Jenkins workspace should provide `.env.stage` and `.env.operation` files.
+The pipeline mounts the selected file into the container as `/app/.env`.
+The Jenkins host should provide Docker, Python, and the `app-net` Docker network.
