@@ -23,10 +23,3 @@ COPY app ./app
 RUN pip install --no-cache-dir .
 
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${APP_PORT}"]
-
-
-{"step1", "~~해라"} //
-{step_id, func, arg}
-..
-..
-
