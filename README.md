@@ -40,7 +40,13 @@ python -m pytest
 Build the image:
 
 ```powershell
-docker build -t artel-agent-server:local .
+docker build --target runtime -t artel-agent-server:local .
+```
+
+Run tests through the Dockerfile:
+
+```powershell
+docker build --target test -t artel-agent-server:test .
 ```
 
 Run the container:
@@ -56,6 +62,10 @@ docker run --rm -p 8080:8080 -v ${PWD}/.env:/app/.env:ro artel-agent-server:loca
 - `main`, `operation` -> `operation`
 - `develop`, `stage` -> `stage`
 
+Pull request builds are detected through Jenkins multibranch variables such as
+`CHANGE_ID`. PR builds run the Dockerfile `test` target but do not build or
+deploy the runtime container.
+
 The Jenkins workspace should provide `.env.stage` and `.env.operation` files.
 The pipeline mounts the selected file into the container as `/app/.env`.
-The Jenkins host should provide Docker, Python, and the `app-net` Docker network.
+The Jenkins host should provide Docker and the `app-net` Docker network.
