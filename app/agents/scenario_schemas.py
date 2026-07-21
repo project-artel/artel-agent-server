@@ -1,12 +1,7 @@
 from pydantic import BaseModel, Field, field_validator
 
-
-class ScenarioContext(BaseModel):
-    states: list[dict] = Field(default_factory=list)
-    events: list[dict] = Field(default_factory=list)
-    functions: list[dict] = Field(default_factory=list)
-    facts: list[dict] = Field(default_factory=list)
-    constraints: list[str] = Field(default_factory=list)
+from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.schemas import LLMMessage
 
 
 class ScenarioStep(BaseModel):
@@ -35,8 +30,15 @@ class ScenarioDraft(BaseModel):
 
 class ScenarioAgentRequest(BaseModel):
     user_input: str
-    context: ScenarioContext
+    # Opaque, game-specific context merged upstream (Unity SDK + user-provided).
+    unity_context: dict = Field(default_factory=dict)
+    game_context: dict = Field(default_factory=dict)
+    # Recent conversation turns, already windowed by the session layer.
+    history: list[LLMMessage] = Field(default_factory=list)
+    # Authoritative current draft (may contain the user's manual edits). None on
+    # the first turn.
     draft: ScenarioDraft | None = None
+    model: LLMModel = DEFAULT_MODEL
 
 
 class ScenarioAgentResult(BaseModel):

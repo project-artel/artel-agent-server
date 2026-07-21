@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     openrouter_site_url: str | None = None
     openrouter_app_title: str = "Artel Agent Server"
 
+    redis_url: str = "redis://localhost:6379/0"
+    session_ttl_seconds: int = 3600
+    history_max_turns: int = 10
+
 
 @lru_cache
 def get_settings() -> Settings:
