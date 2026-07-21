@@ -36,8 +36,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
-        title=settings.app_name,
+        title="Artel Agent Server API",
+        description=(
+            "API contract for Artel scenario generation, QA execution, "
+            "and bug report workflows."
+        ),
         version=settings.app_version,
+        docs_url="/docs",
+        redoc_url="/redoc",
+        openapi_url="/openapi.json",
         lifespan=lifespan,
     )
     app.include_router(api_router)
