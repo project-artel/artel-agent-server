@@ -55,21 +55,24 @@ pipeline {
             }
 
             steps {
-                sh '''
-                    test -f $ENV_FILE
+                withCredentials([file(credentialsId: "agent-server-env-${env.TARGET_ENV}", variable: 'ENV_SRC')]) {
+                    sh '''
+                        cp "$ENV_SRC" "$ENV_FILE"
+                        test -f $ENV_FILE
 
-                    docker stop $CONTAINER_NAME || true
-                    docker rm $CONTAINER_NAME || true
+                        docker stop $CONTAINER_NAME || true
+                        docker rm $CONTAINER_NAME || true
 
-                    docker run -d \
-                      --name $CONTAINER_NAME \
-                      --restart unless-stopped \
-                      --network app-net \
-                      -e APP_ENV=$TARGET_ENV \
-                      -e APP_PORT=$APP_PORT \
-                      -v $(pwd)/$ENV_FILE:/app/.env:ro \
-                      $IMAGE_TAG
-                '''
+                        docker run -d \
+                          --name $CONTAINER_NAME \
+                          --restart unless-stopped \
+                          --network app-net \
+                          -e APP_ENV=$TARGET_ENV \
+                          -e APP_PORT=$APP_PORT \
+                          -v $(pwd)/$ENV_FILE:/app/.env:ro \
+                          $IMAGE_TAG
+                    '''
+                }
             }
         }
     }
