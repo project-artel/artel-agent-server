@@ -9,4 +9,3 @@ build/
 dist/
 .plan/
 .agents/
-tests/

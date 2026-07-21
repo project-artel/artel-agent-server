@@ -14,32 +14,46 @@ pipeline {
             }
         }
 
+        stage('Resolve Target') {
+            steps {
+                script {
+                    env.IS_PR = isPullRequestBuild() ? 'true' : 'false'
+
+                    if (env.IS_PR == 'true') {
+                        env.TARGET_BRANCH = env.CHANGE_TARGET
+                        env.TEST_IMAGE_TAG = "${IMAGE_NAME}:pr-${env.CHANGE_ID}-${env.BUILD_NUMBER}-test"
+                    } else {
+                        env.TARGET_ENV = resolveTargetEnv(env.BRANCH_NAME)
+                        env.CONTAINER_NAME = "${APP_NAME}-${env.TARGET_ENV}"
+                        env.IMAGE_TAG = "${IMAGE_NAME}:${env.TARGET_ENV}-${env.BUILD_NUMBER}"
+                        env.TEST_IMAGE_TAG = "${IMAGE_NAME}:${env.TARGET_ENV}-${env.BUILD_NUMBER}-test"
+                        env.ENV_FILE = ".env.${env.TARGET_ENV}"
+                    }
+                }
+            }
+        }
+
         stage('Test') {
             steps {
-                sh '''
-                    docker run --rm \
-                    -v $(pwd):/app \
-                    -w /app \
-                    python:3.12-slim \
-                    sh -c 'python -m pip install -e ".[dev]" && python -m pytest'
-                '''
+                sh 'docker build --target test -t $TEST_IMAGE_TAG .'
             }
         }
 
         stage('Docker Build') {
-            steps {
-                script {
-                    env.TARGET_ENV = resolveTargetEnv(env.BRANCH_NAME)
-                    env.CONTAINER_NAME = "${APP_NAME}-${env.TARGET_ENV}"
-                    env.IMAGE_TAG = "${IMAGE_NAME}:${env.TARGET_ENV}-${env.BUILD_NUMBER}"
-                    env.ENV_FILE = ".env.${env.TARGET_ENV}"
-                }
+            when {
+                expression { env.IS_PR != 'true' }
+            }
 
-                sh 'docker build -t $IMAGE_TAG .'
+            steps {
+                sh 'docker build --target runtime -t $IMAGE_TAG .'
             }
         }
 
         stage('Deploy') {
+            when {
+                expression { env.IS_PR != 'true' }
+            }
+
             steps {
                 sh '''
                     test -f $ENV_FILE
@@ -71,4 +85,8 @@ def resolveTargetEnv(String branchName) {
     }
 
     error "Unsupported branch for deployment: ${branchName}"
+}
+
+def isPullRequestBuild() {
+    return env.CHANGE_ID?.trim()
 }
