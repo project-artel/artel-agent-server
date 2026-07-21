@@ -41,12 +41,18 @@ Use this pipeline when the work item is tracked in Jira and the user asks for
 end-to-end development. Jira access is described in `project.md`.
 
 1. **Create the issue.** `jira_create_issue` in project `ARTEL`, issue type
-   `작업` unless the work is an epic or a defect. Two custom fields are
-   required and the call fails without them:
+   `작업` unless the work is an epic or a defect. Follow `issue.md` for the
+   body. Set the identifying fields explicitly; a summary alone leaves the
+   issue unassigned and unclassified, and it will not show up in the right
+   filters:
+   - `assignee`: the person who will do the work. Never leave it empty.
    - `customfield_10080` (작업 유형): `feat`, `fix`, `chore`, `docs`,
-     `refactor`, or `infra`
+     `refactor`, or `infra`. Required; the call fails without it.
    - `customfield_10081` (레포지토리): `orchestration-server`, `agent-server`,
-     `home`, `sdk`, or `없음`
+     `home`, `sdk`, or `없음`. Required; the call fails without it.
+   - `labels`: add one only when the work belongs to a theme the two fields
+     above do not already express. Reuse an existing label instead of
+     inventing a near-duplicate.
 
 2. **Move to 진행 중 and create the branch.** Transition the issue, then create
    the branch in the same step so status and branch never drift. Derive the
@@ -58,6 +64,11 @@ end-to-end development. Jira access is described in `project.md`.
 
    For example, `chore/orchestration-jira-mcp-셋팅-ARTEL-69`. Keep Korean
    characters as they appear in the summary. Branch from `origin/develop`.
+
+   The issue key in the branch name is what ties branch, commits, and PR back
+   to the issue, so never create the branch before the issue exists. Keep one
+   issue per branch, never force-push a shared branch without coordination,
+   and delete the branch after merge unless follow-up work depends on it.
 
 3. **Plan.** Use the `writing-plan` skill. Plans land in `.plan/general/`.
 
