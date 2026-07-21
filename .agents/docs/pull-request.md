@@ -28,6 +28,9 @@ Use Conventional Commit format:
 
 ## What Changed
 
+## Code Walkthrough
+- `path/to/unit.ext:12` — what the unit now does, and why it had to change
+
 ## Validation
 - [ ] Command or manual check
 
@@ -37,6 +40,12 @@ Use Conventional Commit format:
 
 Jira: ARTEL-123 (omit when no Jira work item exists)
 ```
+
+`Code Walkthrough` carries one entry per meaningful changed unit — module,
+class, function, migration, or configuration file — anchored with `path:line`.
+State what the unit now does and why the change was necessary. Do not restate
+the diff line by line; the reviewer can read it. Collapse mechanical edits such
+as renames or formatting into a single entry.
 
 ## Review Rules
 
