@@ -12,6 +12,7 @@ class ScenarioContext(BaseModel):
 class ScenarioStep(BaseModel):
     step: int = Field(gt=0)
     title: str
+    state: str
     action: str
     expected: str
 

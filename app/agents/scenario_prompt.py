@@ -22,6 +22,7 @@ class ScenarioPromptBuilder:
                     {
                         "step": 1,
                         "title": "Step name",
+                        "state": "Starting situation or precondition before the action (e.g. title screen, shop screen, must hold at least N gold)",
                         "action": "Concrete action the Unity game QA tester should perform",
                         "expected": "Expected game behavior or observable result",
                     }

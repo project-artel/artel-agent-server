@@ -9,6 +9,7 @@ from app.agents.scenario_schemas import (
     ScenarioStep,
 )
 from app.llm.client import LLMClient
+from app.llm.models import DEFAULT_MODEL, LLMModel
 from app.llm.schemas import LLMRequest, LLMResponse
 
 
@@ -34,6 +35,7 @@ def test_scenario_agent_returns_valid_result() -> None:
               {
                 "step": 1,
                 "title": "Launch game",
+                "state": "The Unity client is installed and not yet running.",
                 "action": "Start the Unity client and wait for the lobby.",
                 "expected": "The lobby is displayed without errors."
               }
@@ -81,14 +83,55 @@ def test_scenario_agent_returns_valid_result() -> None:
     assert result.scenario.title == "Login reward flow"
     assert result.scenario.steps[0].step == 1
     assert result.scenario.steps[0].expected == "The lobby is displayed without errors."
+    assert result.scenario.steps[0].state == "The Unity client is installed and not yet running."
     assert llm.last_request is not None
-    assert llm.last_request.model == "openrouter/auto"
+    assert llm.last_request.model == DEFAULT_MODEL.value
+    # A strict-capable default model must request a strict json_schema.
+    assert llm.last_request.response_format is not None
+    assert llm.last_request.response_format["type"] == "json_schema"
+    assert llm.last_request.response_format["json_schema"]["strict"] is True
+
+
+def test_scenario_agent_falls_back_to_json_object_for_non_strict_model() -> None:
+    llm = FakeLLMClient(
+        """
+        {
+          "message": "ok",
+          "scenario": {
+            "title": "t",
+            "description": "d",
+            "steps": [
+              {
+                "step": 1,
+                "title": "Launch game",
+                "state": "The Unity client is installed and not yet running.",
+                "action": "Start the Unity client.",
+                "expected": "The lobby is displayed."
+              }
+            ]
+          }
+        }
+        """
+    )
+    agent = ScenarioAgent(model=LLMModel.gemma_4_free)
+    context = AgentContext(session_id="session-2", llm=llm)
+    request = ScenarioAgentRequest(
+        user_input="Create a scenario.",
+        context=ScenarioContext(),
+    )
+
+    asyncio.run(agent.run(request, context))
+
+    assert llm.last_request is not None
+    assert llm.last_request.model == LLMModel.gemma_4_free.value
+    assert llm.last_request.response_format == {"type": "json_object"}
 
 
 def test_scenario_draft_rejects_duplicate_step_numbers() -> None:
     step = ScenarioStep(
         step=1,
         title="Launch game",
+        state="The Unity client is installed and not yet running.",
         action="Start the Unity client.",
         expected="The lobby is displayed.",
     )
@@ -106,12 +149,14 @@ def test_scenario_draft_rejects_non_sequential_step_numbers() -> None:
         ScenarioStep(
             step=1,
             title="Launch game",
+            state="The Unity client is installed and not yet running.",
             action="Start the Unity client.",
             expected="The lobby is displayed.",
         ),
         ScenarioStep(
             step=3,
             title="Claim reward",
+            state="The player is on the lobby screen.",
             action="Tap the login reward button.",
             expected="The reward is added to inventory.",
         ),

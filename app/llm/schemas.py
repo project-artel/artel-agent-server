@@ -21,6 +21,7 @@ class LLMRequest(BaseModel):
     messages: list[LLMMessage]
     temperature: float | None = Field(default=None, ge=0)
     max_tokens: int | None = Field(default=None, gt=0)
+    response_format: dict[str, Any] | None = None
     extra_body: dict[str, Any] = Field(default_factory=dict)
 
     def to_chat_payload(self) -> dict[str, Any]:
