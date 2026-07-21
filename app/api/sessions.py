@@ -1,11 +1,10 @@
-import httpx
+import openai
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, ValidationError
 
 from app.agents.errors import ScenarioGenerationError
 from app.agents.scenario_schemas import ScenarioAgentResult, ScenarioDraft
 from app.llm.models import DEFAULT_MODEL, LLMModel
-from app.llm.openrouter_client import LLMClientError
 from app.sessions.service import SessionService
 from app.sessions.store import SessionExpired
 
@@ -120,7 +119,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     _error_event("validation_error", str(error))
                 )
                 continue
-            except (LLMClientError, httpx.HTTPError) as error:
+            except openai.APIError as error:
                 await websocket.send_json(_error_event("llm_error", str(error)))
                 continue
 

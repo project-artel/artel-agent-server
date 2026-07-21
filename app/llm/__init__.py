@@ -1,10 +1,6 @@
-"""LLM client abstractions and provider implementations."""
+"""LLM configuration: model catalog and OpenRouter-backed chat models."""
 
-from app.llm.client import LLMClient
-from app.llm.json_schema import (
-    build_strict_response_format,
-    json_object_response_format,
-)
+from app.llm.chat_model import build_chat_model, select_structured_method
 from app.llm.models import (
     DEFAULT_MODEL,
     MODEL_SPECS,
@@ -14,22 +10,15 @@ from app.llm.models import (
     get_model_spec,
     list_models,
 )
-from app.llm.openrouter_client import OpenRouterClient
-from app.llm.schemas import LLMMessage, LLMRequest, LLMResponse
 
 __all__ = [
     "DEFAULT_MODEL",
     "MODEL_SPECS",
-    "LLMClient",
-    "LLMMessage",
     "LLMModel",
     "LLMProvider",
-    "LLMRequest",
-    "LLMResponse",
     "ModelSpec",
-    "OpenRouterClient",
-    "build_strict_response_format",
+    "build_chat_model",
     "get_model_spec",
-    "json_object_response_format",
     "list_models",
+    "select_structured_method",
 ]

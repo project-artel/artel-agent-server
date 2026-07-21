@@ -1,7 +1,7 @@
-from pydantic import BaseModel, Field, field_validator
+from langchain_core.messages import BaseMessage
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.llm.models import DEFAULT_MODEL, LLMModel
-from app.llm.schemas import LLMMessage
 
 
 class ScenarioStep(BaseModel):
@@ -29,14 +29,16 @@ class ScenarioDraft(BaseModel):
 
 
 class ScenarioAgentRequest(BaseModel):
+    # LangChain messages are passed through as-is (not re-validated).
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     user_input: str
     # Opaque, game-specific context merged upstream (Unity SDK + user-provided).
     unity_context: dict = Field(default_factory=dict)
     game_context: dict = Field(default_factory=dict)
-    # Recent conversation turns, already windowed by the session layer.
-    history: list[LLMMessage] = Field(default_factory=list)
-    # Authoritative current draft (may contain the user's manual edits). None on
-    # the first turn.
+    # Recent conversation, text-only, already windowed by the session layer.
+    history: list[BaseMessage] = Field(default_factory=list)
+    # Authoritative current draft (may contain the user's manual edits).
     draft: ScenarioDraft | None = None
     model: LLMModel = DEFAULT_MODEL
 

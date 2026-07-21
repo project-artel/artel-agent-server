@@ -1,6 +1,8 @@
 import asyncio
 
 import pytest
+from langchain_core.exceptions import OutputParserException
+from langchain_core.runnables import RunnableLambda
 
 from app.agents import (
     AgentContext,
@@ -11,52 +13,31 @@ from app.agents import (
     ScenarioGenerationError,
     ScenarioStep,
 )
-from app.llm.client import LLMClient
-from app.llm.models import DEFAULT_MODEL, LLMModel
-from app.llm.schemas import LLMRequest, LLMResponse
+from app.llm.chat_model import select_structured_method
+from app.llm.models import LLMModel
 
 
-_VALID_RESPONSE = """
-{
-  "message": "Created the first draft.",
-  "scenario": {
-    "title": "Login reward flow",
-    "description": "Verify the Unity game login reward flow.",
-    "steps": [
-      {
-        "step": 1,
-        "title": "Launch game",
-        "state": "The Unity client is installed and not yet running.",
-        "action": "Start the Unity client and wait for the lobby.",
-        "expected": "The lobby is displayed without errors."
-      }
-    ]
-  }
-}
-"""
+def _result(message: str = "Created the first draft.") -> ScenarioAgentResult:
+    return ScenarioAgentResult(
+        message=message,
+        scenario=ScenarioDraft(
+            title="Login reward flow",
+            description="Verify the Unity game login reward flow.",
+            steps=[
+                ScenarioStep(
+                    step=1,
+                    title="Launch game",
+                    state="The Unity client is installed and not yet running.",
+                    action="Start the Unity client and wait for the lobby.",
+                    expected="The lobby is displayed without errors.",
+                )
+            ],
+        ),
+    )
 
 
-class FakeLLMClient(LLMClient):
-    def __init__(self, response: str) -> None:
-        self.last_request: LLMRequest | None = None
-        self._response = response
-
-    async def complete(self, request: LLMRequest) -> LLMResponse:
-        self.last_request = request
-        return LLMResponse(model=request.model, content=self._response)
-
-
-class SequenceLLMClient(LLMClient):
-    """Returns queued responses in order, one per complete() call."""
-
-    def __init__(self, responses: list[str]) -> None:
-        self.requests: list[LLMRequest] = []
-        self._responses = responses
-
-    async def complete(self, request: LLMRequest) -> LLMResponse:
-        self.requests.append(request)
-        content = self._responses[len(self.requests) - 1]
-        return LLMResponse(model=request.model, content=content)
+def _canned_factory(result: ScenarioAgentResult):
+    return lambda model: RunnableLambda(lambda _inputs: result)
 
 
 def _request(**overrides) -> ScenarioAgentRequest:
@@ -69,66 +50,51 @@ def _request(**overrides) -> ScenarioAgentRequest:
     return ScenarioAgentRequest(**base)
 
 
-def test_scenario_agent_returns_valid_result() -> None:
-    llm = FakeLLMClient(_VALID_RESPONSE)
-    agent = ScenarioAgent()
-    context = AgentContext(session_id="session-1", llm=llm)
-
-    result = asyncio.run(agent.run(_request(), context))
-
-    assert isinstance(result, ScenarioAgentResult)
-    assert result.message == "Created the first draft."
-    assert result.scenario.steps[0].step == 1
-    assert result.scenario.steps[0].state == "The Unity client is installed and not yet running."
-    assert llm.last_request is not None
-    assert llm.last_request.model == DEFAULT_MODEL.value
-    assert llm.last_request.response_format is not None
-    assert llm.last_request.response_format["type"] == "json_schema"
-    assert llm.last_request.response_format["json_schema"]["strict"] is True
+_CTX = AgentContext(session_id="session-1")
 
 
-def test_scenario_agent_falls_back_to_json_object_for_non_strict_model() -> None:
-    llm = FakeLLMClient(_VALID_RESPONSE)
-    agent = ScenarioAgent()
-    context = AgentContext(session_id="session-2", llm=llm)
+def test_scenario_agent_returns_structured_result() -> None:
+    result = _result()
+    agent = ScenarioAgent(structured_factory=_canned_factory(result))
 
-    asyncio.run(agent.run(_request(model=LLMModel.gemma_4_free), context))
+    out = asyncio.run(agent.run(_request(), _CTX))
 
-    assert llm.last_request is not None
-    assert llm.last_request.model == LLMModel.gemma_4_free.value
-    assert llm.last_request.response_format == {"type": "json_object"}
-
-
-def test_scenario_agent_strips_code_fence() -> None:
-    llm = FakeLLMClient(f"```json\n{_VALID_RESPONSE}\n```")
-    agent = ScenarioAgent()
-    context = AgentContext(session_id="session-3", llm=llm)
-
-    result = asyncio.run(agent.run(_request(), context))
-
-    assert result.scenario.title == "Login reward flow"
+    assert isinstance(out, ScenarioAgentResult)
+    assert out.message == "Created the first draft."
+    assert out.scenario.steps[0].state == "The Unity client is installed and not yet running."
 
 
-def test_scenario_agent_retries_then_succeeds() -> None:
-    llm = SequenceLLMClient(["not json at all", _VALID_RESPONSE])
-    agent = ScenarioAgent()
-    context = AgentContext(session_id="session-4", llm=llm)
+def test_scenario_agent_retries_on_parse_error_then_succeeds() -> None:
+    result = _result()
+    calls = {"n": 0}
 
-    result = asyncio.run(agent.run(_request(), context))
+    def flaky(_inputs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OutputParserException("bad json")
+        return result
 
-    assert result.message == "Created the first draft."
-    assert len(llm.requests) == 2
-    # The retry appends the failed answer plus a correction instruction.
-    assert len(llm.requests[1].messages) > len(llm.requests[0].messages)
+    agent = ScenarioAgent(structured_factory=lambda model: RunnableLambda(flaky))
+
+    out = asyncio.run(agent.run(_request(), _CTX))
+
+    assert out.message == "Created the first draft."
+    assert calls["n"] == 2  # retried once
 
 
 def test_scenario_agent_raises_after_exhausting_retries() -> None:
-    llm = SequenceLLMClient(["nope", "still nope"])
-    agent = ScenarioAgent()
-    context = AgentContext(session_id="session-5", llm=llm)
+    def always_fail(_inputs):
+        raise OutputParserException("still bad")
+
+    agent = ScenarioAgent(structured_factory=lambda model: RunnableLambda(always_fail))
 
     with pytest.raises(ScenarioGenerationError):
-        asyncio.run(agent.run(_request(), context))
+        asyncio.run(agent.run(_request(), _CTX))
+
+
+def test_select_structured_method_by_model() -> None:
+    assert select_structured_method(LLMModel.gpt_4o_mini) == "json_schema"
+    assert select_structured_method(LLMModel.gemma_4_free) == "json_mode"
 
 
 def test_scenario_draft_rejects_duplicate_step_numbers() -> None:

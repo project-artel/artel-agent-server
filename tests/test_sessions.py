@@ -3,76 +3,88 @@ import asyncio
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from langchain_core.runnables import RunnableLambda
 
+from app.agents import (
+    ScenarioAgent,
+    ScenarioAgentResult,
+    ScenarioDraft,
+    ScenarioStep,
+)
 from app.api.sessions import router as sessions_router
-from app.llm.client import LLMClient
-from app.llm.schemas import LLMRequest, LLMResponse
 from app.sessions import InMemorySessionStore, SessionExpired, SessionService
 
 
-_RESPONSE = """
-{
-  "message": "Here is the draft.",
-  "scenario": {
-    "title": "Shop purchase flow",
-    "description": "Verify the shop purchase flow.",
-    "steps": [
-      {
-        "step": 1,
-        "title": "Open shop",
-        "state": "The player is on the lobby screen with at least 100 gold.",
-        "action": "Tap the shop button.",
-        "expected": "The shop screen is displayed."
-      }
-    ]
-  }
-}
-"""
+def _result(message: str = "Here is the draft.") -> ScenarioAgentResult:
+    return ScenarioAgentResult(
+        message=message,
+        scenario=ScenarioDraft(
+            title="Shop purchase flow",
+            description="Verify the shop purchase flow.",
+            steps=[
+                ScenarioStep(
+                    step=1,
+                    title="Open shop",
+                    state="The player is on the lobby screen with at least 100 gold.",
+                    action="Tap the shop button.",
+                    expected="The shop screen is displayed.",
+                )
+            ],
+        ),
+    )
 
 
-class FakeLLMClient(LLMClient):
-    def __init__(self, response: str = _RESPONSE) -> None:
+class CountingAgent(ScenarioAgent):
+    """Agent whose structured chain returns a canned result and counts calls."""
+
+    def __init__(self, result: ScenarioAgentResult) -> None:
         self.calls = 0
-        self._response = response
 
-    async def complete(self, request: LLMRequest) -> LLMResponse:
-        self.calls += 1
-        return LLMResponse(model=request.model, content=self._response)
+        def factory(model):
+            def run(_inputs):
+                self.calls += 1
+                return result
+
+            return RunnableLambda(run)
+
+        super().__init__(structured_factory=factory)
 
 
-def _service(**kwargs) -> tuple[SessionService, FakeLLMClient, InMemorySessionStore]:
+def _service(**kwargs) -> tuple[SessionService, CountingAgent, InMemorySessionStore]:
     store = InMemorySessionStore()
-    llm = FakeLLMClient()
-    service = SessionService(store=store, llm_client=llm, **kwargs)
-    return service, llm, store
+    agent = CountingAgent(_result())
+    service = SessionService(store=store, agent=agent, **kwargs)
+    return service, agent, store
 
 
 def test_open_stores_pending_input_without_generating() -> None:
-    service, llm, store = _service()
+    service, agent, store = _service()
 
-    session_id = asyncio.run(
-        service.open({"u": 1}, {"g": 2}, "Test the shop flow.")
-    )
+    session_id = asyncio.run(service.open({"u": 1}, {"g": 2}, "Test the shop flow."))
     record = asyncio.run(store.load(session_id))
 
-    assert llm.calls == 0  # no generation at open
+    assert agent.calls == 0
     assert record is not None
     assert record.pending_user_input == "Test the shop flow."
     assert record.unity_context == {"u": 1}
 
 
-def test_first_turn_generates_and_clears_pending() -> None:
-    service, llm, store = _service()
+def test_first_turn_generates_and_full_stores_history() -> None:
+    service, agent, store = _service()
     session_id = asyncio.run(service.open({}, {}, "Test the shop flow."))
 
     result = asyncio.run(service.start_first_turn(session_id))
 
-    assert llm.calls == 1
+    assert agent.calls == 1
     assert result is not None
-    assert result.scenario.title == "Shop purchase flow"
     record = asyncio.run(store.load(session_id))
     assert record.pending_user_input is None
-    assert len(record.history) == 2  # user + assistant
+    assert len(record.history) == 2
+    assert record.history[0].role == "user" and record.history[0].scenario is None
+    # Assistant turn keeps the full scenario (full store).
+    assert record.history[1].role == "assistant"
+    assert record.history[1].scenario is not None
+    assert record.history[1].scenario.title == "Shop purchase flow"
 
 
 def test_first_turn_returns_none_when_no_pending() -> None:
@@ -80,11 +92,10 @@ def test_first_turn_returns_none_when_no_pending() -> None:
     session_id = asyncio.run(service.open({}, {}, "First input."))
     asyncio.run(service.start_first_turn(session_id))
 
-    # A reconnect after the first turn has no pending input.
     assert asyncio.run(service.start_first_turn(session_id)) is None
 
 
-def test_run_turn_appends_history_and_caps_window() -> None:
+def test_run_turn_caps_history_window() -> None:
     service, _, store = _service(history_max_turns=2)  # cap = 4 messages
     session_id = asyncio.run(service.open({}, {}, "First input."))
     asyncio.run(service.start_first_turn(session_id))
@@ -93,7 +104,7 @@ def test_run_turn_appends_history_and_caps_window() -> None:
         asyncio.run(service.run_turn(session_id, f"turn {i}", draft=None))
 
     record = asyncio.run(store.load(session_id))
-    assert len(record.history) == 4  # 2 turns * 2 messages
+    assert len(record.history) == 4
 
 
 def test_missing_session_raises_expired() -> None:
@@ -111,19 +122,17 @@ def test_close_deletes_session() -> None:
     assert asyncio.run(store.load(session_id)) is None
 
 
-def _test_app() -> tuple[FastAPI, FakeLLMClient]:
+def _test_app() -> FastAPI:
     app = FastAPI()
     app.include_router(sessions_router)
-    llm = FakeLLMClient()
     app.state.session_service = SessionService(
-        store=InMemorySessionStore(), llm_client=llm
+        store=InMemorySessionStore(), agent=CountingAgent(_result())
     )
-    return app, llm
+    return app
 
 
 def test_ws_flow_open_first_turn_and_turn() -> None:
-    app, _ = _test_app()
-    client = TestClient(app)
+    client = TestClient(_test_app())
 
     opened = client.post(
         "/sessions",
@@ -133,7 +142,7 @@ def test_ws_flow_open_first_turn_and_turn() -> None:
     session_id = opened.json()["session_id"]
 
     with client.websocket_connect(f"/sessions/{session_id}") as ws:
-        first = ws.receive_json()  # first turn result on connect
+        first = ws.receive_json()
         assert first["type"] == "result"
         assert first["scenario"]["title"] == "Shop purchase flow"
 
@@ -146,8 +155,7 @@ def test_ws_flow_open_first_turn_and_turn() -> None:
 
 
 def test_ws_reports_session_expired() -> None:
-    app, _ = _test_app()
-    client = TestClient(app)
+    client = TestClient(_test_app())
 
     with client.websocket_connect("/sessions/unknown-id") as ws:
         event = ws.receive_json()

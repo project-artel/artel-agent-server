@@ -1,70 +1,54 @@
-import json
+from collections.abc import Callable
 
-from pydantic import ValidationError
+from langchain_core.exceptions import OutputParserException
+from langchain_core.runnables import Runnable
 
 from app.agents.base import AgentContext
 from app.agents.errors import ScenarioGenerationError
-from app.agents.json_parse import extract_json_object
-from app.agents.scenario_prompt import ScenarioPromptBuilder
+from app.agents.scenario_prompt import build_chain_inputs, build_scenario_prompt
 from app.agents.scenario_schemas import ScenarioAgentRequest, ScenarioAgentResult
-from app.llm.json_schema import (
-    build_strict_response_format,
-    json_object_response_format,
-)
-from app.llm.models import LLMModel, get_model_spec
-from app.llm.schemas import LLMMessage, LLMRequest, MessageRole
+from app.llm.chat_model import build_chat_model, select_structured_method
+from app.llm.models import LLMModel
 
 
 _MAX_ATTEMPTS = 2
-_CORRECTION_PROMPT = (
-    "Your previous response was not valid JSON matching the output contract. "
-    "Return ONLY corrected JSON that matches the contract, with no extra text."
-)
+
+StructuredFactory = Callable[[LLMModel], Runnable]
+
+
+def _default_structured_factory(model: LLMModel) -> Runnable:
+    chat = build_chat_model(model)
+    if select_structured_method(model) == "json_schema":
+        return chat.with_structured_output(
+            ScenarioAgentResult, method="json_schema", strict=True
+        )
+    return chat.with_structured_output(ScenarioAgentResult, method="json_mode")
 
 
 class ScenarioAgent:
-    def __init__(self, prompt_builder: ScenarioPromptBuilder | None = None) -> None:
-        self._prompt_builder = prompt_builder or ScenarioPromptBuilder()
+    """Turn-level scenario generator backed by a LangChain structured chain.
+
+    ``structured_factory`` is injectable so tests can supply a canned runnable
+    instead of calling a real model.
+    """
+
+    def __init__(self, structured_factory: StructuredFactory | None = None) -> None:
+        self._prompt = build_scenario_prompt()
+        self._structured_factory = structured_factory or _default_structured_factory
 
     async def run(
         self,
         request: ScenarioAgentRequest,
         context: AgentContext,
     ) -> ScenarioAgentResult:
-        messages = self._prompt_builder.build(request)
-        response_format = self._response_format(request.model)
-
-        last_error: Exception | None = None
-        for _ in range(_MAX_ATTEMPTS):
-            response = await context.llm.complete(
-                LLMRequest(
-                    model=request.model.value,
-                    messages=messages,
-                    temperature=0.2,
-                    response_format=response_format,
-                )
-            )
-            try:
-                payload = json.loads(extract_json_object(response.content))
-                return ScenarioAgentResult.model_validate(payload)
-            except (json.JSONDecodeError, ValidationError, ValueError) as error:
-                last_error = error
-                messages = [
-                    *messages,
-                    LLMMessage(
-                        role=MessageRole.assistant, content=response.content
-                    ),
-                    LLMMessage(role=MessageRole.user, content=_CORRECTION_PROMPT),
-                ]
-
-        raise ScenarioGenerationError(
-            "Failed to produce valid scenario JSON."
-        ) from last_error
-
-    def _response_format(self, model: LLMModel) -> dict:
-        if get_model_spec(model).supports_strict_json:
-            return build_strict_response_format(
-                ScenarioAgentResult,
-                name="scenario_agent_result",
-            )
-        return json_object_response_format()
+        structured = self._structured_factory(request.model)
+        chain = (self._prompt | structured).with_retry(
+            retry_if_exception_type=(OutputParserException,),
+            stop_after_attempt=_MAX_ATTEMPTS,
+        )
+        try:
+            return await chain.ainvoke(build_chain_inputs(request))
+        except OutputParserException as error:
+            raise ScenarioGenerationError(
+                "Failed to produce valid scenario JSON."
+            ) from error

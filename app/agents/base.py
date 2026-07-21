@@ -1,8 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Any, Protocol, TypeVar
 
-from app.llm.client import LLMClient
-
 
 RequestT = TypeVar("RequestT", contravariant=True)
 ResultT = TypeVar("ResultT", covariant=True)
@@ -10,8 +8,9 @@ ResultT = TypeVar("ResultT", covariant=True)
 
 @dataclass(frozen=True)
 class AgentContext:
+    # Correlation id for logging/tracing/metrics. Not a state key — session
+    # state lives in the session layer.
     session_id: str
-    llm: LLMClient
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

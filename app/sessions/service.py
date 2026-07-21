@@ -1,15 +1,15 @@
 import uuid
 
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+
 from app.agents import AgentContext, ScenarioAgent
 from app.agents.scenario_schemas import (
     ScenarioAgentRequest,
     ScenarioAgentResult,
     ScenarioDraft,
 )
-from app.llm.client import LLMClient
 from app.llm.models import DEFAULT_MODEL, LLMModel
-from app.llm.schemas import LLMMessage, MessageRole
-from app.sessions.schemas import SessionRecord
+from app.sessions.schemas import HistoryTurn, SessionRecord
 from app.sessions.store import SessionExpired, SessionStore
 
 
@@ -17,12 +17,10 @@ class SessionService:
     def __init__(
         self,
         store: SessionStore,
-        llm_client: LLMClient,
         agent: ScenarioAgent | None = None,
         history_max_turns: int = 10,
     ) -> None:
         self._store = store
-        self._llm = llm_client
         self._agent = agent or ScenarioAgent()
         # One turn == one user message + one assistant message.
         self._history_max_messages = history_max_turns * 2
@@ -45,11 +43,6 @@ class SessionService:
         return session_id
 
     async def start_first_turn(self, session_id: str) -> ScenarioAgentResult | None:
-        """Run the first generation using the input captured at open time.
-
-        Returns None when there is no pending input (e.g. a reconnect after the
-        first turn already ran).
-        """
         record = await self._load(session_id)
         if not record.pending_user_input:
             return None
@@ -83,6 +76,17 @@ class SessionService:
             raise SessionExpired(session_id)
         return record
 
+    def _replay_messages(self, record: SessionRecord) -> list[BaseMessage]:
+        """Text-only messages for the prompt (scenarios are not replayed)."""
+        window = record.history[-self._history_max_messages :]
+        messages: list[BaseMessage] = []
+        for turn in window:
+            if turn.role == "user":
+                messages.append(HumanMessage(turn.message))
+            else:
+                messages.append(AIMessage(turn.message))
+        return messages
+
     async def _generate(
         self,
         session_id: str,
@@ -94,18 +98,20 @@ class SessionService:
             user_input=user_input,
             unity_context=record.unity_context,
             game_context=record.game_context,
-            history=list(record.history),
+            history=self._replay_messages(record),
             draft=draft,
             model=record.model,
         )
-        context = AgentContext(session_id=session_id, llm=self._llm)
-        result = await self._agent.run(request, context)
+        result = await self._agent.run(request, AgentContext(session_id=session_id))
 
+        # Full store (assistant turn keeps the generated scenario).
+        record.history.append(HistoryTurn(role="user", message=user_input))
         record.history.append(
-            LLMMessage(role=MessageRole.user, content=user_input)
-        )
-        record.history.append(
-            LLMMessage(role=MessageRole.assistant, content=result.message)
+            HistoryTurn(
+                role="assistant",
+                message=result.message,
+                scenario=result.scenario,
+            )
         )
         if len(record.history) > self._history_max_messages:
             record.history = record.history[-self._history_max_messages :]

@@ -1,6 +1,6 @@
 """Scenario session management (store, service, schemas)."""
 
-from app.sessions.schemas import SessionRecord
+from app.sessions.schemas import HistoryTurn, SessionRecord
 from app.sessions.service import SessionService
 from app.sessions.store import (
     InMemorySessionStore,
@@ -9,6 +9,7 @@ from app.sessions.store import (
 )
 
 __all__ = [
+    "HistoryTurn",
     "InMemorySessionStore",
     "SessionExpired",
     "SessionRecord",
