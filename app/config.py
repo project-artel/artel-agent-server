@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     session_ttl_seconds: int = 3600
     history_max_turns: int = 10
 
+    # /extract source fetch guards. allowed_hosts empty = no host restriction
+    # (rely on the caller passing presigned URLs to the expected bucket).
+    extract_max_bytes: int = 20 * 1024 * 1024
+    extract_timeout_seconds: float = 30.0
+    extract_allowed_hosts: list[str] = Field(default_factory=list)
+
 
 @lru_cache
 def get_settings() -> Settings:
