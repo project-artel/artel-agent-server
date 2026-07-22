@@ -2,8 +2,7 @@ import openai
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, ValidationError
 
-from app.agents.errors import ScenarioGenerationError
-from app.agents.scenario_schemas import ScenarioAgentResult, ScenarioDraft
+from app.agents import ScenarioAgentResult, ScenarioDraft, ScenarioGenerationError
 from app.llm.models import DEFAULT_MODEL, LLMModel
 from app.sessions.service import SessionService
 from app.sessions.store import SessionExpired

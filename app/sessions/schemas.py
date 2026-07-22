@@ -2,7 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.agents.scenario_schemas import ScenarioDraft
+from app.agents import ScenarioDraft
 from app.llm.models import DEFAULT_MODEL, LLMModel
 
 

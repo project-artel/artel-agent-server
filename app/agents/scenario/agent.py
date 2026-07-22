@@ -4,9 +4,9 @@ from langchain_core.exceptions import OutputParserException
 from langchain_core.runnables import Runnable
 
 from app.agents.base import AgentContext
-from app.agents.errors import ScenarioGenerationError
-from app.agents.scenario_prompt import build_chain_inputs, build_scenario_prompt
-from app.agents.scenario_schemas import ScenarioAgentRequest, ScenarioAgentResult
+from app.agents.scenario.errors import ScenarioGenerationError
+from app.agents.scenario.prompt import build_chain_inputs, build_scenario_prompt
+from app.agents.scenario.schemas import ScenarioAgentRequest, ScenarioAgentResult
 from app.llm.chat_model import build_chat_model, select_structured_method
 from app.llm.models import LLMModel
 

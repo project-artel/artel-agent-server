@@ -1,18 +1,15 @@
-"""Agent interfaces and implementations."""
+"""Scenario generation agent."""
 
-from app.agents.base import AgentContext, BaseAgent
-from app.agents.scenario import (
-    ScenarioAgent,
+from app.agents.scenario.agent import ScenarioAgent
+from app.agents.scenario.errors import ScenarioGenerationError
+from app.agents.scenario.schemas import (
     ScenarioAgentRequest,
     ScenarioAgentResult,
     ScenarioDraft,
-    ScenarioGenerationError,
     ScenarioStep,
 )
 
 __all__ = [
-    "AgentContext",
-    "BaseAgent",
     "ScenarioAgent",
     "ScenarioAgentRequest",
     "ScenarioAgentResult",

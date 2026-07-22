@@ -2,8 +2,9 @@ import uuid
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
-from app.agents import AgentContext, ScenarioAgent
-from app.agents.scenario_schemas import (
+from app.agents import (
+    AgentContext,
+    ScenarioAgent,
     ScenarioAgentRequest,
     ScenarioAgentResult,
     ScenarioDraft,
