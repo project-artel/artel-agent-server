@@ -69,7 +69,7 @@ pipeline {
                           --network app-net \
                           -e APP_ENV=$TARGET_ENV \
                           -e APP_PORT=$APP_PORT \
-                          -v $(pwd)/$ENV_FILE:/app/.env:ro \
+                          --env-file "$ENV_FILE" \
                           $IMAGE_TAG
                     '''
                 }
