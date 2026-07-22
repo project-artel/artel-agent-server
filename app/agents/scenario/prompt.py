@@ -2,7 +2,7 @@ import json
 
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
-from app.agents.scenario_schemas import ScenarioAgentRequest
+from app.agents.scenario.schemas import ScenarioAgentRequest
 
 
 SYSTEM_PROMPT = (

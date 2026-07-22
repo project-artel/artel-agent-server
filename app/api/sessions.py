@@ -2,8 +2,7 @@ import openai
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, ValidationError
 
-from app.agents.errors import ScenarioGenerationError
-from app.agents.scenario_schemas import ScenarioAgentResult, ScenarioDraft
+from app.agents import ScenarioAgentResult, ScenarioDraft, ScenarioGenerationError
 from app.llm.models import DEFAULT_MODEL, LLMModel
 from app.sessions.service import SessionService
 from app.sessions.store import SessionExpired
@@ -95,6 +94,16 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
     try:
         while True:
             raw = await websocket.receive_json()
+
+            # Client-initiated termination. Approve/decline semantics live in the
+            # orchestration layer; the agent server only needs to tear the session
+            # down and close the socket it owns.
+            if isinstance(raw, dict) and raw.get("type") == "close":
+                await service.close(session_id)
+                await websocket.send_json({"type": "closed"})
+                await websocket.close()
+                return
+
             try:
                 turn = TurnMessage.model_validate(raw)
             except ValidationError as error:

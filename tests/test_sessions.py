@@ -154,6 +154,30 @@ def test_ws_flow_open_first_turn_and_turn() -> None:
     assert approved.json() == {"ok": True}
 
 
+def test_ws_close_terminates_and_deletes_session() -> None:
+    app = _test_app()
+    client = TestClient(app)
+
+    opened = client.post(
+        "/sessions",
+        json={"unity_context": {}, "game_context": {}, "user_input": "shop flow"},
+    )
+    session_id = opened.json()["session_id"]
+
+    with client.websocket_connect(f"/sessions/{session_id}") as ws:
+        assert ws.receive_json()["type"] == "result"
+
+        ws.send_json({"type": "close"})
+        closed = ws.receive_json()
+        assert closed["type"] == "closed"
+
+    # Session is gone: a fresh connection reports it as expired.
+    with client.websocket_connect(f"/sessions/{session_id}") as ws:
+        event = ws.receive_json()
+        assert event["type"] == "error"
+        assert event["code"] == "session_expired"
+
+
 def test_ws_reports_session_expired() -> None:
     client = TestClient(_test_app())
 

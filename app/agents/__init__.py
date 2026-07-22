@@ -1,18 +1,28 @@
 """Agent interfaces and implementations."""
 
 from app.agents.base import AgentContext, BaseAgent
-from app.agents.errors import ScenarioGenerationError
-from app.agents.scenario_agent import ScenarioAgent
-from app.agents.scenario_schemas import (
+from app.agents.game_context import (
+    GameContext,
+    GameContextAgent,
+    GameContextAgentRequest,
+    GameContextExtractionError,
+)
+from app.agents.scenario import (
+    ScenarioAgent,
     ScenarioAgentRequest,
     ScenarioAgentResult,
     ScenarioDraft,
+    ScenarioGenerationError,
     ScenarioStep,
 )
 
 __all__ = [
     "AgentContext",
     "BaseAgent",
+    "GameContext",
+    "GameContextAgent",
+    "GameContextAgentRequest",
+    "GameContextExtractionError",
     "ScenarioAgent",
     "ScenarioAgentRequest",
     "ScenarioAgentResult",

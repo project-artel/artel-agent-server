@@ -1,12 +1,16 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
 from redis.asyncio import from_url as redis_from_url
 
+from app.agents import GameContextAgent
+from app.api.extract import router as extract_router
 from app.api.routes import router as api_router
 from app.api.sessions import router as sessions_router
 from app.config import get_settings
+from app.documents import ExtractionService
 from app.sessions.redis_store import RedisSessionStore
 from app.sessions.service import SessionService
 
@@ -27,9 +31,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         store=store,
         history_max_turns=settings.history_max_turns,
     )
+
+    # Stateless game_context extraction: shared HTTP client for source fetches.
+    http_client = httpx.AsyncClient()
+    app.state.extraction_service = ExtractionService(
+        agent=GameContextAgent(),
+        http_client=http_client,
+        max_bytes=settings.extract_max_bytes,
+        timeout=settings.extract_timeout_seconds,
+        allowed_hosts=settings.extract_allowed_hosts,
+    )
     try:
         yield
     finally:
+        await http_client.aclose()
         await redis.aclose()
 
 
@@ -49,6 +64,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(api_router)
     app.include_router(sessions_router)
+    app.include_router(extract_router)
     return app
 
 
