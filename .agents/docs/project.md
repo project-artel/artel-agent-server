@@ -14,7 +14,7 @@ Fill this document during project initialization. Agents must verify commands ag
 - Entry points: `app.main:create_app`, `app.main:app`
 - Main modules: `app/api`, `app/llm`
 - Dependency direction: API routes stay thin; LLM provider clients depend on shared LLM schemas and configuration.
-- External systems: GitHub repository `project-artel/artel-agent-server`
+- External systems: GitHub repository `project-artel/artel-agent-server`; Jira project `ARTEL` via the `mcp-atlassian` MCP server
 - Persistent data: None yet.
 
 ## Commands
@@ -29,6 +29,21 @@ Fill this document during project initialization. Agents must verify commands ag
 | Unit tests | `python -m pytest` |
 | Integration tests | TODO |
 | Build | TODO |
+| Set up Jira credentials | `cp .jira.env.example .jira.env` |
+
+Jira access goes through the `mcp-atlassian` MCP server, declared in `.mcp.json`
+at the repository root. Claude Code starts it on demand and asks for approval
+the first time it connects.
+
+Credentials live in `.jira.env`, which the server reads through `--env-file`.
+Copy `.jira.env.example` and fill in `JIRA_URL`, `JIRA_USERNAME`, and
+`JIRA_API_TOKEN`, issuing the token at
+`https://id.atlassian.com/manage-profile/security/api-tokens`. `.gitignore`
+excludes `.jira.env`; never commit it.
+
+The server reads that file itself, so the setup does not depend on how Claude
+Code was launched or on which shell exports the variables. Do not register a
+`jira` server in user scope as well, or two copies start.
 
 ## Constraints
 

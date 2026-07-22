@@ -9,3 +9,6 @@ build/
 
 # IDE
 .idea/
+
+# Jira MCP credentials
+.jira.env
