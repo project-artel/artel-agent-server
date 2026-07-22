@@ -13,7 +13,9 @@ An issue is ready when it has:
 - known constraints
 - explicit non-goals when scope could expand
 - dependencies or blockers
-- an assignee, and the 작업 유형 and 레포지토리 fields set
+- an assignee, an existing Epic (상위 항목), and the 작업 유형 and 레포지토리 fields set
+- an explicit assignee accountId for the person responsible; do not leave ownership to a branch or PR author
+- an Epic selected from the repository and work domain before branch creation; do not leave an 일반 작업 without a parent
 
 ## Issue Template
 

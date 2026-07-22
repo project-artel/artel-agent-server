@@ -45,7 +45,8 @@ end-to-end development. Jira access is described in `project.md`.
    body. Set the identifying fields explicitly; a summary alone leaves the
    issue unassigned and unclassified, and it will not show up in the right
    filters:
-   - `assignee`: the person who will do the work. Never leave it empty.
+   - `assignee`: the person who will do the work. Set their Jira `accountId`; never leave it empty or infer ownership from the branch/PR author.
+   - `parent`: select the existing Epic that owns this repository and outcome. Every 일반 작업 must have this parent before branch creation.
    - `customfield_10080` (작업 유형): `feat`, `fix`, `chore`, `docs`,
      `refactor`, or `infra`. Required; the call fails without it.
    - `customfield_10081` (레포지토리): `orchestration-server`, `agent-server`,
