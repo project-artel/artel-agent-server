@@ -90,5 +90,5 @@ def build_chain_inputs(request: ScenarioAgentRequest) -> dict:
         "output_contract": json.dumps(OUTPUT_CONTRACT, ensure_ascii=False),
         # Direct dict access (not .get): a missing directive must fail loudly
         # rather than silently defaulting the output to another language.
-        "language_directive": LANGUAGE_DIRECTIVES[request.language],
+        "language_directive": LANGUAGE_DIRECTIVES[request.locale],
     }

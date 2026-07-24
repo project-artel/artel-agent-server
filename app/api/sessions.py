@@ -25,7 +25,7 @@ class OpenSessionRequest(BaseModel):
     # Applies to the whole session, including the first turn (run from the stored
     # pending input when the WS connects), so it must be set here, not only on the
     # per-turn message below.
-    language: OutputLanguage = DEFAULT_LANGUAGE
+    locale: OutputLanguage = DEFAULT_LANGUAGE
 
 
 class OpenSessionResponse(BaseModel):
@@ -41,8 +41,8 @@ class TurnMessage(BaseModel):
     user_input: str
     draft: ScenarioDraft | None = None
     model: LLMModel | None = None
-    # Optional mid-session language switch; None keeps the session's language.
-    language: OutputLanguage | None = None
+    # Optional mid-session locale switch; None keeps the session's locale.
+    locale: OutputLanguage | None = None
 
 
 def _service(app) -> SessionService:
@@ -71,7 +71,7 @@ async def open_session(
         game_context=payload.game_context,
         user_input=payload.user_input,
         model=payload.model,
-        language=payload.language,
+        locale=payload.locale,
     )
     return OpenSessionResponse(session_id=session_id)
 
@@ -129,7 +129,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     turn.user_input,
                     turn.draft,
                     turn.model,
-                    turn.language,
+                    turn.locale,
                 )
             except SessionExpired:
                 await websocket.send_json(
