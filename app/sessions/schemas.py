@@ -23,6 +23,6 @@ class SessionRecord(BaseModel):
     # First user input, consumed when the WS connects to run the first turn.
     pending_user_input: str | None = None
     model: LLMModel = DEFAULT_MODEL
-    # Output language for generated scenarios. Default keeps records saved
+    # Output locale for generated scenarios. Default keeps records saved
     # before this field was introduced deserializing as Korean.
-    language: OutputLanguage = DEFAULT_LANGUAGE
+    locale: OutputLanguage = DEFAULT_LANGUAGE
