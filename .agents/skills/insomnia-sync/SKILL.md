@@ -19,7 +19,8 @@ writing into someone's local Insomnia app.
 1. **Identify the collection file.** It is `<repo-name>.yaml` at the root of
    `project-artel/insomnia-api` — `artel-agent-server` → `agent-server.yaml`.
    Drop a leading `artel-` from the repository name. If the file does not exist
-   yet, this run creates it from `assets/COLLECTION_TEMPLATE.yaml`.
+   yet, this run creates it, starting from `assets/COLLECTION_TEMPLATE.yaml` and
+   deleting the request shapes the service does not have.
 
 2. **Derive the API surface from the repository, not from memory.** Prefer the
    generated contract over source reading:
@@ -44,11 +45,17 @@ writing into someone's local Insomnia app.
    `%APPDATA%\Insomnia\version-control\git\`. That directory is the app's
    working copy; the app owns its state.
 
-4. **Write the collection file.** Follow `assets/COLLECTION_TEMPLATE.yaml` for
-   the schema. Reconcile rather than regenerate: keep existing `meta.id` values
-   for requests that still exist, so history stays reviewable and local response
-   references survive. Add, update, and delete only what the API surface
-   actually changed.
+4. **Write the collection file.** What binds is Insomnia's own schema 5.1 — the
+   top-level keys, the `wrk_`/`req_`/`env_` id prefixes, epoch-millisecond
+   timestamps — because the app refuses to parse anything else.
+   `assets/COLLECTION_TEMPLATE.yaml` is one filled-in example of that schema,
+   lifted from `agent-server.yaml`; consult it for the shape of a construct you
+   are unsure how to express, not as a layout to reproduce. Its endpoints,
+   `sortKey` values, and request mix are illustrative.
+
+   Reconcile rather than regenerate: keep existing `meta.id` values for requests
+   that still exist, so history stays reviewable and local response references
+   survive. Add, update, and delete only what the API surface actually changed.
 
 5. **Define environments in the same file.** Every URL must resolve without
    manual editing after a pull:

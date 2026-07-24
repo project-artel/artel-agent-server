@@ -1,6 +1,13 @@
 # Insomnia collection file format (schema 5.1) for project-artel/insomnia-api.
 # One file per origin repository, named <repo-slug>.yaml at the repository root.
 #
+# This is a worked example, not a required layout. The key names, id prefixes,
+# and value types below are fixed by Insomnia's schema — the app will not parse
+# a file that departs from them. Everything else is illustration: the four
+# request forms are here to show how each construct is expressed, and the
+# endpoints are agent-server's. Keep only the forms your service actually has,
+# and do not ship /health and /sessions to a service that has neither.
+#
 # `meta.id` values are stable identifiers. When updating an existing collection,
 # preserve the ids of requests that still exist; generate new ones only for new
 # requests. Ids follow Insomnia's prefixes: wrk_ / req_ / env_ / jar_ / fld_,
