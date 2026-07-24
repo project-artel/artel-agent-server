@@ -109,6 +109,11 @@ async def qa_session_ws(websocket: WebSocket, session_id: str) -> None:
             except openai.APIError as error:
                 await websocket.send_json(_error_frame("llm_error", str(error)))
                 continue
+            except Exception as error:  # noqa: BLE001 - keep the socket alive
+                # Store/serialization/unexpected LLM errors must not tear the socket
+                # down silently; surface an ERROR frame and keep serving.
+                await websocket.send_json(_error_frame("internal", str(error)))
+                continue
 
             for frame in output.frames:
                 await websocket.send_json(frame)

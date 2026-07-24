@@ -5,6 +5,7 @@ from app.agents.base import AgentContext
 from app.agents.qa import (
     QaActRequest,
     QaExecutionAgent,
+    QaExecutionError,
     QaVerifyRequest,
 )
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
@@ -14,7 +15,7 @@ from app.qa.envelope import (
     ActionResultPayload,
     CancelPayload,
     ErrorPayload,
-    GameStatePayload,
+    GameState,
     JsonRpcAction,
     LogCategory,
     LogPayload,
@@ -78,8 +79,10 @@ class QaExecutionService:
 
     async def on_game_state(self, session_id: str, raw: dict) -> QaTurnOutput:
         record = await self._load(session_id)
-        payload = GameStatePayload.model_validate(raw.get("payload") or {})
-        record.latest_game_state = payload.state
+        # Orchestration sends the compact game state FLAT in `payload`
+        # (`{scene, interactables, observables}`), not wrapped in a `state` field.
+        state = GameState.model_validate(raw.get("payload") or {})
+        record.latest_game_state = state
 
         frames: list[dict] = []
         # A fresh scene while we still owe the current step its action -> act now.
@@ -180,6 +183,14 @@ class QaExecutionService:
             )
             for index, planned in enumerate(result.actions)
         ]
+
+        # Orchestration rejects an ACTION with zero actions or a blank method
+        # (require(...) throws → WS closed → whole try failed). Guard here so a
+        # degenerate plan surfaces as a recoverable agent error, not a dead socket.
+        if not json_actions or any(not a.method.strip() for a in json_actions):
+            raise QaExecutionError(
+                f"step {step.step} produced no valid action to dispatch"
+            )
 
         started = self._frame(
             record,

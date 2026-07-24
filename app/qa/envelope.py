@@ -83,11 +83,6 @@ class GameState(BaseModel):
     observables: dict[str, Any] = Field(default_factory=dict)
 
 
-class GameStatePayload(BaseModel):
-    message: str | None = None
-    state: GameState
-
-
 class ActionResultItem(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -158,9 +153,13 @@ def outbound_envelope(
 ) -> dict:
     """Stamp a payload into the common envelope for sending over the socket."""
     return {
-        "messageId": uuid4().hex,
+        # Canonical hyphenated UUID: Orchestration validates messageId with
+        # UUID.fromString, which rejects the 32-char dashless `.hex` form.
+        "messageId": str(uuid4()),
         "type": message_type.value,
-        "qaTryId": qa_try_id,
+        # Decimal string, per the envelope contract (Orchestration parses it as a
+        # digits-only string, not a JSON number).
+        "qaTryId": str(qa_try_id),
         "correlationId": correlation_id,
         "sequence": sequence,
         "timestamp": datetime.now(timezone.utc).isoformat(),
