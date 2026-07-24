@@ -6,6 +6,7 @@ from langchain_core.runnables import RunnableLambda
 
 from app.agents import (
     AgentContext,
+    OutputLanguage,
     ScenarioAgent,
     ScenarioAgentRequest,
     ScenarioAgentResult,
@@ -13,6 +14,7 @@ from app.agents import (
     ScenarioGenerationError,
     ScenarioStep,
 )
+from app.agents.scenario.prompt import LANGUAGE_DIRECTIVES, build_chain_inputs
 from app.llm.chat_model import select_structured_method
 from app.llm.models import LLMModel
 
@@ -90,6 +92,28 @@ def test_scenario_agent_raises_after_exhausting_retries() -> None:
 
     with pytest.raises(ScenarioGenerationError):
         asyncio.run(agent.run(_request(), _CTX))
+
+
+def test_chain_inputs_use_requested_language_directive() -> None:
+    ko_inputs = build_chain_inputs(_request(language=OutputLanguage.ko))
+    en_inputs = build_chain_inputs(_request(language=OutputLanguage.en))
+
+    assert ko_inputs["language_directive"] == LANGUAGE_DIRECTIVES[OutputLanguage.ko]
+    assert en_inputs["language_directive"] == LANGUAGE_DIRECTIVES[OutputLanguage.en]
+    assert "한국어" in ko_inputs["language_directive"]
+    assert "English" in en_inputs["language_directive"]
+
+
+def test_chain_inputs_default_to_korean_directive() -> None:
+    inputs = build_chain_inputs(_request())
+
+    assert inputs["language_directive"] == LANGUAGE_DIRECTIVES[OutputLanguage.ko]
+
+
+def test_language_directives_cover_every_language() -> None:
+    # Guards against adding an OutputLanguage member without a directive, which
+    # would raise KeyError at request time instead of silently defaulting.
+    assert set(LANGUAGE_DIRECTIVES) == set(OutputLanguage)
 
 
 def test_select_structured_method_by_model() -> None:

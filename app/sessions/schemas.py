@@ -2,7 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.agents import ScenarioDraft
+from app.agents import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
 from app.llm.models import DEFAULT_MODEL, LLMModel
 
 
@@ -23,3 +23,6 @@ class SessionRecord(BaseModel):
     # First user input, consumed when the WS connects to run the first turn.
     pending_user_input: str | None = None
     model: LLMModel = DEFAULT_MODEL
+    # Output language for generated scenarios. Default keeps records saved
+    # before this field was introduced deserializing as Korean.
+    language: OutputLanguage = DEFAULT_LANGUAGE

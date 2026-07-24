@@ -3,6 +3,8 @@
 from app.agents.scenario.agent import ScenarioAgent
 from app.agents.scenario.errors import ScenarioGenerationError
 from app.agents.scenario.schemas import (
+    DEFAULT_LANGUAGE,
+    OutputLanguage,
     ScenarioAgentRequest,
     ScenarioAgentResult,
     ScenarioDraft,
@@ -10,6 +12,8 @@ from app.agents.scenario.schemas import (
 )
 
 __all__ = [
+    "DEFAULT_LANGUAGE",
+    "OutputLanguage",
     "ScenarioAgent",
     "ScenarioAgentRequest",
     "ScenarioAgentResult",

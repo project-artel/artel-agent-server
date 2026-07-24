@@ -2,7 +2,13 @@ import openai
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, ValidationError
 
-from app.agents import ScenarioAgentResult, ScenarioDraft, ScenarioGenerationError
+from app.agents import (
+    DEFAULT_LANGUAGE,
+    OutputLanguage,
+    ScenarioAgentResult,
+    ScenarioDraft,
+    ScenarioGenerationError,
+)
 from app.llm.models import DEFAULT_MODEL, LLMModel
 from app.sessions.service import SessionService
 from app.sessions.store import SessionExpired
@@ -16,6 +22,10 @@ class OpenSessionRequest(BaseModel):
     game_context: dict = Field(default_factory=dict)
     user_input: str
     model: LLMModel = DEFAULT_MODEL
+    # Applies to the whole session, including the first turn (run from the stored
+    # pending input when the WS connects), so it must be set here, not only on the
+    # per-turn message below.
+    language: OutputLanguage = DEFAULT_LANGUAGE
 
 
 class OpenSessionResponse(BaseModel):
@@ -31,6 +41,8 @@ class TurnMessage(BaseModel):
     user_input: str
     draft: ScenarioDraft | None = None
     model: LLMModel | None = None
+    # Optional mid-session language switch; None keeps the session's language.
+    language: OutputLanguage | None = None
 
 
 def _service(app) -> SessionService:
@@ -59,6 +71,7 @@ async def open_session(
         game_context=payload.game_context,
         user_input=payload.user_input,
         model=payload.model,
+        language=payload.language,
     )
     return OpenSessionResponse(session_id=session_id)
 
@@ -116,6 +129,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     turn.user_input,
                     turn.draft,
                     turn.model,
+                    turn.language,
                 )
             except SessionExpired:
                 await websocket.send_json(

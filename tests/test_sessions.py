@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from langchain_core.runnables import RunnableLambda
 
 from app.agents import (
+    OutputLanguage,
     ScenarioAgent,
     ScenarioAgentResult,
     ScenarioDraft,
@@ -13,6 +14,7 @@ from app.agents import (
 )
 from app.api.sessions import router as sessions_router
 from app.sessions import InMemorySessionStore, SessionExpired, SessionService
+from app.sessions.schemas import SessionRecord
 
 
 def _result(message: str = "Here is the draft.") -> ScenarioAgentResult:
@@ -50,10 +52,30 @@ class CountingAgent(ScenarioAgent):
         super().__init__(structured_factory=factory)
 
 
+class CapturingAgent(ScenarioAgent):
+    """Records the language of the last request reaching the agent."""
+
+    def __init__(self, result: ScenarioAgentResult) -> None:
+        super().__init__(structured_factory=lambda model: None)
+        self._result = result
+        self.languages: list[OutputLanguage] = []
+
+    async def run(self, request, context):  # type: ignore[override]
+        self.languages.append(request.language)
+        return self._result
+
+
 def _service(**kwargs) -> tuple[SessionService, CountingAgent, InMemorySessionStore]:
     store = InMemorySessionStore()
     agent = CountingAgent(_result())
     service = SessionService(store=store, agent=agent, **kwargs)
+    return service, agent, store
+
+
+def _capturing_service() -> tuple[SessionService, CapturingAgent, InMemorySessionStore]:
+    store = InMemorySessionStore()
+    agent = CapturingAgent(_result())
+    service = SessionService(store=store, agent=agent)
     return service, agent, store
 
 
@@ -105,6 +127,47 @@ def test_run_turn_caps_history_window() -> None:
 
     record = asyncio.run(store.load(session_id))
     assert len(record.history) == 4
+
+
+def test_first_turn_uses_session_language() -> None:
+    # Regression: the first turn runs from the stored pending input, so the
+    # language set at open() must reach it — not only later WS turns.
+    service, agent, _ = _capturing_service()
+    session_id = asyncio.run(
+        service.open({}, {}, "Test the shop flow.", language=OutputLanguage.en)
+    )
+
+    asyncio.run(service.start_first_turn(session_id))
+
+    assert agent.languages == [OutputLanguage.en]
+
+
+def test_run_turn_overrides_and_persists_language() -> None:
+    service, agent, store = _capturing_service()
+    session_id = asyncio.run(service.open({}, {}, "First input."))  # defaults to ko
+    asyncio.run(service.start_first_turn(session_id))
+
+    asyncio.run(
+        service.run_turn(session_id, "switch", draft=None, language=OutputLanguage.en)
+    )
+    # Language sticks for subsequent turns without re-sending it.
+    asyncio.run(service.run_turn(session_id, "again", draft=None))
+
+    assert agent.languages == [
+        OutputLanguage.ko,
+        OutputLanguage.en,
+        OutputLanguage.en,
+    ]
+    assert asyncio.run(store.load(session_id)).language == OutputLanguage.en
+
+
+def test_session_record_defaults_language_when_missing() -> None:
+    # Records persisted before `language` existed must still load (as Korean).
+    record = SessionRecord.model_validate(
+        {"unity_context": {}, "game_context": {}, "history": []}
+    )
+
+    assert record.language == OutputLanguage.ko
 
 
 def test_missing_session_raises_expired() -> None:
@@ -185,3 +248,45 @@ def test_ws_reports_session_expired() -> None:
         event = ws.receive_json()
         assert event["type"] == "error"
         assert event["code"] == "session_expired"
+
+
+def test_open_session_rejects_unknown_language() -> None:
+    client = TestClient(_test_app())
+
+    response = client.post(
+        "/sessions",
+        json={"user_input": "shop flow", "language": "korean"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_open_session_language_reaches_first_turn() -> None:
+    app = FastAPI()
+    app.include_router(sessions_router)
+    store = InMemorySessionStore()
+    agent = CapturingAgent(_result())
+    app.state.session_service = SessionService(store=store, agent=agent)
+    client = TestClient(app)
+
+    opened = client.post("/sessions", json={"user_input": "shop flow", "language": "en"})
+    session_id = opened.json()["session_id"]
+
+    with client.websocket_connect(f"/sessions/{session_id}") as ws:
+        assert ws.receive_json()["type"] == "result"
+
+    assert agent.languages == [OutputLanguage.en]
+
+
+def test_ws_turn_rejects_unknown_language() -> None:
+    client = TestClient(_test_app())
+    opened = client.post("/sessions", json={"user_input": "shop flow"})
+    session_id = opened.json()["session_id"]
+
+    with client.websocket_connect(f"/sessions/{session_id}") as ws:
+        assert ws.receive_json()["type"] == "result"
+
+        ws.send_json({"type": "turn", "user_input": "x", "language": "korean"})
+        event = ws.receive_json()
+        assert event["type"] == "error"
+        assert event["code"] == "bad_request"
