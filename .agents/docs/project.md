@@ -51,9 +51,12 @@ API collections live in `project-artel/insomnia-api`, one YAML file per
 repository (`agent-server.yaml` for this one), and reach people through
 Insomnia's git sync. Publish changes with the `insomnia-sync` skill: it derives
 the API surface from the running contract, writes the collection file, and
-opens a PR. Do not push collections into a local Insomnia app over the
-`insomnia` MCP server — that changes one machine and leaves no reviewable diff.
-The MCP server's read tools remain useful for inspecting local state.
+opens a PR.
+
+Do not publish by writing into a local Insomnia app — neither through the
+`insomnia` MCP server's write tools nor by editing the `insomnia.*.db` NeDB
+store. Either way only one machine changes and no reviewable diff exists.
+Reading local state is fine.
 
 Environment variables are committed alongside the requests, so every consumer
 gets working URLs on pull. Secrets are excluded: keep them in an Insomnia
