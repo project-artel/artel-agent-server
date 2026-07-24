@@ -6,11 +6,15 @@ from fastapi import FastAPI
 from redis.asyncio import from_url as redis_from_url
 
 from app.agents import GameContextAgent
+from app.agents.qa import QaExecutionAgent
 from app.api.extract import router as extract_router
+from app.api.qa_sessions import router as qa_sessions_router
 from app.api.routes import router as api_router
 from app.api.sessions import router as sessions_router
 from app.config import get_settings
 from app.documents import ExtractionService
+from app.qa.service import QaExecutionService
+from app.qa.store import RedisQaSessionStore
 from app.sessions.redis_store import RedisSessionStore
 from app.sessions.service import SessionService
 
@@ -30,6 +34,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.session_service = SessionService(
         store=store,
         history_max_turns=settings.history_max_turns,
+    )
+
+    # QA execution sessions share the Redis client (distinct `qa:` namespace).
+    qa_store = RedisQaSessionStore(redis, settings.session_ttl_seconds)
+    app.state.qa_session_service = QaExecutionService(
+        store=qa_store,
+        agent=QaExecutionAgent(),
     )
 
     # Stateless game_context extraction: shared HTTP client for source fetches.
@@ -64,6 +75,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(api_router)
     app.include_router(sessions_router)
+    app.include_router(qa_sessions_router)
     app.include_router(extract_router)
     return app
 
