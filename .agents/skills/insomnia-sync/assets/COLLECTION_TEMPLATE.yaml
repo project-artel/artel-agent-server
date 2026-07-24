@@ -1,0 +1,154 @@
+# Insomnia collection file format (schema 5.1) for project-artel/insomnia-api.
+# One file per origin repository, named <repo-slug>.yaml at the repository root.
+#
+# `meta.id` values are stable identifiers. When updating an existing collection,
+# preserve the ids of requests that still exist; generate new ones only for new
+# requests. Ids follow Insomnia's prefixes: wrk_ / req_ / env_ / jar_ / fld_,
+# each with a 32-character hex suffix. `created` and `modified` are epoch
+# milliseconds.
+
+type: collection.insomnia.rest/5.0
+schema_version: "5.1"
+name: <repo-slug>
+meta:
+  id: wrk_<32-hex>
+  created: 0
+  modified: 0
+  description: >-
+    <서비스 한 줄 설명>
+
+    환경: Base Environment는 stage, local 서브 환경은 개발 서버.
+    <service>_base_url / <service>_ws_url 두 변수를 사용한다.
+    비밀값은 이 파일에 넣지 말고 Insomnia private environment로 관리한다.
+
+collection:
+  # --- HTTP request ---------------------------------------------------------
+  - url: "{{ _.<service>_base_url }}/health"
+    name: /health — 헬스체크
+    meta:
+      id: req_<32-hex>
+      created: 0
+      modified: 0
+      isPrivate: false
+      # Carry the endpoint's summary, response shape, and its OpenAPI tag.
+      description: 'Liveness probe. 200 OK with {"status":"ok"}. tags: system'
+      sortKey: -1
+    method: GET
+    settings:
+      renderRequestBody: true
+      encodeUrl: true
+      followRedirects: global
+      cookies:
+        send: true
+        store: true
+      rebuildPath: true
+
+  # --- Request with a body --------------------------------------------------
+  - url: "{{ _.<service>_base_url }}/sessions"
+    name: /sessions — 세션 열기
+    meta:
+      id: req_<32-hex>
+      created: 0
+      modified: 0
+      isPrivate: false
+      description: >-
+        <동작. 응답 스키마. enum 값은 풀어서 적는다.> tags: <openapi-tag>
+      sortKey: -2
+    method: POST
+    body:
+      mimeType: application/json
+      text: |-
+        {
+          "field": "값"
+        }
+    headers:
+      - name: Content-Type
+        value: application/json
+        disabled: false
+    settings:
+      renderRequestBody: true
+      encodeUrl: true
+      followRedirects: global
+      cookies:
+        send: true
+        store: true
+      rebuildPath: true
+
+  # --- Chaining off a previous response -------------------------------------
+  # Pulls a JSONPath value out of an earlier request's last response. The
+  # argument is base64 of the JSONPath: 'b64::<base64 of $.session_id>::46b'.
+  # Prefer this over a hand-edited environment variable for ids that a prior
+  # call returns.
+  - url: "{{ _.<service>_base_url }}/sessions/{% response 'body', 'req_<32-hex>', 'b64::JC5zZXNzaW9uX2lk::46b', 'never', 60 %}/approve"
+    name: /sessions/{session_id}/approve — 승인·종료
+    meta:
+      id: req_<32-hex>
+      created: 0
+      modified: 0
+      isPrivate: false
+      description: '<동작> tags: <openapi-tag>'
+      sortKey: -3
+    method: POST
+    settings:
+      renderRequestBody: true
+      encodeUrl: true
+      followRedirects: global
+      cookies:
+        send: true
+        store: true
+      rebuildPath: true
+
+  # --- WebSocket ------------------------------------------------------------
+  # Uses the ws variable, not the http one. No `method` key.
+  - url: "{{ _.<service>_ws_url }}/sessions/{% response 'body', 'req_<32-hex>', 'b64::JC5zZXNzaW9uX2lk::46b', 'never', 60 %}"
+    name: WS /sessions/{session_id}
+    meta:
+      id: req_<32-hex>
+      created: 0
+      modified: 0
+      isPrivate: false
+      description: >-
+        <프로토콜 설명: 클라이언트→서버 메시지 형태, 서버→클라이언트 result/error 형태>
+      sortKey: -4
+    settings:
+      encodeUrl: true
+      followRedirects: global
+      cookies:
+        send: true
+        store: true
+
+cookieJar:
+  name: Default Jar
+  meta:
+    id: jar_<32-hex>
+    created: 0
+    modified: 0
+
+# Base Environment holds shared defaults (staging). Each sub-environment
+# overrides the same variable names for a different deployment target; the user
+# switches targets from Insomnia's environment picker.
+#
+# Do not add secrets here — this repository is public and every value below is
+# committed. Secrets go in an Insomnia private environment, which git sync
+# excludes.
+environments:
+  name: Base Environment
+  meta:
+    id: env_<40-hex>
+    created: 0
+    modified: 0
+    isPrivate: false
+  data:
+    <service>_base_url: https://stage-<service>.artel.kr
+    <service>_ws_url: wss://stage-<service>.artel.kr
+  subEnvironments:
+    - name: local
+      meta:
+        id: env_local_<hex>
+        created: 0
+        modified: 0
+        isPrivate: false
+        sortKey: 0
+      data:
+        <service>_base_url: http://localhost:8000
+        <service>_ws_url: ws://localhost:8000
