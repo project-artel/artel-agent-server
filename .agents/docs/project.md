@@ -14,7 +14,7 @@ Fill this document during project initialization. Agents must verify commands ag
 - Entry points: `app.main:create_app`, `app.main:app`
 - Main modules: `app/api`, `app/llm`
 - Dependency direction: API routes stay thin; LLM provider clients depend on shared LLM schemas and configuration.
-- External systems: GitHub repository `project-artel/artel-agent-server`; Jira project `ARTEL` via the `mcp-atlassian` MCP server
+- External systems: GitHub repository `project-artel/artel-agent-server`; Jira project `ARTEL` via the `mcp-atlassian` MCP server; Insomnia collection repository `project-artel/insomnia-api`
 - Persistent data: None yet.
 
 ## Commands
@@ -44,6 +44,23 @@ excludes `.jira.env`; never commit it.
 The server reads that file itself, so the setup does not depend on how Claude
 Code was launched or on which shell exports the variables. Do not register a
 `jira` server in user scope as well, or two copies start.
+
+### Insomnia collections
+
+API collections live in `project-artel/insomnia-api`, one YAML file per
+repository (`agent-server.yaml` for this one), and reach people through
+Insomnia's git sync. Publish changes with the `insomnia-sync` skill: it derives
+the API surface from the running contract, writes the collection file, and
+opens a PR.
+
+Do not publish by writing into a local Insomnia app — neither through the
+`insomnia` MCP server's write tools nor by editing the `insomnia.*.db` NeDB
+store. Either way only one machine changes and no reviewable diff exists.
+Reading local state is fine.
+
+Environment variables are committed alongside the requests, so every consumer
+gets working URLs on pull. Secrets are excluded: keep them in an Insomnia
+private environment. The collection repository is currently public.
 
 ## Constraints
 
