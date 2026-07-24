@@ -62,11 +62,14 @@ writing into someone's local Insomnia app.
    - `environments.data` — shared defaults, pointing at staging.
    - `environments.subEnvironments` — one entry per deployment target
      (`local`, and `prod` where one exists), overriding the same variable names.
-   - Variables are `<service>_base_url` and `<service>_ws_url`. Match the HTTP
-     scheme to the WS scheme: `https` pairs with `wss`, `http` with `ws`.
-   - `agent-server.yaml` predates this convention and uses `stage_agent_*`.
-     Leave it alone unless renaming both the variables and every reference in
-     one commit.
+   - Variables are `stage_<service>_base_url` and `stage_<service>_ws_url`,
+     following `agent-server.yaml`'s `stage_agent_*` and the `stage_orch_*` used
+     for orchestration. The `stage_` prefix names the Base Environment default,
+     not the only target — sub-environments override the same keys, so a `local`
+     run still reads `stage_<service>_base_url`. That reads oddly; leave it
+     until the team renames it across every collection at once.
+   - Match the HTTP scheme to the WS scheme: `https` pairs with `wss`, `http`
+     with `ws`.
 
 6. **Validate before committing:**
 

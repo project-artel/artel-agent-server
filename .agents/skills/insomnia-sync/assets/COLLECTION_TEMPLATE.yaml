@@ -106,11 +106,12 @@ collection:
       rebuildPath: true
 
   # --- WebSocket ------------------------------------------------------------
-  # Uses the ws variable, not the http one. No `method` key.
+  # Uses the ws variable, not the http one. No `method` key, and the id prefix
+  # is ws-req_ rather than req_.
   - url: "{{ _.<service>_ws_url }}/sessions/{% response 'body', 'req_<32-hex>', 'b64::JC5zZXNzaW9uX2lk::46b', 'never', 60 %}"
     name: WS /sessions/{session_id}
     meta:
-      id: req_<32-hex>
+      id: ws-req_<32-hex>
       created: 0
       modified: 0
       isPrivate: false
@@ -123,6 +124,32 @@ collection:
       cookies:
         send: true
         store: true
+
+  # --- Server-Sent Events ---------------------------------------------------
+  # SSE has no dedicated request type. It is a plain GET carrying an
+  # Accept: text/event-stream header, with a req_ id like any other HTTP request.
+  - url: "{{ _.<service>_base_url }}/api/<resource>/{id}/stream"
+    name: GET /api/<resource>/{id}/stream — 이벤트 구독
+    meta:
+      id: req_<32-hex>
+      created: 0
+      modified: 0
+      isPrivate: false
+      description: '<스트림에 실려오는 이벤트 종류> tags: <openapi-tag>'
+      sortKey: -5
+    method: GET
+    headers:
+      - name: Accept
+        value: text/event-stream
+        disabled: false
+    settings:
+      renderRequestBody: true
+      encodeUrl: true
+      followRedirects: global
+      cookies:
+        send: true
+        store: true
+      rebuildPath: true
 
 cookieJar:
   name: Default Jar
