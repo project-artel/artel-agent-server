@@ -1,7 +1,24 @@
+from enum import StrEnum
+
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.llm.models import DEFAULT_MODEL, LLMModel
+
+
+class OutputLanguage(StrEnum):
+    """Language for the scenario agent's natural-language output.
+
+    Scoped to the scenario agent on purpose (see the plan): ``/extract`` keeps
+    its output in English. Add a member here and a matching directive in
+    ``prompt.LANGUAGE_DIRECTIVES`` to support another language.
+    """
+
+    ko = "ko"
+    en = "en"
+
+
+DEFAULT_LANGUAGE: OutputLanguage = OutputLanguage.ko
 
 
 class ScenarioStep(BaseModel):
@@ -41,6 +58,8 @@ class ScenarioAgentRequest(BaseModel):
     # Authoritative current draft (may contain the user's manual edits).
     draft: ScenarioDraft | None = None
     model: LLMModel = DEFAULT_MODEL
+    # Language for the natural-language output (message + scenario text).
+    language: OutputLanguage = DEFAULT_LANGUAGE
 
 
 class ScenarioAgentResult(BaseModel):
