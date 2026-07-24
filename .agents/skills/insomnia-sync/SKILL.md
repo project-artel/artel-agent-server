@@ -54,9 +54,16 @@ and the API drifted apart. Reading local state is fine and often useful.
    cd insomnia-api && git checkout -b feat/<repo-slug>-<change>
    ```
 
-   Never edit Insomnia's own clone under
-   `%APPDATA%\Insomnia\version-control\git\`. That directory is the app's
-   working copy; the app owns its state.
+   Never edit Insomnia's own clone under `<data-dir>/version-control/git/`,
+   where `<data-dir>` is the app's per-platform storage:
+
+   | Platform | Insomnia data directory |
+   |---|---|
+   | Windows | `%APPDATA%\Insomnia` |
+   | macOS | `~/Library/Application Support/Insomnia` |
+   | Linux | `~/.config/Insomnia` |
+
+   That directory is the app's working copy; the app owns its state.
 
 4. **Write the collection file.** What binds is Insomnia's own schema 5.1 — the
    top-level keys, the `wrk_`/`req_`/`ws-req_`/`env_` id prefixes,
@@ -108,11 +115,19 @@ and the API drifted apart. Reading local state is fine and often useful.
      e.g. a `Cookie: artel_access_token={{ _.access_token }}` header. Leaving
      `access_token` undefined is correct — see the rules below.
 
-7. **Validate before committing:**
+7. **Validate before committing.** Parse the file — a YAML error Insomnia would
+   reject is the cheapest failure to catch here:
 
    ```bash
-   python -c "import yaml,sys; d=yaml.safe_load(open(sys.argv[1],encoding='utf-8')); print(len(d['collection']),'requests')" <file>.yaml
+   python3 -c "import yaml,sys; d=yaml.safe_load(open(sys.argv[1],encoding='utf-8')); print(len(d['collection']),'requests')" <file>.yaml
    ```
+
+   Use `python` instead of `python3` on Windows, where the versioned name
+   usually is not on `PATH`. PyYAML is not in the standard library and a
+   JVM-only repository will not have it; install it into a throwaway
+   environment rather than the system interpreter, or fall back to any YAML
+   parser at hand — `ruby -ryaml -e 'YAML.load_file(ARGV[0])'` needs nothing
+   extra on macOS.
 
    Then confirm every `{{ _.name }}` in the file resolves against a defined
    variable, secrets excepted:
