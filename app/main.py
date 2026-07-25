@@ -6,7 +6,6 @@ from fastapi import FastAPI
 from redis.asyncio import from_url as redis_from_url
 
 from app.agents import GameContextAgent
-from app.agents.qa import QaExecutionAgent
 from app.api.extract import router as extract_router
 from app.api.qa_sessions import router as qa_sessions_router
 from app.api.routes import router as api_router
@@ -38,10 +37,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # QA execution sessions share the Redis client (distinct `qa:` namespace).
     qa_store = RedisQaSessionStore(redis, settings.session_ttl_seconds)
-    app.state.qa_session_service = QaExecutionService(
-        store=qa_store,
-        agent=QaExecutionAgent(),
-    )
+    # The runner is built per session, from that session's model and locale.
+    app.state.qa_session_service = QaExecutionService(store=qa_store)
 
     # Stateless game_context extraction: shared HTTP client for source fetches.
     http_client = httpx.AsyncClient()

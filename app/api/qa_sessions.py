@@ -1,8 +1,9 @@
-import openai
-from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, Field, ValidationError
+import asyncio
+import contextlib
 
-from app.agents.qa import QaExecutionError
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
+
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
 from app.llm.models import DEFAULT_MODEL, LLMModel
 from app.qa.envelope import ErrorPayload, MessageType, outbound_envelope
@@ -81,66 +82,42 @@ async def qa_session_ws(websocket: WebSocket, session_id: str) -> None:
         await websocket.close()
         return
 
+    # The agent sends from its own task while this one reads, so writes are
+    # serialised. Two frames interleaved on one socket is a protocol error.
+    write_lock = asyncio.Lock()
+
+    async def send(frame: dict) -> None:
+        async with write_lock:
+            await websocket.send_json(frame)
+
+    # The run drives itself; this coroutine only feeds it what arrives.
+    run = asyncio.create_task(service.run(session_id, send))
+
     try:
-        while True:
-            raw = await websocket.receive_json()
-            message_type = raw.get("type") if isinstance(raw, dict) else None
-
-            try:
-                if message_type == MessageType.GAME_STATE:
-                    output = await service.on_game_state(session_id, raw)
-                elif message_type == MessageType.ACTION_RESULT:
-                    output = await service.on_action_result(session_id, raw)
-                elif message_type == MessageType.CHAT:
-                    output = await service.on_chat(session_id, raw)
-                elif message_type == MessageType.CANCEL:
-                    output = await service.on_cancel(session_id, raw)
-                else:
-                    await websocket.send_json(
-                        _error_frame(
-                            "bad_request",
-                            f"Unsupported inbound type: {message_type!r}",
-                            qa_try_id,
-                        )
-                    )
-                    continue
-            except SessionExpired:
-                await websocket.send_json(
+        while not run.done():
+            receive = asyncio.create_task(websocket.receive_json())
+            done, _ = await asyncio.wait(
+                {receive, run}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if receive not in done:
+                receive.cancel()
+                break
+            raw = receive.result()
+            if not isinstance(raw, dict) or not service.deliver(session_id, raw):
+                await send(
                     _error_frame(
-                        "session_expired", "Session not found or expired.", qa_try_id
+                        "bad_request", f"Unsupported inbound frame: {raw!r}", qa_try_id
                     )
                 )
-                await websocket.close()
-                return
-            except ValidationError as error:
-                await websocket.send_json(
-                    _error_frame("bad_request", str(error), qa_try_id)
-                )
-                continue
-            except QaExecutionError as error:
-                await websocket.send_json(
-                    _error_frame("agent_error", str(error), qa_try_id)
-                )
-                continue
-            except openai.APIError as error:
-                await websocket.send_json(
-                    _error_frame("llm_error", str(error), qa_try_id)
-                )
-                continue
-            except Exception as error:  # noqa: BLE001 - keep the socket alive
-                # Store/serialization/unexpected LLM errors must not tear the socket
-                # down silently; surface an ERROR frame and keep serving.
-                await websocket.send_json(
-                    _error_frame("internal", str(error), qa_try_id)
-                )
-                continue
-
-            for frame in output.frames:
-                await websocket.send_json(frame)
-
-            if output.terminal:
-                await service.close(session_id)
-                await websocket.close()
-                return
     except WebSocketDisconnect:
+        run.cancel()
         return
+    finally:
+        if not run.done():
+            run.cancel()
+
+    with contextlib.suppress(asyncio.CancelledError):
+        await run
+    await service.close(session_id)
+    await websocket.close()
+    return
