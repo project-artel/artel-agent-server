@@ -35,8 +35,13 @@ ACT_SYSTEM = (
     "verification, NOT things you can invoke. Put the element id in `target_id` "
     "(null when the method takes none, e.g. key_click) and remaining literal args "
     "in `arguments`. Return one concise `thought`, a short user-facing "
-    "`action_message`, and the `actions` to perform. {language_directive} Return "
-    "only valid JSON matching the output contract."
+    "`action_message`, and the `actions` to perform.\n"
+    "You may also decide the scene is not ready to act on — a loading screen, an "
+    "animation still playing, a countdown. In that case return NO actions and set "
+    "`wait_seconds` to how long to wait before looking again. Prefer acting when "
+    "the step's action is possible now; wait only when acting would hit the wrong "
+    "screen. You will be shown the scene again after the wait. "
+    "{language_directive} Return only valid JSON matching the output contract."
 )
 
 ACT_HUMAN = (
@@ -52,7 +57,11 @@ ACT_HUMAN = (
 
 ACT_OUTPUT_CONTRACT = {
     "thought": "One concise sentence on what you observe and will do next.",
-    "action_message": "Short user-facing description of the action.",
+    "action_message": "Short user-facing description of the action, or of what you are waiting for.",
+    "wait_seconds": (
+        "null to act now, or seconds to wait before looking at the scene again "
+        "(leave `actions` empty when waiting)"
+    ),
     "actions": [
         {
             "method": "an SDK invokable method, e.g. button_click / enter_text / key_click",

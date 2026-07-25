@@ -22,6 +22,10 @@ class MessageType(StrEnum):
     LOG = "LOG"
     ACTION = "ACTION"
     STATUS = "STATUS"
+    # Ask for a fresh scene, optionally after waiting. This is what lets the
+    # Agent drive: without it the run only advances when the game volunteers
+    # state, and a game that never does leaves the run idle forever.
+    REQUEST_GAME_STATE = "REQUEST_GAME_STATE"
     # Bidirectional
     ERROR = "ERROR"
     # Bidirectional. The operator talking to the Agent mid-run, and its reply.
@@ -109,6 +113,19 @@ class ChatPayload(BaseModel):
     """One operator turn on the way in, one Agent turn on the way out."""
 
     message: str
+    step: int | None = None
+
+
+class RequestGameStatePayload(BaseModel):
+    """Ask for the current scene, `after_seconds` from now.
+
+    The wait is scheduled by Orchestration rather than slept here: this process
+    handles the session on one receive loop, so sleeping in it would stall every
+    other message for the same run, including the operator's.
+    """
+
+    reason: str
+    after_seconds: float = 0.0
     step: int | None = None
 
 

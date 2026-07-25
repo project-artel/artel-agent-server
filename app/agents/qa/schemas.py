@@ -29,6 +29,12 @@ class QaActResult(BaseModel):
     thought: str
     action_message: str
     actions: list[QaPlannedAction] = Field(default_factory=list)
+    # Seconds to wait before looking at the scene again. Set it when the step
+    # needs the game to get somewhere first — a loading screen, an animation, a
+    # timer. `actions` may be empty on such a turn: waiting and looking again is
+    # a legitimate move, and forcing an action would make the agent poke at a
+    # screen it has already decided is not ready.
+    wait_seconds: float | None = Field(default=None, ge=0, le=60)
 
 
 

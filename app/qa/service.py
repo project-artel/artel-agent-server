@@ -23,6 +23,7 @@ from app.qa.envelope import (
     LogPayload,
     MessageType,
     QaChatTurn,
+    RequestGameStatePayload,
     RunResult,
     StatusPayload,
     StepStatus,
@@ -160,8 +161,10 @@ class QaExecutionService:
         record = await self._load(session_id)
         payload = ChatPayload.model_validate(raw.get("payload") or {})
         step = self._current_step(record)
+        # The turn records the step *number*; the request carries the step itself.
+        step_number = None if step is None else step.step
 
-        self._append_chat(record, "USER", payload.message, step)
+        self._append_chat(record, "USER", payload.message, step_number)
         await self._store.save(session_id, record)
 
         result = await self._agent.respond(
@@ -177,11 +180,11 @@ class QaExecutionService:
             AgentContext(session_id=session_id),
         )
 
-        self._append_chat(record, "AGENT", result.reply, None if step is None else step.step)
+        self._append_chat(record, "AGENT", result.reply, step_number)
         frame = self._frame(
             record,
             MessageType.CHAT,
-            ChatPayload(message=result.reply, step=None if step is None else step.step),
+            ChatPayload(message=result.reply, step=step_number),
         )
         await self._store.save(session_id, record)
         return QaTurnOutput(frames=[frame])
@@ -232,6 +235,29 @@ class QaExecutionService:
             )
             for index, planned in enumerate(result.actions)
         ]
+
+        # The agent decided the scene is not ready. Ask to see it again instead of
+        # acting; the step stays where it is, so the next scene runs this again.
+        if result.wait_seconds is not None and not json_actions:
+            thought = self._frame(
+                record,
+                MessageType.LOG,
+                LogPayload(
+                    category=LogCategory.OBSERVATION,
+                    message=result.thought,
+                    step=step.step,
+                ),
+            )
+            request = self._frame(
+                record,
+                MessageType.REQUEST_GAME_STATE,
+                RequestGameStatePayload(
+                    reason=result.action_message,
+                    after_seconds=result.wait_seconds,
+                    step=step.step,
+                ),
+            )
+            return [thought, request]
 
         # Orchestration rejects an ACTION with zero actions or a blank method
         # (require(...) throws → WS closed → whole try failed). Guard here so a
