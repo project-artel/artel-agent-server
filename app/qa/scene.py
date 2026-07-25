@@ -19,6 +19,14 @@ MAX_VALUES_PER_OBSERVABLE = 10
 # Across the scene. Bounds what one observation can dump into the prompt.
 MAX_ACTIONS = 40
 
+# How many observations a key survives after it stops appearing.
+#
+# Kept for a while because something disappearing is evidence — a dialog that
+# closed is often the very thing a step checks. Dropped eventually because a game
+# that swaps its UI without changing the scene name would otherwise accumulate the
+# remains of every screen it has ever shown.
+MISSING_LIFETIME = 5
+
 
 class Observation(BaseModel):
     """A value, and the observation it became that value on."""
@@ -88,9 +96,11 @@ class SceneMemory(BaseModel):
     updates: int = 0
     interactables: list[Interactable] = Field(default_factory=list)
     observables: dict[str, ObservableTrack] = Field(default_factory=dict)
-    # Keys seen earlier in this scene but absent from the latest frame. Kept
-    # rather than deleted: something disappearing is itself evidence.
+    # Keys seen earlier in this scene but absent from the latest frame, and the
+    # observation each was last present on. Kept rather than deleted: something
+    # disappearing is itself evidence.
     missing: list[str] = Field(default_factory=list)
+    last_seen: dict[str, int] = Field(default_factory=dict)
     actions: list[ActionRecord] = Field(default_factory=list)
     actions_at: list[int] = Field(default_factory=list)
 
@@ -100,6 +110,7 @@ class SceneMemory(BaseModel):
             self.updates = 0
             self.observables = {}
             self.missing = []
+            self.last_seen = {}
             self.actions = []
             self.actions_at = []
 
@@ -117,8 +128,17 @@ class SceneMemory(BaseModel):
                 track = ObservableTrack()
                 self.observables[key] = track
             track.record(value, at, type_)
+            self.last_seen[key] = at
 
         seen = set(state.observables)
+        expired = [
+            key
+            for key in self.observables
+            if key not in seen and at - self.last_seen.get(key, at) > MISSING_LIFETIME
+        ]
+        for key in expired:
+            del self.observables[key]
+            self.last_seen.pop(key, None)
         self.missing = [key for key in self.observables if key not in seen]
 
         for record in state.recentActions:

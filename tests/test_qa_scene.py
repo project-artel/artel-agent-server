@@ -1,5 +1,5 @@
 from app.qa.envelope import ActionRecord, GameState, Interactable
-from app.qa.scene import MAX_VALUES_PER_OBSERVABLE, SceneMemory
+from app.qa.scene import MAX_VALUES_PER_OBSERVABLE, MISSING_LIFETIME, SceneMemory
 
 
 def state(scene="Lobby", observables=None, interactables=None, actions=None) -> GameState:
@@ -54,6 +54,17 @@ def test_absent_key_is_marked_gone_not_deleted() -> None:
 
     assert memory.missing == ["Dialog.content"]
     assert memory.observables["Dialog.content"].current == "hi"
+
+
+def test_missing_key_expires_after_its_lifetime() -> None:
+    """A game that swaps UI without changing scene name must not accumulate remains."""
+    memory = SceneMemory()
+    memory.apply(state(observables={"Dialog.content": {"value": "hi"}}))
+    for _ in range(MISSING_LIFETIME + 1):
+        memory.apply(state(observables={}))
+
+    assert "Dialog.content" not in memory.observables
+    assert memory.missing == []
 
 
 def test_interactables_are_replaced_not_merged() -> None:
