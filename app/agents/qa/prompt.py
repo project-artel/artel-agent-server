@@ -2,7 +2,12 @@ import json
 
 from langchain_core.prompts import ChatPromptTemplate
 
-from app.agents.qa.schemas import QaActRequest, QaVerifyRequest
+from app.agents.qa.schemas import (
+    QaActRequest,
+    QaChatRequest,
+    QaChatTurn,
+    QaVerifyRequest,
+)
 from app.agents.scenario import OutputLanguage
 
 
@@ -39,6 +44,9 @@ ACT_HUMAN = (
     "Current step {step_number}:\n"
     "- state: {state}\n- action: {action}\n- expected: {expected}\n\n"
     "Current scene:\n{game_state}\n\n"
+    "Operator conversation (most recent last). Their instructions take precedence "
+    "over your own plan for this step, but never over the scenario's `expected`:\n"
+    "{chat}\n\n"
     "Output contract:\n{output_contract}"
 )
 
@@ -71,6 +79,8 @@ EVAL_HUMAN = (
     "Step {step_number}:\n- action: {action}\n- expected: {expected}\n\n"
     "Action results (success/failure per action):\n{action_result}\n\n"
     "Resulting scene:\n{game_state}\n\n"
+    "Operator conversation (most recent last). Weigh what they report, but the "
+    "verdict must still follow the evidence and the step's `expected`:\n{chat}\n\n"
     "Output contract:\n{output_contract}"
 )
 
@@ -78,6 +88,30 @@ EVAL_OUTPUT_CONTRACT = {
     "reasoning": "One sentence citing the observed evidence.",
     "passed": "true if the expected result held, else false",
     "verdict_message": "Short user-facing verdict.",
+}
+
+
+CHAT_SYSTEM = (
+    "You are the QA execution agent, mid-run, answering the operator watching "
+    "this run. Answer from the run's own evidence: the scenario, the step you are "
+    "on, and the current scene. Be brief and concrete — one short paragraph at "
+    "most. If they gave an instruction, acknowledge exactly what you will do "
+    "differently on the next step; do not restate the whole plan. Never claim an "
+    "action was performed here — this turn only talks, the execution loop acts. "
+    "{language_directive} Return only valid JSON matching the output contract."
+)
+
+CHAT_HUMAN = (
+    "Scenario: {scenario_title} — {scenario_description}\n\n"
+    "Current step:\n{step}\n\n"
+    "Current scene:\n{game_state}\n\n"
+    "Conversation (most recent last; the final USER turn is what you answer):\n"
+    "{chat}\n\n"
+    "Output contract:\n{output_contract}"
+)
+
+CHAT_OUTPUT_CONTRACT = {
+    "reply": "Short answer to the operator's latest message.",
 }
 
 
@@ -93,6 +127,19 @@ def build_evaluate_prompt() -> ChatPromptTemplate:
     )
 
 
+def build_chat_prompt() -> ChatPromptTemplate:
+    return ChatPromptTemplate.from_messages(
+        [("system", CHAT_SYSTEM), ("human", CHAT_HUMAN)]
+    )
+
+
+def render_chat(turns: list[QaChatTurn]) -> str:
+    """Flatten the conversation into the prompt. Empty reads as such, not as '[]'."""
+    if not turns:
+        return "(none)"
+    return "\n".join(f"{turn.role}: {turn.message}" for turn in turns)
+
+
 def build_act_inputs(request: QaActRequest) -> dict:
     return {
         "scenario_title": request.scenario_title,
@@ -102,6 +149,7 @@ def build_act_inputs(request: QaActRequest) -> dict:
         "action": request.step.action,
         "expected": request.step.expected,
         "game_state": json.dumps(request.game_state.model_dump(), ensure_ascii=False),
+        "chat": render_chat(request.chat),
         "output_contract": json.dumps(ACT_OUTPUT_CONTRACT, ensure_ascii=False),
         "language_directive": LANGUAGE_DIRECTIVES[request.language],
     }
@@ -116,6 +164,27 @@ def build_evaluate_inputs(request: QaVerifyRequest) -> dict:
             request.action_result.model_dump(), ensure_ascii=False
         ),
         "game_state": json.dumps(request.game_state.model_dump(), ensure_ascii=False),
+        "chat": render_chat(request.chat),
         "output_contract": json.dumps(EVAL_OUTPUT_CONTRACT, ensure_ascii=False),
+        "language_directive": LANGUAGE_DIRECTIVES[request.language],
+    }
+
+
+def build_chat_inputs(request: QaChatRequest) -> dict:
+    return {
+        "scenario_title": request.scenario_title,
+        "scenario_description": request.scenario_description,
+        "step": (
+            "(the run has no step in flight)"
+            if request.step is None
+            else json.dumps(request.step.model_dump(), ensure_ascii=False)
+        ),
+        "game_state": (
+            "(no scene received yet)"
+            if request.game_state is None
+            else json.dumps(request.game_state.model_dump(), ensure_ascii=False)
+        ),
+        "chat": render_chat(request.chat),
+        "output_contract": json.dumps(CHAT_OUTPUT_CONTRACT, ensure_ascii=False),
         "language_directive": LANGUAGE_DIRECTIVES[request.language],
     }

@@ -91,6 +91,8 @@ async def qa_session_ws(websocket: WebSocket, session_id: str) -> None:
                     output = await service.on_game_state(session_id, raw)
                 elif message_type == MessageType.ACTION_RESULT:
                     output = await service.on_action_result(session_id, raw)
+                elif message_type == MessageType.CHAT:
+                    output = await service.on_chat(session_id, raw)
                 elif message_type == MessageType.CANCEL:
                     output = await service.on_cancel(session_id, raw)
                 else:

@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 from app.agents import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
 from app.llm.models import DEFAULT_MODEL, LLMModel
-from app.qa.envelope import GameState
+from app.qa.envelope import GameState, QaChatTurn
 
 
 class QaStepResult(BaseModel):
@@ -37,3 +37,7 @@ class QaSessionRecord(BaseModel):
     latest_game_state: GameState | None = None
     last_action_message_id: str | None = None
     step_results: list[QaStepResult] = Field(default_factory=list)
+    # Operator conversation. Trimmed to the most recent turns on every append:
+    # the whole record is rewritten to Redis each turn, so it cannot grow without
+    # bound, and only the recent turns are what steer the next decision.
+    chat: list[QaChatTurn] = Field(default_factory=list)

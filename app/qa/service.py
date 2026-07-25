@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from app.agents.base import AgentContext
 from app.agents.qa import (
     QaActRequest,
+    QaChatRequest,
     QaExecutionAgent,
     QaExecutionError,
     QaVerifyRequest,
@@ -14,12 +15,14 @@ from app.qa.envelope import (
     ActionPayload,
     ActionResultPayload,
     CancelPayload,
+    ChatPayload,
     ErrorPayload,
     GameState,
     JsonRpcAction,
     LogCategory,
     LogPayload,
     MessageType,
+    QaChatTurn,
     RunResult,
     StatusPayload,
     StepStatus,
@@ -28,6 +31,10 @@ from app.qa.envelope import (
 from app.qa.schemas import QaSessionRecord, QaStepResult
 from app.qa.store import QaSessionStore
 from app.sessions.store import SessionExpired
+
+
+# Mirrors the scenario chat's history bound (10 turns = 20 messages).
+_MAX_CHAT_TURNS = 20
 
 
 @dataclass
@@ -143,6 +150,42 @@ class QaExecutionService:
         await self._store.save(session_id, record)
         return QaTurnOutput(frames=frames, terminal=terminal)
 
+    async def on_chat(self, session_id: str, raw: dict) -> QaTurnOutput:
+        """Answer the operator. Never acts on the game — see `QaExecutionAgent.respond`.
+
+        The turn is recorded before the reply is generated and kept afterwards, so
+        the instruction reaches the next `_act`/`_verify` through `record.chat`
+        even if the reply itself fails.
+        """
+        record = await self._load(session_id)
+        payload = ChatPayload.model_validate(raw.get("payload") or {})
+        step = self._current_step(record)
+
+        self._append_chat(record, "USER", payload.message, step)
+        await self._store.save(session_id, record)
+
+        result = await self._agent.respond(
+            QaChatRequest(
+                scenario_title=record.scenario.title,
+                scenario_description=record.scenario.description,
+                step=step,
+                game_state=record.latest_game_state,
+                chat=record.chat,
+                model=record.model,
+                language=record.language,
+            ),
+            AgentContext(session_id=session_id),
+        )
+
+        self._append_chat(record, "AGENT", result.reply, None if step is None else step.step)
+        frame = self._frame(
+            record,
+            MessageType.CHAT,
+            ChatPayload(message=result.reply, step=None if step is None else step.step),
+        )
+        await self._store.save(session_id, record)
+        return QaTurnOutput(frames=[frame])
+
     async def on_cancel(self, session_id: str, raw: dict) -> QaTurnOutput:
         record = await self._load(session_id)
         payload = CancelPayload.model_validate(raw.get("payload") or {})
@@ -168,6 +211,7 @@ class QaExecutionService:
                 scenario_description=record.scenario.description,
                 step=step,
                 game_state=record.latest_game_state,
+                chat=record.chat,
                 model=record.model,
                 language=record.language,
             ),
@@ -233,6 +277,7 @@ class QaExecutionService:
                 step=step,
                 game_state=record.latest_game_state,
                 action_result=action_result,
+                chat=record.chat,
                 model=record.model,
                 language=record.language,
             ),
@@ -284,6 +329,18 @@ class QaExecutionService:
         return [frame]
 
     # --- helpers --------------------------------------------------------------
+
+    def _current_step(self, record: QaSessionRecord):
+        """The step in flight, or None once the run has run past its last one."""
+        if record.current_step >= len(record.scenario.steps):
+            return None
+        return record.scenario.steps[record.current_step]
+
+    def _append_chat(
+        self, record: QaSessionRecord, role: str, message: str, step: int | None
+    ) -> None:
+        record.chat.append(QaChatTurn(role=role, message=message, step=step))
+        del record.chat[:-_MAX_CHAT_TURNS]
 
     def _frame(
         self,

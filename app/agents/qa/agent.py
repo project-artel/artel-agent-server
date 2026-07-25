@@ -9,12 +9,16 @@ from app.agents.qa.errors import QaExecutionError
 from app.agents.qa.prompt import (
     build_act_inputs,
     build_act_prompt,
+    build_chat_inputs,
+    build_chat_prompt,
     build_evaluate_inputs,
     build_evaluate_prompt,
 )
 from app.agents.qa.schemas import (
     QaActRequest,
     QaActResult,
+    QaChatRequest,
+    QaChatResult,
     QaVerifyRequest,
     QaVerifyResult,
 )
@@ -45,6 +49,7 @@ class QaExecutionAgent:
     def __init__(self, structured_factory: StructuredFactory | None = None) -> None:
         self._act_prompt = build_act_prompt()
         self._evaluate_prompt = build_evaluate_prompt()
+        self._chat_prompt = build_chat_prompt()
         self._structured_factory = structured_factory or _default_structured_factory
 
     async def act(self, request: QaActRequest, context: AgentContext) -> QaActResult:
@@ -72,3 +77,20 @@ class QaExecutionAgent:
             return await chain.ainvoke(build_evaluate_inputs(request))
         except OutputParserException as error:
             raise QaExecutionError("Failed to produce a valid QA verdict.") from error
+
+    async def respond(self, request: QaChatRequest, context: AgentContext) -> QaChatResult:
+        """Answer the operator without touching the game.
+
+        Talking is separated from acting on purpose: this turn must never emit an
+        ACTION. What the operator says is carried into the next act/evaluate
+        through the request's `chat`, which is where it changes behaviour.
+        """
+        structured = self._structured_factory(request.model, QaChatResult)
+        chain = (self._chat_prompt | structured).with_retry(
+            retry_if_exception_type=(OutputParserException,),
+            stop_after_attempt=_MAX_ATTEMPTS,
+        )
+        try:
+            return await chain.ainvoke(build_chat_inputs(request))
+        except OutputParserException as error:
+            raise QaExecutionError("Failed to produce a QA chat reply.") from error

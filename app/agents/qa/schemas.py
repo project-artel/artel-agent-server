@@ -2,7 +2,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage, ScenarioStep
 from app.llm.models import DEFAULT_MODEL, LLMModel
-from app.qa.envelope import ActionResultPayload, GameState
+from app.qa.envelope import ActionResultPayload, GameState, QaChatTurn
 
 
 # --- ACT: plan the actions for one step ---------------------------------------
@@ -31,6 +31,8 @@ class QaActResult(BaseModel):
     actions: list[QaPlannedAction] = Field(default_factory=list)
 
 
+
+
 class QaActRequest(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -38,6 +40,9 @@ class QaActRequest(BaseModel):
     scenario_description: str
     step: ScenarioStep
     game_state: GameState
+    # The operator conversation so far. It steers the decision: an instruction
+    # given mid-run has to reach the very next act, or answering it was theatre.
+    chat: list[QaChatTurn] = Field(default_factory=list)
     model: LLMModel = DEFAULT_MODEL
     language: OutputLanguage = DEFAULT_LANGUAGE
 
@@ -57,5 +62,26 @@ class QaVerifyRequest(BaseModel):
     step: ScenarioStep
     game_state: GameState
     action_result: ActionResultPayload
+    chat: list[QaChatTurn] = Field(default_factory=list)
+    model: LLMModel = DEFAULT_MODEL
+    language: OutputLanguage = DEFAULT_LANGUAGE
+
+
+# --- CHAT: answer the operator, mid-run -----------------------------------------
+
+
+class QaChatResult(BaseModel):
+    reply: str
+
+
+class QaChatRequest(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    scenario_title: str
+    scenario_description: str
+    # None once the run is past its last step.
+    step: ScenarioStep | None = None
+    game_state: GameState | None = None
+    chat: list[QaChatTurn] = Field(default_factory=list)
     model: LLMModel = DEFAULT_MODEL
     language: OutputLanguage = DEFAULT_LANGUAGE

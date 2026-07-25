@@ -7,7 +7,7 @@ only — Orchestration owns the SDK JSON-RPC translation, qa_log, and SSE. See t
 
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -24,6 +24,9 @@ class MessageType(StrEnum):
     STATUS = "STATUS"
     # Bidirectional
     ERROR = "ERROR"
+    # Bidirectional. The operator talking to the Agent mid-run, and its reply.
+    # One type both ways; the envelope's direction is what names the speaker.
+    CHAT = "CHAT"
 
 
 class LogLevel(StrEnum):
@@ -100,6 +103,26 @@ class ActionResultPayload(BaseModel):
 class CancelPayload(BaseModel):
     message: str | None = None
     reason: str | None = None
+
+
+class ChatPayload(BaseModel):
+    """One operator turn on the way in, one Agent turn on the way out."""
+
+    message: str
+    step: int | None = None
+
+
+class QaChatTurn(BaseModel):
+    """One recorded turn of the operator conversation.
+
+    Lives here, beside the wire types, rather than in the agent package: both the
+    session record and the agent request need it, and `app.qa` importing
+    `app.agents.qa` would close an import cycle (see `app/qa/__init__.py`).
+    """
+
+    role: Literal["USER", "AGENT"]
+    message: str
+    step: int | None = None
 
 
 # --- Outbound payloads (Agent -> Orchestration) -------------------------------
