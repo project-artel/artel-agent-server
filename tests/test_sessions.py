@@ -61,7 +61,7 @@ class CapturingAgent(ScenarioAgent):
         self.languages: list[OutputLanguage] = []
 
     async def run(self, request, context):  # type: ignore[override]
-        self.languages.append(request.language)
+        self.languages.append(request.locale)
         return self._result
 
 
@@ -134,7 +134,7 @@ def test_first_turn_uses_session_language() -> None:
     # language set at open() must reach it — not only later WS turns.
     service, agent, _ = _capturing_service()
     session_id = asyncio.run(
-        service.open({}, {}, "Test the shop flow.", language=OutputLanguage.en)
+        service.open({}, {}, "Test the shop flow.", locale=OutputLanguage.en)
     )
 
     asyncio.run(service.start_first_turn(session_id))
@@ -148,7 +148,7 @@ def test_run_turn_overrides_and_persists_language() -> None:
     asyncio.run(service.start_first_turn(session_id))
 
     asyncio.run(
-        service.run_turn(session_id, "switch", draft=None, language=OutputLanguage.en)
+        service.run_turn(session_id, "switch", draft=None, locale=OutputLanguage.en)
     )
     # Language sticks for subsequent turns without re-sending it.
     asyncio.run(service.run_turn(session_id, "again", draft=None))
@@ -158,16 +158,16 @@ def test_run_turn_overrides_and_persists_language() -> None:
         OutputLanguage.en,
         OutputLanguage.en,
     ]
-    assert asyncio.run(store.load(session_id)).language == OutputLanguage.en
+    assert asyncio.run(store.load(session_id)).locale == OutputLanguage.en
 
 
-def test_session_record_defaults_language_when_missing() -> None:
-    # Records persisted before `language` existed must still load (as Korean).
+def test_session_record_defaults_locale_when_missing() -> None:
+    # Records persisted before `locale` existed must still load (as Korean).
     record = SessionRecord.model_validate(
         {"unity_context": {}, "game_context": {}, "history": []}
     )
 
-    assert record.language == OutputLanguage.ko
+    assert record.locale == OutputLanguage.ko
 
 
 def test_missing_session_raises_expired() -> None:
@@ -250,18 +250,18 @@ def test_ws_reports_session_expired() -> None:
         assert event["code"] == "session_expired"
 
 
-def test_open_session_rejects_unknown_language() -> None:
+def test_open_session_rejects_unknown_locale() -> None:
     client = TestClient(_test_app())
 
     response = client.post(
         "/sessions",
-        json={"user_input": "shop flow", "language": "korean"},
+        json={"user_input": "shop flow", "locale": "korean"},
     )
 
     assert response.status_code == 422
 
 
-def test_open_session_language_reaches_first_turn() -> None:
+def test_open_session_locale_reaches_first_turn() -> None:
     app = FastAPI()
     app.include_router(sessions_router)
     store = InMemorySessionStore()
@@ -269,7 +269,7 @@ def test_open_session_language_reaches_first_turn() -> None:
     app.state.session_service = SessionService(store=store, agent=agent)
     client = TestClient(app)
 
-    opened = client.post("/sessions", json={"user_input": "shop flow", "language": "en"})
+    opened = client.post("/sessions", json={"user_input": "shop flow", "locale": "en"})
     session_id = opened.json()["session_id"]
 
     with client.websocket_connect(f"/sessions/{session_id}") as ws:
@@ -278,7 +278,7 @@ def test_open_session_language_reaches_first_turn() -> None:
     assert agent.languages == [OutputLanguage.en]
 
 
-def test_ws_turn_rejects_unknown_language() -> None:
+def test_ws_turn_rejects_unknown_locale() -> None:
     client = TestClient(_test_app())
     opened = client.post("/sessions", json={"user_input": "shop flow"})
     session_id = opened.json()["session_id"]
@@ -286,7 +286,7 @@ def test_ws_turn_rejects_unknown_language() -> None:
     with client.websocket_connect(f"/sessions/{session_id}") as ws:
         assert ws.receive_json()["type"] == "result"
 
-        ws.send_json({"type": "turn", "user_input": "x", "language": "korean"})
+        ws.send_json({"type": "turn", "user_input": "x", "locale": "korean"})
         event = ws.receive_json()
         assert event["type"] == "error"
         assert event["code"] == "bad_request"

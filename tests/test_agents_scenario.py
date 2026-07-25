@@ -95,8 +95,8 @@ def test_scenario_agent_raises_after_exhausting_retries() -> None:
 
 
 def test_chain_inputs_use_requested_language_directive() -> None:
-    ko_inputs = build_chain_inputs(_request(language=OutputLanguage.ko))
-    en_inputs = build_chain_inputs(_request(language=OutputLanguage.en))
+    ko_inputs = build_chain_inputs(_request(locale=OutputLanguage.ko))
+    en_inputs = build_chain_inputs(_request(locale=OutputLanguage.en))
 
     assert ko_inputs["language_directive"] == LANGUAGE_DIRECTIVES[OutputLanguage.ko]
     assert en_inputs["language_directive"] == LANGUAGE_DIRECTIVES[OutputLanguage.en]

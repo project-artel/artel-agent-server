@@ -34,7 +34,7 @@ class SessionService:
         game_context: dict,
         user_input: str,
         model: LLMModel = DEFAULT_MODEL,
-        language: OutputLanguage = DEFAULT_LANGUAGE,
+        locale: OutputLanguage = DEFAULT_LANGUAGE,
     ) -> str:
         session_id = uuid.uuid4().hex
         record = SessionRecord(
@@ -42,7 +42,7 @@ class SessionService:
             game_context=game_context,
             pending_user_input=user_input,
             model=model,
-            language=language,
+            locale=locale,
         )
         await self._store.save(session_id, record)
         return session_id
@@ -64,13 +64,13 @@ class SessionService:
         user_input: str,
         draft: ScenarioDraft | None,
         model: LLMModel | None = None,
-        language: OutputLanguage | None = None,
+        locale: OutputLanguage | None = None,
     ) -> ScenarioAgentResult:
         record = await self._load(session_id)
         if model is not None:
             record.model = model
-        if language is not None:
-            record.language = language
+        if locale is not None:
+            record.locale = locale
         result = await self._generate(session_id, record, user_input, draft)
         await self._store.save(session_id, record)
         return result
@@ -109,7 +109,7 @@ class SessionService:
             history=self._replay_messages(record),
             draft=draft,
             model=record.model,
-            language=record.language,
+            locale=record.locale,
         )
         result = await self._agent.run(request, AgentContext(session_id=session_id))
 

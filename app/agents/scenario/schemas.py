@@ -58,8 +58,8 @@ class ScenarioAgentRequest(BaseModel):
     # Authoritative current draft (may contain the user's manual edits).
     draft: ScenarioDraft | None = None
     model: LLMModel = DEFAULT_MODEL
-    # Language for the natural-language output (message + scenario text).
-    language: OutputLanguage = DEFAULT_LANGUAGE
+    # Locale for the natural-language output (message + scenario text).
+    locale: OutputLanguage = DEFAULT_LANGUAGE
 
 
 class ScenarioAgentResult(BaseModel):
