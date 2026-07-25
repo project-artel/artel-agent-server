@@ -68,9 +68,14 @@ class QaExecutionService:
         await self._store.save(session_id, record)
         return session_id
 
-    async def ensure(self, session_id: str) -> None:
-        """Raise SessionExpired if the session is gone (used on WS connect)."""
-        await self._load(session_id)
+    async def ensure(self, session_id: str) -> int:
+        """Return the session's qa_try_id, raising SessionExpired if it is gone.
+
+        Used on WS connect, and to stamp connection-level ERROR frames with the
+        real try id (Orchestration rejects frames whose qaTryId has no active try).
+        """
+        record = await self._load(session_id)
+        return record.qa_try_id
 
     async def close(self, session_id: str) -> None:
         await self._store.delete(session_id)

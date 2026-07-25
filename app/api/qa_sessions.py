@@ -35,11 +35,17 @@ def _service(app) -> QaExecutionService:
     return app.state.qa_session_service
 
 
-def _error_frame(code: str, detail: str) -> dict:
-    """A minimal ERROR envelope for connection-level failures (no session yet)."""
+def _error_frame(code: str, detail: str, qa_try_id: int = 0) -> dict:
+    """A minimal ERROR envelope for connection-level failures.
+
+    `qa_try_id` must be the real try once the session is known: Orchestration
+    rejects a frame whose qaTryId has no active try, and that rejection kills the
+    WebSocket and fails the whole run. 0 is only for the pre-session case, where
+    there is no try to name.
+    """
     return outbound_envelope(
         MessageType.ERROR,
-        qa_try_id=0,
+        qa_try_id=qa_try_id,
         sequence=0,
         payload=ErrorPayload(message=detail, code=code),
     )
@@ -67,7 +73,7 @@ async def qa_session_ws(websocket: WebSocket, session_id: str) -> None:
     await websocket.accept()
 
     try:
-        await service.ensure(session_id)
+        qa_try_id = await service.ensure(session_id)
     except SessionExpired:
         await websocket.send_json(
             _error_frame("session_expired", "Session not found or expired.")
@@ -90,29 +96,41 @@ async def qa_session_ws(websocket: WebSocket, session_id: str) -> None:
                 else:
                     await websocket.send_json(
                         _error_frame(
-                            "bad_request", f"Unsupported inbound type: {message_type!r}"
+                            "bad_request",
+                            f"Unsupported inbound type: {message_type!r}",
+                            qa_try_id,
                         )
                     )
                     continue
             except SessionExpired:
                 await websocket.send_json(
-                    _error_frame("session_expired", "Session not found or expired.")
+                    _error_frame(
+                        "session_expired", "Session not found or expired.", qa_try_id
+                    )
                 )
                 await websocket.close()
                 return
             except ValidationError as error:
-                await websocket.send_json(_error_frame("bad_request", str(error)))
+                await websocket.send_json(
+                    _error_frame("bad_request", str(error), qa_try_id)
+                )
                 continue
             except QaExecutionError as error:
-                await websocket.send_json(_error_frame("agent_error", str(error)))
+                await websocket.send_json(
+                    _error_frame("agent_error", str(error), qa_try_id)
+                )
                 continue
             except openai.APIError as error:
-                await websocket.send_json(_error_frame("llm_error", str(error)))
+                await websocket.send_json(
+                    _error_frame("llm_error", str(error), qa_try_id)
+                )
                 continue
             except Exception as error:  # noqa: BLE001 - keep the socket alive
                 # Store/serialization/unexpected LLM errors must not tear the socket
                 # down silently; surface an ERROR frame and keep serving.
-                await websocket.send_json(_error_frame("internal", str(error)))
+                await websocket.send_json(
+                    _error_frame("internal", str(error), qa_try_id)
+                )
                 continue
 
             for frame in output.frames:
