@@ -56,6 +56,39 @@ def test_looking_goes_out_as_a_scan_scene_action() -> None:
     asyncio.run(run())
 
 
+def test_a_scene_transition_counts_as_a_scene_arriving() -> None:
+    """The freshness check cannot key on `updates`.
+
+    `SceneMemory` resets that counter with the scene, so a run that just moved
+    from one scene to another would have the transition reported as the game
+    having stayed silent — the one moment the agent most needs to see.
+    """
+
+    async def run() -> None:
+        channel, sent = make_channel()
+
+        async def answer(scene: str) -> None:
+            await asyncio.sleep(0)
+            channel.on_game_state(scene_frame(scene=scene))
+            channel.on_action_result(
+                {"correlationId": sent[-1]["messageId"], "payload": {"results": []}}
+            )
+
+        asyncio.create_task(answer("Lobby"))
+        await channel.look(0.0, "look")
+        asyncio.create_task(answer("Lobby"))
+        await channel.look(0.0, "look")
+
+        asyncio.create_task(answer("Shop"))
+        assert await channel.look(0.0, "look") is True
+        assert channel.scene.scene == "Shop"
+        # The per-scene counter did restart; the run-wide one did not.
+        assert channel.scene.updates == 1
+        assert channel.scene.frames == 3
+
+    asyncio.run(run())
+
+
 def test_looking_reports_false_when_no_scene_arrives() -> None:
     """No answer is a value, not an exception — the agent decides what to do."""
 

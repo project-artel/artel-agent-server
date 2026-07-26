@@ -103,11 +103,14 @@ class QaRunChannel:
             # Safe to sleep: the run is its own asyncio task (see
             # app/api/qa_sessions.py), so this holds up nothing but this tool.
             await asyncio.sleep(min(after_seconds, MAX_SCENE_WAIT_SECONDS))
-        before = self.scene.updates
+        # Frames, not observations: `updates` restarts at 1 on a scene change,
+        # so comparing it would report a transition as the game having stayed
+        # silent.
+        before = self.scene.frames
         await self.dispatch_actions(
             [JsonRpcAction(id=1, method="scan_scene", params=[])], message, step
         )
-        return self.scene.updates > before
+        return self.scene.frames > before
 
     async def act_and_look(
         self, actions: list[JsonRpcAction], message: str, step: int | None = None
@@ -122,12 +125,12 @@ class QaRunChannel:
 
         Returns the results and whether a fresh scene arrived.
         """
-        before = self.scene.updates
+        before = self.scene.frames
         batch = actions + [
             JsonRpcAction(id=len(actions) + 1, method="scan_scene", params=[])
         ]
         result = await self.dispatch_actions(batch, message, step)
-        return result, self.scene.updates > before
+        return result, self.scene.frames > before
 
     async def dispatch_actions(
         self, actions: list[JsonRpcAction], message: str, step: int | None = None
