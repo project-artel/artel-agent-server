@@ -16,6 +16,7 @@ from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
 from app.llm.chat_model import build_chat_model
 from app.llm.models import DEFAULT_MODEL, LLMModel
 from app.qa.channel import QaCancelled, QaRunChannel
+from app.qa.envelope import LogCategory
 
 # Two bounds, because either alone leaves a hole. A call cap alone lets one
 # unanswered call hold the run open; a clock alone lets a fast loop burn budget.
@@ -101,12 +102,47 @@ class QaRunner:
                 language_directive=LANGUAGE_DIRECTIVES[self._language]
             ),
         )
-        await agent.ainvoke(
+        # Streamed rather than invoked so the model's reasoning can be put on the
+        # timeline as it happens. Left to a tool the agent chooses to call, the
+        # reasoning simply never appears — it has no reason to narrate itself, and
+        # a run that only shows actions gives no way to tell a considered decision
+        # from a lucky one.
+        async for update in agent.astream(
             {"messages": [("user", _first_message(scenario))]},
             # recursion_limit counts graph steps, so it bounds tool calls as well
             # as the model turns between them.
             {"recursion_limit": self._tool_call_limit(len(scenario.steps)) * 2},
-        )
+            stream_mode="updates",
+        ):
+            await self._log_reasoning(channel, update)
+
+    @staticmethod
+    def _text_of(message) -> str:
+        """The assistant's own words, without the tool-call scaffolding."""
+        content = getattr(message, "content", "")
+        if isinstance(content, str):
+            return content.strip()
+        # Some providers return content as blocks; keep only the text ones.
+        parts = [
+            block.get("text", "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        return "\n".join(part for part in parts if part).strip()
+
+    async def _log_reasoning(self, channel: QaRunChannel, update: dict) -> None:
+        """Put each model turn on the timeline before its tools run."""
+        for node in update.values():
+            if not isinstance(node, dict):
+                continue
+            for message in node.get("messages", []) or []:
+                # Tool results are already visible as their own frames; echoing
+                # them here would bury the reasoning in what it reasoned about.
+                if getattr(message, "type", None) != "ai":
+                    continue
+                text = self._text_of(message)
+                if text:
+                    await channel.note(text, LogCategory.THOUGHT)
 
     async def run_with_deadline(
         self, channel: QaRunChannel, scenario: ScenarioDraft
