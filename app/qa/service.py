@@ -1,6 +1,9 @@
 import asyncio
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
+
+from pydantic import ValidationError
 
 from app.agents.qa.runner import QaRunner
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
@@ -16,6 +19,8 @@ from app.qa.envelope import (
 from app.qa.schemas import QaSessionRecord
 from app.qa.store import QaSessionStore
 from app.sessions.store import SessionExpired
+
+logger = logging.getLogger(__name__)
 
 Send = Callable[[dict], Awaitable[None]]
 
@@ -128,20 +133,40 @@ class QaExecutionService:
     # --- inbound --------------------------------------------------------------
 
     def deliver(self, session_id: str, raw: dict) -> bool:
-        """Hand an inbound frame to the running loop. False when it is unknown."""
+        """Hand an inbound frame to the running loop.
+
+        False when the frame is unknown or unreadable; the caller reports that
+        back over the socket. It never raises, which is the point: a payload this
+        cannot parse must not end the run.
+
+        It used to. A single ACTION_RESULT whose shape had drifted from the
+        model raised out of here, through the WebSocket handler, and uvicorn
+        closed the socket — which Orchestration reads as the agent dying and
+        fails the whole try. Orchestration guards its own inbound the same way
+        (see QaAgentInboundRouter).
+        """
         channel = self._channels.get(session_id)
         if channel is None:
             return False
         message_type = raw.get("type")
-        if message_type == MessageType.GAME_STATE:
-            channel.on_game_state(raw)
-        elif message_type == MessageType.ACTION_RESULT:
-            channel.on_action_result(raw)
-        elif message_type == MessageType.CHAT:
-            channel.on_chat(raw)
-        elif message_type == MessageType.CANCEL:
-            channel.on_cancel()
-        else:
+        try:
+            if message_type == MessageType.GAME_STATE:
+                channel.on_game_state(raw)
+            elif message_type == MessageType.ACTION_RESULT:
+                channel.on_action_result(raw)
+            elif message_type == MessageType.CHAT:
+                channel.on_chat(raw)
+            elif message_type == MessageType.CANCEL:
+                channel.on_cancel()
+            else:
+                return False
+        except ValidationError as error:
+            logger.warning(
+                "[QA] dropped an unreadable %s frame: %s\n  payload: %r",
+                message_type,
+                error,
+                raw.get("payload"),
+            )
             return False
         return True
 
