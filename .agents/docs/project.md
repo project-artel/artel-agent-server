@@ -14,7 +14,7 @@ Fill this document during project initialization. Agents must verify commands ag
 - Entry points: `app.main:create_app`, `app.main:app`
 - Main modules: `app/api`, `app/llm`
 - Dependency direction: API routes stay thin; LLM provider clients depend on shared LLM schemas and configuration.
-- External systems: GitHub repository `project-artel/artel-agent-server`; Jira project `ARTEL` via the `mcp-atlassian` MCP server; Insomnia collection repository `project-artel/insomnia-api`
+- External systems: GitHub repository `project-artel/artel-agent-server`; Jira project `ARTEL` via the `mcp-atlassian` MCP server; Insomnia collection repository `project-artel/insomnia-api`; LangSmith tracing (opt-in, see README)
 - Persistent data: None yet.
 
 ## Commands

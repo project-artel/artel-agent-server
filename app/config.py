@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     openrouter_site_url: str | None = None
     openrouter_app_title: str = "Artel Agent Server"
 
+    # LangSmith tracing. Disabled unless both the flag and the key are set, so
+    # a deploy without credentials degrades to "no traces" instead of failing.
+    langsmith_tracing: bool = False
+    langsmith_api_key: str | None = None
+    langsmith_endpoint: str = "https://api.smith.langchain.com"
+    langsmith_project: str | None = None
+
     redis_url: str = "redis://localhost:6379/0"
     session_ttl_seconds: int = 3600
     history_max_turns: int = 10
