@@ -7,6 +7,7 @@ a game that never volunteered its state left the run idle forever.
 
 import asyncio
 import json
+import logging
 
 from langchain.agents import create_agent
 
@@ -17,6 +18,12 @@ from app.llm.chat_model import build_chat_model
 from app.llm.models import DEFAULT_MODEL, LLMModel
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory
+
+logger = logging.getLogger(__name__)
+
+# A scene view runs long. Cut it for the console, and say it was cut — a silently
+# truncated log reads as a smaller context than the model actually saw.
+MAX_LOGGED_CHARS = 4000
 
 # Two bounds, because either alone leaves a hole. A call cap alone lets one
 # unanswered call hold the run open; a clock alone lets a fast loop burn budget.
@@ -32,18 +39,18 @@ SYSTEM_PROMPT = (
     "How to work:\n"
     "1. Call `observe_scene` before acting. You cannot act on a screen you have "
     "not seen, and ids only mean anything in the scene you just observed.\n"
-    "2. Carry out the step's `action` with `perform_actions`. Choose the method "
-    "and the target id from what is actually on screen — never invent an id.\n"
-    "3. Call `observe_scene` again to see what your action did. The result is "
-    "written as what CHANGED, which is the evidence the step's `expected` is "
-    "about.\n"
+    "2. Carry out the step's `action` with `click_button`, `enter_text` or "
+    "`press_key`. Take ids from the scene you just observed — never invent one.\n"
+    "3. Each of those returns the outcome AND the scene it produced, written as "
+    "what CHANGED. That is the evidence the step's `expected` is about; you "
+    "usually do not need a separate observation afterwards.\n"
     "4. Call `report_step` with your verdict and the evidence you saw.\n"
     "5. Repeat for every step, then call `finish_run` exactly once.\n"
     "\n"
-    "Available SDK methods (the set grows; pick whichever fits):\n"
-    "- button_click, target_id = the button's id, no arguments\n"
-    "- enter_text, target_id = the field's id, arguments [value]\n"
-    "- key_click, no target_id, arguments [keyCode, durationSeconds]\n"
+    "A screen with nothing clickable is not a dead end. Dialogue, narration and "
+    "cutscenes usually advance on a key — `press_key` needs no target and works "
+    "when the scene lists no interactables at all. Reach for it before concluding "
+    "that a step cannot be done.\n"
     "\n"
     "If the screen is not ready — loading, animating, counting down — call "
     "`observe_scene` again with `wait_seconds` rather than acting into it. If the "
@@ -56,6 +63,12 @@ SYSTEM_PROMPT = (
     "\n"
     "{language_directive}"
 )
+
+
+def _clip(text: str) -> str:
+    if len(text) <= MAX_LOGGED_CHARS:
+        return text
+    return f"{text[:MAX_LOGGED_CHARS]}\n… [{len(text) - MAX_LOGGED_CHARS} more characters]"
 
 
 def _first_message(scenario: ScenarioDraft) -> str:
@@ -95,12 +108,33 @@ class QaRunner:
     async def run(
         self, channel: QaRunChannel, scenario: ScenarioDraft, state: QaRunState
     ) -> None:
+        system_prompt = SYSTEM_PROMPT.format(
+            language_directive=LANGUAGE_DIRECTIVES[self._language]
+        )
+        first_message = _first_message(scenario)
+        tools = build_tools(channel, state)
+
+        # The whole starting context in one place. Reading a run afterwards means
+        # knowing what the model was actually given, and the prompt is assembled
+        # from several pieces that are otherwise only visible in source.
+        logger.info(
+            "[QA] run starting\n"
+            "  model=%s language=%s steps=%d deadline=%.0fs tools=%s\n"
+            "--- system prompt ---\n%s\n"
+            "--- first message ---\n%s",
+            self._model,
+            self._language,
+            len(scenario.steps),
+            self._deadline,
+            [tool.name for tool in tools],
+            system_prompt,
+            _clip(first_message),
+        )
+
         agent = create_agent(
             model=build_chat_model(self._model),
-            tools=build_tools(channel, state),
-            system_prompt=SYSTEM_PROMPT.format(
-                language_directive=LANGUAGE_DIRECTIVES[self._language]
-            ),
+            tools=tools,
+            system_prompt=system_prompt,
         )
         # Streamed rather than invoked so the model's reasoning can be put on the
         # timeline as it happens. Left to a tool the agent chooses to call, the
@@ -131,16 +165,40 @@ class QaRunner:
         return "\n".join(part for part in parts if part).strip()
 
     async def _log_reasoning(self, channel: QaRunChannel, update: dict) -> None:
-        """Put each model turn on the timeline before its tools run."""
+        """Put each model turn on the timeline, and the whole exchange on the console.
+
+        The timeline carries what a reviewer needs; the console carries what a
+        developer needs — including the tool results, which are most of what the
+        model is actually reading and are invisible everywhere else.
+        """
         for node in update.values():
             if not isinstance(node, dict):
                 continue
             for message in node.get("messages", []) or []:
-                # Tool results are already visible as their own frames; echoing
-                # them here would bury the reasoning in what it reasoned about.
-                if getattr(message, "type", None) != "ai":
+                kind = getattr(message, "type", None)
+
+                if kind == "tool":
+                    logger.info(
+                        "[QA] tool result ← %s\n%s",
+                        getattr(message, "name", "?"),
+                        _clip(str(getattr(message, "content", ""))),
+                    )
                     continue
+
+                # Tool results are already visible as their own frames; echoing
+                # them to the timeline would bury the reasoning in what it
+                # reasoned about.
+                if kind != "ai":
+                    continue
+
                 text = self._text_of(message)
+                calls = getattr(message, "tool_calls", None) or []
+                logger.info(
+                    "[QA] model turn\n  text: %s\n  calls: %s",
+                    _clip(text) if text else "(none)",
+                    [{"name": call.get("name"), "args": call.get("args")} for call in calls]
+                    or "(none)",
+                )
                 if text:
                     await channel.note(text, LogCategory.THOUGHT)
 

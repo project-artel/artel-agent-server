@@ -77,14 +77,47 @@ def test_operator_message_is_appended_to_the_next_tool_result() -> None:
     asyncio.run(run())
 
 
-def test_action_without_a_method_runs_nothing() -> None:
+def test_pressing_a_key_logs_the_reason_and_batches_a_scan() -> None:
+    """press_key needs no target, so it works on a screen with nothing clickable."""
+
     async def run() -> None:
         _, _, tools, sent = make()
-        result = await tools["perform_actions"].ainvoke(
-            {"actions": [{"target_id": 1}], "message": "tap"}
+        await tools["press_key"].ainvoke(
+            {"key_code": "Space", "duration_seconds": 0.5, "thought": "대사를 넘긴다"}
         )
-        assert "needs a method" in result
-        assert sent == []
+
+        logged = [f for f in sent if f["type"] == MessageType.LOG.value]
+        assert logged[0]["payload"]["message"] == "대사를 넘긴다"
+
+        action = next(f for f in sent if f["type"] == MessageType.ACTION.value)
+        methods = [a["method"] for a in action["payload"]["actions"]]
+        # The scan rides in the same batch so it cannot answer before the key does.
+        assert methods == ["key_click", "scan_scene"]
+
+    asyncio.run(run())
+
+
+def test_click_reports_the_failure_reason() -> None:
+    async def run() -> None:
+        channel, _, tools, sent = make()
+
+        async def answer() -> None:
+            await asyncio.sleep(0)
+            channel.on_action_result(
+                {
+                    "correlationId": next(
+                        f["messageId"] for f in sent if f["type"] == MessageType.ACTION.value
+                    ),
+                    "payload": {"results": [{"id": 1, "success": False, "error": "Unknown target id: 999"}]},
+                }
+            )
+
+        task = asyncio.create_task(answer())
+        result = await tools["click_button"].ainvoke({"target_id": 999, "thought": "시작 버튼"})
+        await task
+
+        assert "FAILED" in result
+        assert "Unknown target id: 999" in result
 
     asyncio.run(run())
 

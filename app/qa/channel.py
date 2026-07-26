@@ -108,6 +108,26 @@ class QaRunChannel:
         finally:
             self._scene_waiter = None
 
+    async def act_and_look(
+        self, actions: list[JsonRpcAction], message: str, step: int | None = None
+    ) -> tuple[ActionResultPayload | None, bool]:
+        """Run actions, then read the scene they produced, in one batch.
+
+        `scan_scene` rides at the end of the same batch on purpose. Asked for
+        separately it answers straight out of the SDK's message handler and can
+        return the screen as it was *before* a click's cursor movement finished —
+        the agent would then judge the step against a stale scene. Queued behind
+        the actions it cannot run early.
+
+        Returns the results and whether a fresh scene arrived.
+        """
+        before = self.scene.updates
+        batch = actions + [
+            JsonRpcAction(id=len(actions) + 1, method="scan_scene", params=[])
+        ]
+        result = await self.dispatch_actions(batch, message, step)
+        return result, self.scene.updates > before
+
     async def dispatch_actions(
         self, actions: list[JsonRpcAction], message: str, step: int | None = None
     ) -> ActionResultPayload | None:
