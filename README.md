@@ -35,6 +35,24 @@ Run tests:
 python -m pytest
 ```
 
+## LangSmith Tracing
+
+Tracing is off by default. To turn it on, set in `.env`:
+
+```dotenv
+LANGSMITH_TRACING="true"
+LANGSMITH_API_KEY="<key from https://smith.langchain.com/settings>"
+```
+
+`app.observability.configure_langsmith` runs during `create_app` and copies
+these into the process environment, which is where LangChain reads them from.
+Traces land in `artel-agent-server-<APP_ENV>` unless `LANGSMITH_PROJECT` names
+another project. Set `LANGSMITH_ENDPOINT` for the EU region or a self-hosted
+instance.
+
+If `LANGSMITH_TRACING` is true but the key is missing, the server logs a
+warning and starts without tracing.
+
 ## Container
 
 Build the image:

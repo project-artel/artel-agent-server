@@ -12,6 +12,7 @@ from app.api.routes import router as api_router
 from app.api.sessions import router as sessions_router
 from app.config import get_settings
 from app.documents import ExtractionService
+from app.observability import configure_langsmith
 from app.qa.service import QaExecutionService
 from app.qa.store import RedisQaSessionStore
 from app.sessions.redis_store import RedisSessionStore
@@ -58,6 +59,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    # Before any chat model is built, so every LangChain call is traced.
+    configure_langsmith(settings)
     app = FastAPI(
         title="Artel Agent Server API",
         description=(
