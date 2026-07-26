@@ -81,6 +81,24 @@ class Interactable(BaseModel):
     placeholder: str | None = None
 
 
+class ActionRecord(BaseModel):
+    """One action the game actually ran, as the scene reported it.
+
+    Distinct from ACTION_RESULT: that answers "did the action I dispatched
+    succeed", this also covers actions the game ran on its own, which the Agent
+    would otherwise have no way to observe.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    target: str
+    name: str
+    success: bool
+    returnValue: Any | None = None
+    error: str | None = None
+    at: str
+
+
 class GameState(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -88,6 +106,8 @@ class GameState(BaseModel):
     interactables: list[Interactable] = Field(default_factory=list)
     # Observable state/content values, keyed by name; opaque to the Agent server.
     observables: dict[str, Any] = Field(default_factory=dict)
+    # Oldest first, capped by Orchestration.
+    recentActions: list[ActionRecord] = Field(default_factory=list)
 
 
 class ActionResultItem(BaseModel):

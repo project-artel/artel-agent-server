@@ -1,0 +1,126 @@
+import asyncio
+
+import pytest
+
+from app.qa.channel import QaCancelled, QaRunChannel, with_operator_messages
+from app.qa.envelope import JsonRpcAction, MessageType
+
+
+def make_channel(timeout: float = 30.0) -> tuple[QaRunChannel, list[dict]]:
+    sent: list[dict] = []
+
+    async def send(frame: dict) -> None:
+        sent.append(frame)
+
+    channel = QaRunChannel(
+        qa_try_id=7, send=send, scene_timeout=timeout, action_timeout=timeout
+    )
+    return channel, sent
+
+
+def scene_frame(scene: str = "Lobby", observables: dict | None = None) -> dict:
+    return {
+        "type": "GAME_STATE",
+        "payload": {"scene": scene, "interactables": [], "observables": observables or {}},
+    }
+
+
+def test_scene_request_resolves_when_the_frame_arrives() -> None:
+    async def run() -> None:
+        channel, sent = make_channel()
+
+        async def answer() -> None:
+            await asyncio.sleep(0)
+            channel.on_game_state(scene_frame(observables={"Score": {"value": 1}}))
+
+        asyncio.create_task(answer())
+        state = await channel.request_scene(0.0, "look")
+
+        assert state is not None
+        assert state.scene == "Lobby"
+        assert sent[0]["type"] == MessageType.REQUEST_GAME_STATE.value
+        # The memory is updated on the way in, so the tool can render a diff.
+        assert channel.scene.observables["Score"].current == 1
+
+    asyncio.run(run())
+
+
+def test_scene_request_returns_none_when_the_game_never_answers() -> None:
+    """No answer is a value, not an exception — the agent decides what to do."""
+
+    async def run() -> None:
+        channel, _ = make_channel(timeout=0.05)
+        assert await channel.request_scene(0.0, "look") is None
+
+    asyncio.run(run())
+
+
+def test_action_result_with_a_foreign_correlation_is_ignored() -> None:
+    async def run() -> None:
+        channel, sent = make_channel(timeout=0.05)
+
+        async def answer() -> None:
+            await asyncio.sleep(0)
+            # Belongs to some earlier action; must not resolve this wait.
+            channel.on_action_result({"correlationId": "someone-else", "payload": {}})
+
+        asyncio.create_task(answer())
+        result = await channel.dispatch_actions(
+            [JsonRpcAction(id=1, method="button_click", params=[1])], "tap"
+        )
+
+        assert result is None
+        assert sent[0]["type"] == MessageType.ACTION.value
+
+    asyncio.run(run())
+
+
+def test_action_result_matching_the_pending_action_resolves() -> None:
+    async def run() -> None:
+        channel, sent = make_channel()
+
+        async def answer() -> None:
+            await asyncio.sleep(0)
+            channel.on_action_result(
+                {
+                    "correlationId": sent[0]["messageId"],
+                    "payload": {"results": [{"id": 1, "status": "SUCCEEDED"}]},
+                }
+            )
+
+        asyncio.create_task(answer())
+        result = await channel.dispatch_actions(
+            [JsonRpcAction(id=1, method="button_click", params=[1])], "tap"
+        )
+
+        assert result is not None
+        assert result.results[0].id == 1
+
+    asyncio.run(run())
+
+
+def test_cancel_stops_the_next_tool() -> None:
+    async def run() -> None:
+        channel, _ = make_channel()
+        channel.on_cancel()
+
+        with pytest.raises(QaCancelled):
+            await channel.request_scene(0.0, "look")
+
+    asyncio.run(run())
+
+
+def test_operator_messages_are_drained_once() -> None:
+    channel, _ = make_channel()
+    channel.on_chat({"payload": {"message": "메뉴로 가"}})
+
+    assert channel.drain_operator_messages() == ["메뉴로 가"]
+    assert channel.drain_operator_messages() == []
+
+
+def test_operator_messages_are_appended_to_a_tool_result() -> None:
+    assert with_operator_messages("scene: Lobby", []) == "scene: Lobby"
+
+    merged = with_operator_messages("scene: Lobby", ["메뉴로 가"])
+    assert "scene: Lobby" in merged
+    assert "메뉴로 가" in merged
