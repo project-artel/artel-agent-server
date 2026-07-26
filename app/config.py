@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     langsmith_endpoint: str = "https://api.smith.langchain.com"
     langsmith_project: str | None = None
 
+    # Applied to the root logger at startup; see app/logging_config.py.
+    log_level: str = "INFO"
+
     redis_url: str = "redis://localhost:6379/0"
     session_ttl_seconds: int = 3600
     history_max_turns: int = 10
