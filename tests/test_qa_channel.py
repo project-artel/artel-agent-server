@@ -12,9 +12,7 @@ def make_channel(timeout: float = 30.0) -> tuple[QaRunChannel, list[dict]]:
     async def send(frame: dict) -> None:
         sent.append(frame)
 
-    channel = QaRunChannel(
-        qa_try_id=7, send=send, scene_timeout=timeout, action_timeout=timeout
-    )
+    channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=timeout)
     return channel, sent
 
 
@@ -25,32 +23,45 @@ def scene_frame(scene: str = "Lobby", observables: dict | None = None) -> dict:
     }
 
 
-def test_scene_request_resolves_when_the_frame_arrives() -> None:
+def test_looking_goes_out_as_a_scan_scene_action() -> None:
+    """One path to the scene: the SDK's JSON-RPC method, same as every other action.
+
+    There used to be a second — a REQUEST_GAME_STATE frame that Orchestration
+    turned into a top-level GET_GAME_STATE — which the SDK only keeps as an
+    alias, and which made the timeline log this envelope instead of the frame
+    that actually reached the game.
+    """
+
     async def run() -> None:
         channel, sent = make_channel()
 
         async def answer() -> None:
             await asyncio.sleep(0)
             channel.on_game_state(scene_frame(observables={"Score": {"value": 1}}))
+            channel.on_action_result(
+                {"correlationId": sent[0]["messageId"], "payload": {"results": []}}
+            )
 
         asyncio.create_task(answer())
-        state = await channel.request_scene(0.0, "look")
+        arrived = await channel.look(0.0, "look")
 
-        assert state is not None
-        assert state.scene == "Lobby"
-        assert sent[0]["type"] == MessageType.REQUEST_GAME_STATE.value
+        assert arrived is True
+        assert sent[0]["type"] == MessageType.ACTION.value
+        assert sent[0]["payload"]["actions"] == [
+            {"id": 1, "jsonrpc": "2.0", "method": "scan_scene", "params": []}
+        ]
         # The memory is updated on the way in, so the tool can render a diff.
         assert channel.scene.observables["Score"].current == 1
 
     asyncio.run(run())
 
 
-def test_scene_request_returns_none_when_the_game_never_answers() -> None:
+def test_looking_reports_false_when_no_scene_arrives() -> None:
     """No answer is a value, not an exception — the agent decides what to do."""
 
     async def run() -> None:
         channel, _ = make_channel(timeout=0.05)
-        assert await channel.request_scene(0.0, "look") is None
+        assert await channel.look(0.0, "look") is False
 
     asyncio.run(run())
 
@@ -105,7 +116,7 @@ def test_cancel_stops_the_next_tool() -> None:
         channel.on_cancel()
 
         with pytest.raises(QaCancelled):
-            await channel.request_scene(0.0, "look")
+            await channel.look(0.0, "look")
 
     asyncio.run(run())
 

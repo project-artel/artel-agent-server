@@ -40,9 +40,9 @@ def build_tools(channel: QaRunChannel, state: QaRunState) -> list[StructuredTool
         animation, a countdown. Always look before acting, and look again after
         acting to see what your action did.
         """
-        received = await channel.request_scene(wait_seconds, reason)
+        arrived = await channel.look(wait_seconds, reason)
         messages = channel.drain_operator_messages()
-        if received is None:
+        if not arrived:
             return with_operator_messages(
                 "The game did not answer. It may be loading, or it may be stuck. "
                 "You can look again with a longer wait, or judge the step failed.",

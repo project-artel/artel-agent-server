@@ -19,7 +19,6 @@ from app.qa.envelope import (
     LogCategory,
     LogPayload,
     MessageType,
-    RequestGameStatePayload,
     outbound_envelope,
 )
 from app.qa.scene import SceneMemory
@@ -29,8 +28,11 @@ from app.qa.scene import SceneMemory
 # Returned as a value rather than raised: the server cannot tell a long load from
 # a dead game, so the agent decides whether to retry, wait longer, or fail the
 # step. The run's overall deadline is the real backstop.
-SCENE_TIMEOUT_SECONDS = 30.0
 ACTION_TIMEOUT_SECONDS = 30.0
+
+# Ceiling on a tool's requested wait. The agent picks the number, and an
+# unbounded one would park the run until the overall deadline killed it.
+MAX_SCENE_WAIT_SECONDS = 30.0
 
 
 class QaCancelled(Exception):
@@ -44,15 +46,12 @@ class QaRunChannel:
         self,
         qa_try_id: int,
         send: Callable[[dict], Awaitable[None]],
-        scene_timeout: float = SCENE_TIMEOUT_SECONDS,
         action_timeout: float = ACTION_TIMEOUT_SECONDS,
     ) -> None:
         self._qa_try_id = qa_try_id
         self._send = send
-        self._scene_timeout = scene_timeout
         self._action_timeout = action_timeout
         self._sequence = 0
-        self._scene_waiter: asyncio.Future[GameState] | None = None
         self._action_waiter: asyncio.Future[ActionResultPayload] | None = None
         self._pending_action_id: str | None = None
         self.scene = SceneMemory()
@@ -86,27 +85,29 @@ class QaRunChannel:
     async def emit(self, message_type: MessageType, payload, correlation_id: str | None = None) -> None:
         await self._send(self._frame(message_type, payload, correlation_id))
 
-    async def request_scene(self, after_seconds: float, reason: str, step: int | None = None) -> GameState | None:
-        """Ask the game for its current scene. `None` means it never answered."""
-        self._raise_if_cancelled()
-        loop = asyncio.get_running_loop()
-        waiter: asyncio.Future[GameState] = loop.create_future()
-        self._scene_waiter = waiter
+    async def look(
+        self, after_seconds: float, message: str, step: int | None = None
+    ) -> bool:
+        """Ask the game for the current scene. True when a fresh one arrived.
 
-        await self._send(
-            self._frame(
-                MessageType.REQUEST_GAME_STATE,
-                RequestGameStatePayload(reason=reason, after_seconds=after_seconds, step=step),
-            )
+        Sent as an ACTION carrying `scan_scene`, the same path the acting tools
+        use. There was a second path — a `REQUEST_GAME_STATE` frame that made
+        Orchestration send the SDK a top-level `GET_GAME_STATE` — but the SDK
+        treats that as a compatibility alias and names `scan_scene` as the real
+        method (see ArtelManager's own error text). Two paths to one answer also
+        made the timeline lie: the `GET_GAME_STATE` row logged this envelope
+        rather than the frame that actually went out.
+        """
+        self._raise_if_cancelled()
+        if after_seconds > 0:
+            # Safe to sleep: the run is its own asyncio task (see
+            # app/api/qa_sessions.py), so this holds up nothing but this tool.
+            await asyncio.sleep(min(after_seconds, MAX_SCENE_WAIT_SECONDS))
+        before = self.scene.updates
+        await self.dispatch_actions(
+            [JsonRpcAction(id=1, method="scan_scene", params=[])], message, step
         )
-        try:
-            # The wait itself is scheduled by Orchestration, so the timeout has to
-            # cover it as well as the round trip.
-            return await asyncio.wait_for(waiter, timeout=after_seconds + self._scene_timeout)
-        except asyncio.TimeoutError:
-            return None
-        finally:
-            self._scene_waiter = None
+        return self.scene.updates > before
 
     async def act_and_look(
         self, actions: list[JsonRpcAction], message: str, step: int | None = None
@@ -153,10 +154,11 @@ class QaRunChannel:
     # --- inbound --------------------------------------------------------------
 
     def on_game_state(self, raw: dict) -> None:
-        state = GameState.model_validate(raw.get("payload") or {})
-        self.scene.apply(state)
-        if self._scene_waiter is not None and not self._scene_waiter.done():
-            self._scene_waiter.set_result(state)
+        # No future to resolve: a scene answers the `scan_scene` action it rode
+        # in with, and the ACTION_RESULT is what releases the waiting tool. Scenes
+        # the game volunteers land here too, and are folded into memory the same
+        # way — the watermark means the next render still reports their changes.
+        self.scene.apply(GameState.model_validate(raw.get("payload") or {}))
 
     def on_action_result(self, raw: dict) -> None:
         correlation = raw.get("correlationId")
@@ -178,9 +180,8 @@ class QaRunChannel:
 
     def on_cancel(self) -> None:
         self.cancelled = True
-        for waiter in (self._scene_waiter, self._action_waiter):
-            if waiter is not None and not waiter.done():
-                waiter.cancel()
+        if self._action_waiter is not None and not self._action_waiter.done():
+            self._action_waiter.cancel()
 
     # --- operator ------------------------------------------------------------
 
