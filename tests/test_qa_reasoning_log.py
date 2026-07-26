@@ -124,3 +124,114 @@ def test_block_style_content_is_flattened() -> None:
         assert logs(sent) == ["화면이 아직 로딩 중이다."]
 
     asyncio.run(run())
+
+
+def test_a_thinking_block_reaches_the_timeline() -> None:
+    """Anthropic puts the reasoning in a `thinking` block, not a `text` one.
+
+    Keeping only `text` is why a whole run finished with 48 THOUGHT rows that all
+    came from the tools' own `thought` argument and none from the model itself.
+    """
+
+    async def run() -> None:
+        channel, sent = make_channel()
+        runner = QaRunner()
+
+        await runner._log_reasoning(
+            channel,
+            {
+                "model": {
+                    "messages": [
+                        AIMessage(
+                            content=[
+                                {"type": "thinking", "thinking": "상점 버튼부터 눌러야 한다."},
+                                {"type": "tool_use", "name": "click_button"},
+                            ]
+                        )
+                    ]
+                }
+            },
+        )
+
+        assert logs(sent) == ["상점 버튼부터 눌러야 한다."]
+
+    asyncio.run(run())
+
+
+def test_a_reasoning_block_reaches_the_timeline() -> None:
+    """Several models fronted by OpenRouter name the same block `reasoning`."""
+
+    async def run() -> None:
+        channel, sent = make_channel()
+        runner = QaRunner()
+
+        await runner._log_reasoning(
+            channel,
+            {
+                "model": {
+                    "messages": [
+                        AIMessage(
+                            content=[
+                                {"type": "reasoning", "reasoning": "골드가 줄었는지 확인하자."}
+                            ]
+                        )
+                    ]
+                }
+            },
+        )
+
+        assert logs(sent) == ["골드가 줄었는지 확인하자."]
+
+    asyncio.run(run())
+
+
+def test_reasoning_carried_beside_the_content_reaches_the_timeline() -> None:
+    """Some providers hang it off `additional_kwargs` instead of the content."""
+
+    async def run() -> None:
+        channel, sent = make_channel()
+        runner = QaRunner()
+
+        await runner._log_reasoning(
+            channel,
+            {
+                "model": {
+                    "messages": [
+                        AIMessage(
+                            content="",
+                            additional_kwargs={"reasoning_content": "먼저 화면을 봐야 한다."},
+                        )
+                    ]
+                }
+            },
+        )
+
+        assert logs(sent) == ["먼저 화면을 봐야 한다."]
+
+    asyncio.run(run())
+
+
+def test_reasoning_sent_both_ways_is_logged_once() -> None:
+    """A provider that duplicates it must not double the timeline."""
+
+    async def run() -> None:
+        channel, sent = make_channel()
+        runner = QaRunner()
+
+        await runner._log_reasoning(
+            channel,
+            {
+                "model": {
+                    "messages": [
+                        AIMessage(
+                            content=[{"type": "thinking", "thinking": "상점을 열어 본다."}],
+                            additional_kwargs={"reasoning": "상점을 열어 본다."},
+                        )
+                    ]
+                }
+            },
+        )
+
+        assert logs(sent) == ["상점을 열어 본다."]
+
+    asyncio.run(run())
