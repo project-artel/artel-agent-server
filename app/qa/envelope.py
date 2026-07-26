@@ -111,11 +111,21 @@ class GameState(BaseModel):
 
 
 class ActionResultItem(BaseModel):
+    """One action's outcome, as the SDK reports it.
+
+    The SDK sends `{id, success, error}` — a boolean, not the status enum this
+    once expected. Every ACTION_RESULT failed validation because of it.
+    """
+
     model_config = ConfigDict(extra="allow")
 
     id: int
-    status: ActionItemStatus
+    success: bool = False
     error: str | None = None
+
+    @property
+    def status(self) -> ActionItemStatus:
+        return ActionItemStatus.SUCCEEDED if self.success else ActionItemStatus.FAILED
 
 
 class ActionResultPayload(BaseModel):

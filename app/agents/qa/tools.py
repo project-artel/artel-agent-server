@@ -52,45 +52,67 @@ def build_tools(channel: QaRunChannel, state: QaRunState) -> list[StructuredTool
         state.watermark = channel.scene.updates
         return with_operator_messages(view, messages)
 
-    async def perform_actions(actions: list[dict[str, Any]], message: str) -> str:
-        """Run actions on the game and return each one's outcome.
-
-        Each action is `{"method": ..., "target_id": ..., "arguments": [...]}`.
-        `target_id` must be an id present in the scene you just observed; omit it
-        for methods that take none. `message` is one short line for the operator.
-        """
-        planned: list[JsonRpcAction] = []
-        for index, action in enumerate(actions):
-            method = str(action.get("method", "")).strip()
-            if not method:
-                return "Every action needs a method. Nothing was run."
-            target = action.get("target_id")
-            arguments = list(action.get("arguments") or [])
-            planned.append(
-                JsonRpcAction(
-                    id=index + 1,
-                    method=method,
-                    params=([] if target is None else [target]) + arguments,
-                )
-            )
-        if not planned:
-            return "No actions were given, so nothing was run."
-
-        result = await channel.dispatch_actions(planned, message)
+    async def _run(action: JsonRpcAction, thought: str, summary: str) -> str:
+        """Every acting tool goes through here: log the reasoning, act, look."""
+        await channel.note(thought, LogCategory.THOUGHT)
+        result, looked = await channel.act_and_look([action], summary)
         messages = channel.drain_operator_messages()
+
         if result is None:
             return with_operator_messages(
-                "The game did not report a result. It may still have run. "
-                "Observe the scene to find out what actually happened.",
+                "The game reported no result. It may still have run — observe the "
+                "scene to find out what actually happened.",
                 messages,
             )
-        lines = [
-            f"  action {item.id}: {item.status.value}"
-            + (f" — {item.error}" if item.error else "")
-            for item in result.results
-        ]
-        body = "results:\n" + "\n".join(lines) if lines else "The game reported no per-action result."
+
+        lines = []
+        for item in result.results:
+            # The trailing scan_scene is ours, not something the agent asked for.
+            if item.id > 1:
+                continue
+            outcome = "ok" if item.success else f"FAILED — {item.error or 'no reason given'}"
+            lines.append(f"  {outcome}")
+        body = "\n".join(lines) or "  (the game returned no outcome for this action)"
+
+        if looked:
+            view = channel.scene.render(state.watermark)
+            state.watermark = channel.scene.updates
+            body = f"{body}\n\n{view}"
+        else:
+            body = f"{body}\n\nThe scene did not arrive; observe again to see the result."
         return with_operator_messages(body, messages)
+
+    async def click_button(target_id: int, thought: str) -> str:
+        """Click a button. `target_id` must be an id from the scene you just saw.
+
+        `thought` is why you are clicking this — it goes on the timeline.
+        """
+        return await _run(
+            JsonRpcAction(id=1, method="button_click", params=[target_id]),
+            thought,
+            f"Clicking {target_id}",
+        )
+
+    async def enter_text(target_id: int, value: str, thought: str) -> str:
+        """Type into a text field. `target_id` must be an id from the current scene."""
+        return await _run(
+            JsonRpcAction(id=1, method="enter_text", params=[target_id, value]),
+            thought,
+            f"Typing into {target_id}",
+        )
+
+    async def press_key(key_code: str, duration_seconds: float, thought: str) -> str:
+        """Press a key — no target needed, so this works on a screen with nothing
+        clickable, such as a dialogue or cutscene that advances on any key.
+
+        `key_code` is a Unity KeyCode name, e.g. "Space", "Return", "Escape".
+        `duration_seconds` must be greater than zero.
+        """
+        return await _run(
+            JsonRpcAction(id=1, method="key_click", params=[key_code, duration_seconds]),
+            thought,
+            f"Pressing {key_code}",
+        )
 
     async def report_step(step: int, passed: bool, message: str) -> str:
         """Record the verdict for one scenario step, with the evidence for it.
@@ -140,7 +162,9 @@ def build_tools(channel: QaRunChannel, state: QaRunState) -> list[StructuredTool
 
     return [
         StructuredTool.from_function(coroutine=observe_scene, name="observe_scene"),
-        StructuredTool.from_function(coroutine=perform_actions, name="perform_actions"),
+        StructuredTool.from_function(coroutine=click_button, name="click_button"),
+        StructuredTool.from_function(coroutine=enter_text, name="enter_text"),
+        StructuredTool.from_function(coroutine=press_key, name="press_key"),
         StructuredTool.from_function(coroutine=report_step, name="report_step"),
         StructuredTool.from_function(coroutine=finish_run, name="finish_run"),
         StructuredTool.from_function(coroutine=reply_to_operator, name="reply_to_operator"),
