@@ -133,11 +133,6 @@ def build_tools(channel: QaRunChannel, state: QaRunState) -> list[StructuredTool
         )
         return "The run is closed."
 
-    async def note(message: str) -> str:
-        """Leave a line on the timeline for the operator. Use it sparingly."""
-        await channel.note(message, LogCategory.THOUGHT)
-        return "Noted."
-
     async def reply_to_operator(message: str) -> str:
         """Answer the operator. Use when they asked something, not for progress."""
         await channel.say(message)
@@ -148,6 +143,5 @@ def build_tools(channel: QaRunChannel, state: QaRunState) -> list[StructuredTool
         StructuredTool.from_function(coroutine=perform_actions, name="perform_actions"),
         StructuredTool.from_function(coroutine=report_step, name="report_step"),
         StructuredTool.from_function(coroutine=finish_run, name="finish_run"),
-        StructuredTool.from_function(coroutine=note, name="note"),
         StructuredTool.from_function(coroutine=reply_to_operator, name="reply_to_operator"),
     ]
