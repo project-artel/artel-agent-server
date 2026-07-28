@@ -67,6 +67,34 @@ class ActionItemStatus(StrEnum):
 # forwarded, never stripped. Named fields below are just the always-present ones.
 
 
+class Rect(BaseModel):
+    """Where an element sits on the game's screen, in pixels.
+
+    Origin is the TOP-LEFT of the screen and `x`/`y` are the element's own
+    top-left corner — the same coordinates the SDK's `move_mouse` takes, which
+    flips into Unity's bottom-left screen space itself. Nothing here converts.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    x: int
+    y: int
+    w: int
+    h: int
+
+    @property
+    def center(self) -> tuple[int, int]:
+        """The point to aim the pointer at. Derived here so no reader re-does it."""
+        return self.x + self.w // 2, self.y + self.h // 2
+
+
+class Screen(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    w: int
+    h: int
+
+
 class Interactable(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -75,6 +103,11 @@ class Interactable(BaseModel):
     type: str
     label: str | None = None
     placeholder: str | None = None
+    # Both absent from an Orchestration server older than the coordinate relay,
+    # so neither may be required. `onScreen` defaults to true: an element the
+    # scene bothered to list is on screen unless it says otherwise.
+    rect: Rect | None = None
+    onScreen: bool = True
 
 
 class ActionRecord(BaseModel):
@@ -99,6 +132,7 @@ class GameState(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     scene: str
+    screen: Screen | None = None
     interactables: list[Interactable] = Field(default_factory=list)
     # Observable state/content values, keyed by name; opaque to the Agent server.
     observables: dict[str, Any] = Field(default_factory=dict)

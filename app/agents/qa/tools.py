@@ -135,9 +135,10 @@ def build_tools(channel: QaRunChannel, state: QaRunState) -> list[StructuredTool
     async def move_pointer(step: int, x: float, y: float, thought: str) -> str:
         """Move the pointer to a point on the screen, without pressing anything.
 
-        `x` and `y` are screen pixels with the origin at the BOTTOM-LEFT corner,
-        so y grows upwards. Use this to hover, or to put the pointer somewhere a
-        target id cannot address — a map, a canvas, an inventory slot.
+        `x` and `y` are screen pixels, taken from the scene exactly as printed:
+        an element's `@ x,y` is its centre, and it belongs here unchanged — no
+        conversion of any kind. Use this to hover, or to put the pointer
+        somewhere a target id cannot address — a map, a canvas, an inventory slot.
         """
         return await _run(
             [JsonRpcAction(id=1, method="move_mouse", params=[x, y])],
@@ -214,8 +215,8 @@ def build_tools(channel: QaRunChannel, state: QaRunState) -> list[StructuredTool
     ) -> str:
         """Drag from one point on the screen to another and drop there.
 
-        Coordinates are screen pixels with the origin at the BOTTOM-LEFT corner.
-        `button` is 0 for left, 1 for right, 2 for middle.
+        Coordinates are screen pixels, taken from the scene unchanged, as with
+        `move_pointer`. `button` is 0 for left, 1 for right, 2 for middle.
 
         Prefer this over pressing and releasing yourself: the press, the move and
         the release go to the game as ONE batch, which the game runs strictly in

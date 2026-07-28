@@ -30,7 +30,9 @@ QA 에이전트가 SDK의 신규 ACTION 5종(`move_mouse`, `mouse_down`, `mouse_
 ## Context / Constraints
 
 - 프로토콜(ARTEL-154 확정):
-  - `move_mouse`, params `[x, y]` — 화면 픽셀 좌표, Unity 화면 좌표계(원점 좌하단).
+  - `move_mouse`, params `[x, y]` — 화면 픽셀 좌표. **정정(ARTEL-171): 원점은
+    좌상단이다. SDK가 씬 rect와 같은 좌상단 픽셀을 받아 내부에서 Unity의 좌하단
+    화면 좌표로 뒤집으므로, 호출하는 쪽은 어떤 변환도 하지 않는다.**
   - `mouse_down` / `mouse_up`, params `[]` 또는 `[button]` — 0=좌, 1=우, 2=휠, 기본 0.
   - `key_down` / `key_up`, params `[keyCode]` — Unity KeyCode 이름 또는 숫자값.
 - `mouse_down`은 좌표를 받지 않는다. 누르는 지점은 **그때의 커서 위치**다. 따라서
@@ -96,10 +98,11 @@ QA 에이전트가 SDK의 신규 ACTION 5종(`move_mouse`, `mouse_down`, `mouse_
     `id/name/type/label/placeholder/actions`로만 줄여 넘긴다. 좌표 릴레이가
     붙기 전까지 `move_pointer`/`drag_pointer`는 에이전트가 좌표를 알아낼 방법이
     없다. 별건으로 올려야 한다.
-  - **원점이 서로 다르다.** 씬 rect는 좌상단 원점(y 아래로 증가),
-    `move_mouse`는 Unity 화면 좌표계(좌하단 원점). 좌표가 릴레이되면 변환
-    `y_mouse = screen.h - y_rect`가 필요하고, 이 변환을 어디서 할지(렌더에서
-    미리 바꿔 실을지, 프롬프트로 시킬지)를 그때 정해야 한다.
+  - ~~**원점이 서로 다르다.**~~ **정정(ARTEL-171): 이 위험은 존재하지 않았다.**
+    `move_mouse`는 씬 rect와 같은 좌상단 원점 픽셀을 받고 Unity 좌표계로의
+    변환은 SDK 내부에서 일어난다. `y_mouse = screen.h - y_rect`를 시키면 오히려
+    화면 반대편을 찍는다. 이 서술을 따라 들어갔던 프롬프트·docstring의 변환
+    지시는 ARTEL-171에서 전부 제거했다.
   - **홀드 누수.** `hold_*` 후 `release_*`가 없으면 이후 단계가 오염된다.
     프롬프트로만 막으므로 모델이 어기면 남는다. 런 종료 시 서버가 강제 해제하는
     것은 이번 범위 밖.

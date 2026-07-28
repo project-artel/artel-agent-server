@@ -10,7 +10,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.qa.envelope import ActionRecord, GameState, Interactable
+from app.qa.envelope import ActionRecord, GameState, Interactable, Screen
 
 # Per key. Long enough to show a path like 100 → 80 → 60, short enough that a
 # chatty value cannot grow the session without bound.
@@ -82,6 +82,24 @@ def _unwrap(raw: Any) -> tuple[Any, str | None]:
     return raw, None
 
 
+def _where(item: Interactable) -> str:
+    """Where to aim at an element, as `@ centreX,centreY widthxheight`.
+
+    The centre rather than the reported corner, because the centre is what the
+    pointer tools take and the Agent should not be left doing arithmetic on the
+    way to a click. Empty when the scene reports no rect, which is what an
+    Orchestration server older than the coordinate relay sends.
+    """
+    # An off-screen element still has a rect, somewhere outside the screen.
+    # Naming it beats offering coordinates that would land on nothing.
+    if not item.onScreen:
+        return " (off screen)"
+    if item.rect is None:
+        return ""
+    x, y = item.rect.center
+    return f" @ {x},{y} {item.rect.w}x{item.rect.h}"
+
+
 class SceneMemory(BaseModel):
     """Frames merged into one picture of the current scene.
 
@@ -102,6 +120,8 @@ class SceneMemory(BaseModel):
     # silence — the one moment it most needs to see.
     frames: int = 0
     interactables: list[Interactable] = Field(default_factory=list)
+    # None until a frame carries it; an older Orchestration server sends none.
+    screen: Screen | None = None
     observables: dict[str, ObservableTrack] = Field(default_factory=dict)
     # Keys seen earlier in this scene but absent from the latest frame, and the
     # observation each was last present on. Kept rather than deleted: something
@@ -128,6 +148,12 @@ class SceneMemory(BaseModel):
         # Replaced, not merged: ids can change between frames, and acting on a
         # stale id would target whatever now holds it.
         self.interactables = list(state.interactables)
+
+        # Kept across a frame that omits it — the screen belongs to the window,
+        # not to the frame, so silence is "not reported" rather than "gone". A
+        # resize still lands, since a reported size overwrites.
+        if state.screen is not None:
+            self.screen = state.screen
 
         for key, raw in state.observables.items():
             value, type_ = _unwrap(raw)
@@ -175,6 +201,8 @@ class SceneMemory(BaseModel):
             return "No scene has been received yet."
 
         lines = [f"scene: {self.scene}  (observation {self.updates})"]
+        if self.screen is not None:
+            lines.append(f"screen: {self.screen.w}x{self.screen.h} pixels")
 
         changed = {
             key: track
@@ -219,6 +247,8 @@ class SceneMemory(BaseModel):
         for item in self.interactables:
             label = item.label or item.placeholder or ""
             suffix = f" — {label}" if label else ""
-            lines.append(f"  [{item.id}] {item.name} ({item.type}){suffix}")
+            lines.append(
+                f"  [{item.id}] {item.name} ({item.type}){_where(item)}{suffix}"
+            )
 
         return "\n".join(lines)
