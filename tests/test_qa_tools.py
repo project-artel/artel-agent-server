@@ -1,8 +1,16 @@
+"""What the tools put on the wire, not just what they return to the model.
+
+A real run showed the gap: every tool answered the agent correctly while the
+timeline stayed blind. `observe_scene` logged nothing at all because it took no
+`thought`, and every row landed with `step` null because no tool passed one.
+These pin the frames themselves — category, step, and the actions inside them.
+"""
+
 import asyncio
 
 from app.agents.qa.tools import QaRunState, build_tools
 from app.qa.channel import QaRunChannel
-from app.qa.envelope import MessageType
+from app.qa.envelope import LogCategory, MessageType
 
 
 def make(total_steps: int = 1, timeout: float = 0.05):
@@ -11,9 +19,7 @@ def make(total_steps: int = 1, timeout: float = 0.05):
     async def send(frame: dict) -> None:
         sent.append(frame)
 
-    channel = QaRunChannel(
-        qa_try_id=7, send=send, scene_timeout=timeout, action_timeout=timeout
-    )
+    channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=timeout)
     state = QaRunState(total_steps=total_steps)
     tools = {tool.name: tool for tool in build_tools(channel, state)}
     return channel, state, tools, sent
@@ -26,19 +32,56 @@ def scene(observables: dict) -> dict:
     }
 
 
+def actions(sent: list[dict]) -> list[dict]:
+    return [frame for frame in sent if frame["type"] == MessageType.ACTION.value]
+
+
+def logs(sent: list[dict]) -> list[dict]:
+    return [frame for frame in sent if frame["type"] == MessageType.LOG.value]
+
+
+def answer(
+    channel: QaRunChannel,
+    sent: list[dict],
+    results: list[dict] | None = None,
+    observables: dict | None = None,
+):
+    """Reply the way the game does: the scene, then the batch's ACTION_RESULT.
+
+    `observables=None` means the game stayed silent about the scene. The result
+    has to quote the ACTION's messageId, so this waits for the frame to go out
+    rather than assuming it is already there when the task first runs.
+    """
+    already = len(actions(sent))
+
+    async def reply() -> None:
+        for _ in range(50):
+            if len(actions(sent)) > already:
+                break
+            await asyncio.sleep(0)
+        if observables is not None:
+            channel.on_game_state(scene(observables))
+        channel.on_action_result(
+            {
+                "correlationId": actions(sent)[-1]["messageId"],
+                "payload": {"results": results or []},
+            }
+        )
+
+    return asyncio.create_task(reply())
+
+
 def test_observe_returns_the_change_since_the_last_look() -> None:
     async def run() -> None:
-        channel, state, tools, _ = make()
+        channel, _, tools, sent = make()
 
-        async def answer(value: int) -> None:
-            await asyncio.sleep(0)
-            channel.on_game_state(scene({"Score": {"value": value}}))
+        answer(channel, sent, observables={"Score": {"value": 0}})
+        await tools["observe_scene"].ainvoke({"step": 1, "thought": "화면을 본다"})
 
-        asyncio.create_task(answer(0))
-        await tools["observe_scene"].ainvoke({})
-
-        asyncio.create_task(answer(100))
-        second = await tools["observe_scene"].ainvoke({})
+        answer(channel, sent, observables={"Score": {"value": 100}})
+        second = await tools["observe_scene"].ainvoke(
+            {"step": 1, "thought": "점수가 올랐는지 본다"}
+        )
 
         # The second look reports the move, not just the current number.
         assert "Score: 0 → 100" in second
@@ -51,28 +94,69 @@ def test_observe_says_so_when_the_game_is_silent() -> None:
 
     async def run() -> None:
         _, _, tools, _ = make()
-        result = await tools["observe_scene"].ainvoke({})
+        result = await tools["observe_scene"].ainvoke({"step": 1, "thought": "화면을 본다"})
         assert "did not answer" in result
+
+    asyncio.run(run())
+
+
+def test_observing_goes_out_as_an_action_carrying_only_scan_scene() -> None:
+    """One path to the scene, and it is the SDK's own JSON-RPC method.
+
+    `observe_scene` used to send a REQUEST_GAME_STATE frame, which Orchestration
+    turned into a top-level GET_GAME_STATE — an alias the SDK keeps only for
+    compatibility while naming `scan_scene` as the real method.
+    """
+
+    async def run() -> None:
+        channel, _, tools, sent = make()
+
+        answer(channel, sent, observables={})
+        await tools["observe_scene"].ainvoke({"step": 2, "thought": "화면을 본다"})
+
+        assert [frame["type"] for frame in sent] == [
+            MessageType.LOG.value,
+            MessageType.ACTION.value,
+        ]
+        assert actions(sent)[0]["payload"]["actions"] == [
+            {"id": 1, "jsonrpc": "2.0", "method": "scan_scene", "params": []}
+        ]
+
+    asyncio.run(run())
+
+
+def test_observing_writes_a_thought_row() -> None:
+    """The one tool that used to be silent. Five looks in a real run logged nothing."""
+
+    async def run() -> None:
+        channel, _, tools, sent = make()
+
+        answer(channel, sent, observables={})
+        await tools["observe_scene"].ainvoke(
+            {"step": 3, "thought": "로딩이 끝났는지 확인한다"}
+        )
+
+        assert [(row["payload"]["category"], row["payload"]["message"]) for row in logs(sent)] == [
+            (LogCategory.THOUGHT.value, "로딩이 끝났는지 확인한다")
+        ]
 
     asyncio.run(run())
 
 
 def test_operator_message_is_appended_to_the_next_tool_result() -> None:
     async def run() -> None:
-        channel, _, tools, _ = make()
+        channel, _, tools, sent = make()
         channel.on_chat({"payload": {"message": "메뉴로 가"}})
 
-        async def answer() -> None:
-            await asyncio.sleep(0)
-            channel.on_game_state(scene({}))
-
-        asyncio.create_task(answer())
-        result = await tools["observe_scene"].ainvoke({})
+        answer(channel, sent, observables={})
+        result = await tools["observe_scene"].ainvoke({"step": 1, "thought": "화면을 본다"})
 
         assert "메뉴로 가" in result
         # Delivered once; it must not repeat on every later call.
-        asyncio.create_task(answer())
-        assert "메뉴로 가" not in await tools["observe_scene"].ainvoke({})
+        answer(channel, sent, observables={})
+        assert "메뉴로 가" not in await tools["observe_scene"].ainvoke(
+            {"step": 1, "thought": "다시 본다"}
+        )
 
     asyncio.run(run())
 
@@ -83,14 +167,12 @@ def test_pressing_a_key_logs_the_reason_and_batches_a_scan() -> None:
     async def run() -> None:
         _, _, tools, sent = make()
         await tools["press_key"].ainvoke(
-            {"key_code": "Space", "duration_seconds": 0.5, "thought": "대사를 넘긴다"}
+            {"step": 1, "key_code": "Space", "duration_seconds": 0.5, "thought": "대사를 넘긴다"}
         )
 
-        logged = [f for f in sent if f["type"] == MessageType.LOG.value]
-        assert logged[0]["payload"]["message"] == "대사를 넘긴다"
+        assert logs(sent)[0]["payload"]["message"] == "대사를 넘긴다"
 
-        action = next(f for f in sent if f["type"] == MessageType.ACTION.value)
-        methods = [a["method"] for a in action["payload"]["actions"]]
+        methods = [a["method"] for a in actions(sent)[0]["payload"]["actions"]]
         # The scan rides in the same batch so it cannot answer before the key does.
         assert methods == ["key_click", "scan_scene"]
 
@@ -101,23 +183,54 @@ def test_click_reports_the_failure_reason() -> None:
     async def run() -> None:
         channel, _, tools, sent = make()
 
-        async def answer() -> None:
-            await asyncio.sleep(0)
-            channel.on_action_result(
-                {
-                    "correlationId": next(
-                        f["messageId"] for f in sent if f["type"] == MessageType.ACTION.value
-                    ),
-                    "payload": {"results": [{"id": 1, "success": False, "error": "Unknown target id: 999"}]},
-                }
-            )
-
-        task = asyncio.create_task(answer())
-        result = await tools["click_button"].ainvoke({"target_id": 999, "thought": "시작 버튼"})
+        task = answer(
+            channel,
+            sent,
+            results=[{"id": 1, "success": False, "error": "Unknown target id: 999"}],
+        )
+        result = await tools["click_button"].ainvoke(
+            {"step": 1, "target_id": 999, "thought": "시작 버튼"}
+        )
         await task
 
         assert "FAILED" in result
         assert "Unknown target id: 999" in result
+
+    asyncio.run(run())
+
+
+def test_every_outbound_frame_carries_the_step_number() -> None:
+    """`step` was null on all 451 rows of a real run because no tool passed one.
+
+    Without it the timeline cannot say which scenario step a row belongs to, so
+    the LOG, the ACTION, the STATUS and the CHAT all have to carry the number the
+    agent named.
+    """
+
+    async def run() -> None:
+        channel, _, tools, sent = make(total_steps=2)
+
+        task = answer(channel, sent, results=[{"id": 1, "success": True}])
+        await tools["click_button"].ainvoke(
+            {"step": 4, "target_id": 12, "thought": "시작 버튼을 누른다"}
+        )
+        await task
+
+        await tools["report_step"].ainvoke(
+            {"step": 4, "passed": True, "message": "상점이 열렸다", "thought": "화면이 바뀌었다"}
+        )
+        await tools["reply_to_operator"].ainvoke(
+            {"step": 4, "message": "상점을 확인했습니다", "thought": "질문에 답한다"}
+        )
+
+        by_type: dict[str, list[int | None]] = {}
+        for frame in sent:
+            by_type.setdefault(frame["type"], []).append(frame["payload"].get("step"))
+
+        assert by_type[MessageType.LOG.value] == [4, 4, 4]
+        assert by_type[MessageType.ACTION.value] == [4]
+        assert by_type[MessageType.STATUS.value] == [4]
+        assert by_type[MessageType.CHAT.value] == [4]
 
     asyncio.run(run())
 
@@ -127,12 +240,12 @@ def test_reported_steps_accumulate_and_announce_the_last_one() -> None:
         _, state, tools, sent = make(total_steps=2)
 
         first = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "상점이 열렸다"}
+            {"step": 1, "passed": True, "message": "상점이 열렸다", "thought": "골드 표시를 봤다"}
         )
         assert "1 step(s) left" in first
 
         second = await tools["report_step"].ainvoke(
-            {"step": 2, "passed": False, "message": "골드가 줄지 않았다"}
+            {"step": 2, "passed": False, "message": "골드가 줄지 않았다", "thought": "구매가 안 먹혔다"}
         )
         assert "last step" in second
 
@@ -147,15 +260,53 @@ def test_reported_steps_accumulate_and_announce_the_last_one() -> None:
 def test_finish_run_reports_the_tally() -> None:
     async def run() -> None:
         _, state, tools, sent = make(total_steps=2)
-        await tools["report_step"].ainvoke({"step": 1, "passed": True, "message": "ok"})
-        await tools["report_step"].ainvoke({"step": 2, "passed": False, "message": "no"})
+        await tools["report_step"].ainvoke(
+            {"step": 1, "passed": True, "message": "ok", "thought": "통과"}
+        )
+        await tools["report_step"].ainvoke(
+            {"step": 2, "passed": False, "message": "no", "thought": "실패"}
+        )
 
-        await tools["finish_run"].ainvoke({"passed": False, "summary": "1/2 통과"})
+        await tools["finish_run"].ainvoke(
+            {"passed": False, "summary": "1/2 통과", "thought": "두 번째가 실패했다"}
+        )
 
         assert state.finished
         terminal = sent[-1]["payload"]
         assert terminal["result"] == "FAILED"
         assert terminal["summary"]["passed"] == 1
         assert terminal["summary"]["failed"] == 1
+
+    asyncio.run(run())
+
+
+def test_verdict_tools_each_write_their_own_thought_row() -> None:
+    """A verdict without the reasoning behind it is the row a reviewer cannot use.
+
+    report_step, finish_run and reply_to_operator produce no action, so nothing
+    else on the timeline would say why they were called.
+    """
+
+    async def run() -> None:
+        _, _, tools, sent = make(total_steps=1)
+
+        await tools["report_step"].ainvoke(
+            {"step": 1, "passed": True, "message": "상점이 열렸다", "thought": "화면이 바뀌었다"}
+        )
+        await tools["reply_to_operator"].ainvoke(
+            {"message": "상점까지 확인했습니다", "thought": "진행 상황을 묻길래 답한다"}
+        )
+        await tools["finish_run"].ainvoke(
+            {"passed": True, "summary": "전부 통과", "thought": "모든 단계가 통과했다"}
+        )
+
+        assert [row["payload"]["message"] for row in logs(sent)] == [
+            "화면이 바뀌었다",
+            "진행 상황을 묻길래 답한다",
+            "모든 단계가 통과했다",
+        ]
+        assert {row["payload"]["category"] for row in logs(sent)} == {
+            LogCategory.THOUGHT.value
+        }
 
     asyncio.run(run())

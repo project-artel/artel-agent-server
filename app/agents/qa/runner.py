@@ -31,6 +31,11 @@ BASE_TOOL_CALLS = 10
 TOOL_CALLS_PER_STEP = 15
 RUN_DEADLINE_SECONDS = 600.0
 
+# Content-block types that carry the model's own reasoning, and the keys those
+# blocks put it under. Providers disagree on both.
+_REASONING_BLOCK_TYPES = ("text", "thinking", "reasoning")
+_REASONING_KEYS = ("text", "thinking", "reasoning", "reasoning_content")
+
 
 SYSTEM_PROMPT = (
     "You are a QA agent executing an approved test scenario against a live Unity "
@@ -46,6 +51,11 @@ SYSTEM_PROMPT = (
     "usually do not need a separate observation afterwards.\n"
     "4. Call `report_step` with your verdict and the evidence you saw.\n"
     "5. Repeat for every step, then call `finish_run` exactly once.\n"
+    "\n"
+    "Every tool takes a `thought` — why you are doing this, in one line. It is "
+    "written to the run's timeline, and it is the only record of your reasoning "
+    "a reviewer will ever see. Most tools also take `step`, the scenario step "
+    "the call belongs to; pass the number from the step list, not a guess.\n"
     "\n"
     "A screen with nothing clickable is not a dead end. Dialogue, narration and "
     "cutscenes usually advance on a key — `press_key` needs no target and works "
@@ -152,17 +162,47 @@ class QaRunner:
 
     @staticmethod
     def _text_of(message) -> str:
-        """The assistant's own words, without the tool-call scaffolding."""
+        """The assistant's own words, without the tool-call scaffolding.
+
+        Reasoning is not always a `text` block. Anthropic emits `thinking`,
+        several models fronted by OpenRouter emit `reasoning`, and some carry it
+        beside the content in `additional_kwargs` rather than inside it. Reading
+        only `text` is why a whole run reached the timeline with no reasoning on
+        it at all.
+        """
+        parts: list[str] = []
+
         content = getattr(message, "content", "")
         if isinstance(content, str):
-            return content.strip()
-        # Some providers return content as blocks; keep only the text ones.
-        parts = [
-            block.get("text", "")
-            for block in content
-            if isinstance(block, dict) and block.get("type") == "text"
-        ]
-        return "\n".join(part for part in parts if part).strip()
+            parts.append(content)
+        elif isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") not in _REASONING_BLOCK_TYPES:
+                    continue
+                # The payload key is usually the block's own type, but `text` is
+                # used for reasoning blocks too. Take whichever is present.
+                for key in _REASONING_KEYS:
+                    value = block.get(key)
+                    if isinstance(value, str) and value.strip():
+                        parts.append(value)
+                        break
+
+        extra = getattr(message, "additional_kwargs", None) or {}
+        for key in _REASONING_KEYS:
+            value = extra.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value)
+                break
+
+        seen: list[str] = []
+        for part in parts:
+            stripped = part.strip()
+            # A provider that sends reasoning both ways would otherwise log twice.
+            if stripped and stripped not in seen:
+                seen.append(stripped)
+        return "\n".join(seen)
 
     async def _log_reasoning(self, channel: QaRunChannel, update: dict) -> None:
         """Put each model turn on the timeline, and the whole exchange on the console.

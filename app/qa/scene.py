@@ -93,7 +93,14 @@ class SceneMemory(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     scene: str | None = None
+    # Observations in the CURRENT scene. Reset with the scene, because every
+    # observable's timeline is relative to it.
     updates: int = 0
+    # Frames applied over the whole run, never reset. `updates` cannot answer
+    # "did a new frame arrive", since a scene change sends it back to 1 and a
+    # caller comparing it to what it saw before would read a transition as
+    # silence — the one moment it most needs to see.
+    frames: int = 0
     interactables: list[Interactable] = Field(default_factory=list)
     observables: dict[str, ObservableTrack] = Field(default_factory=dict)
     # Keys seen earlier in this scene but absent from the latest frame, and the
@@ -115,6 +122,7 @@ class SceneMemory(BaseModel):
             self.actions_at = []
 
         self.updates += 1
+        self.frames += 1
         at = self.updates
 
         # Replaced, not merged: ids can change between frames, and acting on a
