@@ -11,11 +11,12 @@ class LLMProvider(StrEnum):
 class LLMModel(StrEnum):
     """Selectable models. Values are OpenRouter model slugs.
 
-    Slugs and the ``supports_strict_json`` flags below reflect the live
+    Slugs and the capability flags below reflect the live
     ``GET https://openrouter.ai/api/v1/models`` catalog: a model advertises
     strict json_schema support via ``structured_outputs`` in its
     ``supported_parameters`` (``response_format`` alone means json_object mode
-    only). Re-verify against that endpoint before adding or renaming entries.
+    only), and image input via ``image`` in ``architecture.input_modalities``.
+    Re-verify both against that endpoint before adding or renaming entries.
     """
 
     gpt_4o_mini = "openai/gpt-4o-mini"
@@ -34,9 +35,16 @@ class ModelSpec:
     # Models with only `response_format` fall back to json_object mode.
     supports_strict_json: bool
     label: str
-    # True when the model accepts image blocks. A model without it is not a
-    # failure: the QA run drops to text-only rather than refusing to start, and
-    # the capture tool is left out of its toolset so it cannot ask for one.
+    # True when the model accepts image blocks — `image` in the catalog's
+    # `architecture.input_modalities`. Verify it there like `supports_strict_json`
+    # rather than assuming: Gemma 4 was carried here as text-only on the strength of
+    # a ticket description and is in fact `image,text,video`, which silently cost it
+    # the capture tool.
+    #
+    # A model without vision is not a failure: the QA run drops to text-only rather
+    # than refusing to start, and the capture tool is left out of its toolset so it
+    # cannot ask for a picture nothing can read. Every model in the catalog below
+    # currently sees, so that path is covered by tests rather than by a live model.
     supports_vision: bool = True
 
 
@@ -72,12 +80,10 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         label="Gemini 2.5 Pro",
     ),
     # json_object-only (no `structured_outputs`): exercises the strict fallback.
-    # Text-only as well, which is what keeps the vision path's fallback honest.
     LLMModel.gemma_4_free: ModelSpec(
         provider=LLMProvider.google,
         supports_strict_json=False,
         label="Gemma 4 (free)",
-        supports_vision=False,
     ),
 }
 

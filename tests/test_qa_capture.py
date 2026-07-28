@@ -269,11 +269,16 @@ def test_a_model_that_cannot_see_is_not_offered_the_tool() -> None:
     assert "observe_scene" in tools
 
 
-def test_the_free_gemma_model_is_marked_text_only() -> None:
-    """The fallback path needs a real model behind it, not just a flag."""
-    assert get_model_spec(LLMModel.gemma_4_free).supports_vision is False
-    assert get_model_spec(LLMModel.gpt_4o_mini).supports_vision is True
-    assert get_model_spec(LLMModel.claude_sonnet_5).supports_vision is True
+def test_every_catalogued_model_is_marked_as_seeing() -> None:
+    """Matches `architecture.input_modalities` in the OpenRouter catalog.
+
+    Gemma 4 was carried as text-only on the strength of a ticket description; the
+    catalog says `image,text,video`, and the wrong flag silently took the capture
+    tool away from it. The flags are claims about a live catalog, so they are
+    written down here rather than left to whoever adds the next model.
+    """
+    for model in LLMModel:
+        assert get_model_spec(model).supports_vision is True, model
 
 
 # --- fetching ---
