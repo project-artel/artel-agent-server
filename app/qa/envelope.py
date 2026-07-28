@@ -110,6 +110,27 @@ class Interactable(BaseModel):
     onScreen: bool = True
 
 
+class Visual(BaseModel):
+    """Something on screen the scene does not offer as an interactable.
+
+    Backgrounds, portraits, sprites — no id worth clicking, but a position worth
+    aiming at: the pointer tools reach anything with a rect. `rect` and `onScreen`
+    carry the same meaning as on `Interactable`, so one formatter serves both.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    id: int
+    name: str
+    # `image` for a uGUI Image, `sprite` for a SpriteRenderer.
+    type: str
+    # The sprite asset's name; absent when the element has none, as a flat-colour
+    # Image does.
+    sprite: str | None = None
+    rect: Rect | None = None
+    onScreen: bool = True
+
+
 class ActionRecord(BaseModel):
     """One action the game actually ran, as the scene reported it.
 
@@ -134,6 +155,10 @@ class GameState(BaseModel):
     scene: str
     screen: Screen | None = None
     interactables: list[Interactable] = Field(default_factory=list)
+    # Everything else on screen. Disjoint from `interactables` by construction —
+    # an element listed there never repeats here. Empty on an Orchestration
+    # server older than the visuals relay.
+    visuals: list[Visual] = Field(default_factory=list)
     # Observable state/content values, keyed by name; opaque to the Agent server.
     observables: dict[str, Any] = Field(default_factory=dict)
     # Oldest first, capped by Orchestration.

@@ -10,7 +10,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.qa.envelope import ActionRecord, GameState, Interactable, Screen
+from app.qa.envelope import ActionRecord, GameState, Interactable, Screen, Visual
 
 # Per key. Long enough to show a path like 100 → 80 → 60, short enough that a
 # chatty value cannot grow the session without bound.
@@ -82,7 +82,7 @@ def _unwrap(raw: Any) -> tuple[Any, str | None]:
     return raw, None
 
 
-def _where(item: Interactable) -> str:
+def _where(item: Interactable | Visual) -> str:
     """Where to aim at an element, as `@ centreX,centreY widthxheight`.
 
     The centre rather than the reported corner, because the centre is what the
@@ -120,6 +120,7 @@ class SceneMemory(BaseModel):
     # silence — the one moment it most needs to see.
     frames: int = 0
     interactables: list[Interactable] = Field(default_factory=list)
+    visuals: list[Visual] = Field(default_factory=list)
     # None until a frame carries it; an older Orchestration server sends none.
     screen: Screen | None = None
     observables: dict[str, ObservableTrack] = Field(default_factory=dict)
@@ -146,8 +147,10 @@ class SceneMemory(BaseModel):
         at = self.updates
 
         # Replaced, not merged: ids can change between frames, and acting on a
-        # stale id would target whatever now holds it.
+        # stale id would target whatever now holds it. The same holds of a
+        # visual's rect — a kept one would aim at where the sprite used to be.
         self.interactables = list(state.interactables)
+        self.visuals = list(state.visuals)
 
         # Kept across a frame that omits it — the screen belongs to the window,
         # not to the frame, so silence is "not reported" rather than "gone". A
@@ -250,5 +253,21 @@ class SceneMemory(BaseModel):
             lines.append(
                 f"  [{item.id}] {item.name} ({item.type}){_where(item)}{suffix}"
             )
+
+        # Its own section, after the actionable list, because these are reachable
+        # by a different route: a point rather than an id. Omitted entirely when
+        # the scene reports none, so an older Orchestration server renders as before.
+        if self.visuals:
+            lines.append("")
+            lines.append("on screen:")
+            for visual in self.visuals:
+                # The sprite asset, when there is one — a name like `goblin_hurt`
+                # says what the element currently shows, which the node's own name
+                # does not.
+                suffix = f" — {visual.sprite}" if visual.sprite else ""
+                lines.append(
+                    f"  [{visual.id}] {visual.name} ({visual.type})"
+                    f"{_where(visual)}{suffix}"
+                )
 
         return "\n".join(lines)

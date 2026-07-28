@@ -1,4 +1,4 @@
-from app.qa.envelope import ActionRecord, GameState, Interactable, Rect, Screen
+from app.qa.envelope import ActionRecord, GameState, Interactable, Rect, Screen, Visual
 from app.qa.scene import MAX_VALUES_PER_OBSERVABLE, MISSING_LIFETIME, SceneMemory
 
 
@@ -8,11 +8,13 @@ def state(
     interactables=None,
     actions=None,
     screen=None,
+    visuals=None,
 ) -> GameState:
     return GameState(
         scene=scene,
         screen=screen,
         interactables=interactables or [],
+        visuals=visuals or [],
         observables=observables or {},
         recentActions=actions or [],
     )
@@ -184,6 +186,73 @@ def test_render_names_an_off_screen_element_instead_of_placing_it() -> None:
 
     assert "[3] NextPage (button) (off screen) — 다음" in view
     assert "2200" not in view
+
+
+def test_render_places_a_visual_the_same_way_as_an_interactable() -> None:
+    """It is not on the actionable list, but the pointer tools reach it all the same."""
+    memory = SceneMemory()
+    memory.apply(
+        state(
+            interactables=[
+                Interactable(
+                    id=12,
+                    name="Start",
+                    type="button",
+                    rect=Rect(x=420, y=300, w=200, h=60),
+                )
+            ],
+            visuals=[
+                Visual(
+                    id=44,
+                    name="enemy_goblin",
+                    type="sprite",
+                    sprite="goblin_idle",
+                    rect=Rect(x=252, y=372, w=96, h=96),
+                )
+            ],
+        )
+    )
+
+    view = memory.render(0)
+
+    assert "on screen:" in view
+    assert "[44] enemy_goblin (sprite) @ 300,420 96x96 — goblin_idle" in view
+    # After the actionable list, so the section it belongs to is unambiguous.
+    assert view.index("you can act on:") < view.index("on screen:")
+
+
+def test_render_names_an_off_screen_visual_instead_of_placing_it() -> None:
+    """Same rule as an interactable: a rect outside the screen is not a target."""
+    memory = SceneMemory()
+    memory.apply(
+        state(
+            visuals=[
+                Visual(
+                    id=7,
+                    name="Backdrop",
+                    type="image",
+                    rect=Rect(x=2400, y=100, w=200, h=200),
+                    onScreen=False,
+                )
+            ],
+        )
+    )
+
+    view = memory.render(0)
+
+    assert "[7] Backdrop (image) (off screen)" in view
+    assert "2500" not in view
+
+
+def test_render_omits_the_visuals_section_when_the_scene_sends_none() -> None:
+    """An Orchestration server older than the visuals relay sends no such field."""
+    memory = SceneMemory()
+    memory.apply(state(interactables=[Interactable(id=1, name="Start", type="button")]))
+
+    view = memory.render(0)
+
+    assert "on screen:" not in view
+    assert view.rstrip().endswith("[1] Start (button)")
 
 
 def test_render_says_nothing_extra_when_the_scene_carries_no_coordinates() -> None:
