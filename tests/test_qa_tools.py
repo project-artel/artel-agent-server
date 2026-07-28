@@ -179,6 +179,134 @@ def test_pressing_a_key_logs_the_reason_and_batches_a_scan() -> None:
     asyncio.run(run())
 
 
+def test_moving_the_pointer_sends_the_screen_coordinates() -> None:
+    """The pointer tools address pixels, not ids — the params are the whole target."""
+
+    async def run() -> None:
+        _, _, tools, sent = make()
+        await tools["move_pointer"].ainvoke(
+            {"step": 1, "x": 860, "y": 540, "thought": "칸 위로 옮긴다"}
+        )
+
+        assert actions(sent)[0]["payload"]["actions"] == [
+            {"id": 1, "jsonrpc": "2.0", "method": "move_mouse", "params": [860, 540]},
+            {"id": 2, "jsonrpc": "2.0", "method": "scan_scene", "params": []},
+        ]
+
+    asyncio.run(run())
+
+
+def test_holding_and_releasing_a_mouse_button_carry_the_button_index() -> None:
+    """Left by default, and the release has to name the same button as the press."""
+
+    async def run() -> None:
+        _, _, tools, sent = make()
+        await tools["hold_mouse_button"].ainvoke({"step": 1, "thought": "누른 채로 둔다"})
+        await tools["release_mouse_button"].ainvoke(
+            {"step": 1, "button": 1, "thought": "우클릭을 놓는다"}
+        )
+
+        emitted = [frame["payload"]["actions"][0] for frame in actions(sent)]
+        assert [(item["method"], item["params"]) for item in emitted] == [
+            ("mouse_down", [0]),
+            ("mouse_up", [1]),
+        ]
+
+    asyncio.run(run())
+
+
+def test_holding_and_releasing_a_key_carry_the_key_code() -> None:
+    async def run() -> None:
+        _, _, tools, sent = make()
+        await tools["hold_key"].ainvoke(
+            {"step": 1, "key_code": "W", "thought": "앞으로 계속 걷는다"}
+        )
+        await tools["release_key"].ainvoke(
+            {"step": 1, "key_code": "W", "thought": "걷기를 멈춘다"}
+        )
+
+        emitted = [frame["payload"]["actions"][0] for frame in actions(sent)]
+        assert [(item["method"], item["params"]) for item in emitted] == [
+            ("key_down", ["W"]),
+            ("key_up", ["W"]),
+        ]
+
+    asyncio.run(run())
+
+
+def test_a_drag_goes_out_as_one_batch_in_order() -> None:
+    """The order is the drag. Split across calls, anything could land between them.
+
+    The press takes no coordinates, so the batch has to start by moving to where
+    the drag begins — otherwise the button goes down wherever the pointer was
+    left. The scan rides last, as it does for every acting tool.
+    """
+
+    async def run() -> None:
+        _, _, tools, sent = make()
+        await tools["drag_pointer"].ainvoke(
+            {
+                "step": 1,
+                "from_x": 100,
+                "from_y": 200,
+                "to_x": 700,
+                "to_y": 200,
+                "thought": "카드를 슬롯으로 끌어다 놓는다",
+            }
+        )
+
+        assert len(actions(sent)) == 1
+        assert actions(sent)[0]["payload"]["actions"] == [
+            {"id": 1, "jsonrpc": "2.0", "method": "move_mouse", "params": [100, 200]},
+            {"id": 2, "jsonrpc": "2.0", "method": "mouse_down", "params": [0]},
+            {"id": 3, "jsonrpc": "2.0", "method": "move_mouse", "params": [700, 200]},
+            {"id": 4, "jsonrpc": "2.0", "method": "mouse_up", "params": [0]},
+            {"id": 5, "jsonrpc": "2.0", "method": "scan_scene", "params": []},
+        ]
+
+    asyncio.run(run())
+
+
+def test_a_batch_result_names_which_action_failed() -> None:
+    """Four outcomes in a row are unreadable unless each says what it belongs to.
+
+    The trailing scan_scene is still ours, so its outcome must not be reported as
+    something the agent asked for — with a batch that is id 5, not id 2.
+    """
+
+    async def run() -> None:
+        channel, _, tools, sent = make()
+
+        task = answer(
+            channel,
+            sent,
+            results=[
+                {"id": 1, "success": True},
+                {"id": 2, "success": True},
+                {"id": 3, "success": True},
+                {"id": 4, "success": False, "error": "No drop target under the pointer"},
+                {"id": 5, "success": True},
+            ],
+        )
+        result = await tools["drag_pointer"].ainvoke(
+            {
+                "step": 1,
+                "from_x": 100,
+                "from_y": 200,
+                "to_x": 700,
+                "to_y": 200,
+                "thought": "카드를 슬롯으로 끌어다 놓는다",
+            }
+        )
+        await task
+
+        assert "mouse_up: FAILED — No drop target under the pointer" in result
+        assert result.count("move_mouse: ok") == 2
+        assert "scan_scene" not in result
+
+    asyncio.run(run())
+
+
 def test_click_reports_the_failure_reason() -> None:
     async def run() -> None:
         channel, _, tools, sent = make()
