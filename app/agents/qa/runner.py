@@ -13,9 +13,10 @@ from langchain.agents import create_agent
 
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.agents.qa.tools import QaRunState, build_tools
+from app.agents.qa.vision import QaCaptureVisionMiddleware
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
 from app.llm.chat_model import build_chat_model
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.models import DEFAULT_MODEL, LLMModel, get_model_spec
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory
 
@@ -35,6 +36,17 @@ RUN_DEADLINE_SECONDS = 600.0
 # blocks put it under. Providers disagree on both.
 _REASONING_BLOCK_TYPES = ("text", "thinking", "reasoning")
 _REASONING_KEYS = ("text", "thinking", "reasoning", "reasoning_content")
+
+# Only shown to models that can read images. Telling a text-only model about a tool
+# it does not have would send it looking for one.
+VISION_DIRECTIVE = (
+    "The scene listing says what exists, not what it looks like. When a step is "
+    "about appearance — a layout that may be broken, a button that may be covered, "
+    "a sprite in the wrong state, text that may be unreadable — call "
+    "`capture_screen` and judge from the picture. Screenshots are limited, so "
+    "spend them on the steps where looking decides the verdict.\n"
+    "\n"
+)
 
 
 SYSTEM_PROMPT = (
@@ -57,6 +69,7 @@ SYSTEM_PROMPT = (
     "a reviewer will ever see. Most tools also take `step`, the scenario step "
     "the call belongs to; pass the number from the step list, not a guess.\n"
     "\n"
+    "{vision_directive}"
     "A screen with nothing clickable is not a dead end. Dialogue, narration and "
     "cutscenes usually advance on a key — `press_key` needs no target and works "
     "when the scene lists no interactables at all. Reach for it before concluding "
@@ -118,11 +131,13 @@ class QaRunner:
     async def run(
         self, channel: QaRunChannel, scenario: ScenarioDraft, state: QaRunState
     ) -> None:
+        supports_vision = get_model_spec(self._model).supports_vision
         system_prompt = SYSTEM_PROMPT.format(
-            language_directive=LANGUAGE_DIRECTIVES[self._language]
+            language_directive=LANGUAGE_DIRECTIVES[self._language],
+            vision_directive=VISION_DIRECTIVE if supports_vision else "",
         )
         first_message = _first_message(scenario)
-        tools = build_tools(channel, state)
+        tools = build_tools(channel, state, supports_vision)
 
         # The whole starting context in one place. Reading a run afterwards means
         # knowing what the model was actually given, and the prompt is assembled
@@ -145,6 +160,9 @@ class QaRunner:
             model=build_chat_model(self._model),
             tools=tools,
             system_prompt=system_prompt,
+            # Only when the model can look. On a text-only model the middleware
+            # would have nothing to inject and nothing to trim.
+            middleware=[QaCaptureVisionMiddleware(state)] if supports_vision else [],
         )
         # Streamed rather than invoked so the model's reasoning can be put on the
         # timeline as it happens. Left to a tool the agent chooses to call, the

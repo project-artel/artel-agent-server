@@ -119,6 +119,11 @@ class ActionResultItem(BaseModel):
     success: bool = False
     error: str | None = None
 
+    # What the action produced, for the actions that produce something. Absent on
+    # every action that does not, which is why it cannot be required. `capture_screen`
+    # puts the uploaded image's URL here; the bytes never travel over this socket.
+    returnValue: dict | None = None
+
     @property
     def status(self) -> ActionItemStatus:
         return ActionItemStatus.SUCCEEDED if self.success else ActionItemStatus.FAILED

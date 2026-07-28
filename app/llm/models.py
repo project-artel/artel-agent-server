@@ -34,6 +34,10 @@ class ModelSpec:
     # Models with only `response_format` fall back to json_object mode.
     supports_strict_json: bool
     label: str
+    # True when the model accepts image blocks. A model without it is not a
+    # failure: the QA run drops to text-only rather than refusing to start, and
+    # the capture tool is left out of its toolset so it cannot ask for one.
+    supports_vision: bool = True
 
 
 MODEL_SPECS: dict[LLMModel, ModelSpec] = {
@@ -68,10 +72,12 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         label="Gemini 2.5 Pro",
     ),
     # json_object-only (no `structured_outputs`): exercises the strict fallback.
+    # Text-only as well, which is what keeps the vision path's fallback honest.
     LLMModel.gemma_4_free: ModelSpec(
         provider=LLMProvider.google,
         supports_strict_json=False,
         label="Gemma 4 (free)",
+        supports_vision=False,
     ),
 }
 
@@ -94,6 +100,7 @@ def list_models() -> list[dict[str, str | bool]]:
             "label": spec.label,
             "provider": spec.provider.value,
             "supports_strict_json": spec.supports_strict_json,
+            "supports_vision": spec.supports_vision,
         }
         for model, spec in MODEL_SPECS.items()
     ]
