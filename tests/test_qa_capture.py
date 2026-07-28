@@ -179,18 +179,41 @@ def test_capturing_puts_the_url_on_the_timeline() -> None:
 
 
 def test_a_refused_capture_keeps_the_run_going() -> None:
+    """The reason AND what to do instead.
+
+    A game whose SDK predates this action answers "Unsupported method" to every
+    capture. Told only that, the agent failed the step and then the whole run —
+    over a screenshot it could have done without. Seen in a real run.
+    """
+
     async def run() -> None:
         channel, state, tools, sent = make()
 
         answer(
             channel,
             sent,
-            [{"id": 1, "success": False, "error": "The game runs in batchmode."}],
+            [{"id": 1, "success": False, "error": "Unsupported method: capture_screen"}],
         )
         result = await tools["capture_screen"].ainvoke({"step": 1, "thought": "화면을 본다"})
 
-        assert "batchmode" in result
+        assert "Unsupported method" in result
+        assert "scene text" in result
         assert state.take_pending_captures() == []
+
+    asyncio.run(run())
+
+
+def test_a_failed_capture_still_spends_the_run_budget() -> None:
+    """Otherwise a game that refuses every capture never reaches the cap."""
+
+    async def run() -> None:
+        channel, state, tools, sent = make()
+
+        for _ in range(2):
+            answer(channel, sent, [{"id": 1, "success": False, "error": "Unsupported method"}])
+            await tools["capture_screen"].ainvoke({"step": 1, "thought": "화면을 본다"})
+
+        assert state.captures_attempted == 2
 
     asyncio.run(run())
 
@@ -227,7 +250,7 @@ def test_the_per_run_cap_is_refused_with_its_reason() -> None:
 
     async def run() -> None:
         channel, state, tools, sent = make()
-        state.captures_taken = MAX_CAPTURES_PER_RUN
+        state.captures_attempted = MAX_CAPTURES_PER_RUN
 
         result = await tools["capture_screen"].ainvoke({"step": 1, "thought": "화면을 본다"})
 

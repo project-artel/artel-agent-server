@@ -11,7 +11,6 @@ from typing import Any
 from langchain_core.tools import StructuredTool
 
 from app.agents.qa.vision import MAX_CAPTURES_PER_RUN
-
 from app.qa.channel import QaRunChannel, with_operator_messages
 from app.qa.envelope import (
     JsonRpcAction,
@@ -43,14 +42,16 @@ class QaRunState:
         self.finished = False
         # The observation the agent last saw, so the next look is a diff.
         self.watermark = 0
-        self.captures_taken = 0
+        # Attempts, not successes. A game whose SDK does not know the capture action
+        # refuses every one of them, and counting only what worked would leave that
+        # loop unbounded — the cap has to bind on the failing case too.
+        self.captures_attempted = 0
         # Handed to the vision middleware on the next model call. The tool cannot
         # return the image itself — an image block on a tool result is rejected by
         # the chat/completions API every model here is reached through.
         self._pending_captures: list[PendingCapture] = []
 
     def add_pending_capture(self, capture: PendingCapture) -> None:
-        self.captures_taken += 1
         self._pending_captures.append(capture)
 
     def take_pending_captures(self) -> list[PendingCapture]:
@@ -127,7 +128,7 @@ def build_tools(
 
         The picture arrives right after this result, as its own message.
         """
-        if state.captures_taken >= MAX_CAPTURES_PER_RUN:
+        if state.captures_attempted >= MAX_CAPTURES_PER_RUN:
             # Refused with the reason, not silently: a run that keeps looking
             # instead of deciding will reach the deadline with nothing reported.
             return (
@@ -136,6 +137,7 @@ def build_tools(
             )
 
         await channel.note(thought, LogCategory.THOUGHT, step)
+        state.captures_attempted += 1
         params: list[Any] = [] if target_id is None else [target_id]
         what = "the screen" if target_id is None else f"element {target_id}"
         result = await channel.dispatch_actions(
@@ -154,8 +156,14 @@ def build_tools(
 
         item = result.results[0]
         if not item.success:
+            # Says what to do instead, not just what went wrong. A game built on an SDK
+            # without this action answers "Unsupported method" to every capture, and an
+            # agent told only that failed the step and then the whole run — over a
+            # screenshot it could have done without.
             return with_operator_messages(
-                f"The screen could not be captured — {item.error or 'no reason given'}.",
+                f"The screen could not be captured — {item.error or 'no reason given'}. "
+                "Judge this step from the scene text instead, and do not capture again "
+                "in this run.",
                 messages,
             )
 
