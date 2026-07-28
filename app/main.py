@@ -12,6 +12,7 @@ from app.api.routes import router as api_router
 from app.api.sessions import router as sessions_router
 from app.config import get_settings
 from app.documents import ExtractionService
+from app.logging_config import configure_logging
 from app.observability import configure_langsmith
 from app.qa.service import QaExecutionService
 from app.qa.store import RedisQaSessionStore
@@ -59,6 +60,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    # Before anything else: until this runs, every `logger.*` call in the
+    # application is discarded, including the ones that report startup failing —
+    # which is why it precedes the tracing setup rather than following it.
+    configure_logging(settings.log_level)
     # Before any chat model is built, so every LangChain call is traced.
     configure_langsmith(settings)
     app = FastAPI(
