@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "notion-cli": {
+      "source": "makenotion/skills",
+      "sourceType": "github",
+      "skillPath": "skills/notion-cli/SKILL.md",
+      "computedHash": "9624b2f0f37d738d3be67e7c7cc8b8359063defea92b32e96b01692aee60adb4"
+    }
+  }
+}
