@@ -36,11 +36,14 @@ class QaExecutionService:
     def __init__(
         self,
         store: QaSessionStore,
-        runner_factory: Callable[[LLMModel, OutputLanguage], QaRunner] | None = None,
+        runner_factory: Callable[[LLMModel, OutputLanguage, str | None], QaRunner]
+        | None = None,
     ) -> None:
         self._store = store
         self._runner_factory = runner_factory or (
-            lambda model, language: QaRunner(model=model, language=language)
+            lambda model, language, prompt_version: QaRunner(
+                model=model, language=language, prompt_version=prompt_version
+            )
         )
         self._channels: dict[str, QaRunChannel] = {}
 
@@ -52,6 +55,7 @@ class QaExecutionService:
         scenario: ScenarioDraft,
         model: LLMModel = DEFAULT_MODEL,
         language: OutputLanguage = DEFAULT_LANGUAGE,
+        prompt_version: str | None = None,
     ) -> str:
         session_id = uuid.uuid4().hex
         record = QaSessionRecord(
@@ -61,6 +65,7 @@ class QaExecutionService:
             scenario=scenario,
             model=model,
             language=language,
+            prompt_version=prompt_version,
         )
         await self._store.save(session_id, record)
         return session_id
@@ -90,7 +95,9 @@ class QaExecutionService:
         channel = QaRunChannel(qa_try_id=record.qa_try_id, send=send)
         self._channels[session_id] = channel
 
-        runner = self._runner_factory(record.model, record.language)
+        runner = self._runner_factory(
+            record.model, record.language, record.prompt_version
+        )
         try:
             state, failure = await runner.run_with_deadline(channel, record.scenario)
         finally:

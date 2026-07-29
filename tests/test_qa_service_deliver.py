@@ -48,7 +48,8 @@ class StallingRunner:
 async def _running_service() -> tuple[QaExecutionService, str, asyncio.Task]:
     runner = StallingRunner()
     service = QaExecutionService(
-        store=InMemoryQaSessionStore(), runner_factory=lambda model, language: runner
+        store=InMemoryQaSessionStore(),
+        runner_factory=lambda model, language, prompt_version: runner,
     )
     session_id = await service.open(
         qa_try_id=7,

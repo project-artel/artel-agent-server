@@ -14,6 +14,7 @@ from app.config import get_settings
 from app.documents import ExtractionService
 from app.logging_config import configure_logging
 from app.observability import configure_langsmith
+from app.prompts import validate_prompts
 from app.qa.service import QaExecutionService
 from app.qa.store import RedisQaSessionStore
 from app.sessions.redis_store import RedisSessionStore
@@ -66,6 +67,10 @@ def create_app() -> FastAPI:
     configure_logging(settings.log_level)
     # Before any chat model is built, so every LangChain call is traced.
     configure_langsmith(settings)
+    # Read and check every prompt file now. A prompt whose placeholders have
+    # drifted, or a *_PROMPT_VERSION naming a version nobody created, must stop
+    # the process here rather than surface as a failed run an hour into a shift.
+    validate_prompts()
     app = FastAPI(
         title="Artel Agent Server API",
         description=(

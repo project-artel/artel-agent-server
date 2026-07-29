@@ -3,31 +3,11 @@ import json
 from langchain_core.prompts import ChatPromptTemplate
 
 from app.agents.game_context.schemas import GameContextAgentRequest
+from app.prompts import load_prompt
 
+# Directory under app/prompts/ holding this agent's prompt versions.
+PROMPT_AGENT = "game_context"
 
-SYSTEM_PROMPT = (
-    "You are a game design document extraction agent. Read one game design "
-    "document and extract structured, reusable game facts for a QA-testing "
-    "knowledge base. "
-    "INCLUDE game behavior and rules, screens/scenes and their UI elements and "
-    "transitions, entities (characters, enemies, items), progression "
-    "(levels/stages and their order), notable flows (e.g. tutorials), and "
-    "domain terms. "
-    "EXCLUDE development-process noise: schedules and deadlines, task/owner "
-    "assignments, asset-store links, meeting notes, and team logistics. "
-    "Use the FIXED section frame only — never invent new top-level sections. "
-    "Put game-specific variety INSIDE entries (rules, attributes, steps), not as "
-    "new sections. Use `misc` only for a fact that fits no other section. "
-    "Record only what the document supports; do not invent details, and leave a "
-    "field or section empty when the document does not cover it. "
-    "Write values in the document's own language. Return only valid JSON "
-    "matching the requested output contract."
-)
-
-HUMAN_TEMPLATE = (
-    "Game design document:\n{document_text}\n\n"
-    "Output contract (shape guidance; omit empty sections):\n{output_contract}"
-)
 
 OUTPUT_CONTRACT = {
     "overview": {
@@ -71,11 +51,13 @@ OUTPUT_CONTRACT = {
 }
 
 
-def build_game_context_prompt() -> ChatPromptTemplate:
+def build_game_context_prompt(version: str | None = None) -> ChatPromptTemplate:
+    system = load_prompt(PROMPT_AGENT, "system", version)
+    human = load_prompt(PROMPT_AGENT, "human", version)
     return ChatPromptTemplate.from_messages(
         [
-            ("system", SYSTEM_PROMPT),
-            ("human", HUMAN_TEMPLATE),
+            ("system", system.body),
+            ("human", human.body),
         ]
     )
 
