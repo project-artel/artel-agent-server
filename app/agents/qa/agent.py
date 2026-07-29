@@ -60,7 +60,9 @@ class QaExecutionAgent:
             stop_after_attempt=_MAX_ATTEMPTS,
         )
         try:
-            return await chain.ainvoke(build_act_inputs(request))
+            return await chain.ainvoke(
+                build_act_inputs(request), context.trace_config("qa-action")
+            )
         except OutputParserException as error:
             raise QaExecutionError("Failed to produce a valid QA action.") from error
 
@@ -74,7 +76,9 @@ class QaExecutionAgent:
             stop_after_attempt=_MAX_ATTEMPTS,
         )
         try:
-            return await chain.ainvoke(build_evaluate_inputs(request))
+            return await chain.ainvoke(
+                build_evaluate_inputs(request), context.trace_config("qa-evaluation")
+            )
         except OutputParserException as error:
             raise QaExecutionError("Failed to produce a valid QA verdict.") from error
 
@@ -91,6 +95,8 @@ class QaExecutionAgent:
             stop_after_attempt=_MAX_ATTEMPTS,
         )
         try:
-            return await chain.ainvoke(build_chat_inputs(request))
+            return await chain.ainvoke(
+                build_chat_inputs(request), context.trace_config("qa-operator-response")
+            )
         except OutputParserException as error:
             raise QaExecutionError("Failed to produce a QA chat reply.") from error

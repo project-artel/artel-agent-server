@@ -61,6 +61,11 @@ class QaRunChannel:
         # simpler, and it guarantees the words reach the next decision.
         self._operator_messages: list[str] = []
 
+    @property
+    def qa_try_id(self) -> int:
+        """Stable correlation value exposed for trace metadata."""
+        return self._qa_try_id
+
     # --- outbound -------------------------------------------------------------
 
     def _frame(self, message_type: MessageType, payload, correlation_id: str | None = None) -> dict:
