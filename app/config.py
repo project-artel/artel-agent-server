@@ -33,6 +33,15 @@ class Settings(BaseSettings):
     session_ttl_seconds: int = 3600
     history_max_turns: int = 10
 
+    # Default prompt version per agent, matching a directory under
+    # app/prompts/<agent>/. Unset means the highest version present, so a new
+    # version ships by being added; pin one here to hold an agent back or to
+    # run a candidate. A value naming a directory that does not exist fails at
+    # startup.
+    qa_prompt_version: str | None = None
+    scenario_prompt_version: str | None = None
+    game_context_prompt_version: str | None = None
+
     # /extract source fetch guards. allowed_hosts empty = no host restriction
     # (rely on the caller passing presigned URLs to the expected bucket).
     extract_max_bytes: int = 20 * 1024 * 1024
