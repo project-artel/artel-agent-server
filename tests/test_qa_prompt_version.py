@@ -12,7 +12,7 @@ import pytest
 
 from app.agents.qa import runner as runner_module
 from app.agents.qa.runner import QaRunner
-from app.agents.qa.tools import QaRunState
+from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.scenario import ScenarioDraft, ScenarioStep
 from app.api.qa_sessions import OpenQaSessionRequest
 from app.prompts import load_prompt
@@ -20,6 +20,11 @@ from app.prompts.loader import resolve_version
 from app.qa.channel import QaRunChannel
 from app.qa.service import QaExecutionService
 from app.qa.store import InMemoryQaSessionStore
+
+
+async def _ignore(_frame: dict) -> None:
+    """A send that goes nowhere, for the tools that only need to be built."""
+    return None
 
 
 def make_scenario() -> ScenarioDraft:
@@ -182,6 +187,42 @@ def test_v2_adds_the_new_tools_and_keeps_v1_intact() -> None:
         assert paragraph in v2
 
 
-def test_the_default_qa_version_is_v2() -> None:
-    """A run that names no version has to get the prompt that knows the new tools."""
-    assert resolve_version("qa_run") == "v2"
+def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> None:
+    """v3 stops repeating the tool descriptions. It must not stop stating the rules.
+
+    The paragraphs it condensed were duplicates of the tool docstrings, and a
+    duplicate is only safe to remove while the other copy is still there. So the
+    check spans both halves: every tool v2 pointed at is still pointed at — by v3
+    or by another tool's description — and the rules that span tools, undo what
+    you hold and take the scene's pixels verbatim, are still said out loud.
+
+    Pointing matters beyond listing. A tool the model is handed but never told to
+    reach for is one it reaches for late or not at all, and `resume_game_time` is
+    the case that bites: nothing prompts it except having paused.
+    """
+    v2 = load_prompt("qa_run", "system", "v2").body
+    v3 = load_prompt("qa_run", "system", "v3").body
+
+    channel = QaRunChannel(qa_try_id=7, send=_ignore)
+    tools = {tool.name: tool for tool in build_tools(channel, QaRunState(total_steps=1))}
+
+    for name in tools:
+        if name not in v2:
+            continue
+        pointed_at = name in v3 or any(
+            name in other.description for other in tools.values() if other.name != name
+        )
+        assert pointed_at, f"v2 pointed the agent at {name} and nothing does any more"
+
+    # Cross-tool rules have no single owner, so no tool description can carry them.
+    assert "VERBATIM" in v3
+    assert "before you report" in v3
+    assert "`on screen:`" in v3
+
+    # And the shortening has to have actually happened.
+    assert len(v3) < len(v2)
+
+
+def test_the_default_qa_version_is_v3() -> None:
+    """A run that names no version has to get the newest prompt."""
+    assert resolve_version("qa_run") == "v3"
