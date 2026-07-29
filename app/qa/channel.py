@@ -34,6 +34,11 @@ ACTION_TIMEOUT_SECONDS = 30.0
 # unbounded one would park the run until the overall deadline killed it.
 MAX_SCENE_WAIT_SECONDS = 30.0
 
+# Ceiling on a wait for the operator. Longer than a scene wait because a person
+# has to read the question and type, and shorter than the run's deadline so the
+# run still ends by its own account rather than by being killed mid-wait.
+MAX_OPERATOR_WAIT_SECONDS = 300.0
+
 
 class QaCancelled(Exception):
     """Raised inside the agent loop when the operator ends the run."""
@@ -60,6 +65,9 @@ class QaRunChannel:
         # by appending to the next tool result rather than interrupting the graph:
         # simpler, and it guarantees the words reach the next decision.
         self._operator_messages: list[str] = []
+        # Set exactly while that list has something in it, so a tool can wait on
+        # the operator instead of only picking messages up in passing.
+        self._operator_arrived = asyncio.Event()
 
     @property
     def qa_try_id(self) -> int:
@@ -185,22 +193,54 @@ class QaRunChannel:
     def on_chat(self, raw: dict) -> None:
         payload = ChatPayload.model_validate(raw.get("payload") or {})
         self._operator_messages.append(payload.message)
+        self._operator_arrived.set()
 
     def on_cancel(self) -> None:
         self.cancelled = True
         if self._action_waiter is not None and not self._action_waiter.done():
             self._action_waiter.cancel()
+        # A tool parked on the operator has no action to cancel, so wake it and
+        # let it find the cancellation itself.
+        self._operator_arrived.set()
 
     # --- operator ------------------------------------------------------------
 
     def drain_operator_messages(self) -> list[str]:
         messages = self._operator_messages
         self._operator_messages = []
+        self._operator_arrived.clear()
         return messages
+
+    async def wait_for_operator(self, timeout_seconds: float) -> list[str]:
+        """Park until the operator says something. Empty means nobody did.
+
+        Returns rather than raises on a timeout, for the same reason `look` does:
+        silence is a thing the agent decides about, not an error.
+        """
+        self._raise_if_cancelled()
+        try:
+            await asyncio.wait_for(
+                self._operator_arrived.wait(),
+                timeout=bounded_operator_wait(timeout_seconds),
+            )
+        except asyncio.TimeoutError:
+            return []
+        # Cancellation wakes this too, and it must not be read as an answer.
+        self._raise_if_cancelled()
+        return self.drain_operator_messages()
 
     def _raise_if_cancelled(self) -> None:
         if self.cancelled:
             raise QaCancelled()
+
+
+def bounded_operator_wait(timeout_seconds: float) -> float:
+    """The wait the channel will actually make, which is what a tool must quote.
+
+    Shared so the tool's "nobody answered within Ns" cannot name a number the
+    channel never waited.
+    """
+    return min(max(timeout_seconds, 0.0), MAX_OPERATOR_WAIT_SECONDS)
 
 
 def with_operator_messages(result: str, messages: list[str]) -> str:

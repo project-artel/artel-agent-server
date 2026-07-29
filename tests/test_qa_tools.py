@@ -267,6 +267,97 @@ def test_a_drag_goes_out_as_one_batch_in_order() -> None:
     asyncio.run(run())
 
 
+def test_pausing_and_resuming_go_out_as_the_time_actions() -> None:
+    """Freezing the game is an action like any other, so a scan rides with it.
+
+    Without the scan the agent would freeze the screen and then have to ask for
+    it separately — one round trip during which the thing it paused to read may
+    already be gone.
+    """
+
+    async def run() -> None:
+        _, _, tools, sent = make()
+        await tools["pause_game_time"].ainvoke(
+            {"step": 1, "thought": "이펙트가 사라지기 전에 멈춘다"}
+        )
+        await tools["resume_game_time"].ainvoke({"step": 1, "thought": "다시 진행시킨다"})
+
+        assert [frame["payload"]["message"] for frame in actions(sent)] == [
+            "Pausing game time",
+            "Resuming game time",
+        ]
+        assert [
+            [item["method"] for item in frame["payload"]["actions"]]
+            for frame in actions(sent)
+        ] == [["pause_time", "scan_scene"], ["resume_time", "scan_scene"]]
+
+    asyncio.run(run())
+
+
+def test_resume_reports_the_games_refusal() -> None:
+    """Resuming what nobody paused fails in the SDK, and the agent has to see it."""
+
+    async def run() -> None:
+        channel, _, tools, sent = make()
+
+        task = answer(
+            channel,
+            sent,
+            results=[
+                {
+                    "id": 1,
+                    "success": False,
+                    "error": "resume_time: game time was not paused by pause_time.",
+                }
+            ],
+        )
+        result = await tools["resume_game_time"].ainvoke(
+            {"step": 1, "thought": "멈춰 있었는지 확인한다"}
+        )
+        await task
+
+        assert "resume_time: FAILED — resume_time: game time was not paused" in result
+
+    asyncio.run(run())
+
+
+def test_waiting_for_the_operator_returns_what_they_said() -> None:
+    async def run() -> None:
+        channel, _, tools, sent = make()
+
+        async def speak() -> None:
+            await asyncio.sleep(0)
+            channel.on_chat({"payload": {"message": "그 화면은 건너뛰어"}})
+
+        asyncio.create_task(speak())
+        result = await tools["wait_for_operator"].ainvoke(
+            {"step": 2, "thought": "시나리오에 없는 화면이라 물어본다"}
+        )
+
+        assert "그 화면은 건너뛰어" in result
+        # The reason for stopping the run belongs on the timeline like any other.
+        assert logs(sent)[0]["payload"]["message"] == "시나리오에 없는 화면이라 물어본다"
+        assert logs(sent)[0]["payload"]["step"] == 2
+        # Nothing was asked of the game while it waited.
+        assert actions(sent) == []
+
+    asyncio.run(run())
+
+
+def test_waiting_says_so_when_nobody_answers() -> None:
+    """Silence comes back as a value, with the wait it actually made named."""
+
+    async def run() -> None:
+        _, _, tools, _ = make()
+        result = await tools["wait_for_operator"].ainvoke(
+            {"thought": "답을 기다린다", "timeout_seconds": 0.05}
+        )
+
+        assert "said nothing within 0.05s" in result
+
+    asyncio.run(run())
+
+
 def test_a_batch_result_names_which_action_failed() -> None:
     """Four outcomes in a row are unreadable unless each says what it belongs to.
 

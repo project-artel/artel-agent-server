@@ -162,6 +162,61 @@ def test_operator_messages_are_drained_once() -> None:
     assert channel.drain_operator_messages() == []
 
 
+def test_waiting_returns_as_soon_as_the_operator_speaks() -> None:
+    async def run() -> None:
+        channel, _ = make_channel()
+
+        async def answer() -> None:
+            await asyncio.sleep(0)
+            channel.on_chat({"payload": {"message": "상점으로 가"}})
+
+        asyncio.create_task(answer())
+        assert await channel.wait_for_operator(30.0) == ["상점으로 가"]
+        # Handed over, so the next tool result must not repeat them.
+        assert channel.drain_operator_messages() == []
+
+    asyncio.run(run())
+
+
+def test_waiting_finds_a_message_that_arrived_before_it() -> None:
+    """The operator does not wait to be asked, and their words must not be lost."""
+
+    async def run() -> None:
+        channel, _ = make_channel()
+        channel.on_chat({"payload": {"message": "그대로 진행해"}})
+
+        assert await channel.wait_for_operator(30.0) == ["그대로 진행해"]
+
+    asyncio.run(run())
+
+
+def test_waiting_returns_empty_on_silence() -> None:
+    """Timeout is an answer the agent acts on, not an exception."""
+
+    async def run() -> None:
+        channel, _ = make_channel()
+        assert await channel.wait_for_operator(0.05) == []
+
+    asyncio.run(run())
+
+
+def test_cancel_wakes_a_wait_instead_of_letting_it_sit() -> None:
+    """Nothing else would release it: a wait has no action to cancel."""
+
+    async def run() -> None:
+        channel, _ = make_channel()
+
+        async def cancel() -> None:
+            await asyncio.sleep(0)
+            channel.on_cancel()
+
+        asyncio.create_task(cancel())
+        with pytest.raises(QaCancelled):
+            await channel.wait_for_operator(30.0)
+
+    asyncio.run(run())
+
+
 def test_operator_messages_are_appended_to_a_tool_result() -> None:
     assert with_operator_messages("scene: Lobby", []) == "scene: Lobby"
 

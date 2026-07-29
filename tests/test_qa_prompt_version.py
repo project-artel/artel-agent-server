@@ -15,6 +15,8 @@ from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState
 from app.agents.scenario import ScenarioDraft, ScenarioStep
 from app.api.qa_sessions import OpenQaSessionRequest
+from app.prompts import load_prompt
+from app.prompts.loader import resolve_version
 from app.qa.channel import QaRunChannel
 from app.qa.service import QaExecutionService
 from app.qa.store import InMemoryQaSessionStore
@@ -159,3 +161,27 @@ def test_the_run_start_log_names_the_prompt_version(stubbed_agent, caplog) -> No
     # The system prompt still reaches the log, rendered rather than templated.
     assert "You are a QA agent executing an approved test scenario" in starting[0]
     assert "{language_directive}" not in starting[0]
+
+
+def test_v2_adds_the_new_tools_and_keeps_v1_intact() -> None:
+    """The new guidance goes in a new version, not on top of the old one.
+
+    v1 is the frozen copy of the Python constants, and
+    `tests/test_prompts_v1_regression.py` pins it. Editing it in place would make
+    a run tagged `prompt_version=v1` unreproducible.
+    """
+    v1 = load_prompt("qa_run", "system", "v1").body
+    v2 = load_prompt("qa_run", "system", "v2").body
+
+    for tool in ("pause_game_time", "resume_game_time", "wait_for_operator"):
+        assert tool not in v1
+        assert tool in v2
+
+    # Everything v1 said, v2 still says: the additions are insertions, not a rewrite.
+    for paragraph in v1.split("\n\n"):
+        assert paragraph in v2
+
+
+def test_the_default_qa_version_is_v2() -> None:
+    """A run that names no version has to get the prompt that knows the new tools."""
+    assert resolve_version("qa_run") == "v2"
