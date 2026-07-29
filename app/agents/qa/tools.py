@@ -8,7 +8,7 @@ game happened to send something.
 from dataclasses import dataclass
 from typing import Any
 
-from langchain_core.tools import StructuredTool
+from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.vision import MAX_CAPTURES_PER_RUN
 from app.qa.channel import (
@@ -64,9 +64,29 @@ class QaRunState:
         return pending
 
 
+# The one description written out here rather than left as a docstring, because
+# it has to name the cap and a docstring cannot interpolate one. An agent told
+# only "screenshots are limited" spends them at the first opportunity; the number
+# is what makes the budget something it can actually ration.
+CAPTURE_SCREEN_DESCRIPTION = """Look at the actual picture on screen, not just the scene text.
+
+Use this when the step is about how something *looks*: a layout that may be
+broken, a button that may be covered by other UI, a sprite in the wrong state,
+text that may be unreadable. The scene listing cannot express any of that.
+
+Leave `target_id` out for the whole screen. Give one to see just that element's
+area, at higher detail.
+
+You get {limit} screenshots for the whole run and no more, so spend them on the
+steps where looking is what decides the verdict.
+
+The picture arrives right after this result, as its own message."""
+
+
 def build_tools(
     channel: QaRunChannel, state: QaRunState, supports_vision: bool = True
-) -> list[StructuredTool]:
+) -> list[BaseTool]:
+    @tool
     async def observe_scene(step: int, thought: str, wait_seconds: float = 0.0) -> str:
         """Look at the game screen. Returns what changed since your last look.
 
@@ -130,19 +150,11 @@ def build_tools(
             body = f"{body}\n\nThe scene did not arrive; observe again to see the result."
         return with_operator_messages(body, messages)
 
+    @tool(description=CAPTURE_SCREEN_DESCRIPTION.format(limit=MAX_CAPTURES_PER_RUN))
     async def capture_screen(step: int, thought: str, target_id: int | None = None) -> str:
-        """Look at the actual picture on screen, not just the scene text.
-
-        Use this when the step is about how something *looks*: a layout that may be
-        broken, a button that may be covered by other UI, a sprite in the wrong
-        state, text that may be unreadable. The scene listing cannot express any of
-        that.
-
-        Leave `target_id` out for the whole screen. Give one to see just that
-        element's area, at higher detail.
-
-        The picture arrives right after this result, as its own message.
-        """
+        # What the agent reads is CAPTURE_SCREEN_DESCRIPTION above, not this.
+        # Returns the capture as a promise: the image itself is handed to the
+        # vision middleware and arrives on the next model call.
         if state.captures_attempted >= MAX_CAPTURES_PER_RUN:
             # Refused with the reason, not silently: a run that keeps looking
             # instead of deciding will reach the deadline with nothing reported.
@@ -210,6 +222,7 @@ def build_tools(
 
         return with_operator_messages(f"Captured {what}. The image follows.", messages)
 
+    @tool
     async def click_button(step: int, target_id: int, thought: str) -> str:
         """Click a button. `target_id` must be an id from the scene you just saw.
 
@@ -223,6 +236,7 @@ def build_tools(
             step,
         )
 
+    @tool
     async def enter_text(step: int, target_id: int, value: str, thought: str) -> str:
         """Type into a text field. `target_id` must be an id from the current scene."""
         return await _run(
@@ -232,6 +246,7 @@ def build_tools(
             step,
         )
 
+    @tool
     async def press_key(step: int, key_code: str, duration_seconds: float, thought: str) -> str:
         """Press a key — no target needed, so this works on a screen with nothing
         clickable, such as a dialogue or cutscene that advances on any key.
@@ -246,6 +261,7 @@ def build_tools(
             step,
         )
 
+    @tool
     async def move_pointer(step: int, x: float, y: float, thought: str) -> str:
         """Move the pointer to a point on the screen, without pressing anything.
 
@@ -261,6 +277,7 @@ def build_tools(
             step,
         )
 
+    @tool
     async def hold_mouse_button(step: int, thought: str, button: int = 0) -> str:
         """Press a mouse button and keep it down, at wherever the pointer now is.
 
@@ -278,6 +295,7 @@ def build_tools(
             step,
         )
 
+    @tool
     async def release_mouse_button(step: int, thought: str, button: int = 0) -> str:
         """Let go of a mouse button held by `hold_mouse_button`.
 
@@ -292,6 +310,7 @@ def build_tools(
             step,
         )
 
+    @tool
     async def hold_key(step: int, key_code: str, thought: str) -> str:
         """Press a key and keep it down until you release it.
 
@@ -309,6 +328,7 @@ def build_tools(
             step,
         )
 
+    @tool
     async def release_key(step: int, key_code: str, thought: str) -> str:
         """Let go of a key held by `hold_key`. `key_code` must be the same one."""
         return await _run(
@@ -318,6 +338,7 @@ def build_tools(
             step,
         )
 
+    @tool
     async def drag_pointer(
         step: int,
         from_x: float,
@@ -350,6 +371,7 @@ def build_tools(
             step,
         )
 
+    @tool
     async def pause_game_time(step: int, thought: str) -> str:
         """Freeze game time, so the screen stops changing while you read it.
 
@@ -368,6 +390,7 @@ def build_tools(
             step,
         )
 
+    @tool
     async def resume_game_time(step: int, thought: str) -> str:
         """Let game time run again, at the speed it had before the pause.
 
@@ -381,6 +404,7 @@ def build_tools(
             step,
         )
 
+    @tool
     async def wait_for_operator(
         thought: str, timeout_seconds: float = 60.0, step: int | None = None
     ) -> str:
@@ -393,7 +417,9 @@ def build_tools(
         first and only then wait for it.
 
         Returns what they said, or tells you nobody answered in time — silence is
-        not a failure, and you decide what to do with it.
+        not a failure, and you decide what to do with it. But do not settle in on
+        it: waiting is capped per call, and a couple of full waits is the whole
+        run's clock, spent on nothing.
         """
         await channel.note(thought, LogCategory.THOUGHT, step)
         waited = bounded_operator_wait(timeout_seconds)
@@ -406,6 +432,7 @@ def build_tools(
             )
         return with_operator_messages("The operator answered.", messages)
 
+    @tool
     async def report_step(step: int, passed: bool, message: str, thought: str) -> str:
         """Record the verdict for one scenario step, with the evidence for it.
 
@@ -428,6 +455,7 @@ def build_tools(
             return f"Recorded. {remaining} step(s) left."
         return "Recorded. That was the last step — finish the run."
 
+    @tool
     async def finish_run(passed: bool, summary: str, thought: str) -> str:
         """End the run. Call this once, after the last step has been reported.
 
@@ -453,6 +481,7 @@ def build_tools(
         )
         return "The run is closed."
 
+    @tool
     async def reply_to_operator(message: str, thought: str, step: int | None = None) -> str:
         """Answer the operator. Use when they asked something, not for progress.
 
@@ -463,32 +492,31 @@ def build_tools(
         await channel.say(message, step)
         return "Sent."
 
-    tools = [
-        StructuredTool.from_function(coroutine=observe_scene, name="observe_scene"),
-        StructuredTool.from_function(coroutine=click_button, name="click_button"),
-        StructuredTool.from_function(coroutine=enter_text, name="enter_text"),
-        StructuredTool.from_function(coroutine=press_key, name="press_key"),
-        StructuredTool.from_function(coroutine=move_pointer, name="move_pointer"),
-        StructuredTool.from_function(coroutine=hold_mouse_button, name="hold_mouse_button"),
-        StructuredTool.from_function(
-            coroutine=release_mouse_button, name="release_mouse_button"
-        ),
-        StructuredTool.from_function(coroutine=hold_key, name="hold_key"),
-        StructuredTool.from_function(coroutine=release_key, name="release_key"),
-        StructuredTool.from_function(coroutine=drag_pointer, name="drag_pointer"),
-        StructuredTool.from_function(coroutine=pause_game_time, name="pause_game_time"),
-        StructuredTool.from_function(coroutine=resume_game_time, name="resume_game_time"),
-        StructuredTool.from_function(coroutine=wait_for_operator, name="wait_for_operator"),
-        StructuredTool.from_function(coroutine=report_step, name="report_step"),
-        StructuredTool.from_function(coroutine=finish_run, name="finish_run"),
-        StructuredTool.from_function(coroutine=reply_to_operator, name="reply_to_operator"),
+    # Each name below is the decorated tool, not the function: `@tool` takes the
+    # name off the function itself, so a tool can no longer end up filed under a
+    # name string that drifted away from what it is called here.
+    tools: list[BaseTool] = [
+        observe_scene,
+        click_button,
+        enter_text,
+        press_key,
+        move_pointer,
+        hold_mouse_button,
+        release_mouse_button,
+        hold_key,
+        release_key,
+        drag_pointer,
+        pause_game_time,
+        resume_game_time,
+        wait_for_operator,
+        report_step,
+        finish_run,
+        reply_to_operator,
     ]
 
     # A model that cannot read images is not offered the tool at all. Left in, it
     # would be called, cost a game round trip, and produce an image nothing can
     # look at — and the agent would have no way to know why looking did not help.
     if supports_vision:
-        tools.append(
-            StructuredTool.from_function(coroutine=capture_screen, name="capture_screen")
-        )
+        tools.append(capture_screen)
     return tools

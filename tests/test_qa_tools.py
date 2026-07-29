@@ -9,6 +9,7 @@ These pin the frames themselves — category, step, and the actions inside them.
 import asyncio
 
 from app.agents.qa.tools import QaRunState, build_tools
+from app.agents.qa.vision import MAX_CAPTURES_PER_RUN
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import LogCategory, MessageType
 
@@ -529,3 +530,64 @@ def test_verdict_tools_each_write_their_own_thought_row() -> None:
         }
 
     asyncio.run(run())
+
+
+# --- what the model is handed, before any of it is called ---------------------
+
+
+def test_the_agent_is_offered_exactly_these_tools() -> None:
+    """Names are the API between the prompt and the code, and `@tool` derives them.
+
+    A tool renamed by renaming its function reads as a harmless refactor and is
+    not one: the system prompt names tools in prose, and a run whose prompt calls
+    for a tool the model was not given is a run that stalls on step one.
+    """
+    _, _, tools, _ = make()
+
+    assert set(tools) == {
+        "observe_scene",
+        "click_button",
+        "enter_text",
+        "press_key",
+        "move_pointer",
+        "hold_mouse_button",
+        "release_mouse_button",
+        "hold_key",
+        "release_key",
+        "drag_pointer",
+        "pause_game_time",
+        "resume_game_time",
+        "wait_for_operator",
+        "report_step",
+        "finish_run",
+        "reply_to_operator",
+        "capture_screen",
+    }
+
+
+def test_every_tool_reaches_the_model_described() -> None:
+    """The tool list IS documentation; a blank entry is a tool nobody can use."""
+    _, _, tools, _ = make()
+
+    for name, tool in tools.items():
+        assert tool.description.strip(), f"{name} reaches the model with no description"
+
+
+def test_the_capture_tool_states_its_own_budget() -> None:
+    """The cap has to be in the description, not only in the refusal.
+
+    An agent that learns the limit by hitting it has already spent it. The
+    description is built from MAX_CAPTURES_PER_RUN for exactly this reason, so
+    the number cannot drift away from the one the tool enforces.
+    """
+    _, _, tools, _ = make()
+
+    assert str(MAX_CAPTURES_PER_RUN) in tools["capture_screen"].description
+
+
+def test_every_tool_takes_a_thought() -> None:
+    """The timeline is built out of `thought`; a tool without one logs nothing."""
+    _, _, tools, _ = make()
+
+    for name, tool in tools.items():
+        assert "thought" in tool.args, f"{name} would act without recording why"
