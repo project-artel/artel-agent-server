@@ -11,21 +11,30 @@ from typing import Any
 from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.knowledge import (
+    FORGET_KNOWLEDGE_DESCRIPTION,
     KNOWLEDGE_TAGS,
+    MAX_FORGETS_PER_RUN,
+    MAX_RECORDS_PER_RUN,
     MAX_SEARCHES_PER_RUN,
+    RECORD_KNOWLEDGE_DESCRIPTION,
     RESULT_LIMIT,
     SEARCH_KNOWLEDGE_DESCRIPTION,
+    render_entry_label,
+    render_missing_knowledge_warning,
     render_results,
 )
 from app.agents.qa.vision import MAX_CAPTURES_PER_RUN
 from app.qa.channel import (
     KnowledgeSearchFailed,
+    QaCancelled,
     QaRunChannel,
     bounded_operator_wait,
     with_operator_messages,
 )
 from app.qa.envelope import (
     JsonRpcAction,
+    KnowledgeCreatePayload,
+    KnowledgeDeletePayload,
     LogCategory,
     MessageType,
     RunResult,
@@ -61,6 +70,26 @@ class QaRunState:
         # Attempts again, and for the same reason: a search Orchestration refuses
         # every time would otherwise be a loop with no bound on it.
         self.knowledge_searches_attempted = 0
+        # Attempts for the knowledge writes too, and here there is no alternative:
+        # nothing answers a write (see `QaRunChannel.write_knowledge`), so success
+        # is not something this side could count even if it wanted to.
+        self.knowledge_records_attempted = 0
+        self.knowledge_forgets_attempted = 0
+        # What `search_knowledge` has actually shown the agent, id -> summary.
+        # A deletion may only name an id from here. An agent free to pass any id
+        # could erase an entry it never read, and on the far side that id resolves
+        # to a real row — Orchestration cannot tell the difference, so the check
+        # only exists if it exists here.
+        self.knowledge_seen: dict[str, str] = {}
+        # Entries this run deleted and has not written a replacement for, as
+        # printable labels, oldest first.
+        #
+        # There is no update tool, so correcting an entry is a delete followed by a
+        # record, and this is the only thing that knows a run is halfway through
+        # one. It is what lets a failing `record_knowledge` say what is missing
+        # instead of reporting a bare failure, and what exempts a replacement write
+        # from the record cap.
+        self.knowledge_deleted_unreplaced: list[str] = []
         # Handed to the vision middleware on the next model call. The tool cannot
         # return the image itself — an image block on a tool result is rejected by
         # the chat/completions API every model here is reached through.
@@ -287,7 +316,159 @@ def build_tools(
                 f"you can see. {remaining} search(es) left.",
                 messages,
             )
+        # Remembered before the result is rendered, because this is what makes an
+        # entry deletable: `forget_knowledge` refuses an id that never came back
+        # from a search in this run. An id-less hit is skipped rather than stored
+        # under the empty string — it is not addressable, so it is not deletable.
+        for entry in answer.results:
+            if entry.id:
+                state.knowledge_seen[entry.id] = entry.summary
         return with_operator_messages(render_results(answer, remaining), messages)
+
+    @tool(
+        description=RECORD_KNOWLEDGE_DESCRIPTION.format(
+            limit=MAX_RECORDS_PER_RUN, tags=", ".join(KNOWLEDGE_TAGS)
+        )
+    )
+    async def record_knowledge(
+        step: int, thought: str, tag: str, summary: str, description: str
+    ) -> str:
+        # What the agent reads is RECORD_KNOWLEDGE_DESCRIPTION, not this.
+        #
+        # Not routed through `_run`, for the same reason `search_knowledge` is not:
+        # nothing here touches the game, so a scene view on the result would be the
+        # picture the agent already has, paid for again in context (ARTEL-180).
+        #
+        # Every refusal below carries `render_missing_knowledge_warning`. This tool
+        # is the second half of a repair as often as it is a first write, and a
+        # refusal phrased only as "nothing was recorded" reads as harmless in the
+        # one case where it is not.
+        outstanding = state.knowledge_deleted_unreplaced
+
+        # The cap does not bind a replacement write. It exists to stop a run
+        # narrating into the knowledge base; applied to the second half of a
+        # repair it would make the budget itself the thing that loses knowledge.
+        if state.knowledge_records_attempted >= MAX_RECORDS_PER_RUN and not outstanding:
+            return (
+                f"You have used all {MAX_RECORDS_PER_RUN} knowledge records for this "
+                "run, so nothing was recorded. Carry on with the run and judge the "
+                "remaining steps."
+            )
+
+        topic = (tag or "").strip().upper()
+        if topic not in KNOWLEDGE_TAGS:
+            # Refused before it goes out, as with a search's tag. Orchestration
+            # rejects an unknown topic, and its rejection never comes back down
+            # this socket — so a frame sent anyway would leave the run believing it
+            # had written something.
+            return (
+                f"{tag!r} is not a knowledge topic, so nothing was recorded. Use one "
+                f"of {', '.join(KNOWLEDGE_TAGS)} and call this again."
+            ) + render_missing_knowledge_warning(outstanding)
+
+        fact = summary.strip()
+        detail = description.strip()
+        if not fact or not detail:
+            # Same reason as the tag: Orchestration rejects a blank one on arrival
+            # and says so only on its own timeline.
+            return (
+                "`summary` and `description` must both say something, so nothing was "
+                "recorded. Write them out and call this again."
+            ) + render_missing_knowledge_warning(outstanding)
+
+        await channel.note(thought, LogCategory.THOUGHT, step)
+        state.knowledge_records_attempted += 1
+        try:
+            await channel.write_knowledge(
+                MessageType.KNOWLEDGE_CREATE,
+                KnowledgeCreatePayload(tag=topic, summary=fact, description=detail),
+            )
+        except QaCancelled:
+            # The operator ended the run. That is not this tool's to swallow.
+            raise
+        except Exception as error:  # noqa: BLE001 - a dead socket must not end the run here
+            # Storing knowledge is a side errand to the verdict, so a failed write
+            # is reported and the run goes on. It is still stated plainly: an agent
+            # told nothing would move on believing the fact was filed.
+            return (
+                f"The knowledge write could not be sent — {error}. Nothing was recorded."
+            ) + render_missing_knowledge_warning(outstanding)
+
+        replaced = bool(outstanding)
+        state.knowledge_deleted_unreplaced = []
+        messages = channel.drain_operator_messages()
+        remaining = max(MAX_RECORDS_PER_RUN - state.knowledge_records_attempted, 0)
+
+        lines = [f'Sent to the knowledge base, filed under {topic}: "{fact}".']
+        if replaced:
+            lines.append(
+                "That completes the correction — the entry you deleted has been "
+                "replaced, and nothing is outstanding."
+            )
+        lines.append(
+            "Nothing answers a knowledge write, so treat this as done and do not "
+            f"send the same fact again in this run. {remaining} record(s) left."
+        )
+        return with_operator_messages("\n\n".join(lines), messages)
+
+    @tool(description=FORGET_KNOWLEDGE_DESCRIPTION.format(limit=MAX_FORGETS_PER_RUN))
+    async def forget_knowledge(step: int, thought: str, knowledge_id: str) -> str:
+        # What the agent reads is FORGET_KNOWLEDGE_DESCRIPTION, not this.
+        #
+        # No scene view here either, for the reason given on `record_knowledge`.
+        if state.knowledge_forgets_attempted >= MAX_FORGETS_PER_RUN:
+            return (
+                f"You have used all {MAX_FORGETS_PER_RUN} knowledge deletion(s) for "
+                "this run, so nothing was deleted. If another entry still looks "
+                "wrong, say so in `report_step` instead of deleting it."
+            )
+
+        target = (knowledge_id or "").strip()
+        if target not in state.knowledge_seen:
+            # The whole guard against deleting blind. Orchestration resolves this id
+            # to a real row and has no way to know the agent never read it, so this
+            # check exists here or nowhere. An id already deleted in this run is
+            # gone from `knowledge_seen` too, which is what stops a second delete.
+            return (
+                f"Nothing was deleted: {knowledge_id!r} is not an entry "
+                "`search_knowledge` returned in this run, and you can only delete "
+                "what you have read. Search for it first and use the id printed with "
+                "the hit."
+            )
+
+        await channel.note(thought, LogCategory.THOUGHT, step)
+        state.knowledge_forgets_attempted += 1
+        try:
+            await channel.write_knowledge(
+                MessageType.KNOWLEDGE_DELETE, KnowledgeDeletePayload(knowledge_id=target)
+            )
+        except QaCancelled:
+            raise
+        except Exception as error:  # noqa: BLE001 - a dead socket must not end the run here
+            # Nothing went out, so nothing was deleted and nothing is outstanding.
+            # The entry stays in `knowledge_seen`, which leaves it retryable.
+            return (
+                f"The deletion could not be sent — {error}. Nothing was deleted and "
+                "the entry is still on file."
+            )
+
+        # Taken out of what may be deleted and recorded as outstanding, in that
+        # order, before the result is composed: from here on a `record_knowledge`
+        # that fails is able to name exactly what is missing.
+        label = render_entry_label(target, state.knowledge_seen.pop(target, ""))
+        state.knowledge_deleted_unreplaced.append(label)
+        messages = channel.drain_operator_messages()
+        remaining = max(MAX_FORGETS_PER_RUN - state.knowledge_forgets_attempted, 0)
+
+        return with_operator_messages(
+            f"Deleted {label}. This cannot be undone from here.\n\n"
+            "If you deleted it in order to CORRECT it, call `record_knowledge` NOW "
+            "with the corrected version, before anything else. There is no update "
+            "tool: that was half of a repair, and a run that stops here has removed "
+            "the knowledge rather than fixed it.\n\n"
+            f"{remaining} deletion(s) left in this run.",
+            messages,
+        )
 
     @tool
     async def click_button(step: int, target_id: int, thought: str) -> str:
@@ -565,6 +746,8 @@ def build_tools(
     tools: list[BaseTool] = [
         observe_scene,
         search_knowledge,
+        record_knowledge,
+        forget_knowledge,
         click_button,
         enter_text,
         press_key,

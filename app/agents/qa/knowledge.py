@@ -1,22 +1,34 @@
-"""Asking the project's knowledge base what the screen cannot tell you.
+"""Reading from, and writing to, the project's knowledge base.
 
 A QA agent starts a run knowing only the scenario text it was handed. Everything
 else about the game — what a mechanic costs, what counts as success, which of two
 plausible readings of "the purchase fails" is the designed one — lives in the
 project's knowledge base, extracted from its design documents. Without a way to
-ask, a step whose `expected` depends on a rule is judged on a guess.
+ask, a step whose `expected` depends on a rule is judged on a guess. And without
+a way to write, everything a run works out for itself dies with the run.
 
-Three things are kept here rather than in `app/agents/qa/tools.py`, for the same
-reason `vision.py` keeps the capture budget and image handling: they are this
-tool's own subject matter, and the numbers, the vocabulary and the wording that
+These things are kept here rather than in `app/agents/qa/tools.py`, for the same
+reason `vision.py` keeps the capture budget and image handling: they are these
+tools' own subject matter, and the numbers, the vocabulary and the wording that
 teaches the agent to ration them all have to move together.
 
-Nothing in this module touches the game. A search changes no screen, so no scene
-view is produced and none is appended to the result — see `app/agents/qa/context.py`
-for why re-loading a scene the agent has already read is the thing to avoid.
+**There is no update.** An entry is corrected by deleting it and recording the
+corrected version, which is two calls where the knowledge base offers one. That
+choice buys a smaller tool surface and pays for it with a gap: a run that deletes
+and then fails to record has removed knowledge rather than fixed it. Everything
+in this module that reads as over-careful — `render_missing_knowledge_warning`,
+the deletion budget being the smallest number here, the replacement write being
+exempt from the record cap — exists to make that gap loud and narrow.
+
+Nothing in this module touches the game. Neither a search nor a write changes a
+screen, so no scene view is produced and none is appended to any result — see
+`app/agents/qa/context.py` for why re-loading a scene the agent has already read
+is the thing to avoid.
 """
 
 from app.qa.envelope import KnowledgeSearchHit, KnowledgeSearchResultPayload
+
+# --- how much of the knowledge base one run may move -------------------------
 
 # A run that keeps looking things up instead of deciding reaches the deadline
 # with nothing reported — the same failure `MAX_CAPTURES_PER_RUN` exists to
@@ -24,6 +36,21 @@ from app.qa.envelope import KnowledgeSearchHit, KnowledgeSearchResultPayload
 # during a run: the second search on the same subject learns nothing the first
 # one did not.
 MAX_SEARCHES_PER_RUN = 6
+
+# How much a run may add. Below the search budget because a run that learns five
+# durable rules about a game has had an unusually instructive hour; one that
+# claims to have learned more is filing observations, not knowledge.
+MAX_RECORDS_PER_RUN = 5
+
+# How much a run may erase, and the smallest number in this module on purpose.
+#
+# Deletion is the least reversible thing the agent does and the least watched. A
+# wrong verdict is read by whoever reads the report; an entry wrongly deleted just
+# quietly stops being there for every run after this one, and the soft delete only
+# helps somebody who already suspects it happened. `FORGET_KNOWLEDGE_DESCRIPTION`
+# is the other half of the defence — this is the half that holds when the wording
+# does not.
+MAX_FORGETS_PER_RUN = 2
 
 # How many hits one search brings back.
 #
@@ -80,6 +107,106 @@ whenever you are unsure which the answer would be filed under.
 An empty result is an answer. It means the documents do not cover this, not that
 something went wrong — judge the step on what you can see and carry on."""
 
+# The two write descriptions carry the whole usage policy for these tools, per
+# ARTEL-192: the tool description is the single source, and the system prompt is
+# left alone. What each one has to teach is not "how to call it" — the arguments
+# are obvious — but where the line is. For recording, the line between a rule and
+# this run's own state; for deleting, the line between stale knowledge and a bug.
+# An agent that gets either wrong degrades the knowledge base for every run after.
+RECORD_KNOWLEDGE_DESCRIPTION = """Write down something you learned about this game, so later runs start knowing it.
+
+Use this when the run taught you a RULE the scenario did not state: what a
+mechanic costs, what a control actually does, what happens when a resource runs
+out, which of two readings of a screen is the designed one. The test for whether
+something belongs here is one question — would it still be true in tomorrow's
+run, on a fresh save?
+
+That question is what rules out this run's own state. "The player has 500 gold",
+"the shop is open", "the boss is at half health" are facts about this moment, not
+about the game, and filing them poisons the answers later runs get. "Buying is
+blocked while gold is below the price" is knowledge; "buying is blocked right
+now" is not.
+
+Do NOT record what the scenario already told you. Do NOT record a bug: a build
+behaving wrongly is a finding for `report_step`, not a rule to teach the next
+run — record it here and you have taught every later run that the broken
+behaviour is correct.
+
+`tag` is the topic it is filed under, one of {tags}. `summary` is one sentence,
+the fact itself, phrased as you would answer someone who asked. `description` is
+what stands behind it: the condition, the exception, what you saw that
+established it.
+
+You get {limit} of these for the whole run, so spend them on what was worth
+learning.
+
+Nothing answers a knowledge write, so send each fact once — a repeat files it
+twice, and no one will tell you."""
+
+FORGET_KNOWLEDGE_DESCRIPTION = """Delete a knowledge entry that is no longer true.
+
+This is the most destructive thing you can do in a run and the least watched. A
+wrong verdict gets read by whoever reads the report; a rule you delete by mistake
+just stops being there, for every run after this one, with nobody prompted to
+look. So the bar is high, and you get only {limit} of these.
+
+Delete only when the game plainly contradicts the entry AND the game is the one
+that is right. ONE contradiction is not enough. A single disagreement between a
+documented rule and what you saw is more often a BUG than stale documentation —
+and a bug is something to report with `report_step`, not something to erase the
+rule over. If you cannot tell which of the two you are looking at, report it and
+leave the entry alone. Leaving a stale entry costs a later run one confusing
+search result; deleting a correct one costs it the answer entirely.
+
+`knowledge_id` must be the id of an entry `search_knowledge` returned to you in
+this run — it is printed with each hit. You cannot delete something you have not
+read.
+
+There is no update tool, and that is deliberate. To CORRECT an entry: delete it,
+then call `record_knowledge` with the corrected version IMMEDIATELY, in the same
+step, before anything else. Those two calls are one repair. A run that makes the
+first and not the second has deleted that knowledge rather than fixed it, and
+nothing here can undo it for you.
+
+`thought` is why this entry is wrong. It is the only record of the reasoning
+behind the deletion, so write what someone would need who later asks whether this
+should have been deleted at all."""
+
+
+def render_entry_label(knowledge_id: str, summary: str) -> str:
+    """How one knowledge entry is named back to the agent.
+
+    The summary rides along wherever there is one, because an id alone tells the
+    agent nothing about what it just removed — and the place this matters most is
+    the warning below, where the whole point is naming what went missing.
+    """
+    return f'{knowledge_id} — "{summary}"' if summary else knowledge_id
+
+
+def render_missing_knowledge_warning(deleted: list[str]) -> str:
+    """The sentence that must appear whenever a write fails after a delete did not.
+
+    This is the one path in this design that loses knowledge. There is no update
+    tool, so correcting an entry is a delete followed by a record, and the gap
+    between the two is real: the delete is already applied on the far side and
+    nothing here can take it back. Every way `record_knowledge` can fail routes
+    through this, so no failure of it can be phrased as though nothing were at
+    stake.
+
+    Empty when the run has deleted nothing outstanding, which is the ordinary case
+    — a first record that fails has lost nothing yet.
+    """
+    if not deleted:
+        return ""
+    entries = "\n".join(f"  - {item}" for item in deleted)
+    return (
+        "\n\nNOTHING WAS RECORDED, and you have already deleted:\n"
+        f"{entries}\n"
+        "That knowledge is missing from the project right now. Fix the problem "
+        "above and call `record_knowledge` again immediately — nothing else will, "
+        "and the deletion cannot be undone from here."
+    )
+
 
 def render_description(description: str) -> str:
     if len(description) <= MAX_DESCRIPTION_CHARS:
@@ -95,8 +222,16 @@ def render_hit(index: int, hit: KnowledgeSearchHit) -> str:
     run observed. The similarity is printed for the same reason — a weak match is
     still returned, and the agent has to be able to discount it rather than treat
     the top hit as authoritative by position alone.
+
+    The id is printed because a search is the only way to reach one. `forget_knowledge`
+    takes an id and refuses one this run has not been shown, so an entry the agent
+    never read is an entry it cannot delete; unprinted, the id would make that rule
+    unsatisfiable rather than safe.
     """
-    header = f"{index}. [{hit.tag or 'UNTAGGED'} · from {hit.source or 'unknown'} · similarity {hit.score:.2f}]"
+    header = (
+        f"{index}. [id {hit.id or 'unknown'} · {hit.tag or 'UNTAGGED'} · "
+        f"from {hit.source or 'unknown'} · similarity {hit.score:.2f}]"
+    )
     body = render_description(hit.description)
     lines = [header, f"   {hit.summary}"] if hit.summary else [header]
     if body:

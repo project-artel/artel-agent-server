@@ -13,7 +13,11 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import wrap_model_call
 
 from app.agents.qa.context import fold_stale_scenes
-from app.agents.qa.knowledge import MAX_SEARCHES_PER_RUN
+from app.agents.qa.knowledge import (
+    MAX_FORGETS_PER_RUN,
+    MAX_RECORDS_PER_RUN,
+    MAX_SEARCHES_PER_RUN,
+)
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.vision import QaCaptureVisionMiddleware
@@ -41,8 +45,13 @@ MAX_LOGGED_CHARS = 4000
 # per-run allowances the tools cap themselves at — while PER_STEP covers the
 # work of one scenario step. So BASE grows when a new run-level allowance is
 # added; left alone, `search_knowledge` would have taken its budget out of the
-# steps and shortened every scenario by the amount it looked things up.
-BASE_TOOL_CALLS = 10 + MAX_SEARCHES_PER_RUN
+# steps and shortened every scenario by the amount it looked things up. The
+# knowledge writes are counted the same way, and the record allowance is the one
+# that must be there in full: a `forget_knowledge` whose replacement write cannot
+# be afforded is how this design loses knowledge.
+BASE_TOOL_CALLS = (
+    10 + MAX_SEARCHES_PER_RUN + MAX_RECORDS_PER_RUN + MAX_FORGETS_PER_RUN
+)
 TOOL_CALLS_PER_STEP = 15
 RUN_DEADLINE_SECONDS = 600.0
 

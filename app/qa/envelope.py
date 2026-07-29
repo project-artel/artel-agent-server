@@ -29,6 +29,20 @@ class MessageType(StrEnum):
     # them: it rejects an unknown type outright, and that rejection reaches the
     # waiting tool as silence rather than as an error it could report.
     KNOWLEDGE_SEARCH = "KNOWLEDGE_SEARCH"
+    # Writes to the project's knowledge base: one new entry, and one soft delete.
+    #
+    # Unlike the search, these are ONE-WAY. Orchestration's `routeKnowledgeMutation`
+    # answers a mutation with no frame at all — a success is silent, and a rejection
+    # becomes an ORCHE_INTERNAL row on the run's own timeline, published to the
+    # operator's stream rather than back down this socket. Nothing on this side may
+    # wait for a reply to one of these.
+    #
+    # Orchestration also accepts KNOWLEDGE_UPDATE. It is deliberately absent here:
+    # this agent corrects an entry by deleting it and recording the corrected
+    # version, so there is no tool that could put that frame on the wire
+    # (ARTEL-189). The Orchestration path stays for other callers.
+    KNOWLEDGE_CREATE = "KNOWLEDGE_CREATE"
+    KNOWLEDGE_DELETE = "KNOWLEDGE_DELETE"
     # Bidirectional
     ERROR = "ERROR"
     # Bidirectional. The operator talking to the Agent mid-run, and its reply.
@@ -307,6 +321,38 @@ class KnowledgeSearchPayload(BaseModel):
     # singular — so a value read off a hit can be fed straight back as a filter.
     tag: str | None = None
     limit: int
+
+
+class KnowledgeCreatePayload(BaseModel):
+    """One fact the run learned, to be filed against this project.
+
+    No project and no source travel with it. Orchestration fixes both from the run
+    itself — `qaTryId -> gameInstanceId -> projectId`, `source=QA`,
+    `source_id=qa_try.id` — which is what stops one run's frame from writing into
+    another project's knowledge base.
+    """
+
+    tag: str
+    summary: str
+    description: str
+
+
+class KnowledgeDeletePayload(BaseModel):
+    """The soft delete of one existing entry.
+
+    Split from the create rather than sharing Orchestration's single
+    `KnowledgeMutationRequest`, because on this side the two have no field in
+    common: a create never names an id, and a delete never carries a body. One
+    model would make every field optional and leave which ones are required to a
+    comment.
+
+    `knowledge_id` is a string, and matches the wire name Orchestration maps with
+    `@JsonProperty("knowledge_id")`. Ids leave Orchestration as text so a 64-bit
+    value cannot lose precision on the way through JSON, and it comes back the
+    same way.
+    """
+
+    knowledge_id: str
 
 
 class StatusPayload(BaseModel):
