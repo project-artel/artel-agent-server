@@ -192,13 +192,14 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
 
     The paragraphs it condensed were duplicates of the tool docstrings, and a
     duplicate is only safe to remove while the other copy is still there. So the
-    check spans both halves: every tool v2 pointed at is still pointed at — by v3
-    or by another tool's description — and the rules that span tools, undo what
-    you hold and take the scene's pixels verbatim, are still said out loud.
+    check spans both halves: what a tool leaves behind, its own description now
+    has to name the way out of, and the rules no single tool owns are still said
+    out loud in the prompt.
 
-    Pointing matters beyond listing. A tool the model is handed but never told to
-    reach for is one it reaches for late or not at all, and `resume_game_time` is
-    the case that bites: nothing prompts it except having paused.
+    The pairs are the ones worth pinning. Nothing prompts `release_key` or
+    `resume_game_time` except having called its partner, so a description that
+    stops naming the undo leaves the run to end with a key down or time stopped —
+    and that poisons every step after, not just the one that set it.
     """
     v2 = load_prompt("qa_run", "system", "v2").body
     v3 = load_prompt("qa_run", "system", "v3").body
@@ -206,13 +207,19 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     channel = QaRunChannel(qa_try_id=7, send=_ignore)
     tools = {tool.name: tool for tool in build_tools(channel, QaRunState(total_steps=1))}
 
-    for name in tools:
-        if name not in v2:
-            continue
-        pointed_at = name in v3 or any(
-            name in other.description for other in tools.values() if other.name != name
+    for holder, undo in (
+        ("hold_mouse_button", "release_mouse_button"),
+        ("hold_key", "release_key"),
+        ("pause_game_time", "resume_game_time"),
+    ):
+        assert undo in tools[holder].description, (
+            f"{holder} leaves state behind without naming {undo}"
         )
-        assert pointed_at, f"v2 pointed the agent at {name} and nothing does any more"
+
+    # Waiting is the other way a run ends with nothing to show. v2 closed that
+    # off in the prompt ("do not wait forever on silence"); v3 dropped the
+    # sentence, so the tool has to say the run pays for it.
+    assert "run's clock" in tools["wait_for_operator"].description
 
     # Cross-tool rules have no single owner, so no tool description can carry them.
     assert "VERBATIM" in v3

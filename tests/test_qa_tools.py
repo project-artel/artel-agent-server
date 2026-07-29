@@ -535,17 +535,41 @@ def test_verdict_tools_each_write_their_own_thought_row() -> None:
 # --- what the model is handed, before any of it is called ---------------------
 
 
-def test_every_tool_reaches_the_model_named_and_described() -> None:
-    """The tool list IS documentation; a blank entry is a tool nobody can use.
+def test_the_agent_is_offered_exactly_these_tools() -> None:
+    """Names are the API between the prompt and the code, and `@tool` derives them.
 
-    `@tool` takes the name from the function and the description from the
-    docstring, so a rename or a stripped docstring shows up here rather than as a
-    run where the agent quietly never reaches for the tool.
+    A tool renamed by renaming its function reads as a harmless refactor and is
+    not one: the system prompt names tools in prose, and a run whose prompt calls
+    for a tool the model was not given is a run that stalls on step one.
     """
     _, _, tools, _ = make()
 
+    assert set(tools) == {
+        "observe_scene",
+        "click_button",
+        "enter_text",
+        "press_key",
+        "move_pointer",
+        "hold_mouse_button",
+        "release_mouse_button",
+        "hold_key",
+        "release_key",
+        "drag_pointer",
+        "pause_game_time",
+        "resume_game_time",
+        "wait_for_operator",
+        "report_step",
+        "finish_run",
+        "reply_to_operator",
+        "capture_screen",
+    }
+
+
+def test_every_tool_reaches_the_model_described() -> None:
+    """The tool list IS documentation; a blank entry is a tool nobody can use."""
+    _, _, tools, _ = make()
+
     for name, tool in tools.items():
-        assert tool.name == name
         assert tool.description.strip(), f"{name} reaches the model with no description"
 
 

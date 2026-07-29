@@ -417,7 +417,9 @@ def build_tools(
         first and only then wait for it.
 
         Returns what they said, or tells you nobody answered in time — silence is
-        not a failure, and you decide what to do with it.
+        not a failure, and you decide what to do with it. But do not settle in on
+        it: waiting is capped per call, and a couple of full waits is the whole
+        run's clock, spent on nothing.
         """
         await channel.note(thought, LogCategory.THOUGHT, step)
         waited = bounded_operator_wait(timeout_seconds)
@@ -490,9 +492,9 @@ def build_tools(
         await channel.say(message, step)
         return "Sent."
 
-    # Each name below is the decorated tool, not the function: `@tool` reads the
-    # name off the function and the description off the docstring, so the two can
-    # no longer disagree the way an explicit `name=` could.
+    # Each name below is the decorated tool, not the function: `@tool` takes the
+    # name off the function itself, so a tool can no longer end up filed under a
+    # name string that drifted away from what it is called here.
     tools: list[BaseTool] = [
         observe_scene,
         click_button,
