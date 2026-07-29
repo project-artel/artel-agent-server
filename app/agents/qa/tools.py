@@ -10,8 +10,16 @@ from typing import Any
 
 from langchain_core.tools import BaseTool, tool
 
+from app.agents.qa.knowledge import (
+    KNOWLEDGE_TAGS,
+    MAX_SEARCHES_PER_RUN,
+    RESULT_LIMIT,
+    SEARCH_KNOWLEDGE_DESCRIPTION,
+    render_results,
+)
 from app.agents.qa.vision import MAX_CAPTURES_PER_RUN
 from app.qa.channel import (
+    KnowledgeSearchFailed,
     QaRunChannel,
     bounded_operator_wait,
     with_operator_messages,
@@ -50,6 +58,9 @@ class QaRunState:
         # refuses every one of them, and counting only what worked would leave that
         # loop unbounded — the cap has to bind on the failing case too.
         self.captures_attempted = 0
+        # Attempts again, and for the same reason: a search Orchestration refuses
+        # every time would otherwise be a loop with no bound on it.
+        self.knowledge_searches_attempted = 0
         # Handed to the vision middleware on the next model call. The tool cannot
         # return the image itself — an image block on a tool result is rejected by
         # the chat/completions API every model here is reached through.
@@ -221,6 +232,62 @@ def build_tools(
         await channel.note(f"Captured {what}: {url}", LogCategory.OBSERVATION, step)
 
         return with_operator_messages(f"Captured {what}. The image follows.", messages)
+
+    @tool(
+        description=SEARCH_KNOWLEDGE_DESCRIPTION.format(
+            limit=MAX_SEARCHES_PER_RUN, tags=", ".join(KNOWLEDGE_TAGS)
+        )
+    )
+    async def search_knowledge(
+        step: int, thought: str, query: str, tag: str | None = None
+    ) -> str:
+        # What the agent reads is SEARCH_KNOWLEDGE_DESCRIPTION, not this.
+        #
+        # Deliberately not routed through `_run`: that path dispatches actions and
+        # appends the scene they produced. A search moves nothing on screen, so a
+        # scene view here would be the same picture the agent already has, paid for
+        # again in context — exactly what `app/agents/qa/context.py` exists to stop.
+        if state.knowledge_searches_attempted >= MAX_SEARCHES_PER_RUN:
+            return (
+                f"You have used all {MAX_SEARCHES_PER_RUN} knowledge searches for "
+                "this run. Judge the remaining steps from the scenario and what you "
+                "can see."
+            )
+
+        topic = (tag or "").strip().upper()
+        if topic and topic not in KNOWLEDGE_TAGS:
+            # Refused before it goes out. Orchestration rejects an unknown tag
+            # outright rather than ignoring it, so sending one would spend a round
+            # trip and a search out of the run's budget to be told something this
+            # side already knew.
+            return (
+                f"{tag!r} is not a knowledge topic, so the search was not sent. "
+                f"Use one of {', '.join(KNOWLEDGE_TAGS)}, or leave `tag` out."
+            )
+
+        await channel.note(thought, LogCategory.THOUGHT, step)
+        state.knowledge_searches_attempted += 1
+        answer = await channel.search_knowledge(query, topic or None, RESULT_LIMIT)
+        messages = channel.drain_operator_messages()
+        remaining = MAX_SEARCHES_PER_RUN - state.knowledge_searches_attempted
+
+        if answer is None:
+            return with_operator_messages(
+                "The knowledge base did not answer in time. Judge this step from "
+                f"the scenario and what you can see. {remaining} search(es) left.",
+                messages,
+            )
+        if isinstance(answer, KnowledgeSearchFailed):
+            # Said plainly, with what to do instead. A failed lookup is a side
+            # errand that failed, not a failed step — an agent told only that
+            # something went wrong has been known to fail the step over it.
+            return with_operator_messages(
+                f"The knowledge search could not run — {answer.reason}. This says "
+                "nothing about the game; judge this step from the scenario and what "
+                f"you can see. {remaining} search(es) left.",
+                messages,
+            )
+        return with_operator_messages(render_results(answer, remaining), messages)
 
     @tool
     async def click_button(step: int, target_id: int, thought: str) -> str:
@@ -497,6 +564,7 @@ def build_tools(
     # name string that drifted away from what it is called here.
     tools: list[BaseTool] = [
         observe_scene,
+        search_knowledge,
         click_button,
         enter_text,
         press_key,

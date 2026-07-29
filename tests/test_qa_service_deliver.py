@@ -121,6 +121,51 @@ def test_the_run_survives_and_keeps_accepting_frames() -> None:
     asyncio.run(run())
 
 
+def test_a_knowledge_search_result_reaches_the_channel() -> None:
+    """The answer to a search has to be routed, or the tool that asked hangs
+    until its own timeout and the run pays for it."""
+
+    async def run() -> None:
+        service, session_id, task = await _running_service()
+        try:
+            handled = service.deliver(
+                session_id,
+                {
+                    "type": "KNOWLEDGE_SEARCH_RESULT",
+                    "correlationId": "whatever",
+                    "payload": {"query": "q", "model": "e5", "results": []},
+                },
+            )
+            assert handled is True
+        finally:
+            task.cancel()
+
+    asyncio.run(run())
+
+
+def test_an_inbound_error_is_accepted_even_when_it_answers_nothing() -> None:
+    """ERROR is a legitimate frame in both directions.
+
+    Rejected, it would come back over the socket as "unsupported inbound frame" —
+    this side reporting a protocol fault where the other side was reporting a
+    problem. Correlated to a pending search it releases that search; otherwise it
+    is logged and dropped.
+    """
+
+    async def run() -> None:
+        service, session_id, task = await _running_service()
+        try:
+            handled = service.deliver(
+                session_id,
+                {"type": "ERROR", "payload": {"message": "knowledge search failed"}},
+            )
+            assert handled is True
+        finally:
+            task.cancel()
+
+    asyncio.run(run())
+
+
 def test_an_unknown_type_is_still_rejected() -> None:
     async def run() -> None:
         service, session_id, task = await _running_service()
