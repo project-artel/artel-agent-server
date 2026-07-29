@@ -11,7 +11,11 @@ from typing import Any
 from langchain_core.tools import StructuredTool
 
 from app.agents.qa.vision import MAX_CAPTURES_PER_RUN
-from app.qa.channel import QaRunChannel, with_operator_messages
+from app.qa.channel import (
+    QaRunChannel,
+    bounded_operator_wait,
+    with_operator_messages,
+)
 from app.qa.envelope import (
     JsonRpcAction,
     LogCategory,
@@ -346,6 +350,62 @@ def build_tools(
             step,
         )
 
+    async def pause_game_time(step: int, thought: str) -> str:
+        """Freeze game time, so the screen stops changing while you read it.
+
+        Use this when the thing you have to judge does not stay still — a hit
+        effect, a countdown, a toast that disappears, a cutscene that plays past
+        the moment the step is about. Clicking, typing and observing all keep
+        working while time is frozen, because they do not run on game time.
+
+        Nothing unfreezes this for you. Call `resume_game_time` before you report
+        the step, or every step after it runs against a stopped game.
+        """
+        return await _run(
+            [JsonRpcAction(id=1, method="pause_time")],
+            thought,
+            "Pausing game time",
+            step,
+        )
+
+    async def resume_game_time(step: int, thought: str) -> str:
+        """Let game time run again, at the speed it had before the pause.
+
+        Fails if the game was not paused by `pause_game_time` — the speed a game
+        chose for itself is not yours to overwrite.
+        """
+        return await _run(
+            [JsonRpcAction(id=1, method="resume_time")],
+            thought,
+            "Resuming game time",
+            step,
+        )
+
+    async def wait_for_operator(
+        thought: str, timeout_seconds: float = 60.0, step: int | None = None
+    ) -> str:
+        """Stop and wait until the operator says something.
+
+        For when you cannot go on without a person: the step is ambiguous, the
+        game is in a state the scenario does not cover, or you asked them
+        something with `reply_to_operator` and the answer decides what you do
+        next. The run makes no progress while you are here, so ask the question
+        first and only then wait for it.
+
+        Returns what they said, or tells you nobody answered in time — silence is
+        not a failure, and you decide what to do with it.
+        """
+        await channel.note(thought, LogCategory.THOUGHT, step)
+        waited = bounded_operator_wait(timeout_seconds)
+        messages = await channel.wait_for_operator(timeout_seconds)
+        if not messages:
+            return (
+                f"The operator said nothing within {waited:g}s. Decide for "
+                "yourself whether to wait again, carry on with what you have, or "
+                "judge the step failed."
+            )
+        return with_operator_messages("The operator answered.", messages)
+
     async def report_step(step: int, passed: bool, message: str, thought: str) -> str:
         """Record the verdict for one scenario step, with the evidence for it.
 
@@ -416,6 +476,9 @@ def build_tools(
         StructuredTool.from_function(coroutine=hold_key, name="hold_key"),
         StructuredTool.from_function(coroutine=release_key, name="release_key"),
         StructuredTool.from_function(coroutine=drag_pointer, name="drag_pointer"),
+        StructuredTool.from_function(coroutine=pause_game_time, name="pause_game_time"),
+        StructuredTool.from_function(coroutine=resume_game_time, name="resume_game_time"),
+        StructuredTool.from_function(coroutine=wait_for_operator, name="wait_for_operator"),
         StructuredTool.from_function(coroutine=report_step, name="report_step"),
         StructuredTool.from_function(coroutine=finish_run, name="finish_run"),
         StructuredTool.from_function(coroutine=reply_to_operator, name="reply_to_operator"),
