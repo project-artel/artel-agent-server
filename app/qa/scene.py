@@ -27,6 +27,18 @@ MAX_ACTIONS = 40
 # remains of every screen it has ever shown.
 MISSING_LIFETIME = 5
 
+# `render`'s output is wrapped in these so a later pass — `fold_stale_scenes` in
+# `app/agents/qa/context.py` — can find exactly where the view starts and ends
+# inside a tool message that may also carry action-outcome lines above it and an
+# operator block below it. A marker beats guessing at `scene: ` text: nothing
+# stops a game's own scene name, or an observable's value, from containing that
+# word, and a wrong guess would clip a view rather than fold it whole. The
+# observation number rides in the start marker so a reader of a folded message
+# does not have to parse the view itself to say which one went missing.
+SCENE_VIEW_START_PREFIX = "<<scene view "
+SCENE_VIEW_START_SUFFIX = ">>"
+SCENE_VIEW_END = "<<end scene view>>"
+
 
 class Observation(BaseModel):
     """A value, and the observation it became that value on."""
@@ -270,4 +282,6 @@ class SceneMemory(BaseModel):
                     f"{_where(visual)}{suffix}"
                 )
 
-        return "\n".join(lines)
+        body = "\n".join(lines)
+        start = f"{SCENE_VIEW_START_PREFIX}{self.updates}{SCENE_VIEW_START_SUFFIX}"
+        return f"{start}\n{body}\n{SCENE_VIEW_END}"

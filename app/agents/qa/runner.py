@@ -10,7 +10,9 @@ import json
 import logging
 
 from langchain.agents import create_agent
+from langchain.agents.middleware import wrap_model_call
 
+from app.agents.qa.context import fold_stale_scenes
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.vision import QaCaptureVisionMiddleware
@@ -136,6 +138,17 @@ def _first_message(scenario: ScenarioDraft) -> str:
     )
 
 
+@wrap_model_call
+async def _fold_scene_views(request, handler):
+    """Fold stale scene views out of what one model call actually receives.
+
+    `request.override` replaces only this call's messages, not the graph's own
+    state, so the timeline and the console logging below keep the full text —
+    see `app/agents/qa/context.py` for the fold itself.
+    """
+    return await handler(request.override(messages=fold_stale_scenes(request.messages)))
+
+
 class QaRunner:
     """Runs one scenario to completion over one channel."""
 
@@ -184,9 +197,16 @@ class QaRunner:
             model=build_chat_model(self._model),
             tools=tools,
             system_prompt=system_prompt,
-            # Only when the model can look. On a text-only model the middleware
-            # would have nothing to inject and nothing to trim.
-            middleware=[QaCaptureVisionMiddleware(state)] if supports_vision else [],
+            # Folding runs on every request; the scene views pile up whether or
+            # not the model can see. The vision middleware is added only when it
+            # can — on a text-only model it would have nothing to inject and
+            # nothing to trim. The two touch disjoint messages, so their order
+            # here does not matter.
+            middleware=(
+                [_fold_scene_views, QaCaptureVisionMiddleware(state)]
+                if supports_vision
+                else [_fold_scene_views]
+            ),
         )
         # Streamed rather than invoked so the model's reasoning can be put on the
         # timeline as it happens. Left to a tool the agent chooses to call, the

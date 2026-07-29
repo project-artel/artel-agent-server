@@ -1,5 +1,12 @@
 from app.qa.envelope import ActionRecord, GameState, Interactable, Rect, Screen, Visual
-from app.qa.scene import MAX_VALUES_PER_OBSERVABLE, MISSING_LIFETIME, SceneMemory
+from app.qa.scene import (
+    MAX_VALUES_PER_OBSERVABLE,
+    MISSING_LIFETIME,
+    SCENE_VIEW_END,
+    SCENE_VIEW_START_PREFIX,
+    SCENE_VIEW_START_SUFFIX,
+    SceneMemory,
+)
 
 
 def state(
@@ -252,7 +259,25 @@ def test_render_omits_the_visuals_section_when_the_scene_sends_none() -> None:
     view = memory.render(0)
 
     assert "on screen:" not in view
-    assert view.rstrip().endswith("[1] Start (button)")
+    # The last content line, i.e. right before the end-of-view marker.
+    content_lines = view.splitlines()
+    assert content_lines[-2] == "  [1] Start (button)"
+
+
+def test_render_wraps_the_view_in_start_and_end_markers() -> None:
+    """`fold_stale_scenes` (app/agents/qa/context.py) locates a view by these,
+    rather than guessing where `scene: ...` text starts or ends."""
+    memory = SceneMemory()
+    memory.apply(state(interactables=[Interactable(id=1, name="Start", type="button")]))
+    memory.apply(state(interactables=[Interactable(id=1, name="Start", type="button")]))
+
+    view = memory.render(0)
+
+    start = f"{SCENE_VIEW_START_PREFIX}{memory.updates}{SCENE_VIEW_START_SUFFIX}"
+    assert view.startswith(start)
+    assert view.endswith(SCENE_VIEW_END)
+    # The observation number in the marker matches the one in the view body.
+    assert f"(observation {memory.updates})" in view
 
 
 def test_render_says_nothing_extra_when_the_scene_carries_no_coordinates() -> None:
