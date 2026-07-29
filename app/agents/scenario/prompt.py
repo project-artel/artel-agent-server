@@ -3,6 +3,10 @@ import json
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from app.agents.scenario.schemas import OutputLanguage, ScenarioAgentRequest
+from app.prompts import load_prompt
+
+# Directory under app/prompts/ holding this agent's prompt versions.
+PROMPT_AGENT = "scenario"
 
 
 # Written in the target language on purpose: the language a directive is written
@@ -20,31 +24,6 @@ LANGUAGE_DIRECTIVES: dict[OutputLanguage, str] = {
         "Do not change JSON keys or step numbers."
     ),
 }
-
-SYSTEM_PROMPT = (
-    "You are a Unity game QA test scenario generation agent. "
-    "Use the provided game context and conversation to create or revise a game "
-    "QA test scenario. The provided draft is the AUTHORITATIVE current state and "
-    "may already contain the user's manual edits — preserve those edits and "
-    "apply the new user input on top of them; do not discard or silently revert "
-    "them. If the draft is null, create a new scenario from scratch. "
-    "Describe state, action, and expected as plain natural language a human "
-    "tester would use (e.g. \"press the buy button\"), not as code identifiers "
-    "such as GameObject, component, method, or scene names copied from the "
-    "provided context; binding those intents to invokable functions happens "
-    "later, at execution time. "
-    "{language_directive} "
-    "Return only valid JSON matching the requested output contract, and number "
-    "steps sequentially starting from 1."
-)
-
-HUMAN_TEMPLATE = (
-    "Unity context:\n{unity_context}\n\n"
-    "Game context:\n{game_context}\n\n"
-    "Current draft (authoritative):\n{draft}\n\n"
-    "User input:\n{user_input}\n\n"
-    "Output contract:\n{output_contract}"
-)
 
 OUTPUT_CONTRACT = {
     "message": "Brief chatbot response for the user.",
@@ -70,12 +49,14 @@ OUTPUT_CONTRACT = {
 }
 
 
-def build_scenario_prompt() -> ChatPromptTemplate:
+def build_scenario_prompt(version: str | None = None) -> ChatPromptTemplate:
+    system = load_prompt(PROMPT_AGENT, "system", version)
+    human = load_prompt(PROMPT_AGENT, "human", version)
     return ChatPromptTemplate.from_messages(
         [
-            ("system", SYSTEM_PROMPT),
+            ("system", system.body),
             MessagesPlaceholder("history"),
-            ("human", HUMAN_TEMPLATE),
+            ("human", human.body),
         ]
     )
 

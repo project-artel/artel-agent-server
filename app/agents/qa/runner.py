@@ -17,10 +17,14 @@ from app.agents.qa.vision import QaCaptureVisionMiddleware
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
 from app.llm.chat_model import build_chat_model
 from app.llm.models import DEFAULT_MODEL, LLMModel, get_model_spec
+from app.prompts import load_prompt
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory
 
 logger = logging.getLogger(__name__)
+
+# Directory under app/prompts/ holding this agent's prompt versions.
+PROMPT_AGENT = "qa_run"
 
 # A scene view runs long. Cut it for the console, and say it was cut — a silently
 # truncated log reads as a smaller context than the model actually saw.
@@ -36,80 +40,6 @@ RUN_DEADLINE_SECONDS = 600.0
 # blocks put it under. Providers disagree on both.
 _REASONING_BLOCK_TYPES = ("text", "thinking", "reasoning")
 _REASONING_KEYS = ("text", "thinking", "reasoning", "reasoning_content")
-
-# Only shown to models that can read images. Telling a text-only model about a tool
-# it does not have would send it looking for one.
-VISION_DIRECTIVE = (
-    "The scene listing says what exists, not what it looks like. When a step is "
-    "about appearance — a layout that may be broken, a button that may be covered, "
-    "a sprite in the wrong state, text that may be unreadable — call "
-    "`capture_screen` and judge from the picture. Screenshots are limited, so "
-    "spend them on the steps where looking decides the verdict.\n"
-    "\n"
-)
-
-
-SYSTEM_PROMPT = (
-    "You are a QA agent executing an approved test scenario against a live Unity "
-    "game, step by step, using tools.\n"
-    "\n"
-    "How to work:\n"
-    "1. Call `observe_scene` before acting. You cannot act on a screen you have "
-    "not seen, and ids only mean anything in the scene you just observed.\n"
-    "2. Carry out the step's `action` with `click_button`, `enter_text`, "
-    "`press_key`, or the pointer and hold tools described below. Take ids from "
-    "the scene you just observed — never invent one.\n"
-    "3. Each of those returns the outcome AND the scene it produced, written as "
-    "what CHANGED. That is the evidence the step's `expected` is about; you "
-    "usually do not need a separate observation afterwards.\n"
-    "4. Call `report_step` with your verdict and the evidence you saw.\n"
-    "5. Repeat for every step, then call `finish_run` exactly once.\n"
-    "\n"
-    "Every tool takes a `thought` — why you are doing this, in one line. It is "
-    "written to the run's timeline, and it is the only record of your reasoning "
-    "a reviewer will ever see. Most tools also take `step`, the scenario step "
-    "the call belongs to; pass the number from the step list, not a guess.\n"
-    "\n"
-    "{vision_directive}"
-    "A screen with nothing clickable is not a dead end. Dialogue, narration and "
-    "cutscenes usually advance on a key — `press_key` needs no target and works "
-    "when the scene lists no interactables at all. Reach for it before concluding "
-    "that a step cannot be done.\n"
-    "\n"
-    "Neither is a target the scene gives no id for. The scene prints each element "
-    "as `@ x,y wxh` — `x,y` is its CENTRE, the point to aim at, and `wxh` its "
-    "size. Those numbers go into `move_pointer` and `drag_pointer` VERBATIM: the "
-    "tools take exactly the pixels the scene reports, so never convert, flip or "
-    "recompute them. `move_pointer` hovers, `drag_pointer` drags one point onto "
-    "another. An element marked `(off screen)` has no position you can aim at — "
-    "bring it into view first.\n"
-    "\n"
-    "The scene also lists what it cannot offer as an action, under `on screen:` — "
-    "backgrounds, portraits, sprites. Anything printed there with coordinates can "
-    "still be pressed or dragged with the pointer tools, exactly like an element "
-    "from the actionable list; only its id is useless, since nothing takes it. "
-    "Dragging a sprite that is not a button is reachable no other way, so look "
-    "there before deciding the step's target does not exist.\n"
-    "\n"
-    "`hold_mouse_button`, `hold_key` and their `release_` partners are for state "
-    "the game reads as held — walking with a key down, a press that must outlast "
-    "several moves. Whatever you hold, release it in the same step, before you "
-    "report a verdict: a button or key left down poisons every step after it. "
-    "When a plain drag is all you need, use `drag_pointer` rather than holding "
-    "the button yourself — it sends the whole press-move-release as one batch the "
-    "game runs in order, so it cannot be left half-done.\n"
-    "\n"
-    "If the screen is not ready — loading, animating, counting down — call "
-    "`observe_scene` again with `wait_seconds` rather than acting into it. If the "
-    "game stops answering, decide for yourself whether to wait once more or judge "
-    "the step failed; do not loop on it forever.\n"
-    "\n"
-    "The operator may speak to you mid-run. Their words are appended to tool "
-    "results. Treat an instruction as binding from that point on, and answer a "
-    "question with `reply_to_operator` — never with an action.\n"
-    "\n"
-    "{language_directive}"
-)
 
 
 def _clip(text: str) -> str:
@@ -144,10 +74,13 @@ class QaRunner:
         model: LLMModel = DEFAULT_MODEL,
         language: OutputLanguage = DEFAULT_LANGUAGE,
         deadline_seconds: float = RUN_DEADLINE_SECONDS,
+        prompt_version: str | None = None,
     ) -> None:
         self._model = model
         self._language = language
         self._deadline = deadline_seconds
+        # None leaves the choice to settings, and then to the newest version.
+        self._prompt_version = prompt_version
 
     def _tool_call_limit(self, steps: int) -> int:
         return BASE_TOOL_CALLS + TOOL_CALLS_PER_STEP * max(steps, 1)
@@ -156,23 +89,36 @@ class QaRunner:
         self, channel: QaRunChannel, scenario: ScenarioDraft, state: QaRunState
     ) -> None:
         supports_vision = get_model_spec(self._model).supports_vision
-        system_prompt = SYSTEM_PROMPT.format(
+        prompt = load_prompt(PROMPT_AGENT, "system", self._prompt_version)
+        # A separate file in the same version: it is prompt text, tuned by whoever
+        # tunes the rest of it, and only reaches models that can read images.
+        # Telling a text-only model about a tool it does not have would send it
+        # looking for one.
+        vision_directive = (
+            load_prompt(PROMPT_AGENT, "vision_directive", self._prompt_version).body
+            if supports_vision
+            else ""
+        )
+        system_prompt = prompt.body.format(
             language_directive=LANGUAGE_DIRECTIVES[self._language],
-            vision_directive=VISION_DIRECTIVE if supports_vision else "",
+            vision_directive=vision_directive,
         )
         first_message = _first_message(scenario)
         tools = build_tools(channel, state, supports_vision)
 
         # The whole starting context in one place. Reading a run afterwards means
         # knowing what the model was actually given, and the prompt is assembled
-        # from several pieces that are otherwise only visible in source.
+        # from several pieces that are otherwise only visible in source. The
+        # resolved prompt version is here because the text alone does not say
+        # which candidate produced this run.
         logger.info(
             "[QA] run starting\n"
-            "  model=%s language=%s steps=%d deadline=%.0fs tools=%s\n"
+            "  model=%s language=%s prompt_version=%s steps=%d deadline=%.0fs tools=%s\n"
             "--- system prompt ---\n%s\n"
             "--- first message ---\n%s",
             self._model,
             self._language,
+            prompt.version,
             len(scenario.steps),
             self._deadline,
             [tool.name for tool in tools],
