@@ -52,6 +52,7 @@ def test_the_app_refuses_to_start_on_a_prompt_version_that_does_not_exist() -> N
         qa_prompt_version = "v999"
         scenario_prompt_version = None
         game_context_prompt_version = None
+        knowledge_query_prompt_version = None
 
     original = loader.get_settings
     loader.get_settings = lambda: BadSettings()

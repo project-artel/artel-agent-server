@@ -5,13 +5,16 @@ import httpx
 from fastapi import FastAPI
 from redis.asyncio import from_url as redis_from_url
 
-from app.agents import GameContextAgent
+from app.agents import GameContextAgent, KnowledgeQueryAgent
+from app.api.embeddings import router as embeddings_router
 from app.api.extract import router as extract_router
+from app.api.knowledge_queries import router as knowledge_queries_router
 from app.api.qa_sessions import router as qa_sessions_router
 from app.api.routes import router as api_router
 from app.api.sessions import router as sessions_router
 from app.config import get_settings
 from app.documents import ExtractionService
+from app.llm import build_embedding_client
 from app.logging_config import configure_logging
 from app.observability import configure_langsmith
 from app.prompts import validate_prompts
@@ -52,6 +55,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         timeout=settings.extract_timeout_seconds,
         allowed_hosts=settings.extract_allowed_hosts,
     )
+
+    # Knowledge indexing support, both stateless: this server can produce
+    # vectors and search queries, and Orchestration stores what comes back.
+    app.state.embedding_client = build_embedding_client(settings)
+    app.state.knowledge_query_agent = KnowledgeQueryAgent()
+    app.state.knowledge_query_batch_limit = settings.knowledge_query_batch_limit
     try:
         yield
     finally:
@@ -87,6 +96,8 @@ def create_app() -> FastAPI:
     app.include_router(sessions_router)
     app.include_router(qa_sessions_router)
     app.include_router(extract_router)
+    app.include_router(embeddings_router)
+    app.include_router(knowledge_queries_router)
     return app
 
 

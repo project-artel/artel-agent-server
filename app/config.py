@@ -41,6 +41,27 @@ class Settings(BaseSettings):
     qa_prompt_version: str | None = None
     scenario_prompt_version: str | None = None
     game_context_prompt_version: str | None = None
+    knowledge_query_prompt_version: str | None = None
+
+    # Embeddings. The slug is configuration rather than a constant because
+    # swapping the model must not be a code change — but it is not a free swap
+    # either: embedding_dimensions is pinned into Orchestration's vector(N)
+    # column, so changing either value means a migration and a full re-index.
+    #
+    # openai/text-embedding-3-large scored best on the Korean retrieval set the
+    # model was chosen with (ARTEL-184): 34/34 top-1, MRR 1.0. 1024 is a
+    # Matryoshka truncation of its native 3072, which cost nothing measurable on
+    # that set and keeps the vector under pgvector's 2000-dimension ceiling for
+    # HNSW and IVFFlat indexes — 3072 would force halfvec on the storage side.
+    embedding_model: str = "openai/text-embedding-3-large"
+    embedding_dimensions: int = 1024
+    # One request's worth of texts. Unbounded batches are how a backfill worker
+    # turns a retry loop into a timeout and a bill.
+    embedding_batch_limit: int = 128
+
+    # Knowledge items per /knowledge-queries call. Each item is its own model
+    # call, so this bounds fan-out, not payload size.
+    knowledge_query_batch_limit: int = 32
 
     # /extract source fetch guards. allowed_hosts empty = no host restriction
     # (rely on the caller passing presigned URLs to the expected bucket).

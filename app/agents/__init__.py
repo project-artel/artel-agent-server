@@ -7,6 +7,15 @@ from app.agents.game_context import (
     GameContextAgentRequest,
     GameContextExtractionError,
 )
+from app.agents.knowledge_query import (
+    QUESTIONS_PER_ITEM,
+    KnowledgeItem,
+    KnowledgeItemQueries,
+    KnowledgeQueries,
+    KnowledgeQueryAgent,
+    KnowledgeQueryAgentRequest,
+    KnowledgeQueryGenerationError,
+)
 from app.agents.scenario import (
     DEFAULT_LANGUAGE,
     OutputLanguage,
@@ -20,12 +29,19 @@ from app.agents.scenario import (
 
 __all__ = [
     "DEFAULT_LANGUAGE",
+    "QUESTIONS_PER_ITEM",
     "AgentContext",
     "BaseAgent",
     "GameContext",
     "GameContextAgent",
     "GameContextAgentRequest",
     "GameContextExtractionError",
+    "KnowledgeItem",
+    "KnowledgeItemQueries",
+    "KnowledgeQueries",
+    "KnowledgeQueryAgent",
+    "KnowledgeQueryAgentRequest",
+    "KnowledgeQueryGenerationError",
     "OutputLanguage",
     "ScenarioAgent",
     "ScenarioAgentRequest",
