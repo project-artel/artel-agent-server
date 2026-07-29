@@ -35,6 +35,16 @@ def test_openapi_contract_describes_the_agent_server_api() -> None:
     assert schema["paths"]["/health"]["get"]["tags"] == ["system"]
 
 
+def test_opening_a_qa_session_offers_an_optional_prompt_version() -> None:
+    schema = client.get("/openapi.json").json()
+
+    request_body = schema["components"]["schemas"]["OpenQaSessionRequest"]
+
+    assert "prompt_version" in request_body["properties"]
+    # Optional, so every caller written before ARTEL-179 keeps working.
+    assert "prompt_version" not in request_body.get("required", [])
+
+
 def test_the_app_refuses_to_start_on_a_prompt_version_that_does_not_exist() -> None:
     """Boot is the last moment a bad prompt is cheap to notice."""
 
