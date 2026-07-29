@@ -197,7 +197,16 @@ class QaRunner:
             {"messages": [("user", _first_message(scenario))]},
             # recursion_limit counts graph steps, so it bounds tool calls as well
             # as the model turns between them.
-            {"recursion_limit": self._tool_call_limit(len(scenario.steps)) * 2},
+            {
+                "recursion_limit": self._tool_call_limit(len(scenario.steps)) * 2,
+                "run_name": "qa-scenario-run",
+                "tags": ["agent", "qa"],
+                "metadata": {
+                    "qa_try_id": channel.qa_try_id,
+                    "model": self._model.value,
+                    "language": self._language.value,
+                },
+            },
             stream_mode="updates",
         ):
             await self._log_reasoning(channel, update)

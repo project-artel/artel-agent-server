@@ -55,6 +55,36 @@ def _request(**overrides) -> ScenarioAgentRequest:
 _CTX = AgentContext(session_id="session-1")
 
 
+def test_agent_context_builds_trace_config() -> None:
+    context = AgentContext(
+        session_id="session-1", metadata={"environment": "test", "session_id": "wrong"}
+    )
+
+    assert context.trace_config("scenario-generation") == {
+        "run_name": "scenario-generation",
+        "tags": ["agent"],
+        "metadata": {"environment": "test", "session_id": "session-1"},
+    }
+
+
+def test_scenario_agent_passes_trace_config_to_runnable() -> None:
+    seen = {}
+
+    def capture(_inputs, config):
+        seen.update(config)
+        return _result()
+
+    agent = ScenarioAgent(
+        structured_factory=lambda model: RunnableLambda(capture)
+    )
+
+    asyncio.run(agent.run(_request(), _CTX))
+
+    assert seen["run_name"] == "scenario-generation"
+    assert seen["tags"] == ["agent"]
+    assert seen["metadata"]["session_id"] == "session-1"
+
+
 def test_scenario_agent_returns_structured_result() -> None:
     result = _result()
     agent = ScenarioAgent(structured_factory=_canned_factory(result))

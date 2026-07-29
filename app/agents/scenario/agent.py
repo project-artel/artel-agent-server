@@ -47,7 +47,10 @@ class ScenarioAgent:
             stop_after_attempt=_MAX_ATTEMPTS,
         )
         try:
-            return await chain.ainvoke(build_chain_inputs(request))
+            return await chain.ainvoke(
+                build_chain_inputs(request),
+                context.trace_config("scenario-generation"),
+            )
         except OutputParserException as error:
             raise ScenarioGenerationError(
                 "Failed to produce valid scenario JSON."

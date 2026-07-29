@@ -51,7 +51,10 @@ class GameContextAgent:
             stop_after_attempt=_MAX_ATTEMPTS,
         )
         try:
-            return await chain.ainvoke(build_chain_inputs(request))
+            return await chain.ainvoke(
+                build_chain_inputs(request),
+                context.trace_config("game-context-extraction"),
+            )
         except OutputParserException as error:
             raise GameContextExtractionError(
                 "Failed to produce valid game_context JSON."
