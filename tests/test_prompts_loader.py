@@ -30,6 +30,9 @@ class StubSettings:
         self.qa_prompt_version = versions.get("qa_prompt_version")
         self.scenario_prompt_version = versions.get("scenario_prompt_version")
         self.game_context_prompt_version = versions.get("game_context_prompt_version")
+        self.knowledge_query_prompt_version = versions.get(
+            "knowledge_query_prompt_version"
+        )
 
 
 @pytest.fixture
@@ -298,7 +301,12 @@ def test_every_live_agent_has_a_v1(monkeypatch) -> None:
     monkeypatch.setattr(loader, "get_settings", lambda: StubSettings())
     clear_prompt_cache()
     try:
-        assert set(known_agents()) == {"qa_run", "scenario", "game_context"}
+        assert set(known_agents()) == {
+            "qa_run",
+            "scenario",
+            "game_context",
+            "knowledge_query",
+        }
         for agent in known_agents():
             assert available_versions(agent)[0] == "v1"
     finally:
