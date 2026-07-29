@@ -26,6 +26,10 @@ class OpenQaSessionRequest(BaseModel):
     context: QaContext
     model: LLMModel = DEFAULT_MODEL
     language: OutputLanguage = DEFAULT_LANGUAGE
+    # Pins this run to one prompt version (a directory under
+    # app/prompts/qa_run/), so two runs can be compared. Omit it to take
+    # QA_PROMPT_VERSION, and failing that the newest version.
+    prompt_version: str | None = None
 
 
 class OpenQaSessionResponse(BaseModel):
@@ -64,6 +68,7 @@ async def open_qa_session(
         scenario=payload.context.scenario,
         model=payload.model,
         language=payload.language,
+        prompt_version=payload.prompt_version,
     )
     return OpenQaSessionResponse(session_id=session_id)
 

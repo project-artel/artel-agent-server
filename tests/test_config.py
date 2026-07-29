@@ -27,3 +27,32 @@ def test_settings_can_load_from_env_file(tmp_path) -> None:
     assert settings.openrouter_base_url == "https://openrouter.test/api/v1"
     assert settings.openrouter_site_url == "https://example.test"
     assert settings.openrouter_app_title == "Test Title"
+
+
+def test_prompt_versions_default_to_unset() -> None:
+    """Unset means "the newest version on disk", which is what a fresh deploy wants."""
+    settings = Settings(_env_file=None)
+
+    assert settings.qa_prompt_version is None
+    assert settings.scenario_prompt_version is None
+    assert settings.game_context_prompt_version is None
+
+
+def test_prompt_versions_can_be_pinned_per_agent(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                'QA_PROMPT_VERSION="v2"',
+                'SCENARIO_PROMPT_VERSION="v1"',
+                'GAME_CONTEXT_PROMPT_VERSION="v3"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = Settings(_env_file=env_file)
+
+    assert settings.qa_prompt_version == "v2"
+    assert settings.scenario_prompt_version == "v1"
+    assert settings.game_context_prompt_version == "v3"

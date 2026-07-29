@@ -29,6 +29,9 @@ class QaSessionRecord(BaseModel):
     scenario: ScenarioDraft
     model: LLMModel = DEFAULT_MODEL
     language: OutputLanguage = DEFAULT_LANGUAGE
+    # Which prompt version this run uses. None defers to QA_PROMPT_VERSION, and
+    # then to the newest version on disk.
+    prompt_version: str | None = None
 
     # Live execution state.
     current_step: int = 0  # 0-based index into scenario.steps
