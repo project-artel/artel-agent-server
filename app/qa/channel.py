@@ -234,6 +234,25 @@ class QaRunChannel:
             self._knowledge_waiter = None
             self._pending_knowledge_id = None
 
+    async def write_knowledge(self, message_type: MessageType, payload) -> None:
+        """Write to the project's knowledge base. Nothing comes back, by design.
+
+        The deliberate asymmetry with `search_knowledge` above: that one parks on
+        a future until Orchestration answers, this one has no waiter and no
+        correlation to match, because Orchestration's `routeKnowledgeMutation`
+        answers a mutation with nothing at all. A success is silent and a
+        rejection becomes an ORCHE_INTERNAL error row on the run's timeline,
+        published to the operator's stream rather than sent back down this socket.
+        A tool that waited here would therefore wait out its whole timeout on
+        every call, including the ones that worked.
+
+        What that costs is honesty about the result, and the tools pay it rather
+        than hide it: this side can report that the frame went out, never that it
+        landed. See `app/agents/qa/knowledge.py`.
+        """
+        self._raise_if_cancelled()
+        await self._send(self._frame(message_type, payload))
+
     # --- inbound --------------------------------------------------------------
 
     def on_game_state(self, raw: dict) -> None:
