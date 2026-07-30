@@ -3,6 +3,7 @@ import asyncio
 import pytest
 from langchain_core.exceptions import OutputParserException
 from langchain_core.runnables import RunnableLambda
+from langchain_core.tracers.context import collect_runs
 
 from app.agents import (
     AgentContext,
@@ -67,22 +68,25 @@ def test_agent_context_builds_trace_config() -> None:
     }
 
 
-def test_scenario_agent_passes_trace_config_to_runnable() -> None:
-    seen = {}
+def test_scenario_agent_names_and_tags_its_trace() -> None:
+    """The run LangSmith shows carries the name, tag and session id.
 
-    def capture(_inputs, config):
-        seen.update(config)
-        return _result()
+    Asserted on the run tree rather than on the config a chain step receives.
+    `run_name` names one run, so LangChain strips it from the child configs it
+    derives — keeping it would give every step in the chain the same name, and
+    children get `seq:step:N` tags instead. Reading a child's config tests
+    something the framework never promised; it only ever passed because an
+    older langchain-core leaked `run_name` through.
+    """
+    agent = ScenarioAgent(structured_factory=_canned_factory(_result()))
 
-    agent = ScenarioAgent(
-        structured_factory=lambda model: RunnableLambda(capture)
-    )
+    with collect_runs() as collected:
+        asyncio.run(agent.run(_request(), _CTX))
 
-    asyncio.run(agent.run(_request(), _CTX))
-
-    assert seen["run_name"] == "scenario-generation"
-    assert seen["tags"] == ["agent"]
-    assert seen["metadata"]["session_id"] == "session-1"
+    (root,) = collected.traced_runs
+    assert root.name == "scenario-generation"
+    assert root.tags == ["agent"]
+    assert root.extra["metadata"]["session_id"] == "session-1"
 
 
 def test_scenario_agent_returns_structured_result() -> None:
