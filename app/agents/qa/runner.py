@@ -13,6 +13,7 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import wrap_model_call
 
 from app.agents.qa.context import fold_stale_scenes
+from app.agents.qa.knowledge import MAX_SEARCHES_PER_RUN
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.vision import QaCaptureVisionMiddleware
@@ -34,7 +35,14 @@ MAX_LOGGED_CHARS = 4000
 
 # Two bounds, because either alone leaves a hole. A call cap alone lets one
 # unanswered call hold the run open; a clock alone lets a fast loop burn budget.
-BASE_TOOL_CALLS = 10
+#
+# The split is by what the calls are for: BASE covers what a run spends
+# regardless of length — the opening observation, `finish_run`, and the
+# per-run allowances the tools cap themselves at — while PER_STEP covers the
+# work of one scenario step. So BASE grows when a new run-level allowance is
+# added; left alone, `search_knowledge` would have taken its budget out of the
+# steps and shortened every scenario by the amount it looked things up.
+BASE_TOOL_CALLS = 10 + MAX_SEARCHES_PER_RUN
 TOOL_CALLS_PER_STEP = 15
 RUN_DEADLINE_SECONDS = 600.0
 

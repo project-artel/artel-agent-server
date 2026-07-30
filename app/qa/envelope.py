@@ -18,10 +18,17 @@ class MessageType(StrEnum):
     GAME_STATE = "GAME_STATE"
     ACTION_RESULT = "ACTION_RESULT"
     CANCEL = "CANCEL"
+    # The answer to a KNOWLEDGE_SEARCH, correlated by that frame's messageId.
+    KNOWLEDGE_SEARCH_RESULT = "KNOWLEDGE_SEARCH_RESULT"
     # Agent -> Orchestration
     LOG = "LOG"
     ACTION = "ACTION"
     STATUS = "STATUS"
+    # Asks the project's knowledge base a question. This name and the result type
+    # above are spelled exactly as Orchestration's QaAgentInboundRouter expects
+    # them: it rejects an unknown type outright, and that rejection reaches the
+    # waiting tool as silence rather than as an error it could report.
+    KNOWLEDGE_SEARCH = "KNOWLEDGE_SEARCH"
     # Bidirectional
     ERROR = "ERROR"
     # Bidirectional. The operator talking to the Agent mid-run, and its reply.
@@ -194,6 +201,48 @@ class ActionResultPayload(BaseModel):
     results: list[ActionResultItem] = Field(default_factory=list)
 
 
+class KnowledgeSearchHit(BaseModel):
+    """One piece of project knowledge the search matched.
+
+    Every field defaults, and unknown ones are kept. A hit that failed validation
+    would take the whole answer down with it, and the tool that asked would then
+    sit until its own timeout — the run paying twenty seconds for a renamed
+    field. A missing summary reads as an empty one instead.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str = ""
+    # One of CONTROL|RULE|OBJECTIVE|UI|MISC. Left as a plain string rather than an
+    # enum: Orchestration owns that vocabulary, and a value added there must not
+    # make this side drop the hit.
+    tag: str = ""
+    source: str = ""
+    summary: str = ""
+    description: str = ""
+    # Cosine similarity, so higher is closer. Orchestration flips pgvector's
+    # distance before sending precisely so nobody downstream has to remember which
+    # direction is good.
+    score: float = 0.0
+
+
+class KnowledgeSearchResultPayload(BaseModel):
+    """The answer to one KNOWLEDGE_SEARCH.
+
+    An empty `results` is a normal answer, not a failure: the embedding backfill
+    runs asynchronously, so knowledge that exists may have no vector yet.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    query: str = ""
+    # Which embedding model the search ran under. Kept because a search that keeps
+    # coming back empty is diagnosed by comparing this against the Agent's own
+    # embedding configuration.
+    model: str = ""
+    results: list[KnowledgeSearchHit] = Field(default_factory=list)
+
+
 class CancelPayload(BaseModel):
     message: str | None = None
     reason: str | None = None
@@ -242,6 +291,22 @@ class ActionPayload(BaseModel):
     message: str
     step: int | None = None
     actions: list[JsonRpcAction] = Field(default_factory=list)
+
+
+class KnowledgeSearchPayload(BaseModel):
+    """A question for the project's knowledge base.
+
+    The project is deliberately absent. Orchestration resolves the search's scope
+    from the run itself (`qaTryId -> gameInstanceId -> projectId`), so no frame
+    from here can read another project's knowledge.
+    """
+
+    query: str
+    # Singular, though Orchestration accepts a `tags` list too. The tool offers one
+    # topic because one question has one topic, and a result's own `tag` is
+    # singular — so a value read off a hit can be fed straight back as a filter.
+    tag: str | None = None
+    limit: int
 
 
 class StatusPayload(BaseModel):

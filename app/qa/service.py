@@ -161,6 +161,19 @@ class QaExecutionService:
                 channel.on_game_state(raw)
             elif message_type == MessageType.ACTION_RESULT:
                 channel.on_action_result(raw)
+            elif message_type == MessageType.KNOWLEDGE_SEARCH_RESULT:
+                channel.on_knowledge_search_result(raw)
+            elif message_type == MessageType.ERROR:
+                # Always accepted, answered or not. ERROR is a legitimate frame in
+                # both directions, so answering it with "unsupported inbound frame"
+                # would be this side reporting a protocol fault that is not one.
+                # An uncorrelated one is logged and dropped: nothing is waiting for
+                # it, and the run has no verdict to draw from it either.
+                if not channel.on_error(raw):
+                    logger.warning(
+                        "[QA] inbound ERROR answered no pending request: %r",
+                        raw.get("payload"),
+                    )
             elif message_type == MessageType.CHAT:
                 channel.on_chat(raw)
             elif message_type == MessageType.CANCEL:
