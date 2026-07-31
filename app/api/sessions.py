@@ -26,6 +26,10 @@ class OpenSessionRequest(BaseModel):
     # pending input when the WS connects), so it must be set here, not only on the
     # per-turn message below.
     locale: OutputLanguage = DEFAULT_LANGUAGE
+    # Run scope (ARTEL-206): set when opened from a run dashboard. Optional so
+    # pre-run-scope callers keep working.
+    run_id: int | None = None
+    project_id: int | None = None
 
 
 class OpenSessionResponse(BaseModel):
@@ -72,6 +76,8 @@ async def open_session(
         user_input=payload.user_input,
         model=payload.model,
         locale=payload.locale,
+        run_id=payload.run_id,
+        project_id=payload.project_id,
     )
     return OpenSessionResponse(session_id=session_id)
 

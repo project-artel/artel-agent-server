@@ -35,6 +35,8 @@ class SessionService:
         user_input: str,
         model: LLMModel = DEFAULT_MODEL,
         locale: OutputLanguage = DEFAULT_LANGUAGE,
+        run_id: int | None = None,
+        project_id: int | None = None,
     ) -> str:
         session_id = uuid.uuid4().hex
         record = SessionRecord(
@@ -43,6 +45,8 @@ class SessionService:
             pending_user_input=user_input,
             model=model,
             locale=locale,
+            run_id=run_id,
+            project_id=project_id,
         )
         await self._store.save(session_id, record)
         return session_id
