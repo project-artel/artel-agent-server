@@ -9,58 +9,63 @@ from app.agents import (
     OutputLanguage,
     ScenarioAgent,
     ScenarioAgentResult,
-    ScenarioDraft,
-    ScenarioStep,
+    ScenarioPlan,
 )
 from app.api.sessions import router as sessions_router
-from app.sessions import InMemorySessionStore, SessionExpired, SessionService
+from app.sessions import (
+    InMemorySessionStore,
+    ScenarioChannel,
+    SessionExpired,
+    SessionService,
+)
 from app.sessions.schemas import SessionRecord
 
 
-def _result(message: str = "Here is the draft.") -> ScenarioAgentResult:
+def _result(message: str = "Here are the scenarios.") -> ScenarioAgentResult:
     return ScenarioAgentResult(
         message=message,
-        scenario=ScenarioDraft(
-            title="Shop purchase flow",
-            description="Verify the shop purchase flow.",
-            steps=[
-                ScenarioStep(
-                    step=1,
-                    title="Open shop",
-                    state="The player is on the lobby screen with at least 100 gold.",
-                    action="Tap the shop button.",
-                    expected="The shop screen is displayed.",
-                )
-            ],
-        ),
+        scenarios=[
+            ScenarioPlan(
+                title="Shop purchase flow",
+                description="Verify the shop purchase flow.",
+                case_ids=[1, 2],
+            )
+        ],
     )
 
 
+def _channel() -> ScenarioChannel:
+    async def send(_frame: dict) -> None:
+        return None
+
+    return ScenarioChannel(send)
+
+
 class CountingAgent(ScenarioAgent):
-    """Agent whose structured chain returns a canned result and counts calls."""
+    """Agent whose tool loop returns a canned result and counts calls."""
 
     def __init__(self, result: ScenarioAgentResult) -> None:
         self.calls = 0
 
-        def factory(model):
+        def factory(*, model, tools, system_prompt):
             def run(_inputs):
                 self.calls += 1
-                return result
+                return {"messages": [], "structured_response": result}
 
             return RunnableLambda(run)
 
-        super().__init__(structured_factory=factory)
+        super().__init__(agent_factory=factory)
 
 
 class CapturingAgent(ScenarioAgent):
     """Records the language of the last request reaching the agent."""
 
     def __init__(self, result: ScenarioAgentResult) -> None:
-        super().__init__(structured_factory=lambda model: None)
+        super().__init__(agent_factory=lambda **_kwargs: None)
         self._result = result
         self.languages: list[OutputLanguage] = []
 
-    async def run(self, request, context):  # type: ignore[override]
+    async def run(self, request, context, channel):  # type: ignore[override]
         self.languages.append(request.locale)
         return self._result
 
@@ -95,35 +100,35 @@ def test_first_turn_generates_and_full_stores_history() -> None:
     service, agent, store = _service()
     session_id = asyncio.run(service.open({}, {}, "Test the shop flow."))
 
-    result = asyncio.run(service.start_first_turn(session_id))
+    result = asyncio.run(service.start_first_turn(session_id, _channel()))
 
     assert agent.calls == 1
     assert result is not None
     record = asyncio.run(store.load(session_id))
     assert record.pending_user_input is None
     assert len(record.history) == 2
-    assert record.history[0].role == "user" and record.history[0].scenario is None
-    # Assistant turn keeps the full scenario (full store).
+    assert record.history[0].role == "user" and record.history[0].scenarios is None
+    # Assistant turn keeps the authored scenarios (full store).
     assert record.history[1].role == "assistant"
-    assert record.history[1].scenario is not None
-    assert record.history[1].scenario.title == "Shop purchase flow"
+    assert record.history[1].scenarios is not None
+    assert record.history[1].scenarios[0].title == "Shop purchase flow"
 
 
 def test_first_turn_returns_none_when_no_pending() -> None:
     service, _, _ = _service()
     session_id = asyncio.run(service.open({}, {}, "First input."))
-    asyncio.run(service.start_first_turn(session_id))
+    asyncio.run(service.start_first_turn(session_id, _channel()))
 
-    assert asyncio.run(service.start_first_turn(session_id)) is None
+    assert asyncio.run(service.start_first_turn(session_id, _channel())) is None
 
 
 def test_run_turn_caps_history_window() -> None:
     service, _, store = _service(history_max_turns=2)  # cap = 4 messages
     session_id = asyncio.run(service.open({}, {}, "First input."))
-    asyncio.run(service.start_first_turn(session_id))
+    asyncio.run(service.start_first_turn(session_id, _channel()))
 
     for i in range(5):
-        asyncio.run(service.run_turn(session_id, f"turn {i}", draft=None))
+        asyncio.run(service.run_turn(session_id, _channel(), f"turn {i}", draft=None))
 
     record = asyncio.run(store.load(session_id))
     assert len(record.history) == 4
@@ -137,7 +142,7 @@ def test_first_turn_uses_session_language() -> None:
         service.open({}, {}, "Test the shop flow.", locale=OutputLanguage.en)
     )
 
-    asyncio.run(service.start_first_turn(session_id))
+    asyncio.run(service.start_first_turn(session_id, _channel()))
 
     assert agent.languages == [OutputLanguage.en]
 
@@ -145,13 +150,15 @@ def test_first_turn_uses_session_language() -> None:
 def test_run_turn_overrides_and_persists_language() -> None:
     service, agent, store = _capturing_service()
     session_id = asyncio.run(service.open({}, {}, "First input."))  # defaults to ko
-    asyncio.run(service.start_first_turn(session_id))
+    asyncio.run(service.start_first_turn(session_id, _channel()))
 
     asyncio.run(
-        service.run_turn(session_id, "switch", draft=None, locale=OutputLanguage.en)
+        service.run_turn(
+            session_id, _channel(), "switch", draft=None, locale=OutputLanguage.en
+        )
     )
     # Language sticks for subsequent turns without re-sending it.
-    asyncio.run(service.run_turn(session_id, "again", draft=None))
+    asyncio.run(service.run_turn(session_id, _channel(), "again", draft=None))
 
     assert agent.languages == [
         OutputLanguage.ko,
@@ -173,7 +180,7 @@ def test_session_record_defaults_locale_when_missing() -> None:
 def test_missing_session_raises_expired() -> None:
     service, _, _ = _service()
     with pytest.raises(SessionExpired):
-        asyncio.run(service.run_turn("does-not-exist", "hi", draft=None))
+        asyncio.run(service.run_turn("does-not-exist", _channel(), "hi", draft=None))
 
 
 def test_close_deletes_session() -> None:
@@ -207,7 +214,8 @@ def test_ws_flow_open_first_turn_and_turn() -> None:
     with client.websocket_connect(f"/sessions/{session_id}") as ws:
         first = ws.receive_json()
         assert first["type"] == "result"
-        assert first["scenario"]["title"] == "Shop purchase flow"
+        assert first["scenarios"][0]["title"] == "Shop purchase flow"
+        assert first["scenarios"][0]["case_ids"] == [1, 2]
 
         ws.send_json({"type": "turn", "user_input": "make it shorter", "draft": None})
         second = ws.receive_json()

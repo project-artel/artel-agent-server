@@ -1,7 +1,6 @@
 import asyncio
 
 import pytest
-from langchain_core.exceptions import OutputParserException
 from langchain_core.runnables import RunnableLambda
 from langchain_core.tracers.context import collect_runs
 
@@ -11,41 +10,62 @@ from app.agents import (
     ScenarioAgent,
     ScenarioAgentRequest,
     ScenarioAgentResult,
-    ScenarioDraft,
     ScenarioGenerationError,
-    ScenarioStep,
+    ScenarioPlan,
 )
-from app.agents.scenario.prompt import LANGUAGE_DIRECTIVES, build_chain_inputs
+from app.agents.scenario.prompt import (
+    LANGUAGE_DIRECTIVES,
+    build_first_message,
+    build_system_prompt,
+)
 from app.llm.chat_model import select_structured_method
 from app.llm.models import LLMModel
+from app.sessions.channel import ScenarioChannel
 
 
-def _result(message: str = "Created the first draft.") -> ScenarioAgentResult:
+def _result(message: str = "Authored two scenarios.") -> ScenarioAgentResult:
     return ScenarioAgentResult(
         message=message,
-        scenario=ScenarioDraft(
-            title="Login reward flow",
-            description="Verify the Unity game login reward flow.",
-            steps=[
-                ScenarioStep(
-                    step=1,
-                    title="Launch game",
-                    state="The Unity client is installed and not yet running.",
-                    action="Start the Unity client and wait for the lobby.",
-                    expected="The lobby is displayed without errors.",
-                )
-            ],
-        ),
+        scenarios=[
+            ScenarioPlan(
+                title="Login reward flow",
+                description="Verify the login reward flow.",
+                case_ids=[11, 12],
+            ),
+            ScenarioPlan(
+                title="Shop purchase flow",
+                description="Verify the shop purchase flow.",
+                case_ids=[21],
+            ),
+        ],
     )
 
 
 def _canned_factory(result: ScenarioAgentResult):
-    return lambda model: RunnableLambda(lambda _inputs: result)
+    """A factory whose agent returns the graph state create_agent would produce.
+
+    create_agent's final state carries the parsed schema under
+    ``structured_response``; the agent reads exactly that key.
+    """
+
+    def factory(*, model, tools, system_prompt):
+        return RunnableLambda(
+            lambda _inputs: {"messages": [], "structured_response": result}
+        )
+
+    return factory
+
+
+def _channel() -> ScenarioChannel:
+    async def send(_frame: dict) -> None:
+        return None
+
+    return ScenarioChannel(send)
 
 
 def _request(**overrides) -> ScenarioAgentRequest:
     base = {
-        "user_input": "Create a login reward QA scenario.",
+        "user_input": "Author scenarios for login rewards and the shop.",
         "game_context": {"constraints": ["Reward can be claimed once per day."]},
         "unity_context": {"states": [{"key": "login_reward.claimed"}]},
     }
@@ -69,19 +89,11 @@ def test_agent_context_builds_trace_config() -> None:
 
 
 def test_scenario_agent_names_and_tags_its_trace() -> None:
-    """The run LangSmith shows carries the name, tag and session id.
-
-    Asserted on the run tree rather than on the config a chain step receives.
-    `run_name` names one run, so LangChain strips it from the child configs it
-    derives — keeping it would give every step in the chain the same name, and
-    children get `seq:step:N` tags instead. Reading a child's config tests
-    something the framework never promised; it only ever passed because an
-    older langchain-core leaked `run_name` through.
-    """
-    agent = ScenarioAgent(structured_factory=_canned_factory(_result()))
+    """The run LangSmith shows carries the name, tag and session id."""
+    agent = ScenarioAgent(agent_factory=_canned_factory(_result()))
 
     with collect_runs() as collected:
-        asyncio.run(agent.run(_request(), _CTX))
+        asyncio.run(agent.run(_request(), _CTX, _channel()))
 
     (root,) = collected.traced_runs
     assert root.name == "scenario-generation"
@@ -89,102 +101,101 @@ def test_scenario_agent_names_and_tags_its_trace() -> None:
     assert root.extra["metadata"]["session_id"] == "session-1"
 
 
-def test_scenario_agent_returns_structured_result() -> None:
+def test_scenario_agent_returns_multi_scenario_result() -> None:
     result = _result()
-    agent = ScenarioAgent(structured_factory=_canned_factory(result))
+    agent = ScenarioAgent(agent_factory=_canned_factory(result))
 
-    out = asyncio.run(agent.run(_request(), _CTX))
+    out = asyncio.run(agent.run(_request(), _CTX, _channel()))
 
     assert isinstance(out, ScenarioAgentResult)
-    assert out.message == "Created the first draft."
-    assert out.scenario.steps[0].state == "The Unity client is installed and not yet running."
+    assert out.message == "Authored two scenarios."
+    assert [plan.title for plan in out.scenarios] == [
+        "Login reward flow",
+        "Shop purchase flow",
+    ]
+    assert out.scenarios[0].case_ids == [11, 12]
 
 
-def test_scenario_agent_retries_on_parse_error_then_succeeds() -> None:
-    result = _result()
-    calls = {"n": 0}
+def test_scenario_agent_raises_when_no_structured_response() -> None:
+    """A loop that ended without a plan is a generation failure, not empty output."""
 
-    def flaky(_inputs):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise OutputParserException("bad json")
-        return result
+    def factory(*, model, tools, system_prompt):
+        return RunnableLambda(lambda _inputs: {"messages": [], "structured_response": None})
 
-    agent = ScenarioAgent(structured_factory=lambda model: RunnableLambda(flaky))
-
-    out = asyncio.run(agent.run(_request(), _CTX))
-
-    assert out.message == "Created the first draft."
-    assert calls["n"] == 2  # retried once
-
-
-def test_scenario_agent_raises_after_exhausting_retries() -> None:
-    def always_fail(_inputs):
-        raise OutputParserException("still bad")
-
-    agent = ScenarioAgent(structured_factory=lambda model: RunnableLambda(always_fail))
+    agent = ScenarioAgent(agent_factory=factory)
 
     with pytest.raises(ScenarioGenerationError):
-        asyncio.run(agent.run(_request(), _CTX))
+        asyncio.run(agent.run(_request(), _CTX, _channel()))
 
 
-def test_chain_inputs_use_requested_language_directive() -> None:
-    ko_inputs = build_chain_inputs(_request(locale=OutputLanguage.ko))
-    en_inputs = build_chain_inputs(_request(locale=OutputLanguage.en))
+def test_scenario_agent_binds_the_search_tool() -> None:
+    """The turn is a tool loop: the case-search tool must reach the model."""
+    seen: dict[str, list[str]] = {}
 
-    assert ko_inputs["language_directive"] == LANGUAGE_DIRECTIVES[OutputLanguage.ko]
-    assert en_inputs["language_directive"] == LANGUAGE_DIRECTIVES[OutputLanguage.en]
-    assert "한국어" in ko_inputs["language_directive"]
-    assert "English" in en_inputs["language_directive"]
+    def factory(*, model, tools, system_prompt):
+        seen["tools"] = [tool.name for tool in tools]
+        seen["system_prompt"] = system_prompt
+        return RunnableLambda(
+            lambda _inputs: {"messages": [], "structured_response": _result()}
+        )
+
+    agent = ScenarioAgent(agent_factory=factory)
+    asyncio.run(agent.run(_request(), _CTX, _channel()))
+
+    assert seen["tools"] == ["search_test_cases"]
+    # The system prompt is the resolved v2 text, language directive substituted.
+    assert "search_test_cases" in seen["system_prompt"]
+    assert "{" not in seen["system_prompt"]
 
 
-def test_chain_inputs_default_to_korean_directive() -> None:
-    inputs = build_chain_inputs(_request())
+def test_empty_scenarios_is_a_valid_result() -> None:
+    """No matching cases: the agent returns a message and an empty plan list."""
+    result = ScenarioAgentResult(message="No matching cases yet.", scenarios=[])
+    agent = ScenarioAgent(agent_factory=_canned_factory(result))
 
-    assert inputs["language_directive"] == LANGUAGE_DIRECTIVES[OutputLanguage.ko]
+    out = asyncio.run(agent.run(_request(), _CTX, _channel()))
+
+    assert out.scenarios == []
+    assert out.message == "No matching cases yet."
+
+
+def test_scenario_result_parses_string_case_ids_as_ints() -> None:
+    """Search hits carry string ids; the plan stores them as ints (spec)."""
+    parsed = ScenarioAgentResult.model_validate(
+        {
+            "message": "ok",
+            "scenarios": [
+                {"title": "t", "description": "d", "case_ids": ["7", "8"]}
+            ],
+        }
+    )
+
+    assert parsed.scenarios[0].case_ids == [7, 8]
+
+
+def test_system_prompt_uses_requested_language_directive() -> None:
+    ko_body, _ = build_system_prompt(_request(locale=OutputLanguage.ko))
+    en_body, version = build_system_prompt(_request(locale=OutputLanguage.en))
+
+    assert LANGUAGE_DIRECTIVES[OutputLanguage.ko] in ko_body
+    assert LANGUAGE_DIRECTIVES[OutputLanguage.en] in en_body
+    assert "한국어" in ko_body
+    assert "English" in en_body
+    # v2 is the newest scenario prompt version and the default.
+    assert version == "v2"
+
+
+def test_first_message_carries_the_run_goal_and_context() -> None:
+    message = build_first_message(_request())
+
+    assert "Author scenarios for login rewards and the shop." in message
+    assert "login_reward.claimed" in message
 
 
 def test_language_directives_cover_every_language() -> None:
-    # Guards against adding an OutputLanguage member without a directive, which
-    # would raise KeyError at request time instead of silently defaulting.
     assert set(LANGUAGE_DIRECTIVES) == set(OutputLanguage)
 
 
 def test_select_structured_method_by_model() -> None:
     assert select_structured_method(LLMModel.gpt_4o_mini) == "json_schema"
     assert select_structured_method(LLMModel.gemma_4_free) == "json_mode"
-
-
-def test_scenario_draft_rejects_duplicate_step_numbers() -> None:
-    step = ScenarioStep(
-        step=1,
-        title="Launch game",
-        state="The Unity client is installed and not yet running.",
-        action="Start the Unity client.",
-        expected="The lobby is displayed.",
-    )
-
-    with pytest.raises(ValueError, match="Scenario step numbers must be unique."):
-        ScenarioDraft(title="Duplicate step", description="Invalid flow.", steps=[step, step])
-
-
-def test_scenario_draft_rejects_non_sequential_step_numbers() -> None:
-    steps = [
-        ScenarioStep(
-            step=1,
-            title="Launch game",
-            state="The Unity client is installed and not yet running.",
-            action="Start the Unity client.",
-            expected="The lobby is displayed.",
-        ),
-        ScenarioStep(
-            step=3,
-            title="Claim reward",
-            state="The player is on the lobby screen.",
-            action="Tap the login reward button.",
-            expected="The reward is added to inventory.",
-        ),
-    ]
-
-    with pytest.raises(ValueError, match="numbered sequentially"):
-        ScenarioDraft(title="Missing step", description="Invalid flow.", steps=steps)
