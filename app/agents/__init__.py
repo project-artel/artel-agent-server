@@ -24,6 +24,7 @@ from app.agents.scenario import (
     ScenarioAgentResult,
     ScenarioDraft,
     ScenarioGenerationError,
+    ScenarioPlan,
     ScenarioStep,
 )
 
@@ -48,5 +49,6 @@ __all__ = [
     "ScenarioAgentResult",
     "ScenarioDraft",
     "ScenarioGenerationError",
+    "ScenarioPlan",
     "ScenarioStep",
 ]

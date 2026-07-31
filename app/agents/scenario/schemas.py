@@ -62,6 +62,28 @@ class ScenarioAgentRequest(BaseModel):
     locale: OutputLanguage = DEFAULT_LANGUAGE
 
 
+class ScenarioPlan(BaseModel):
+    """One scenario the run goal was decomposed into.
+
+    Deliberately NOT a ``ScenarioDraft``: the run-scoped authoring agent no longer
+    writes step bodies. TestCases live only in the orchestration server, so a
+    scenario is expressed as references to the cases that make it up
+    (``case_ids``), and Orchestration links them (`test_scenario_case`) and adds
+    the scenario to the run. ``ScenarioDraft``/``ScenarioStep`` stay for the QA
+    execution agent, which still runs an approved step-based scenario.
+    """
+
+    title: str
+    description: str
+    # Ids of existing TestCases (from `search_test_cases`) this scenario is built
+    # from. The search returns ids as strings on the wire; they are numeric on the
+    # far side, so the plan carries them as ints. May be empty only alongside an
+    # empty `scenarios` on the result — a scenario with no cases is not authored.
+    case_ids: list[int] = Field(default_factory=list)
+
+
 class ScenarioAgentResult(BaseModel):
     message: str
-    scenario: ScenarioDraft
+    # The run goal, decomposed. Empty when no matching cases were found: the agent
+    # must not fabricate scenarios, and says so in `message` instead.
+    scenarios: list[ScenarioPlan] = Field(default_factory=list)

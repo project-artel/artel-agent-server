@@ -2,16 +2,17 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.agents import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
+from app.agents import DEFAULT_LANGUAGE, OutputLanguage, ScenarioPlan
 from app.llm.models import DEFAULT_MODEL, LLMModel
 
 
 class HistoryTurn(BaseModel):
     role: Literal["user", "assistant"]
     message: str
-    # Assistant turns keep the full generated draft (audit/restore); this is NOT
-    # replayed into the prompt — only `message` text is.
-    scenario: ScenarioDraft | None = None
+    # Assistant turns keep the scenarios they authored (audit/restore); these are
+    # NOT replayed into the prompt — only `message` text is. Multi-scenario plans
+    # now (ARTEL-206/227), where a turn once kept one step-based ScenarioDraft.
+    scenarios: list[ScenarioPlan] | None = None
 
 
 class SessionRecord(BaseModel):
