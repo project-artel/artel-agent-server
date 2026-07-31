@@ -49,7 +49,7 @@ async def _running_service() -> tuple[QaExecutionService, str, asyncio.Task]:
     runner = StallingRunner()
     service = QaExecutionService(
         store=InMemoryQaSessionStore(),
-        runner_factory=lambda model, language, prompt_version: runner,
+        runner_factory=lambda **_kwargs: runner,
     )
     session_id = await service.open(
         qa_try_id=7,

@@ -2,10 +2,15 @@ import asyncio
 import contextlib
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.models import (
+    DEFAULT_MODEL,
+    LLMModel,
+    ReasoningConfig,
+    validate_reasoning,
+)
 from app.qa.envelope import ErrorPayload, MessageType, outbound_envelope
 from app.qa.service import QaExecutionService
 from app.sessions.store import SessionExpired
@@ -30,6 +35,12 @@ class OpenQaSessionRequest(BaseModel):
     # app/prompts/qa_run/), so two runs can be compared. Omit it to take
     # QA_PROMPT_VERSION, and failing that the newest version.
     prompt_version: str | None = None
+    reasoning: ReasoningConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_model_reasoning(self) -> "OpenQaSessionRequest":
+        validate_reasoning(self.model, self.reasoning)
+        return self
 
 
 class OpenQaSessionResponse(BaseModel):
@@ -69,6 +80,7 @@ async def open_qa_session(
         model=payload.model,
         language=payload.language,
         prompt_version=payload.prompt_version,
+        reasoning=payload.reasoning,
     )
     return OpenQaSessionResponse(session_id=session_id)
 

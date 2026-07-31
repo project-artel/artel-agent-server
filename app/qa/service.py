@@ -7,7 +7,12 @@ from pydantic import ValidationError
 
 from app.agents.qa.runner import QaRunner
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.models import (
+    DEFAULT_MODEL,
+    LLMModel,
+    ReasoningConfig,
+    validate_reasoning,
+)
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import (
     ErrorPayload,
@@ -36,13 +41,15 @@ class QaExecutionService:
     def __init__(
         self,
         store: QaSessionStore,
-        runner_factory: Callable[[LLMModel, OutputLanguage, str | None], QaRunner]
-        | None = None,
+        runner_factory: Callable[..., QaRunner] | None = None,
     ) -> None:
         self._store = store
         self._runner_factory = runner_factory or (
-            lambda model, language, prompt_version: QaRunner(
-                model=model, language=language, prompt_version=prompt_version
+            lambda *, model, language, prompt_version, reasoning: QaRunner(
+                model=model,
+                language=language,
+                prompt_version=prompt_version,
+                reasoning=reasoning,
             )
         )
         self._channels: dict[str, QaRunChannel] = {}
@@ -56,7 +63,9 @@ class QaExecutionService:
         model: LLMModel = DEFAULT_MODEL,
         language: OutputLanguage = DEFAULT_LANGUAGE,
         prompt_version: str | None = None,
+        reasoning: ReasoningConfig | None = None,
     ) -> str:
+        validate_reasoning(model, reasoning)
         session_id = uuid.uuid4().hex
         record = QaSessionRecord(
             qa_try_id=qa_try_id,
@@ -66,6 +75,7 @@ class QaExecutionService:
             model=model,
             language=language,
             prompt_version=prompt_version,
+            reasoning=reasoning,
         )
         await self._store.save(session_id, record)
         return session_id
@@ -96,7 +106,10 @@ class QaExecutionService:
         self._channels[session_id] = channel
 
         runner = self._runner_factory(
-            record.model, record.language, record.prompt_version
+            model=record.model,
+            language=record.language,
+            prompt_version=record.prompt_version,
+            reasoning=record.reasoning,
         )
         try:
             state, failure = await runner.run_with_deadline(channel, record.scenario)
