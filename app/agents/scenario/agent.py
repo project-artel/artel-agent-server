@@ -1,57 +1,115 @@
-from collections.abc import Callable
+"""The scenario authoring turn as a tool loop.
 
-from langchain_core.exceptions import OutputParserException
+Where v1 was a single structured LLM call, this drives a `create_agent` tool
+loop: the agent searches existing TestCases with `search_test_cases` (over the
+session channel) as many times as it needs, then returns a structured
+multi-scenario plan. It mirrors `app/agents/qa/runner.py`'s `create_agent`
+usage; the structured final answer is produced by a `ToolStrategy` response
+format rather than by a `finish_run`-style tool.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+from langchain.agents import create_agent
+from langchain.agents.structured_output import ToolStrategy
 from langchain_core.runnables import Runnable
 
 from app.agents.base import AgentContext
+from app.agents.scenario.cases import MAX_SEARCHES_PER_RUN, TestCaseSearchState
 from app.agents.scenario.errors import ScenarioGenerationError
-from app.agents.scenario.prompt import build_chain_inputs, build_scenario_prompt
+from app.agents.scenario.prompt import build_messages, build_system_prompt
 from app.agents.scenario.schemas import ScenarioAgentRequest, ScenarioAgentResult
-from app.llm.chat_model import build_chat_model, select_structured_method
+from app.agents.scenario.tools import build_tools
+from app.llm.chat_model import build_chat_model
 from app.llm.models import LLMModel
 
+if TYPE_CHECKING:
+    # Type-only: see app/agents/scenario/cases.py for why app.sessions is not
+    # imported at module load.
+    from app.sessions.channel import ScenarioChannel
 
-_MAX_ATTEMPTS = 2
+logger = logging.getLogger(__name__)
 
-StructuredFactory = Callable[[LLMModel], Runnable]
+# Graph steps the loop may take: a model turn and a tool turn per search, the
+# structured-output turn, and headroom. recursion_limit counts graph steps, so
+# this bounds tool calls and model turns together (see the QA runner). Doubled to
+# cover the model turn that sits between each tool result.
+RECURSION_LIMIT = (MAX_SEARCHES_PER_RUN + 4) * 2
+
+# Injectable so tests can hand back a canned runnable instead of reaching a real
+# model. The runnable is invoked with {"messages": [...]} and must return a state
+# dict carrying "structured_response".
+AgentFactory = Callable[..., Runnable]
 
 
-def _default_structured_factory(model: LLMModel) -> Runnable:
-    chat = build_chat_model(model)
-    if select_structured_method(model) == "json_schema":
-        return chat.with_structured_output(
-            ScenarioAgentResult, method="json_schema", strict=True
-        )
-    return chat.with_structured_output(ScenarioAgentResult, method="json_mode")
+def _default_agent_factory(
+    *, model: LLMModel, tools: list, system_prompt: str
+) -> Runnable:
+    # ToolStrategy rather than the provider's native structured output: the loop
+    # already uses tool calling for the search, and a structured-output tool
+    # alongside it is the portable path across the OpenRouter catalog — the model
+    # calls it to return the final plan, which ends the loop.
+    return create_agent(
+        model=build_chat_model(model),
+        tools=tools,
+        system_prompt=system_prompt,
+        response_format=ToolStrategy(schema=ScenarioAgentResult),
+    )
 
 
 class ScenarioAgent:
-    """Turn-level scenario generator backed by a LangChain structured chain.
+    """Turn-level multi-scenario authoring agent backed by a tool loop.
 
-    ``structured_factory`` is injectable so tests can supply a canned runnable
-    instead of calling a real model.
+    ``agent_factory`` is injectable so tests can supply a canned runnable instead
+    of calling a real model.
     """
 
-    def __init__(self, structured_factory: StructuredFactory | None = None) -> None:
-        self._prompt = build_scenario_prompt()
-        self._structured_factory = structured_factory or _default_structured_factory
+    def __init__(self, agent_factory: AgentFactory | None = None) -> None:
+        self._agent_factory = agent_factory or _default_agent_factory
 
     async def run(
         self,
         request: ScenarioAgentRequest,
         context: AgentContext,
+        channel: ScenarioChannel,
     ) -> ScenarioAgentResult:
-        structured = self._structured_factory(request.model)
-        chain = (self._prompt | structured).with_retry(
-            retry_if_exception_type=(OutputParserException,),
-            stop_after_attempt=_MAX_ATTEMPTS,
+        state = TestCaseSearchState()
+        tools = build_tools(channel, state)
+        system_prompt, version = build_system_prompt(request)
+        messages = build_messages(request)
+
+        logger.info(
+            "[scenario] turn starting\n"
+            "  model=%s locale=%s prompt_version=%s tools=%s",
+            request.model,
+            request.locale,
+            version,
+            [tool.name for tool in tools],
         )
-        try:
-            return await chain.ainvoke(
-                build_chain_inputs(request),
-                context.trace_config("scenario-generation"),
-            )
-        except OutputParserException as error:
+
+        agent = self._agent_factory(
+            model=request.model, tools=tools, system_prompt=system_prompt
+        )
+        config = {
+            **context.trace_config("scenario-generation"),
+            "recursion_limit": RECURSION_LIMIT,
+        }
+        result_state = await agent.ainvoke({"messages": messages}, config)
+
+        structured = (
+            result_state.get("structured_response")
+            if isinstance(result_state, dict)
+            else None
+        )
+        if not isinstance(structured, ScenarioAgentResult):
+            # The loop ended without a structured plan — the model stopped early,
+            # or the structured-output tool never came back. Nothing downstream
+            # can act on that, so it is a generation failure, not an empty result.
             raise ScenarioGenerationError(
-                "Failed to produce valid scenario JSON."
-            ) from error
+                "Scenario agent did not return a structured multi-scenario result."
+            )
+        return structured
