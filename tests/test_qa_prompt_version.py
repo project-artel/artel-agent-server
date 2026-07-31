@@ -87,8 +87,8 @@ async def _run_session(prompt_version: str | None) -> str | None:
     seen: list[str | None] = []
     runner = RecordingRunner()
 
-    def factory(model, language, version):
-        seen.append(version)
+    def factory(*, model, language, prompt_version, reasoning):
+        seen.append(prompt_version)
         return runner
 
     service = QaExecutionService(
@@ -134,7 +134,9 @@ class SilentAgent:
 
 @pytest.fixture
 def stubbed_agent(monkeypatch):
-    monkeypatch.setattr(runner_module, "build_chat_model", lambda model: object())
+    monkeypatch.setattr(
+        runner_module, "build_chat_model", lambda model, reasoning=None: object()
+    )
     monkeypatch.setattr(
         runner_module, "create_agent", lambda **_kwargs: SilentAgent()
     )

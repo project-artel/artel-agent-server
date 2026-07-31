@@ -3,11 +3,13 @@ from functools import lru_cache
 from langchain_openai import ChatOpenAI
 
 from app.config import get_settings
-from app.llm.models import LLMModel, get_model_spec
+from app.llm.models import LLMModel, ReasoningConfig, get_model_spec, validate_reasoning
 
 
 @lru_cache
-def build_chat_model(model: LLMModel) -> ChatOpenAI:
+def build_chat_model(
+    model: LLMModel, reasoning: ReasoningConfig | None = None
+) -> ChatOpenAI:
     """Build a chat model for an OpenRouter slug.
 
     ChatOpenAI targets any OpenAI-compatible endpoint; pointed at OpenRouter it
@@ -20,6 +22,7 @@ def build_chat_model(model: LLMModel) -> ChatOpenAI:
         headers["HTTP-Referer"] = settings.openrouter_site_url
     if settings.openrouter_app_title:
         headers["X-Title"] = settings.openrouter_app_title
+    reasoning = validate_reasoning(model, reasoning)
 
     return ChatOpenAI(
         model=model.value,
@@ -27,6 +30,9 @@ def build_chat_model(model: LLMModel) -> ChatOpenAI:
         api_key=settings.openrouter_api_key or "missing",
         temperature=0.2,
         default_headers=headers or None,
+        extra_body=(
+            {"reasoning": reasoning.as_openrouter()} if reasoning is not None else None
+        ),
     )
 
 

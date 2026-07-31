@@ -23,7 +23,7 @@ from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.vision import QaCaptureVisionMiddleware
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
 from app.llm.chat_model import build_chat_model
-from app.llm.models import DEFAULT_MODEL, LLMModel, get_model_spec
+from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig, get_model_spec
 from app.prompts import load_prompt
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory
@@ -105,12 +105,14 @@ class QaRunner:
         language: OutputLanguage = DEFAULT_LANGUAGE,
         deadline_seconds: float = RUN_DEADLINE_SECONDS,
         prompt_version: str | None = None,
+        reasoning: ReasoningConfig | None = None,
     ) -> None:
         self._model = model
         self._language = language
         self._deadline = deadline_seconds
         # None leaves the choice to settings, and then to the newest version.
         self._prompt_version = prompt_version
+        self._reasoning = reasoning
 
     def _tool_call_limit(self, steps: int) -> int:
         return BASE_TOOL_CALLS + TOOL_CALLS_PER_STEP * max(steps, 1)
@@ -143,10 +145,15 @@ class QaRunner:
         # which candidate produced this run.
         logger.info(
             "[QA] run starting\n"
-            "  model=%s language=%s prompt_version=%s steps=%d deadline=%.0fs tools=%s\n"
+            "  model=%s reasoning=%s language=%s prompt_version=%s steps=%d deadline=%.0fs tools=%s\n"
             "--- system prompt ---\n%s\n"
             "--- first message ---\n%s",
             self._model,
+            (
+                self._reasoning.model_dump(mode="json", exclude_none=True)
+                if self._reasoning
+                else None
+            ),
             self._language,
             prompt.version,
             len(scenario.steps),
@@ -157,7 +164,7 @@ class QaRunner:
         )
 
         agent = create_agent(
-            model=build_chat_model(self._model),
+            model=build_chat_model(self._model, self._reasoning),
             tools=tools,
             system_prompt=system_prompt,
             # Folding runs on every request; the scene views pile up whether or

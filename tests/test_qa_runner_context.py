@@ -128,7 +128,10 @@ def test_the_model_receives_folded_views_but_the_channel_keeps_the_full_text(
             {"content": "done"},
         ]
     )
-    monkeypatch.setattr("app.agents.qa.runner.build_chat_model", lambda _model: model)
+    monkeypatch.setattr(
+        "app.agents.qa.runner.build_chat_model",
+        lambda _model, reasoning=None: model,
+    )
 
     channel, sent = make_channel()
     state = QaRunState(total_steps=1)

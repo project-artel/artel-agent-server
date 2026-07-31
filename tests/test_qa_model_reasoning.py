@@ -1,0 +1,283 @@
+import asyncio
+import json
+import logging
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+from langchain_openai import ChatOpenAI
+from pydantic import ValidationError
+
+from app.api.qa_sessions import OpenQaSessionRequest
+from app.agents.qa import runner as runner_module
+from app.agents.qa.runner import QaRunner
+from app.agents.qa.tools import QaRunState
+from app.llm import chat_model
+from app.llm.models import (
+    LLMModel,
+    ReasoningConfig,
+    ReasoningEffort,
+    ReasoningKind,
+)
+from app.main import app
+from app.qa.channel import QaRunChannel
+from app.qa.service import QaExecutionService
+from app.qa.store import InMemoryQaSessionStore
+from tests.test_qa_prompt_version import make_scenario, open_request
+
+
+def test_models_api_exposes_reasoning_selection_capabilities() -> None:
+    catalog = {
+        item["id"]: item for item in TestClient(app).get("/models").json()
+    }
+
+    assert set(catalog) == {model.value for model in LLMModel}
+    assert catalog[LLMModel.claude_sonnet_5]["reasoning"] == {
+        "kind": "effort",
+        "efforts": ["max", "xhigh", "high", "medium", "low"],
+        "min_tokens": None,
+        "max_tokens": None,
+        "step": None,
+    }
+    assert catalog[LLMModel.gemini_2_5_pro]["reasoning"] == {
+        "kind": "max_tokens",
+        "efforts": None,
+        "min_tokens": 128,
+        "max_tokens": 32768,
+        "step": 128,
+    }
+    assert catalog[LLMModel.gemini_2_5_pro]["input_modalities"] == [
+        "text",
+        "image",
+        "file",
+        "audio",
+        "video",
+    ]
+    assert catalog[LLMModel.gemini_2_5_pro]["multimodal"] is True
+    assert catalog[LLMModel.gpt_4o_mini]["reasoning"] is None
+
+
+def test_request_accepts_each_supported_reasoning_shape() -> None:
+    effort = OpenQaSessionRequest.model_validate(
+        open_request(
+            model=LLMModel.claude_sonnet_5,
+            reasoning={"effort": "high"},
+        )
+    )
+    budget = OpenQaSessionRequest.model_validate(
+        open_request(
+            model=LLMModel.gemini_2_5_pro,
+            reasoning={"max_tokens": 2048},
+        )
+    )
+
+    assert effort.reasoning == ReasoningConfig(effort=ReasoningEffort.high)
+    assert budget.reasoning == ReasoningConfig(max_tokens=2048)
+
+
+@pytest.mark.parametrize(
+    ("model", "reasoning"),
+    [
+        (LLMModel.gpt_4o_mini, {"effort": "low"}),
+        (LLMModel.claude_sonnet_5, {"max_tokens": 2048}),
+        (LLMModel.gemini_2_5_pro, {"effort": "high"}),
+    ],
+)
+def test_request_rejects_unsupported_model_reasoning_combinations(
+    model: LLMModel, reasoning: dict
+) -> None:
+    with pytest.raises(ValidationError):
+        OpenQaSessionRequest.model_validate(
+            open_request(model=model, reasoning=reasoning)
+        )
+
+
+def test_reasoning_budget_requires_exactly_one_setting() -> None:
+    with pytest.raises(ValidationError):
+        ReasoningConfig()
+    with pytest.raises(ValidationError):
+        ReasoningConfig(effort=ReasoningEffort.low, max_tokens=1024)
+
+
+def test_request_rejects_unknown_or_out_of_range_reasoning_fields() -> None:
+    with pytest.raises(ValidationError):
+        OpenQaSessionRequest.model_validate(
+            open_request(
+                model=LLMModel.claude_sonnet_5,
+                reasoning={"effort": "high", "max_token": 2048},
+            )
+        )
+    with pytest.raises(ValidationError, match="max_tokens >= 128"):
+        OpenQaSessionRequest.model_validate(
+            open_request(
+                model=LLMModel.gemini_2_5_pro,
+                reasoning={"max_tokens": 127},
+            )
+        )
+
+
+def test_service_persists_reasoning_and_passes_it_to_runner() -> None:
+    async def run() -> None:
+        seen = []
+
+        class Runner:
+            async def run_with_deadline(self, channel, scenario):
+                return None, None
+
+        def factory(**kwargs):
+            seen.append(kwargs)
+            return Runner()
+
+        store = InMemoryQaSessionStore()
+        service = QaExecutionService(store=store, runner_factory=factory)
+        reasoning = ReasoningConfig(effort=ReasoningEffort.medium)
+        session_id = await service.open(
+            qa_try_id=7,
+            game_instance_id=1,
+            test_scenario_id=1,
+            scenario=make_scenario(),
+            model=LLMModel.claude_sonnet_5,
+            reasoning=reasoning,
+        )
+
+        assert (await store.load(session_id)).reasoning == reasoning
+
+        async def send(_frame: dict) -> None:
+            return None
+
+        await service.run(session_id, send)
+        assert seen[0]["reasoning"] == reasoning
+
+    asyncio.run(run())
+
+
+def test_service_rejects_invalid_reasoning_before_saving() -> None:
+    async def run() -> None:
+        service = QaExecutionService(InMemoryQaSessionStore())
+        with pytest.raises(ValueError, match="does not support"):
+            await service.open(
+                qa_try_id=7,
+                game_instance_id=1,
+                test_scenario_id=1,
+                scenario=make_scenario(),
+                reasoning=ReasoningConfig(effort=ReasoningEffort.low),
+            )
+
+    asyncio.run(run())
+
+
+def test_langchain_sends_reasoning_in_openrouter_request(monkeypatch) -> None:
+    requests: list[dict] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "completion",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "test",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "ok"},
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
+        )
+
+    transport = httpx.MockTransport(respond)
+    monkeypatch.setattr(
+        chat_model,
+        "ChatOpenAI",
+        lambda **kwargs: ChatOpenAI(
+            **kwargs, http_client=httpx.Client(transport=transport)
+        ),
+    )
+    chat_model.build_chat_model.cache_clear()
+    try:
+        chat_model.build_chat_model(
+            LLMModel.claude_sonnet_5,
+            ReasoningConfig(effort=ReasoningEffort.high),
+        ).invoke("test")
+    finally:
+        chat_model.build_chat_model.cache_clear()
+
+    assert requests[0]["reasoning"] == {"effort": "high", "exclude": True}
+
+
+def test_omitted_reasoning_is_not_sent_and_uses_a_distinct_cache_entry(
+    monkeypatch,
+) -> None:
+    created: list[dict] = []
+
+    class FakeChat:
+        def __init__(self, **kwargs):
+            created.append(kwargs)
+
+    monkeypatch.setattr(chat_model, "ChatOpenAI", FakeChat)
+    chat_model.build_chat_model.cache_clear()
+    try:
+        plain = chat_model.build_chat_model(LLMModel.claude_sonnet_5)
+        reasoned = chat_model.build_chat_model(
+            LLMModel.claude_sonnet_5,
+            ReasoningConfig(effort=ReasoningEffort.low),
+        )
+        assert plain is not reasoned
+    finally:
+        chat_model.build_chat_model.cache_clear()
+
+    assert created[0]["extra_body"] is None
+    assert created[1]["extra_body"] == {
+        "reasoning": {"effort": "low", "exclude": True}
+    }
+
+
+def test_run_start_log_names_reasoning(monkeypatch, caplog) -> None:
+    class SilentAgent:
+        def astream(self, *_args, **_kwargs):
+            async def updates():
+                return
+                yield {}
+
+            return updates()
+
+    monkeypatch.setattr(
+        runner_module, "build_chat_model", lambda model, reasoning=None: object()
+    )
+    monkeypatch.setattr(
+        runner_module, "create_agent", lambda **_kwargs: SilentAgent()
+    )
+
+    async def run() -> None:
+        async def send(_frame: dict) -> None:
+            return None
+
+        runner = QaRunner(
+            model=LLMModel.claude_sonnet_5,
+            reasoning=ReasoningConfig(effort=ReasoningEffort.high),
+        )
+        await runner.run(
+            QaRunChannel(qa_try_id=7, send=send),
+            make_scenario(),
+            QaRunState(total_steps=1),
+        )
+
+    with caplog.at_level(logging.INFO, logger="app.agents.qa.runner"):
+        asyncio.run(run())
+
+    starting = [
+        record.getMessage()
+        for record in caplog.records
+        if "[QA] run starting" in record.getMessage()
+    ]
+    assert len(starting) == 1
+    assert "model=anthropic/claude-sonnet-5" in starting[0]
+    assert "reasoning={'effort': 'high'}" in starting[0]

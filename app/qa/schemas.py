@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from app.agents import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig
 from app.qa.envelope import GameState, QaChatTurn
 
 
@@ -32,6 +32,7 @@ class QaSessionRecord(BaseModel):
     # Which prompt version this run uses. None defers to QA_PROMPT_VERSION, and
     # then to the newest version on disk.
     prompt_version: str | None = None
+    reasoning: ReasoningConfig | None = None
 
     # Live execution state.
     current_step: int = 0  # 0-based index into scenario.steps

@@ -9,6 +9,7 @@ from app.agents import GameContextAgent, KnowledgeQueryAgent
 from app.api.embeddings import router as embeddings_router
 from app.api.extract import router as extract_router
 from app.api.knowledge_queries import router as knowledge_queries_router
+from app.api.models import router as models_router
 from app.api.qa_sessions import router as qa_sessions_router
 from app.api.routes import router as api_router
 from app.api.sessions import router as sessions_router
@@ -98,6 +99,7 @@ def create_app() -> FastAPI:
     app.include_router(extract_router)
     app.include_router(embeddings_router)
     app.include_router(knowledge_queries_router)
+    app.include_router(models_router)
     return app
 
 
