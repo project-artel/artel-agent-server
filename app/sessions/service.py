@@ -12,6 +12,7 @@ from app.agents import (
     ScenarioDraft,
 )
 from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.sessions.channel import ScenarioChannel
 from app.sessions.schemas import HistoryTurn, SessionRecord
 from app.sessions.store import SessionExpired, SessionStore
 
@@ -51,20 +52,25 @@ class SessionService:
         await self._store.save(session_id, record)
         return session_id
 
-    async def start_first_turn(self, session_id: str) -> ScenarioAgentResult | None:
+    async def start_first_turn(
+        self, session_id: str, channel: ScenarioChannel
+    ) -> ScenarioAgentResult | None:
         record = await self._load(session_id)
         if not record.pending_user_input:
             return None
 
         user_input = record.pending_user_input
         record.pending_user_input = None
-        result = await self._generate(session_id, record, user_input, draft=None)
+        result = await self._generate(
+            session_id, record, user_input, draft=None, channel=channel
+        )
         await self._store.save(session_id, record)
         return result
 
     async def run_turn(
         self,
         session_id: str,
+        channel: ScenarioChannel,
         user_input: str,
         draft: ScenarioDraft | None,
         model: LLMModel | None = None,
@@ -75,7 +81,9 @@ class SessionService:
             record.model = model
         if locale is not None:
             record.locale = locale
-        result = await self._generate(session_id, record, user_input, draft)
+        result = await self._generate(
+            session_id, record, user_input, draft, channel=channel
+        )
         await self._store.save(session_id, record)
         return result
 
@@ -105,6 +113,7 @@ class SessionService:
         record: SessionRecord,
         user_input: str,
         draft: ScenarioDraft | None,
+        channel: ScenarioChannel,
     ) -> ScenarioAgentResult:
         request = ScenarioAgentRequest(
             user_input=user_input,
@@ -115,15 +124,17 @@ class SessionService:
             model=record.model,
             locale=record.locale,
         )
-        result = await self._agent.run(request, AgentContext(session_id=session_id))
+        result = await self._agent.run(
+            request, AgentContext(session_id=session_id), channel
+        )
 
-        # Full store (assistant turn keeps the generated scenario).
+        # Full store (assistant turn keeps the scenarios it authored).
         record.history.append(HistoryTurn(role="user", message=user_input))
         record.history.append(
             HistoryTurn(
                 role="assistant",
                 message=result.message,
-                scenario=result.scenario,
+                scenarios=result.scenarios,
             )
         )
         if len(record.history) > self._history_max_messages:
