@@ -11,6 +11,7 @@ from app.agents import (
     ScenarioAgentResult,
     ScenarioDraft,
     ScenarioGenerationError,
+    ScenarioPlan,
 )
 from app.llm.models import DEFAULT_MODEL, LLMModel
 from app.sessions.channel import ScenarioChannel
@@ -34,6 +35,9 @@ class OpenSessionRequest(BaseModel):
     # pre-run-scope callers keep working.
     run_id: int | None = None
     project_id: int | None = None
+    # The run's current scenarios at open (ARTEL-206 Step 6); lets the agent edit
+    # existing scenarios by echoing their `scenario_id`. Empty for a fresh run.
+    current_scenarios: list[ScenarioPlan] = Field(default_factory=list)
 
 
 class OpenSessionResponse(BaseModel):
@@ -51,6 +55,9 @@ class TurnMessage(BaseModel):
     model: LLMModel | None = None
     # Optional mid-session locale switch; None keeps the session's locale.
     locale: OutputLanguage | None = None
+    # The run's current scenarios at this turn (ARTEL-206 Step 6), refreshed by
+    # the orchestration server so edits target the right existing scenario_id.
+    current_scenarios: list[ScenarioPlan] = Field(default_factory=list)
 
 
 def _service(app) -> SessionService:
@@ -82,6 +89,7 @@ async def open_session(
         locale=payload.locale,
         run_id=payload.run_id,
         project_id=payload.project_id,
+        current_scenarios=payload.current_scenarios,
     )
     return OpenSessionResponse(session_id=session_id)
 
@@ -207,6 +215,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                         turn.draft,
                         turn.model,
                         turn.locale,
+                        turn.current_scenarios,
                     )
                 )
                 continue

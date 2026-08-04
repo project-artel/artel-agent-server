@@ -33,3 +33,7 @@ class SessionRecord(BaseModel):
     # scope (and existing tests) omit them.
     run_id: int | None = None
     project_id: int | None = None
+    # The run's current scenarios (ARTEL-206 Step 6), refreshed every turn by the
+    # orchestration server. Fed to the agent so it can target existing scenarios
+    # for edits (echoing `scenario_id`). Default empty keeps older records valid.
+    current_scenarios: list[ScenarioPlan] = Field(default_factory=list)

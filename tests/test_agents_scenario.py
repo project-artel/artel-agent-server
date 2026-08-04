@@ -173,6 +173,50 @@ def test_scenario_result_parses_string_case_ids_as_ints() -> None:
     assert parsed.scenarios[0].case_ids == [7, 8]
 
 
+def test_scenario_result_scenario_id_edit_vs_add() -> None:
+    """scenario_id: an id (string coerced to int) means edit; absent means add."""
+    parsed = ScenarioAgentResult.model_validate(
+        {
+            "message": "ok",
+            "scenarios": [
+                {"scenario_id": "5", "title": "edit", "description": "d", "case_ids": [1]},
+                {"title": "add", "description": "d", "case_ids": [2]},
+            ],
+        }
+    )
+
+    assert parsed.scenarios[0].scenario_id == 5
+    assert parsed.scenarios[1].scenario_id is None
+
+
+def test_first_message_carries_current_scenarios() -> None:
+    """The run's existing scenarios reach the prompt so the agent can edit by id."""
+    message = build_first_message(
+        _request(
+            current_scenarios=[
+                ScenarioPlan(
+                    scenario_id=42,
+                    title="Checkout flow",
+                    description="Verify checkout.",
+                    case_ids=[1, 2],
+                )
+            ]
+        )
+    )
+
+    assert "Checkout flow" in message
+    assert "42" in message
+    # The placeholder was resolved (not left literal) in the rendered prompt.
+    assert "{current_scenarios}" not in message
+
+
+def test_first_message_empty_current_scenarios_renders_empty_list() -> None:
+    """A fresh run renders the current-scenarios block as an empty JSON list."""
+    message = build_first_message(_request())
+
+    assert "[]" in message
+
+
 def test_system_prompt_uses_requested_language_directive() -> None:
     ko_body, _ = build_system_prompt(_request(locale=OutputLanguage.ko))
     en_body, version = build_system_prompt(_request(locale=OutputLanguage.en))

@@ -39,6 +39,10 @@ def build_first_message(request: ScenarioAgentRequest) -> str:
         unity_context=json.dumps(request.unity_context, ensure_ascii=False),
         game_context=json.dumps(request.game_context, ensure_ascii=False),
         draft=request.draft.model_dump_json() if request.draft is not None else "null",
+        current_scenarios=json.dumps(
+            [scenario.model_dump() for scenario in request.current_scenarios],
+            ensure_ascii=False,
+        ),
         user_input=request.user_input,
     )
 

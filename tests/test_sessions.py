@@ -58,15 +58,17 @@ class CountingAgent(ScenarioAgent):
 
 
 class CapturingAgent(ScenarioAgent):
-    """Records the language of the last request reaching the agent."""
+    """Records the language and current_scenarios of each request reaching the agent."""
 
     def __init__(self, result: ScenarioAgentResult) -> None:
         super().__init__(agent_factory=lambda **_kwargs: None)
         self._result = result
         self.languages: list[OutputLanguage] = []
+        self.current_scenarios_seen: list[list[ScenarioPlan]] = []
 
     async def run(self, request, context, channel):  # type: ignore[override]
         self.languages.append(request.locale)
+        self.current_scenarios_seen.append(request.current_scenarios)
         return self._result
 
 
@@ -177,6 +179,49 @@ def test_session_record_defaults_locale_when_missing() -> None:
     assert record.locale == OutputLanguage.ko
 
 
+def test_session_record_defaults_current_scenarios_when_missing() -> None:
+    # Records persisted before `current_scenarios` existed must still load (empty).
+    record = SessionRecord.model_validate(
+        {"unity_context": {}, "game_context": {}, "history": []}
+    )
+
+    assert record.current_scenarios == []
+
+
+def test_open_stores_current_scenarios() -> None:
+    service, _, store = _service()
+    current = [
+        ScenarioPlan(scenario_id=7, title="Checkout", description="d", case_ids=[1])
+    ]
+
+    session_id = asyncio.run(
+        service.open({}, {}, "edit checkout", current_scenarios=current)
+    )
+
+    record = asyncio.run(store.load(session_id))
+    assert record is not None
+    assert [s.scenario_id for s in record.current_scenarios] == [7]
+
+
+def test_run_turn_refreshes_current_scenarios_and_reaches_agent() -> None:
+    service, agent, store = _capturing_service()
+    session_id = asyncio.run(service.open({}, {}, "start"))
+    asyncio.run(service.start_first_turn(session_id, _channel()))
+
+    updated = [
+        ScenarioPlan(scenario_id=9, title="Login", description="d", case_ids=[3])
+    ]
+    asyncio.run(
+        service.run_turn(
+            session_id, _channel(), "tweak login", draft=None, current_scenarios=updated
+        )
+    )
+
+    # The refreshed run state reached the agent request and stuck on the record.
+    assert [s.scenario_id for s in agent.current_scenarios_seen[-1]] == [9]
+    assert [s.scenario_id for s in asyncio.run(store.load(session_id)).current_scenarios] == [9]
+
+
 def test_missing_session_raises_expired() -> None:
     service, _, _ = _service()
     with pytest.raises(SessionExpired):
@@ -223,6 +268,54 @@ def test_ws_flow_open_first_turn_and_turn() -> None:
 
     approved = client.post(f"/sessions/{session_id}/approve")
     assert approved.json() == {"ok": True}
+
+
+def test_ws_accepts_current_scenarios_and_round_trips_scenario_id() -> None:
+    app = FastAPI()
+    app.include_router(sessions_router)
+    # The agent echoes an edit (scenario_id set) so we can assert it flows out.
+    edit_result = ScenarioAgentResult(
+        message="edited",
+        scenarios=[
+            ScenarioPlan(
+                scenario_id=42, title="Checkout", description="d", case_ids=[1]
+            )
+        ],
+    )
+    app.state.session_service = SessionService(
+        store=InMemorySessionStore(), agent=CountingAgent(edit_result)
+    )
+    client = TestClient(app)
+
+    opened = client.post(
+        "/sessions",
+        json={
+            "user_input": "edit checkout",
+            "current_scenarios": [
+                {"scenario_id": 42, "title": "Checkout", "description": "d", "case_ids": [1]}
+            ],
+        },
+    )
+    assert opened.status_code == 200
+    session_id = opened.json()["session_id"]
+
+    with client.websocket_connect(f"/sessions/{session_id}") as ws:
+        first = ws.receive_json()
+        assert first["type"] == "result"
+        # scenario_id survives the round-trip out to the client (edit signal).
+        assert first["scenarios"][0]["scenario_id"] == 42
+
+        # A turn frame may also carry the refreshed run scenarios.
+        ws.send_json(
+            {
+                "type": "turn",
+                "user_input": "again",
+                "current_scenarios": [
+                    {"scenario_id": 42, "title": "Checkout", "description": "d", "case_ids": [1, 2]}
+                ],
+            }
+        )
+        assert ws.receive_json()["type"] == "result"
 
 
 def test_ws_close_terminates_and_deletes_session() -> None:

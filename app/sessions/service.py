@@ -10,6 +10,7 @@ from app.agents import (
     ScenarioAgentRequest,
     ScenarioAgentResult,
     ScenarioDraft,
+    ScenarioPlan,
 )
 from app.llm.models import DEFAULT_MODEL, LLMModel
 from app.sessions.channel import ScenarioChannel
@@ -38,6 +39,7 @@ class SessionService:
         locale: OutputLanguage = DEFAULT_LANGUAGE,
         run_id: int | None = None,
         project_id: int | None = None,
+        current_scenarios: list[ScenarioPlan] | None = None,
     ) -> str:
         session_id = uuid.uuid4().hex
         record = SessionRecord(
@@ -48,6 +50,7 @@ class SessionService:
             locale=locale,
             run_id=run_id,
             project_id=project_id,
+            current_scenarios=current_scenarios or [],
         )
         await self._store.save(session_id, record)
         return session_id
@@ -75,12 +78,17 @@ class SessionService:
         draft: ScenarioDraft | None,
         model: LLMModel | None = None,
         locale: OutputLanguage | None = None,
+        current_scenarios: list[ScenarioPlan] | None = None,
     ) -> ScenarioAgentResult:
         record = await self._load(session_id)
         if model is not None:
             record.model = model
         if locale is not None:
             record.locale = locale
+        # Orchestration refreshes the run's current scenarios each turn, so the
+        # agent always sees the latest state (prior turns' adds/edits applied).
+        if current_scenarios is not None:
+            record.current_scenarios = current_scenarios
         result = await self._generate(
             session_id, record, user_input, draft, channel=channel
         )
@@ -121,6 +129,7 @@ class SessionService:
             game_context=record.game_context,
             history=self._replay_messages(record),
             draft=draft,
+            current_scenarios=record.current_scenarios,
             model=record.model,
             locale=record.locale,
         )
