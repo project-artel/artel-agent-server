@@ -135,7 +135,7 @@ class SilentAgent:
 @pytest.fixture
 def stubbed_agent(monkeypatch):
     monkeypatch.setattr(
-        runner_module, "build_chat_model", lambda model, reasoning=None: object()
+        runner_module, "build_chat_model", lambda model, reasoning=None, **_: object()
     )
     monkeypatch.setattr(
         runner_module, "create_agent", lambda **_kwargs: SilentAgent()

@@ -192,7 +192,10 @@ class QaRunner:
         )
 
         agent = create_agent(
-            model=build_chat_model(self._model, self._reasoning),
+            # Prompt caching is asked for here and nowhere else: the agent loop
+            # resends the whole conversation every turn, which is the one shape
+            # that reads back more than it writes. See `build_chat_model`.
+            model=build_chat_model(self._model, self._reasoning, cache_prompt=True),
             tools=tools,
             system_prompt=system_prompt,
             # Folding runs on every request; the scene views pile up whether or
