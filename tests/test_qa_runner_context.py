@@ -14,14 +14,16 @@ from typing import Any
 
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
+from app.agents.qa.context import DEFAULT_KEEP_SCENES
 from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState
 from app.agents.scenario import ScenarioDraft, ScenarioStep
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import MessageType
+from app.qa.scene import CURRENT_SCENE_END, CURRENT_SCENE_START
 
 
 class ScriptedModel(BaseChatModel):
@@ -93,13 +95,9 @@ def tool_result_contents(messages: list[BaseMessage]) -> list[str]:
     return [m.content for m in messages if isinstance(m, ToolMessage) and isinstance(m.content, str)]
 
 
-def test_the_model_receives_folded_views_but_the_channel_keeps_the_full_text(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Four observations happen before the run ends; DEFAULT_KEEP_SCENES=2 means
-    the model's LAST call should see the first two folded and the last two in
-    full — while the channel's own scene memory and the sent LOG/STATUS frames
-    are never touched by the fold at all."""
+def scripted_run(monkeypatch: pytest.MonkeyPatch) -> tuple[ScriptedModel, QaRunChannel, list[dict]]:
+    """Four observations, a verdict and a close, against a model that records
+    every message list it was handed."""
 
     model = ScriptedModel(
         turns=[
@@ -141,15 +139,26 @@ def test_the_model_receives_folded_views_but_the_channel_keeps_the_full_text(
 
     assert state.finished
     assert len(model.received) >= 6
+    return model, channel, sent
+
+
+def test_the_model_receives_folded_views_but_the_channel_keeps_the_full_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Four observations happen before the run ends; `DEFAULT_KEEP_SCENES` says
+    how many of those tool-result views survive in full — while the channel's own
+    scene memory and the sent LOG/STATUS frames are never touched by the fold."""
+
+    model, channel, sent = scripted_run(monkeypatch)
 
     # The 5th call is the first one made after all four observations landed.
     fifth_call_results = tool_result_contents(model.received[4])
     assert len(fifth_call_results) == 4
-    assert "you can act on:" not in fifth_call_results[0]
-    assert "you can act on:" not in fifth_call_results[1]
-    assert "you can act on:" in fifth_call_results[2]
-    assert "you can act on:" in fifth_call_results[3]
-    assert "observe_scene" in fifth_call_results[0]
+    folded = fifth_call_results[: 4 - DEFAULT_KEEP_SCENES]
+    kept = fifth_call_results[4 - DEFAULT_KEEP_SCENES :]
+    assert all("you can act on:" not in content for content in folded)
+    assert all("you can act on:" in content for content in kept)
+    assert "observe_scene" in folded[0]
 
     # Model input only: the channel's own memory and everything actually sent
     # over the socket carry the full views, unaffected by the fold.
@@ -160,3 +169,28 @@ def test_the_model_receives_folded_views_but_the_channel_keeps_the_full_text(
         if frame["type"] in (MessageType.LOG.value, MessageType.STATUS.value)
     ]
     assert any(frame["type"] == MessageType.STATUS.value for frame in log_and_status_frames)
+
+
+def test_the_current_scene_is_the_last_thing_the_model_reads_every_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole point of the live view: the agent never has to have asked."""
+
+    model, _channel, _sent = scripted_run(monkeypatch)
+
+    def views(messages: list[BaseMessage]) -> list[BaseMessage]:
+        # The system prompt teaches the agent how to read this block, so it names
+        # the marker too. Only a message that IS a view counts here.
+        return [m for m in messages if str(m.content).startswith(CURRENT_SCENE_START)]
+
+    # Not on the first call — no frame has arrived yet, so there is no scene.
+    assert views(model.received[0]) == []
+
+    for received in model.received[1:]:
+        last = received[-1]
+        assert isinstance(last, HumanMessage)
+        assert str(last.content).startswith(CURRENT_SCENE_START)
+        assert str(last.content).endswith(CURRENT_SCENE_END)
+        # Exactly one, every turn: it is appended to the request rather than
+        # written into the graph's state, so it cannot pile up.
+        assert views(received) == [last]

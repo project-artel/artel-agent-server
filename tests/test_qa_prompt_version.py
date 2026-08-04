@@ -232,6 +232,23 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v3() -> None:
+def test_the_default_qa_version_is_v4() -> None:
     """A run that names no version has to get the newest prompt."""
-    assert resolve_version("qa_run") == "v3"
+    assert resolve_version("qa_run") == "v4"
+
+
+def test_v4_teaches_the_live_view_and_the_value_paths() -> None:
+    """The view and the history lists are useless if the agent cannot read them:
+    `100 → 80 → 60   [obs 4, 7, 11]` says nothing to a model never told what the
+    arrows and the bracket are."""
+    v3 = load_prompt("qa_run", "system", "v3").body
+    v4 = load_prompt("qa_run", "system", "v4").body
+
+    assert "<<current scene>>" in v4
+    assert "[obs 4, 7, 11]" in v4
+    assert "moved:" in v4
+    assert "(earlier changes trimmed)" in v4
+
+    # One paragraph added, nothing from v3 dropped.
+    for paragraph in v3.split("\n\n"):
+        assert paragraph in v4
