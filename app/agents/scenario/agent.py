@@ -18,6 +18,8 @@ from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.runnables import Runnable
 
+from langgraph.errors import GraphRecursionError
+
 from app.agents.base import AgentContext
 from app.agents.scenario.cases import MAX_SEARCHES_PER_RUN, TestCaseSearchState
 from app.agents.scenario.errors import ScenarioGenerationError
@@ -37,8 +39,10 @@ logger = logging.getLogger(__name__)
 # Graph steps the loop may take: a model turn and a tool turn per search, the
 # structured-output turn, and headroom. recursion_limit counts graph steps, so
 # this bounds tool calls and model turns together (see the QA runner). Doubled to
-# cover the model turn that sits between each tool result.
-RECURSION_LIMIT = (MAX_SEARCHES_PER_RUN + 4) * 2
+# cover the model turn that sits between each tool result. The headroom is generous
+# so a model that keeps probing after the search budget still lands on the
+# structured output before the limit — and if it doesn't, we fail gracefully below.
+RECURSION_LIMIT = (MAX_SEARCHES_PER_RUN + 8) * 2
 
 # Injectable so tests can hand back a canned runnable instead of reaching a real
 # model. The runnable is invoked with {"messages": [...]} and must return a state
@@ -98,7 +102,18 @@ class ScenarioAgent:
             **context.trace_config("scenario-generation"),
             "recursion_limit": RECURSION_LIMIT,
         }
-        result_state = await agent.ainvoke({"messages": messages}, config)
+        try:
+            result_state = await agent.ainvoke({"messages": messages}, config)
+        except GraphRecursionError as error:
+            # The tool loop never converged on a structured result within the step
+            # budget (e.g. the model kept searching). Surface it as a generation
+            # failure so the session emits an error frame and the client unblocks,
+            # rather than the turn task dying silently and leaving the UI "thinking".
+            logger.warning("[scenario] recursion limit hit before a result: %s", error)
+            raise ScenarioGenerationError(
+                "Scenario agent kept searching without settling on scenarios. "
+                "Try a more specific request."
+            ) from error
 
         structured = (
             result_state.get("structured_response")
