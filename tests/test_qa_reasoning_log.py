@@ -6,10 +6,12 @@ capture so that cannot regress silently.
 """
 
 import asyncio
+import logging
+from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from app.agents.qa.runner import QaRunner
+from app.agents.qa.runner import QaRunner, _log_token_usage
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import MessageType
 
@@ -235,3 +237,29 @@ def test_reasoning_sent_both_ways_is_logged_once() -> None:
         assert logs(sent) == ["상점을 열어 본다."]
 
     asyncio.run(run())
+
+
+def test_token_usage_log_reports_cache_reads(caplog) -> None:
+    """Cache misses are silent, so the run log has to carry the hit count.
+
+    Drives the middleware directly: it only reads `usage_metadata` off whatever
+    the handler returned, so a fake response exercises all of it.
+    """
+    reply = AIMessage(
+        content="ok",
+        usage_metadata={
+            "input_tokens": 5000,
+            "output_tokens": 100,
+            "total_tokens": 5100,
+            "input_token_details": {"cache_read": 4800},
+        },
+    )
+
+    async def handler(_request):
+        return SimpleNamespace(result=[reply])
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(_log_token_usage.awrap_model_call(object(), handler))
+
+    assert "cache_read': 4800" in caplog.text
+    assert "input=5000" in caplog.text

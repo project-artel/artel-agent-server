@@ -1014,7 +1014,7 @@ def test_a_run_searches_knowledge_and_carries_on_to_its_verdict(
     )
     monkeypatch.setattr(
         "app.agents.qa.runner.build_chat_model",
-        lambda _model, reasoning=None: model,
+        lambda _model, reasoning=None, **_: model,
     )
 
     sent: list[dict] = []
@@ -1188,7 +1188,7 @@ def test_a_run_corrects_an_entry_by_deleting_it_and_recording_the_new_one(
     )
     monkeypatch.setattr(
         "app.agents.qa.runner.build_chat_model",
-        lambda _model, reasoning=None: model,
+        lambda _model, reasoning=None, **_: model,
     )
 
     sent: list[dict] = []
