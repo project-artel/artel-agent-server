@@ -295,6 +295,30 @@ def test_pausing_and_resuming_go_out_as_the_time_actions() -> None:
     asyncio.run(run())
 
 
+def test_resetting_goes_out_as_the_reset_action() -> None:
+    """The scan riding with it is what makes the reset usable.
+
+    Every target id the agent holds dies with the old scene, so a reset that
+    came back without a fresh scene would leave it acting on corpses.
+    """
+
+    async def run() -> None:
+        _, _, tools, sent = make()
+        await tools["reset_game"].ainvoke(
+            {"step": 1, "thought": "튜토리얼을 처음부터 다시 본다"}
+        )
+
+        assert [frame["payload"]["message"] for frame in actions(sent)] == [
+            "Resetting the game"
+        ]
+        assert [item["method"] for item in actions(sent)[0]["payload"]["actions"]] == [
+            "reset_game",
+            "scan_scene",
+        ]
+
+    asyncio.run(run())
+
+
 def test_resume_reports_the_games_refusal() -> None:
     """Resuming what nobody paused fails in the SDK, and the agent has to see it."""
 
@@ -560,6 +584,7 @@ def test_the_agent_is_offered_exactly_these_tools() -> None:
         "drag_pointer",
         "pause_game_time",
         "resume_game_time",
+        "reset_game",
         "wait_for_operator",
         "report_step",
         "finish_run",

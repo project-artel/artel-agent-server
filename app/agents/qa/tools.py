@@ -653,6 +653,32 @@ def build_tools(
         )
 
     @tool
+    async def reset_game(step: int, thought: str) -> str:
+        """Put the game back to the state the run started in.
+
+        For a step that needs a clean game and no path back to one — a tutorial
+        that plays once a session, a level already cleared, a wrong branch taken
+        three screens ago. Cheaper than asking the operator to restart, and it
+        keeps the run alive.
+
+        It reloads the game's first scene, so everything on screen now is gone,
+        and so is whatever the game was keeping across scene loads: managers,
+        score, inventory. What it cannot undo is saved data — a game that writes
+        progress to disk comes back holding it, and a step that depends on a
+        fresh save file needs the operator.
+
+        A `pause_game_time` freeze and any held key or mouse button are released
+        first, so the fresh game starts with nothing pressed. Every target id you
+        have is dead afterwards; observe before you act again.
+        """
+        return await _run(
+            [JsonRpcAction(id=1, method="reset_game")],
+            thought,
+            "Resetting the game",
+            step,
+        )
+
+    @tool
     async def wait_for_operator(
         thought: str, timeout_seconds: float = 60.0, step: int | None = None
     ) -> str:
@@ -759,6 +785,7 @@ def build_tools(
         drag_pointer,
         pause_game_time,
         resume_game_time,
+        reset_game,
         wait_for_operator,
         report_step,
         finish_run,
