@@ -13,6 +13,7 @@ from app.llm.models import (
     ReasoningConfig,
     validate_reasoning,
 )
+from app.llm.usage import set_usage_scope
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import (
     ErrorPayload,
@@ -102,6 +103,9 @@ class QaExecutionService:
         already sent a terminal STATUS in every case. The caller closes the socket.
         """
         record = await self._load(session_id)
+        # Every model call the run makes from here inherits this label; the
+        # contextvar rides the run's task and its children.
+        set_usage_scope("QA_RUN", record.qa_try_id)
         channel = QaRunChannel(qa_try_id=record.qa_try_id, send=send)
         self._channels[session_id] = channel
 

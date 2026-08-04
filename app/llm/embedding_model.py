@@ -18,6 +18,7 @@ from langchain_core.embeddings import Embeddings
 from langchain_openai import OpenAIEmbeddings
 
 from app.config import Settings, get_settings
+from app.llm.usage import build_usage_http_client
 
 
 class EmbeddingBatchTooLargeError(ValueError):
@@ -64,6 +65,11 @@ def build_embedding_model(
         # each. Matching the caller's own limit makes a permitted batch exactly
         # one request rather than however many the library default implies.
         chunk_size=batch_limit,
+        # Embeddings have no LangChain callback to hang usage off — they are not
+        # a chat model and never enter an agent graph — so the token counts are
+        # read off the HTTP response instead. This function is @lru_cache'd, so
+        # the client (and its connection pool) is built once.
+        http_async_client=build_usage_http_client(),
     )
 
 

@@ -26,6 +26,10 @@ class OpenSessionRequest(BaseModel):
     # pending input when the WS connects), so it must be set here, not only on the
     # per-turn message below.
     locale: OutputLanguage = DEFAULT_LANGUAGE
+    # What this session's LLM spend is booked against. Optional so an
+    # Orchestration that does not send it yet keeps working — until it does, the
+    # usage records carry a null reference.
+    test_scenario_id: int | None = None
 
 
 class OpenSessionResponse(BaseModel):
@@ -72,6 +76,7 @@ async def open_session(
         user_input=payload.user_input,
         model=payload.model,
         locale=payload.locale,
+        test_scenario_id=payload.test_scenario_id,
     )
     return OpenSessionResponse(session_id=session_id)
 

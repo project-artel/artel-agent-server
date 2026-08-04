@@ -16,6 +16,7 @@ from app.api.sessions import router as sessions_router
 from app.config import get_settings
 from app.documents import ExtractionService
 from app.llm import build_embedding_client
+from app.llm.usage import get_usage_buffer
 from app.logging_config import configure_logging
 from app.observability import configure_langsmith
 from app.prompts import validate_prompts
@@ -62,9 +63,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.embedding_client = build_embedding_client(settings)
     app.state.knowledge_query_agent = KnowledgeQueryAgent()
     app.state.knowledge_query_batch_limit = settings.knowledge_query_batch_limit
+
+    # LLM spend collection. No-op without ORCHESTRATION_BASE_URL; stop() sends
+    # the partial batch, without which every deploy loses one.
+    usage_buffer = get_usage_buffer()
+    usage_buffer.start()
     try:
         yield
     finally:
+        await usage_buffer.stop()
         await http_client.aclose()
         await redis.aclose()
 

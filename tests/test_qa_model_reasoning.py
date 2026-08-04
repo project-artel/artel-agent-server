@@ -234,10 +234,10 @@ def test_omitted_reasoning_is_not_sent_and_uses_a_distinct_cache_entry(
     finally:
         chat_model.build_chat_model.cache_clear()
 
-    assert created[0]["extra_body"] is None
-    assert created[1]["extra_body"] == {
-        "reasoning": {"effort": "low", "exclude": True}
-    }
+    # usage.include always rides along (it is what makes OpenRouter report cost);
+    # reasoning is the part that appears only when it was asked for.
+    assert "reasoning" not in created[0]["extra_body"]
+    assert created[1]["extra_body"]["reasoning"] == {"effort": "low", "exclude": True}
 
 
 def test_run_start_log_names_reasoning(monkeypatch, caplog) -> None:

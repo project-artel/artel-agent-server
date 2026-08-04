@@ -4,6 +4,7 @@ from langchain_openai import ChatOpenAI
 
 from app.config import get_settings
 from app.llm.models import LLMModel, ReasoningConfig, get_model_spec, validate_reasoning
+from app.llm.usage import UsageCallback
 
 
 @lru_cache
@@ -24,15 +25,21 @@ def build_chat_model(
         headers["X-Title"] = settings.openrouter_app_title
     reasoning = validate_reasoning(model, reasoning)
 
+    # OpenRouter prices the call itself and reports what it charged, but only
+    # when asked — without usage.include the response carries token counts and
+    # no `cost`. Merged rather than assigned: reasoning shares this field.
+    extra_body: dict = {"usage": {"include": True}}
+    if reasoning is not None:
+        extra_body["reasoning"] = reasoning.as_openrouter()
+
     return ChatOpenAI(
         model=model.value,
         base_url=settings.openrouter_base_url,
         api_key=settings.openrouter_api_key or "missing",
         temperature=0.2,
         default_headers=headers or None,
-        extra_body=(
-            {"reasoning": reasoning.as_openrouter()} if reasoning is not None else None
-        ),
+        extra_body=extra_body,
+        callbacks=[UsageCallback()],
     )
 
 

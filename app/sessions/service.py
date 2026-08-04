@@ -12,6 +12,7 @@ from app.agents import (
     ScenarioDraft,
 )
 from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.usage import set_usage_scope
 from app.sessions.schemas import HistoryTurn, SessionRecord
 from app.sessions.store import SessionExpired, SessionStore
 
@@ -35,6 +36,7 @@ class SessionService:
         user_input: str,
         model: LLMModel = DEFAULT_MODEL,
         locale: OutputLanguage = DEFAULT_LANGUAGE,
+        test_scenario_id: int | None = None,
     ) -> str:
         session_id = uuid.uuid4().hex
         record = SessionRecord(
@@ -43,6 +45,7 @@ class SessionService:
             pending_user_input=user_input,
             model=model,
             locale=locale,
+            test_scenario_id=test_scenario_id,
         )
         await self._store.save(session_id, record)
         return session_id
@@ -102,6 +105,7 @@ class SessionService:
         user_input: str,
         draft: ScenarioDraft | None,
     ) -> ScenarioAgentResult:
+        set_usage_scope("SCENARIO", record.test_scenario_id)
         request = ScenarioAgentRequest(
             user_input=user_input,
             unity_context=record.unity_context,
