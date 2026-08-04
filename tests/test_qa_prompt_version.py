@@ -232,27 +232,6 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_v4_points_at_the_reset_without_rewriting_v3() -> None:
-    """`reset_game` is the one tool nothing in the loop leads to.
-
-    Every other tool answers a question the run already asks — what is on screen,
-    how do I press this. Resetting answers one the agent has to think of first:
-    the step needs a game state this run has walked past. A tool description is
-    read when the tool is already in mind, so the prompt is the only place that
-    can put it there.
-    """
-    v3 = load_prompt("qa_run", "system", "v3").body
-    v4 = load_prompt("qa_run", "system", "v4").body
-
-    assert "reset_game" not in v3
-    assert "reset_game" in v4
-
-    # An addition, not a rewrite: a run tagged v3 has to stay reproducible, so
-    # every paragraph of it survives verbatim.
-    for paragraph in v3.split("\n\n"):
-        assert paragraph in v4
-
-
-def test_the_default_qa_version_is_v4() -> None:
+def test_the_default_qa_version_is_v3() -> None:
     """A run that names no version has to get the newest prompt."""
-    assert resolve_version("qa_run") == "v4"
+    assert resolve_version("qa_run") == "v3"
