@@ -2,16 +2,17 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.agents import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
+from app.agents import DEFAULT_LANGUAGE, OutputLanguage, ScenarioPlan
 from app.llm.models import DEFAULT_MODEL, LLMModel
 
 
 class HistoryTurn(BaseModel):
     role: Literal["user", "assistant"]
     message: str
-    # Assistant turns keep the full generated draft (audit/restore); this is NOT
-    # replayed into the prompt — only `message` text is.
-    scenario: ScenarioDraft | None = None
+    # Assistant turns keep the scenarios they authored (audit/restore); these are
+    # NOT replayed into the prompt — only `message` text is. Multi-scenario plans
+    # now (ARTEL-206/227), where a turn once kept one step-based ScenarioDraft.
+    scenarios: list[ScenarioPlan] | None = None
 
 
 class SessionRecord(BaseModel):
@@ -26,3 +27,13 @@ class SessionRecord(BaseModel):
     # Output locale for generated scenarios. Default keeps records saved
     # before this field was introduced deserializing as Korean.
     locale: OutputLanguage = DEFAULT_LANGUAGE
+    # Run scope (ARTEL-206). Set when the authoring session is opened from a run
+    # dashboard, so the agent's case search and the orchestration-side reconcile
+    # can be bound to the right run/project. Optional: callers that predate run
+    # scope (and existing tests) omit them.
+    run_id: int | None = None
+    project_id: int | None = None
+    # The run's current scenarios (ARTEL-206 Step 6), refreshed every turn by the
+    # orchestration server. Fed to the agent so it can target existing scenarios
+    # for edits (echoing `scenario_id`). Default empty keeps older records valid.
+    current_scenarios: list[ScenarioPlan] = Field(default_factory=list)

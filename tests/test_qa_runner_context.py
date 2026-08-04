@@ -128,7 +128,7 @@ def scripted_run(monkeypatch: pytest.MonkeyPatch) -> tuple[ScriptedModel, QaRunC
     )
     monkeypatch.setattr(
         "app.agents.qa.runner.build_chat_model",
-        lambda _model, reasoning=None: model,
+        lambda _model, reasoning=None, **_: model,
     )
 
     channel, sent = make_channel()
