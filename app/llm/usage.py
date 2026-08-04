@@ -327,8 +327,14 @@ def build_usage_http_client(
             usage = body.get("usage") or {}
             started = response.request.extensions.get(_STARTED_EXTENSION)
             cost = usage.get("cost")
+            # OpenRouter echoes an embedding model without its provider prefix
+            # ("text-embedding-3-large", not "openai/text-embedding-3-large"),
+            # and a slug with no "/" makes provider come out as the model name.
+            # The configured slug is the one that still carries the vendor.
+            reported = body.get("model") or ""
+            configured = get_settings().embedding_model
             record = _build_record(
-                body.get("model") or get_settings().embedding_model,
+                reported if "/" in reported else configured,
                 input_tokens=usage.get("prompt_tokens", usage.get("total_tokens", 0)),
                 # An embedding call produces vectors, not tokens.
                 output_tokens=0,

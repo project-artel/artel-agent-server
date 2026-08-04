@@ -117,7 +117,9 @@ def _embedding_transport() -> httpx.MockTransport:
         return httpx.Response(
             200,
             json={
-                "model": "openai/text-embedding-3-large",
+                # OpenRouter reports an embedding model without the provider
+                # prefix it was asked for — verified against the live endpoint.
+                "model": "text-embedding-3-large",
                 "data": [{"embedding": [0.1, 0.2]}],
                 "usage": {"prompt_tokens": 87, "total_tokens": 87, "cost": 0.000012},
             },
@@ -142,7 +144,10 @@ def test_embedding_response_is_recorded_with_no_output_tokens() -> None:
     assert record["referenceId"] == 9
     assert record["inputTokens"] == 87
     assert record["outputTokens"] == 0
+    # The prefix-less slug in the response would make provider come out as the
+    # model name, so the configured slug is what the record carries.
     assert record["model"] == "openai/text-embedding-3-large"
+    assert record["provider"] == "openai"
     assert record["costUsd"] == 0.000012
     # The hook read the body; the SDK must still find it there afterwards.
     assert response.json()["data"] == [{"embedding": [0.1, 0.2]}]
