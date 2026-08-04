@@ -96,6 +96,34 @@ async def _fold_scene_views(request, handler):
     return await handler(request.override(messages=fold_stale_scenes(request.messages)))
 
 
+@wrap_model_call
+async def _log_token_usage(request, handler):
+    """Log what each model call cost, and how much of it came from cache.
+
+    Prompt caching fails silently: a prefix under the model's minimum size, or one
+    that changed since the last call, is billed in full with no error and no
+    warning. `cache_read` in the details is the only signal that the
+    `cache_control` set in `app/llm/chat_model.py` is doing anything, so a run's
+    log has to carry it or the setting is unverifiable in production.
+
+    The details dict is logged whole rather than picked apart: which keys
+    OpenRouter fills in varies by provider, and an unread key is worth more here
+    than a `0` for one this provider never sends.
+    """
+    response = await handler(request)
+    for message in response.result:
+        usage = getattr(message, "usage_metadata", None)
+        if not usage:
+            continue
+        logger.info(
+            "[QA] tokens input=%d output=%d details=%s",
+            usage.get("input_tokens", 0),
+            usage.get("output_tokens", 0),
+            usage.get("input_token_details") or {},
+        )
+    return response
+
+
 class QaRunner:
     """Runs one scenario to completion over one channel."""
 
@@ -164,18 +192,22 @@ class QaRunner:
         )
 
         agent = create_agent(
-            model=build_chat_model(self._model, self._reasoning),
+            # Prompt caching is asked for here and nowhere else: the agent loop
+            # resends the whole conversation every turn, which is the one shape
+            # that reads back more than it writes. See `build_chat_model`.
+            model=build_chat_model(self._model, self._reasoning, cache_prompt=True),
             tools=tools,
             system_prompt=system_prompt,
             # Folding runs on every request; the scene views pile up whether or
             # not the model can see. The vision middleware is added only when it
             # can — on a text-only model it would have nothing to inject and
             # nothing to trim. The two touch disjoint messages, so their order
-            # here does not matter.
+            # here does not matter. Usage logging is last so it wraps the others
+            # and reports what the model was actually sent, after folding.
             middleware=(
-                [_fold_scene_views, QaCaptureVisionMiddleware(state)]
+                [_fold_scene_views, QaCaptureVisionMiddleware(state), _log_token_usage]
                 if supports_vision
-                else [_fold_scene_views]
+                else [_fold_scene_views, _log_token_usage]
             ),
         )
         # Streamed rather than invoked so the model's reasoning can be put on the

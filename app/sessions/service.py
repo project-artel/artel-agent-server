@@ -10,9 +10,11 @@ from app.agents import (
     ScenarioAgentRequest,
     ScenarioAgentResult,
     ScenarioDraft,
+    ScenarioPlan,
 )
 from app.llm.models import DEFAULT_MODEL, LLMModel
 from app.llm.usage import set_usage_scope
+from app.sessions.channel import ScenarioChannel
 from app.sessions.schemas import HistoryTurn, SessionRecord
 from app.sessions.store import SessionExpired, SessionStore
 
@@ -37,6 +39,9 @@ class SessionService:
         model: LLMModel = DEFAULT_MODEL,
         locale: OutputLanguage = DEFAULT_LANGUAGE,
         test_scenario_id: int | None = None,
+        run_id: int | None = None,
+        project_id: int | None = None,
+        current_scenarios: list[ScenarioPlan] | None = None,
     ) -> str:
         session_id = uuid.uuid4().hex
         record = SessionRecord(
@@ -46,35 +51,50 @@ class SessionService:
             model=model,
             locale=locale,
             test_scenario_id=test_scenario_id,
+            run_id=run_id,
+            project_id=project_id,
+            current_scenarios=current_scenarios or [],
         )
         await self._store.save(session_id, record)
         return session_id
 
-    async def start_first_turn(self, session_id: str) -> ScenarioAgentResult | None:
+    async def start_first_turn(
+        self, session_id: str, channel: ScenarioChannel
+    ) -> ScenarioAgentResult | None:
         record = await self._load(session_id)
         if not record.pending_user_input:
             return None
 
         user_input = record.pending_user_input
         record.pending_user_input = None
-        result = await self._generate(session_id, record, user_input, draft=None)
+        result = await self._generate(
+            session_id, record, user_input, draft=None, channel=channel
+        )
         await self._store.save(session_id, record)
         return result
 
     async def run_turn(
         self,
         session_id: str,
+        channel: ScenarioChannel,
         user_input: str,
         draft: ScenarioDraft | None,
         model: LLMModel | None = None,
         locale: OutputLanguage | None = None,
+        current_scenarios: list[ScenarioPlan] | None = None,
     ) -> ScenarioAgentResult:
         record = await self._load(session_id)
         if model is not None:
             record.model = model
         if locale is not None:
             record.locale = locale
-        result = await self._generate(session_id, record, user_input, draft)
+        # Orchestration refreshes the run's current scenarios each turn, so the
+        # agent always sees the latest state (prior turns' adds/edits applied).
+        if current_scenarios is not None:
+            record.current_scenarios = current_scenarios
+        result = await self._generate(
+            session_id, record, user_input, draft, channel=channel
+        )
         await self._store.save(session_id, record)
         return result
 
@@ -104,6 +124,7 @@ class SessionService:
         record: SessionRecord,
         user_input: str,
         draft: ScenarioDraft | None,
+        channel: ScenarioChannel,
     ) -> ScenarioAgentResult:
         set_usage_scope("SCENARIO", record.test_scenario_id)
         request = ScenarioAgentRequest(
@@ -112,18 +133,21 @@ class SessionService:
             game_context=record.game_context,
             history=self._replay_messages(record),
             draft=draft,
+            current_scenarios=record.current_scenarios,
             model=record.model,
             locale=record.locale,
         )
-        result = await self._agent.run(request, AgentContext(session_id=session_id))
+        result = await self._agent.run(
+            request, AgentContext(session_id=session_id), channel
+        )
 
-        # Full store (assistant turn keeps the generated scenario).
+        # Full store (assistant turn keeps the scenarios it authored).
         record.history.append(HistoryTurn(role="user", message=user_input))
         record.history.append(
             HistoryTurn(
                 role="assistant",
                 message=result.message,
-                scenario=result.scenario,
+                scenarios=result.scenarios,
             )
         )
         if len(record.history) > self._history_max_messages:

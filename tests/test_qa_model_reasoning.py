@@ -240,6 +240,40 @@ def test_omitted_reasoning_is_not_sent_and_uses_a_distinct_cache_entry(
     assert created[1]["extra_body"]["reasoning"] == {"effort": "low", "exclude": True}
 
 
+def test_caching_is_opt_in_and_only_for_anthropic(monkeypatch) -> None:
+    """Both conditions have to hold before a breakpoint is sent.
+
+    `cache_prompt` because the breakpoint lands at the end of the prompt: a caller
+    that varies its last message shares nothing past it, so it rewrites the cache
+    every request and pays the write premium for a read that never comes. Only a
+    caller that appends — the agent loop — comes out ahead.
+
+    Anthropic because OpenAI and Google cache without being asked, and must not be
+    sent a parameter their providers do not read.
+    """
+    created: list[dict] = []
+
+    class FakeChat:
+        def __init__(self, **kwargs):
+            created.append(kwargs)
+
+    monkeypatch.setattr(chat_model, "ChatOpenAI", FakeChat)
+    chat_model.build_chat_model.cache_clear()
+    try:
+        chat_model.build_chat_model(LLMModel.claude_opus_4_8, cache_prompt=True)
+        chat_model.build_chat_model(LLMModel.claude_opus_4_8)
+        chat_model.build_chat_model(LLMModel.gpt_4o_mini, cache_prompt=True)
+    finally:
+        chat_model.build_chat_model.cache_clear()
+
+    asked_anthropic, default_anthropic, asked_openai = created
+    assert asked_anthropic["extra_body"]["cache_control"] == {"type": "ephemeral"}
+    # extra_body always carries usage.include (cost reporting), so the check is
+    # the absence of the breakpoint, not an empty body.
+    assert "cache_control" not in default_anthropic["extra_body"]
+    assert "cache_control" not in asked_openai["extra_body"]
+
+
 def test_run_start_log_names_reasoning(monkeypatch, caplog) -> None:
     class SilentAgent:
         def astream(self, *_args, **_kwargs):
@@ -250,7 +284,7 @@ def test_run_start_log_names_reasoning(monkeypatch, caplog) -> None:
             return updates()
 
     monkeypatch.setattr(
-        runner_module, "build_chat_model", lambda model, reasoning=None: object()
+        runner_module, "build_chat_model", lambda model, reasoning=None, **_: object()
     )
     monkeypatch.setattr(
         runner_module, "create_agent", lambda **_kwargs: SilentAgent()
