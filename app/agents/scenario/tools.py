@@ -1,0 +1,64 @@
+"""The tools the scenario authoring agent drives its search with.
+
+One tool for now: `search_test_cases`. It mirrors the QA agent's
+`search_knowledge` wrapper (`app/agents/qa/tools.py`) — a per-turn budget, and
+the three search outcomes formatted for the model to act on — over the scenario
+session's own channel rather than the QA envelope.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from langchain_core.tools import BaseTool, tool
+
+from app.agents.scenario.cases import (
+    MAX_SEARCHES_PER_RUN,
+    RESULT_LIMIT,
+    SEARCH_TEST_CASES_DESCRIPTION,
+    TestCaseSearchState,
+    render_results,
+)
+
+if TYPE_CHECKING:
+    # Type-only: see app/agents/scenario/cases.py for why app.sessions is not
+    # imported at module load.
+    from app.sessions.channel import ScenarioChannel
+
+
+def build_tools(channel: ScenarioChannel, state: TestCaseSearchState) -> list[BaseTool]:
+    # Imported here, not at module load, to keep the agent layer free of an
+    # app.sessions import at import time (that would cycle through the service).
+    from app.sessions.channel import TestCaseSearchFailed
+
+    @tool(description=SEARCH_TEST_CASES_DESCRIPTION.format(limit=MAX_SEARCHES_PER_RUN))
+    async def search_test_cases(query: str, category: str | None = None) -> str:
+        # What the agent reads is SEARCH_TEST_CASES_DESCRIPTION, not this.
+        if state.searches_attempted >= MAX_SEARCHES_PER_RUN:
+            return (
+                f"You have used all {MAX_SEARCHES_PER_RUN} case searches this turn. "
+                "Build the scenarios from the cases you have already found."
+            )
+
+        state.searches_attempted += 1
+        answer = await channel.search_test_cases(
+            query, (category or "").strip() or None, RESULT_LIMIT
+        )
+        remaining = MAX_SEARCHES_PER_RUN - state.searches_attempted
+
+        if answer is None:
+            return (
+                "The case search did not answer in time. Build the scenarios from "
+                f"the cases you already have. {remaining} search(es) left."
+            )
+        if isinstance(answer, TestCaseSearchFailed):
+            # Said plainly, with what to do instead: a failed lookup is a side
+            # errand that failed, not a reason to invent cases.
+            return (
+                f"The case search could not run — {answer.reason}. Build the "
+                "scenarios from the cases you already have, and note what is "
+                f"missing. {remaining} search(es) left."
+            )
+        return render_results(answer, remaining)
+
+    return [search_test_cases]

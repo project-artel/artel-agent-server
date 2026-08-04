@@ -8,6 +8,7 @@ from app.agents.scenario.schemas import (
     ScenarioAgentRequest,
     ScenarioAgentResult,
     ScenarioDraft,
+    ScenarioPlan,
     ScenarioStep,
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     "ScenarioAgentResult",
     "ScenarioDraft",
     "ScenarioGenerationError",
+    "ScenarioPlan",
     "ScenarioStep",
 ]

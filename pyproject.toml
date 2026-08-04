@@ -33,3 +33,7 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+# Tests are function-style. Collect only classes ending in "Tests" so domain
+# types named after the product's "TestCase" vocabulary (TestCaseHit, …) are not
+# mistaken for test classes and warned about.
+python_classes = ["*Tests"]
