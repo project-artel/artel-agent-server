@@ -234,10 +234,35 @@ def test_omitted_reasoning_is_not_sent_and_uses_a_distinct_cache_entry(
     finally:
         chat_model.build_chat_model.cache_clear()
 
-    assert created[0]["extra_body"] is None
-    assert created[1]["extra_body"] == {
-        "reasoning": {"effort": "low", "exclude": True}
-    }
+    # Anthropic slugs always carry the caching breakpoint (see the caching test
+    # below), so "reasoning was omitted" is read off the key, not off the whole body.
+    assert "reasoning" not in created[0]["extra_body"]
+    assert created[1]["extra_body"]["reasoning"] == {"effort": "low", "exclude": True}
+
+
+def test_only_anthropic_slugs_carry_a_caching_breakpoint(monkeypatch) -> None:
+    """OpenRouter caches Anthropic prompts only when the request asks for it.
+
+    Root-level `cache_control` lets OpenRouter place and move the breakpoint
+    itself. OpenAI and Google models cache without being asked, so they must not
+    be sent a parameter their providers do not read.
+    """
+    created: list[dict] = []
+
+    class FakeChat:
+        def __init__(self, **kwargs):
+            created.append(kwargs)
+
+    monkeypatch.setattr(chat_model, "ChatOpenAI", FakeChat)
+    chat_model.build_chat_model.cache_clear()
+    try:
+        chat_model.build_chat_model(LLMModel.claude_opus_4_8)
+        chat_model.build_chat_model(LLMModel.gpt_4o_mini)
+    finally:
+        chat_model.build_chat_model.cache_clear()
+
+    assert created[0]["extra_body"]["cache_control"] == {"type": "ephemeral"}
+    assert created[1]["extra_body"] is None
 
 
 def test_run_start_log_names_reasoning(monkeypatch, caplog) -> None:
