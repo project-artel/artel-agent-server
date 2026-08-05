@@ -162,6 +162,22 @@ def test_operator_messages_are_drained_once() -> None:
     assert channel.drain_operator_messages() == []
 
 
+def test_draining_does_not_erase_what_the_operator_said() -> None:
+    """Delivery is once; the record is for the whole run.
+
+    Once drained, an instruction exists only inside the text of one tool result,
+    and compaction replaces exactly that text. "It applies from now on" then quietly
+    stops being true. `render_progress_ledger` restates this list afterwards.
+    """
+    channel, _ = make_channel()
+    channel.on_chat({"payload": {"message": "메뉴로 가"}})
+    channel.on_chat({"payload": {"message": "천천히"}})
+
+    channel.drain_operator_messages()
+
+    assert channel.operator_instructions == ["메뉴로 가", "천천히"]
+
+
 def test_waiting_returns_as_soon_as_the_operator_speaks() -> None:
     async def run() -> None:
         channel, _ = make_channel()

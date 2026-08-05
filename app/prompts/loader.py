@@ -40,6 +40,7 @@ PROMPTS_ROOT = Path(__file__).resolve().parent
 # Which Settings field holds each agent's default version. Unset means "latest".
 SETTINGS_VERSION_KEYS: dict[str, str] = {
     "qa_run": "qa_prompt_version",
+    "qa_compaction": "qa_compaction_prompt_version",
     "scenario": "scenario_prompt_version",
     "game_context": "game_context_prompt_version",
     "knowledge_query": "knowledge_query_prompt_version",

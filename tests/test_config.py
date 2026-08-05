@@ -1,4 +1,8 @@
+import pytest
+from pydantic import ValidationError
+
 from app.config import Settings
+from app.llm.models import LLMModel
 
 
 def test_settings_can_load_from_env_file(tmp_path) -> None:
@@ -36,6 +40,9 @@ def test_prompt_versions_default_to_unset() -> None:
     assert settings.qa_prompt_version is None
     assert settings.scenario_prompt_version is None
     assert settings.game_context_prompt_version is None
+    # Versioned apart from the run's own prompt: the summarizer is a different
+    # call to a different model, and pinning one back must not pin the other.
+    assert settings.qa_compaction_prompt_version is None
 
 
 def test_prompt_versions_can_be_pinned_per_agent(tmp_path) -> None:
@@ -56,3 +63,24 @@ def test_prompt_versions_can_be_pinned_per_agent(tmp_path) -> None:
     assert settings.qa_prompt_version == "v2"
     assert settings.scenario_prompt_version == "v1"
     assert settings.game_context_prompt_version == "v3"
+
+
+def test_compaction_defaults_are_safe_to_deploy_with() -> None:
+    """On by default, because a run that hits the provider's limit is worse than a
+    run that compacts when it did not strictly need to."""
+    settings = Settings(_env_file=None)
+
+    assert settings.qa_compaction_enabled is True
+    assert settings.qa_compaction_trigger_fraction == 0.9
+    assert settings.qa_compaction_keep_messages == 20
+    assert settings.qa_compaction_min_new_messages == 4
+    assert settings.qa_compaction_trim_tokens == 8000
+    assert settings.qa_compaction_model == LLMModel.gpt_5_6_luna.value
+
+
+def test_a_summarizer_outside_the_catalog_is_refused_at_startup() -> None:
+    """The slug cannot be typed as `LLMModel` here — importing `app.llm` from this
+    module would import `chat_model`, which imports this module back. The validator
+    is what keeps a typo from surviving until the first QA run compacts."""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, qa_compaction_model="openai/not-a-model")

@@ -13,6 +13,7 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import wrap_model_call
 from langchain_core.messages import HumanMessage
 
+from app.agents.qa.compaction import QaCompactionMiddleware
 from app.agents.qa.context import fold_stale_scenes
 from app.agents.qa.knowledge import (
     MAX_FORGETS_PER_RUN,
@@ -23,6 +24,7 @@ from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.vision import QaCaptureVisionMiddleware
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
+from app.config import Settings, get_settings
 from app.llm.chat_model import build_chat_model
 from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig, get_model_spec
 from app.prompts import load_prompt
@@ -31,8 +33,11 @@ from app.qa.envelope import LogCategory
 
 logger = logging.getLogger(__name__)
 
-# Directory under app/prompts/ holding this agent's prompt versions.
+# Directories under app/prompts/ holding these agents' prompt versions. The
+# summarizing prompt is versioned apart from the run's own: it is a different call
+# to a different model, so pinning one back must not pin the other.
 PROMPT_AGENT = "qa_run"
+COMPACTION_PROMPT_AGENT = "qa_compaction"
 
 # A scene view runs long. Cut it for the console, and say it was cut — a silently
 # truncated log reads as a smaller context than the model actually saw.
@@ -60,6 +65,11 @@ RUN_DEADLINE_SECONDS = 600.0
 # blocks put it under. Providers disagree on both.
 _REASONING_BLOCK_TYPES = ("text", "thinking", "reasoning")
 _REASONING_KEYS = ("text", "thinking", "reasoning", "reasoning_content")
+
+# The graph nodes whose updates carry turns that actually happened. Everything
+# else in an `astream` update is a middleware node reporting its own rewrite of
+# the conversation, which is not new and must not be logged as if it were.
+_TURN_PRODUCING_NODES = frozenset({"model", "tools"})
 
 
 def _clip(text: str) -> str:
@@ -135,6 +145,7 @@ class QaRunner:
         deadline_seconds: float = RUN_DEADLINE_SECONDS,
         prompt_version: str | None = None,
         reasoning: ReasoningConfig | None = None,
+        settings: Settings | None = None,
     ) -> None:
         self._model = model
         self._language = language
@@ -142,9 +153,53 @@ class QaRunner:
         # None leaves the choice to settings, and then to the newest version.
         self._prompt_version = prompt_version
         self._reasoning = reasoning
+        # Read here rather than taken as arguments so that `QaExecutionService`'s
+        # runner factory, which passes only the run's own options, needs no change
+        # when a compaction setting is added. Injectable for tests.
+        self._settings = settings or get_settings()
 
     def _tool_call_limit(self, steps: int) -> int:
         return BASE_TOOL_CALLS + TOOL_CALLS_PER_STEP * max(steps, 1)
+
+    def _build_compaction(
+        self, channel: QaRunChannel, state: QaRunState
+    ) -> QaCompactionMiddleware | None:
+        """The compaction middleware, or None when it is switched off."""
+        settings = self._settings
+        if not settings.qa_compaction_enabled:
+            return None
+        prompt = load_prompt(COMPACTION_PROMPT_AGENT, "summary")
+        logger.info(
+            "[QA] compaction on: model=%s prompt_version=%s trigger=%.2f keep=%d",
+            settings.qa_compaction_model,
+            prompt.version,
+            settings.qa_compaction_trigger_fraction,
+            settings.qa_compaction_keep_messages,
+        )
+        return QaCompactionMiddleware(
+            # Not the run's model, and not `cache_prompt`: summarizing is one
+            # call over a prefix nothing will send again, so caching it would pay
+            # the write premium for a read that never happens.
+            model=build_chat_model(LLMModel(settings.qa_compaction_model)),
+            summary_prompt=prompt.body,
+            run_model_max_input_tokens=get_model_spec(self._model).max_input_tokens,
+            state=state,
+            channel=channel,
+            trigger_fraction=settings.qa_compaction_trigger_fraction,
+            keep_messages=settings.qa_compaction_keep_messages,
+            min_new_messages=settings.qa_compaction_min_new_messages,
+            trim_tokens=settings.qa_compaction_trim_tokens,
+            on_compacted=self._log_compaction,
+        )
+
+    async def _log_compaction(self, summary: str, count: int) -> None:
+        """The summary on the console, whole.
+
+        The timeline says that a compaction happened; only the log can say what
+        the model was left with, and that is the first thing anyone reads when a
+        run goes strange right after one.
+        """
+        logger.info("[QA] context compacted #%d\n%s", count, _clip(summary))
 
     async def run(
         self, channel: QaRunChannel, scenario: ScenarioDraft, state: QaRunState
@@ -211,6 +266,29 @@ class QaRunner:
             _clip(first_message),
         )
 
+        # Folding runs on every request; the scene views pile up whether or not
+        # the model can see. The vision middleware is added only when it can — on
+        # a text-only model it would have nothing to inject and nothing to trim.
+        # The two touch disjoint messages, so their order here does not matter.
+        #
+        # The live scene is appended after them: the fold has run over the tool
+        # messages and the image trim has happened, which leaves it as the actual
+        # final message the model reads. Usage logging sits innermost, after that,
+        # so it reports what was actually sent.
+        middleware: list = [_fold_scene_views]
+        if supports_vision:
+            middleware.append(QaCaptureVisionMiddleware(state))
+        middleware += [_append_current_scene, _log_token_usage]
+
+        # Compaction is listed first because it is the first thing that happens,
+        # but the position is documentation rather than wiring: it hooks
+        # `before_model`, which is its own graph node ahead of the model call,
+        # while everything above wraps the call itself. List order only sequences
+        # middleware sharing a hook.
+        compaction = self._build_compaction(channel, state)
+        if compaction is not None:
+            middleware.insert(0, compaction)
+
         agent = create_agent(
             # Prompt caching is asked for here and nowhere else: the agent loop
             # resends the whole conversation every turn, which is the one shape
@@ -218,26 +296,7 @@ class QaRunner:
             model=build_chat_model(self._model, self._reasoning, cache_prompt=True),
             tools=tools,
             system_prompt=system_prompt,
-            # Folding runs on every request; the scene views pile up whether or
-            # not the model can see. The vision middleware is added only when it
-            # can — on a text-only model it would have nothing to inject and
-            # nothing to trim. The two touch disjoint messages, so their order
-            # here does not matter.
-            #
-            # The live scene is appended after them: the fold has run over the
-            # tool messages and the image trim has happened, which leaves it as
-            # the actual final message the model reads. Usage logging sits
-            # innermost, after that, so it reports what was actually sent.
-            middleware=(
-                [
-                    _fold_scene_views,
-                    QaCaptureVisionMiddleware(state),
-                    _append_current_scene,
-                    _log_token_usage,
-                ]
-                if supports_vision
-                else [_fold_scene_views, _append_current_scene, _log_token_usage]
-            ),
+            middleware=middleware,
         )
         # Streamed rather than invoked so the model's reasoning can be put on the
         # timeline as it happens. Left to a tool the agent chooses to call, the
@@ -249,7 +308,14 @@ class QaRunner:
             # recursion_limit counts graph steps, so it bounds tool calls as well
             # as the model turns between them.
             {
-                "recursion_limit": self._tool_call_limit(len(scenario.steps)) * 2,
+                # Two graph steps per iteration — the model call and the tool
+                # call — plus one for each middleware that runs as its own node
+                # ahead of the model. Left at a flat 2, turning compaction on
+                # would quietly cost the run a third of its tool budget.
+                "recursion_limit": (
+                    self._tool_call_limit(len(scenario.steps))
+                    * (2 + (1 if compaction is not None else 0))
+                ),
                 "run_name": "qa-scenario-run",
                 "tags": ["agent", "qa"],
                 "metadata": {
@@ -313,7 +379,14 @@ class QaRunner:
         developer needs — including the tool results, which are most of what the
         model is actually reading and are invisible everywhere else.
         """
-        for node in update.values():
+        for name, node in update.items():
+            # Only the two nodes that produce new turns. A middleware node —
+            # compaction is one — reports its whole rewritten message list as its
+            # update, so every preserved AIMessage in it would be logged and put
+            # on the timeline a second time. The operator would see the agent's
+            # reasoning repeat itself after each compaction, with no clue why.
+            if name not in _TURN_PRODUCING_NODES:
+                continue
             if not isinstance(node, dict):
                 continue
             for message in node.get("messages", []) or []:

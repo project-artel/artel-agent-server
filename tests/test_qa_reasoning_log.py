@@ -263,3 +263,33 @@ def test_token_usage_log_reports_cache_reads(caplog) -> None:
 
     assert "cache_read': 4800" in caplog.text
     assert "input=5000" in caplog.text
+
+
+def test_a_middleware_node_s_rewrite_is_not_logged_as_a_new_turn() -> None:
+    """Compaction reports its whole rewritten conversation as its node update.
+
+    Read like a model turn, every preserved AIMessage in it would be logged and put
+    on the timeline a second time — the operator would watch the agent's reasoning
+    repeat itself after each compaction with no clue why. Only `model` and `tools`
+    produce turns that actually happened.
+    """
+
+    async def run() -> None:
+        channel, sent = make_channel()
+        runner = QaRunner()
+
+        await runner._log_reasoning(
+            channel,
+            {
+                "QaCompactionMiddleware.before_model": {
+                    "messages": [
+                        HumanMessage(content="요약"),
+                        AIMessage(content="상점을 열어 본다."),
+                    ]
+                }
+            },
+        )
+
+        assert logs(sent) == []
+
+    asyncio.run(run())

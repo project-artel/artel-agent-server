@@ -1,0 +1,375 @@
+"""`QaCompactionMiddleware` in isolation.
+
+The end-to-end wiring is pinned in `tests/test_qa_run_compacted.py`. What is
+tested here is the message surgery and the decisions around it, because those are
+where a mistake is silent: a conversation that comes back missing one half of a
+tool call is not rejected here, it is rejected by the provider, several turns
+later, as a 400 with no mention of compaction in it.
+"""
+
+import asyncio
+from typing import Any
+
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages.utils import count_tokens_approximately
+from langchain_core.outputs import ChatGeneration, ChatResult
+
+from app.agents.qa.compaction import QaCompactionMiddleware, render_progress_ledger
+from app.agents.qa.tools import QaRunState
+from app.prompts import load_prompt
+from app.qa.channel import QaRunChannel
+from app.qa.envelope import LogCategory, MessageType
+from app.qa.scene import SCENE_VIEW_END, SCENE_VIEW_START_PREFIX, SCENE_VIEW_START_SUFFIX
+from app.qa.schemas import QaStepResult
+
+SUMMARY_TEXT = "## SCENARIO\nA scenario.\n\n## NEXT ACTION\nCarry on."
+
+
+class FakeSummarizer(BaseChatModel):
+    """Stands in for the summarizing model, and counts how often it was asked."""
+
+    summary: str = SUMMARY_TEXT
+    fail: bool = False
+    calls: int = 0
+
+    @property
+    def _llm_type(self) -> str:
+        return "fake-summarizer"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs: Any) -> ChatResult:
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("the summarizer is down")
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.summary))])
+
+
+def make_channel() -> tuple[QaRunChannel, list[dict]]:
+    sent: list[dict] = []
+
+    async def send(frame: dict) -> None:
+        sent.append(frame)
+
+    return QaRunChannel(qa_try_id=1, send=send), sent
+
+
+def scene_view(observation: int, body: str = "you can act on:\n  1 Start") -> str:
+    """A tool result carrying a scene view, marked the way `SceneMemory` marks it."""
+    start = f"{SCENE_VIEW_START_PREFIX}{observation}{SCENE_VIEW_START_SUFFIX}"
+    return f"{start}\n{body}\n{SCENE_VIEW_END}"
+
+
+def conversation(pairs: int, view_body: str = "you can act on:\n  1 Start") -> list[BaseMessage]:
+    """`pairs` observe_scene round trips, each an AIMessage and its ToolMessage."""
+    messages: list[BaseMessage] = [HumanMessage(content="Begin. Observe the screen first.")]
+    for index in range(1, pairs + 1):
+        call_id = f"call-{index}"
+        messages.append(
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "observe_scene", "args": {}, "id": call_id}],
+            )
+        )
+        messages.append(
+            ToolMessage(
+                content=scene_view(index, view_body),
+                tool_call_id=call_id,
+                name="observe_scene",
+            )
+        )
+    return messages
+
+
+def build_middleware(
+    state: QaRunState,
+    channel: QaRunChannel,
+    model: FakeSummarizer,
+    *,
+    # Small enough that any conversation these tests build is over the
+    # threshold; the tests that need the opposite pass a large budget.
+    max_input_tokens: int = 10,
+    trigger_fraction: float = 0.9,
+    keep_messages: int = 6,
+    min_new_messages: int = 4,
+) -> QaCompactionMiddleware:
+    return QaCompactionMiddleware(
+        model=model,
+        # The real prompt, not a stub: `_acreate_summary` formats it with
+        # `{messages}`, so a stub without that field would pass here and fail in
+        # production.
+        summary_prompt=load_prompt("qa_compaction", "summary").body,
+        run_model_max_input_tokens=max_input_tokens,
+        state=state,
+        channel=channel,
+        trigger_fraction=trigger_fraction,
+        keep_messages=keep_messages,
+        min_new_messages=min_new_messages,
+        trim_tokens=4_000,
+    )
+
+
+def compact(middleware: QaCompactionMiddleware, messages: list[BaseMessage]):
+    return asyncio.run(middleware.abefore_model({"messages": messages}, None))
+
+
+def unanswered_calls(messages: list[BaseMessage]) -> list[str]:
+    """Tool call ids with no result, and result ids with no call — either is a 400."""
+    called = {
+        call["id"]
+        for message in messages
+        if isinstance(message, AIMessage)
+        for call in (message.tool_calls or [])
+        if call.get("id")
+    }
+    answered = {
+        message.tool_call_id
+        for message in messages
+        if isinstance(message, ToolMessage) and message.tool_call_id
+    }
+    return sorted(called.symmetric_difference(answered))
+
+
+def test_a_cut_never_separates_a_tool_call_from_its_result() -> None:
+    """The invariant the provider enforces, and the reason this subclasses
+    LangChain's summarization rather than slicing the list itself.
+
+    `keep=7` over this conversation puts the naive cut squarely on a ToolMessage:
+    the tail would begin with a result whose call had just been summarized away.
+    """
+    state = QaRunState(total_steps=1)
+    channel, _sent = make_channel()
+    model = FakeSummarizer()
+    middleware = build_middleware(state, channel, model, keep_messages=7)
+
+    messages = conversation(pairs=10)
+    assert isinstance(messages[len(messages) - 7], ToolMessage)
+
+    update = compact(middleware, messages)
+
+    assert update is not None
+    assert unanswered_calls(update["messages"]) == []
+
+
+def test_a_summarizer_that_fails_does_not_cost_the_run_its_history() -> None:
+    """LangChain turns a failed summary into a summary that says it failed, and
+    still returns the instruction to delete everything else. Declining the whole
+    update is the only thing standing between a summarizer timeout and a run that
+    has forgotten what it was doing."""
+    state = QaRunState(total_steps=1)
+    channel, sent = make_channel()
+    model = FakeSummarizer(fail=True)
+    middleware = build_middleware(state, channel, model)
+
+    assert compact(middleware, conversation(pairs=10)) is None
+    assert state.compactions == 0
+
+    notes = [frame for frame in sent if frame["type"] == MessageType.LOG.value]
+    assert notes, "the operator has to be told the run is still growing"
+    assert notes[-1]["payload"]["category"] == LogCategory.SYSTEM.value
+
+
+def test_the_agent_can_compact_below_the_automatic_threshold() -> None:
+    """`compact_context` exists for the run the size trigger has not caught yet."""
+    state = QaRunState(total_steps=1)
+    channel, _sent = make_channel()
+    model = FakeSummarizer()
+    # A budget nothing here will ever approach, so only the flag can fire it.
+    middleware = build_middleware(state, channel, model, max_input_tokens=10_000_000)
+    messages = conversation(pairs=10)
+
+    assert compact(middleware, messages) is None
+
+    state.compaction_requested = True
+    update = compact(middleware, messages)
+
+    assert update is not None
+    assert state.compactions == 1
+    # Consumed by the pass that answered it: a request is for one compaction.
+    assert state.compaction_requested is False
+    assert compact(middleware, messages) is None
+
+
+def test_the_size_trigger_fires_on_the_run_model_s_budget() -> None:
+    """Above the fraction it compacts; below it, it leaves the run alone."""
+    messages = conversation(pairs=10)
+    size = count_tokens_approximately(messages)
+
+    state = QaRunState(total_steps=1)
+    channel, _sent = make_channel()
+    over = build_middleware(
+        state, channel, FakeSummarizer(), max_input_tokens=int(size / 0.9) - 10
+    )
+    assert compact(over, messages) is not None
+
+    idle_state = QaRunState(total_steps=1)
+    idle_channel, _ = make_channel()
+    under = build_middleware(
+        idle_state, idle_channel, FakeSummarizer(), max_input_tokens=int(size / 0.9) * 4
+    )
+    assert compact(under, messages) is None
+
+
+def test_the_threshold_is_measured_on_the_folded_conversation() -> None:
+    """`fold_stale_scenes` rewrites the request, not the graph's own messages, so
+    counting what is stored would measure a conversation that is never sent — and
+    keep measuring it as bigger every turn while the real size stays flat."""
+    # Long enough that folding all but the newest view is the difference between
+    # over and under the threshold.
+    messages = conversation(pairs=10, view_body="you can act on:\n" + "  1 Start\n" * 200)
+    stored = count_tokens_approximately(messages)
+
+    state = QaRunState(total_steps=1)
+    channel, _sent = make_channel()
+    model = FakeSummarizer()
+    # A budget the stored size clears but the folded size does not.
+    middleware = build_middleware(
+        state, channel, model, max_input_tokens=int(stored / 0.9)
+    )
+
+    assert compact(middleware, messages) is None
+    assert model.calls == 0
+
+
+def test_nothing_compacts_again_until_the_conversation_has_moved_on() -> None:
+    """The thrash guard. Each compaction pays for a summary and then invalidates
+    the prompt cache it rewrote the prefix of; a preserved tail that is itself over
+    the threshold would otherwise do that on every single turn."""
+    state = QaRunState(total_steps=1)
+    channel, _sent = make_channel()
+    model = FakeSummarizer()
+    middleware = build_middleware(state, channel, model, max_input_tokens=10)
+
+    first = compact(middleware, conversation(pairs=10))
+    assert first is not None
+    calls_after_first = model.calls
+
+    # Two more messages is short of `min_new_messages`, so nothing happens even
+    # though the size trigger is still screaming.
+    grown = [*first["messages"][1:], HumanMessage(content="hi"), AIMessage(content="ok")]
+    assert compact(middleware, grown) is None
+    assert model.calls == calls_after_first
+
+
+def test_the_ledger_restates_what_the_summary_is_told_not_to_carry() -> None:
+    """Verdicts, the steps still open, and the operator's standing instructions are
+    facts the run already holds. Asking a model to remember them would trade
+    certainty for nothing."""
+    state = QaRunState(total_steps=4)
+    state.step_results = [
+        QaStepResult(step=1, passed=True, message="시작 화면이 떴다"),
+        QaStepResult(step=2, passed=False, message="설정 버튼이 없다"),
+    ]
+    channel, _sent = make_channel()
+    channel.on_chat({"payload": {"message": "느리게 진행해줘"}})
+    channel.on_chat({"payload": {"message": "소리는 끄고"}})
+
+    ledger = render_progress_ledger(state, channel)
+
+    assert "step 1: PASS — 시작 화면이 떴다" in ledger
+    assert "step 2: FAIL — 설정 버튼이 없다" in ledger
+    assert "3, 4" in ledger
+    assert "Continue with step 3" in ledger
+    assert "느리게 진행해줘" in ledger
+    assert "소리는 끄고" in ledger
+    # The same wording the tools use, so an instruction reads on re-entry exactly
+    # as it read when it arrived.
+    assert "The operator said, and it applies from now on:" in ledger
+
+
+def test_the_ledger_reaches_the_model_after_the_summary() -> None:
+    state = QaRunState(total_steps=2)
+    state.step_results = [QaStepResult(step=1, passed=True, message="확인함")]
+    channel, _sent = make_channel()
+    middleware = build_middleware(state, channel, FakeSummarizer(), max_input_tokens=10)
+
+    update = compact(middleware, conversation(pairs=10))
+
+    assert update is not None
+    texts = [str(message.content) for message in update["messages"]]
+    summary_at = next(index for index, text in enumerate(texts) if SUMMARY_TEXT in text)
+    ledger_at = next(index for index, text in enumerate(texts) if "CONTEXT COMPACTED" in text)
+    assert ledger_at == summary_at + 1
+    assert "step 1: PASS — 확인함" in texts[ledger_at]
+
+
+def test_compaction_cannot_lose_a_verdict() -> None:
+    """`step_results` lives on `QaRunState`, never in the message list — which is
+    what makes the ledger able to restate it. Asserted rather than assumed."""
+    state = QaRunState(total_steps=2)
+    state.step_results = [QaStepResult(step=1, passed=True, message="확인함")]
+    channel, _sent = make_channel()
+    middleware = build_middleware(state, channel, FakeSummarizer(), max_input_tokens=10)
+
+    compact(middleware, conversation(pairs=10))
+
+    assert [result.step for result in state.step_results] == [1]
+
+
+def test_langchain_still_offers_the_seams_this_is_built_on() -> None:
+    """This test exists to fail on a LangChain upgrade, not to test our code.
+
+    Compaction hangs off two things the library does not document as API: the
+    decision point `_should_summarize`, and the shape `abefore_model` returns. If
+    either moves, compaction stops happening — silently, which is the dangerous
+    way for it to break, since the symptom is a provider 400 much later in a run.
+    """
+    import inspect
+
+    from langchain.agents.middleware import SummarizationMiddleware
+    from langchain_core.messages import RemoveMessage
+    from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
+    signature = inspect.signature(SummarizationMiddleware._should_summarize)
+    assert list(signature.parameters) == ["self", "messages", "total_tokens"]
+
+    base = SummarizationMiddleware(
+        FakeSummarizer(), trigger=("tokens", 1), keep=("messages", 4)
+    )
+    update = asyncio.run(base.abefore_model({"messages": conversation(pairs=10)}, None))
+    assert update is not None
+    first = update["messages"][0]
+    assert isinstance(first, RemoveMessage)
+    assert first.id == REMOVE_ALL_MESSAGES
+
+
+def test_the_tool_only_raises_a_flag() -> None:
+    """It cannot do the work itself: its own AIMessage is already in the
+    conversation, and rewriting the list from the tools node would delete that
+    message while leaving this result behind it."""
+    state = QaRunState(total_steps=1)
+    channel, _sent = make_channel()
+    middleware = build_middleware(state, channel, FakeSummarizer())
+
+    (compact_context,) = middleware.tools
+    assert compact_context.name == "compact_context"
+
+    answer = asyncio.run(compact_context.ainvoke({"reason": "너무 길어졌다"}))
+
+    assert state.compaction_requested is True
+    assert "preserved" in answer
+
+
+def test_the_summary_prompt_is_versioned_like_every_other_prompt() -> None:
+    """It is a prompt, so it lives with the prompts rather than in a constant —
+    reviewable, diffable, and pinnable to a candidate without a deploy.
+
+    Its own agent, not a role under `qa_run`: `QA_PROMPT_VERSION=v4` is the
+    documented way to roll a system-prompt change back, and it must not take this
+    with it — nor fail outright on a version that predates it.
+    """
+    from app.prompts import SETTINGS_VERSION_KEYS, available_versions
+
+    assert SETTINGS_VERSION_KEYS["qa_compaction"] == "qa_compaction_prompt_version"
+    assert available_versions("qa_compaction")[0] == "v1"
+
+    prompt = load_prompt("qa_compaction", "summary")
+    # `_acreate_summary` calls `.format(messages=...)`, and LangChain documents the
+    # `<messages>` marker as part of the constant's contract — deep agents splice
+    # instructions in just above it. The loader pins the placeholder; this pins the
+    # marker, which it cannot see.
+    assert prompt.placeholders == ("messages",)
+    assert "<messages>" in prompt.body
+
+    # And it still says the things the ledger depends on it NOT duplicating.
+    assert "restated" in prompt.body
+    assert "Never write that a step passed or failed" in prompt.body

@@ -99,6 +99,20 @@ class QaRunChannel:
         # Set exactly while that list has something in it, so a tool can wait on
         # the operator instead of only picking messages up in passing.
         self._operator_arrived = asyncio.Event()
+        # Everything the operator has said this run, in order — the durable record
+        # beside the delivery queue above, which is emptied as soon as a tool picks
+        # it up. Once delivered, an instruction exists only inside one tool result's
+        # text, and compaction replaces exactly that text; "it applies from now on"
+        # then stops being true halfway through a run. This list is what
+        # `render_progress_ledger` restates afterwards.
+        #
+        # Recorded in `on_chat` rather than at any tool, because that is the single
+        # funnel every operator message passes through: a tool added later cannot
+        # forget to do it.
+        #
+        # Unbounded, and bounded in practice by the run's own deadline: an operator
+        # cannot type enough in 600 seconds for the restated block to matter.
+        self.operator_instructions: list[str] = []
 
     @property
     def qa_try_id(self) -> int:
@@ -327,6 +341,7 @@ class QaRunChannel:
     def on_chat(self, raw: dict) -> None:
         payload = ChatPayload.model_validate(raw.get("payload") or {})
         self._operator_messages.append(payload.message)
+        self.operator_instructions.append(payload.message)
         self._operator_arrived.set()
 
     def on_cancel(self) -> None:
