@@ -22,7 +22,7 @@ class LLMModel(StrEnum):
     Re-verify both against that endpoint before adding or renaming entries.
     """
 
-    gpt_4o_mini = "openai/gpt-4o-mini"
+    gpt_5_6_luna = "openai/gpt-5.6-luna"
     gpt_4o = "openai/gpt-4o"
     claude_sonnet_5 = "anthropic/claude-sonnet-5"
     claude_opus_4_8 = "anthropic/claude-opus-4.8"
@@ -97,11 +97,15 @@ class ModelSpec:
 
 
 MODEL_SPECS: dict[LLMModel, ModelSpec] = {
-    LLMModel.gpt_4o_mini: ModelSpec(
+    LLMModel.gpt_5_6_luna: ModelSpec(
         provider=LLMProvider.openai,
         supports_strict_json=True,
-        label="GPT-4o mini",
+        label="GPT-5.6 Luna",
         input_modalities=("text", "image", "file"),
+        # The catalog also advertises a sixth effort, `none`, which
+        # `ReasoningEffort` does not model; the five below are the whole enum.
+        reasoning=ReasoningKind.effort,
+        reasoning_efforts=tuple(ReasoningEffort),
     ),
     LLMModel.gpt_4o: ModelSpec(
         provider=LLMProvider.openai,
@@ -155,7 +159,7 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
 }
 
 
-DEFAULT_MODEL: LLMModel = LLMModel.gpt_4o_mini
+DEFAULT_MODEL: LLMModel = LLMModel.gpt_5_6_luna
 
 
 def get_model_spec(model: LLMModel) -> ModelSpec:
