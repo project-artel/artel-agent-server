@@ -8,13 +8,15 @@ run died exactly this way, on `{"id": 1, "success": true, "error": ""}`.
 
 import asyncio
 
-from app.agents.scenario import ScenarioDraft, ScenarioStep
+from app.agents.scenario import ScenarioStep
+from app.qa.cases import QaScenarioBody
+from app.qa.schemas import QaScenario
 from app.qa.service import QaExecutionService
 from app.qa.store import InMemoryQaSessionStore
 
 
-def make_scenario() -> ScenarioDraft:
-    return ScenarioDraft(
+def make_scenario() -> QaScenarioBody:
+    return QaScenarioBody(
         title="튜토리얼",
         description="튜토리얼 진입을 확인한다",
         steps=[
@@ -52,10 +54,9 @@ async def _running_service() -> tuple[QaExecutionService, str, asyncio.Task]:
         runner_factory=lambda **_kwargs: runner,
     )
     session_id, _run_config = await service.open(
-        qa_try_id=7,
+        qa_run_id=7,
         game_instance_id=1,
-        test_scenario_id=1,
-        scenario=make_scenario(),
+        scenarios=[QaScenario(qa_try_id=7, test_scenario_id=1, scenario=make_scenario())],
     )
 
     async def send(_frame: dict) -> None:
