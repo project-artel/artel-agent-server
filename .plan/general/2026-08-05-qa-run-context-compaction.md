@@ -112,7 +112,8 @@ QA 런은 `create_agent` 툴 루프로 돌고, 메시지는 런이 끝날 때까
 - [x] **Step 2-1: `app/qa/channel.py`** — `on_chat`에서 `operator_instructions` 리스트에도
       기록한다. `drain_operator_messages`는 그대로(1회성 배달 큐). 운영자 말이 지금은
       툴 결과 문자열 안에만 있어서 압축이 지우기 때문. `on_chat`이 모든 운영자 메시지가
-      지나는 유일한 통로라서 여기 둔다. 최근 50개로 상한.
+      지나는 유일한 통로라서 여기 둔다. 상한은 두지 않는다 — 600초 데드라인이 사실상의
+      상한이고, 도달하지 않는 상태를 방어하는 코드는 넣지 않는다.
 
 - [x] **Step 2-2: `app/agents/qa/tools.py`** — `QaRunState`에
       `compaction_requested: bool`, `compactions: int` 추가. `finish_run`의 미보고 스텝

@@ -42,11 +42,6 @@ MAX_SCENE_WAIT_SECONDS = 30.0
 # run still ends by its own account rather than by being killed mid-wait.
 MAX_OPERATOR_WAIT_SECONDS = 300.0
 
-# How many operator instructions the durable record keeps, for restating after a
-# compaction. A ceiling rather than a policy: an operator who narrates the whole
-# run would otherwise make the restated block the largest thing in context.
-MAX_OPERATOR_INSTRUCTIONS = 50
-
 # How long a knowledge search waits before the agent is told nobody answered.
 #
 # Shorter than an action's wait on purpose. An action is the run making progress,
@@ -114,6 +109,9 @@ class QaRunChannel:
         # Recorded in `on_chat` rather than at any tool, because that is the single
         # funnel every operator message passes through: a tool added later cannot
         # forget to do it.
+        #
+        # Unbounded, and bounded in practice by the run's own deadline: an operator
+        # cannot type enough in 600 seconds for the restated block to matter.
         self.operator_instructions: list[str] = []
 
     @property
@@ -344,9 +342,6 @@ class QaRunChannel:
         payload = ChatPayload.model_validate(raw.get("payload") or {})
         self._operator_messages.append(payload.message)
         self.operator_instructions.append(payload.message)
-        # An operator who keeps typing must not be able to grow the ledger without
-        # bound; the newest are the ones still worth restating.
-        del self.operator_instructions[:-MAX_OPERATOR_INSTRUCTIONS]
         self._operator_arrived.set()
 
     def on_cancel(self) -> None:

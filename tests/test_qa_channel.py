@@ -2,12 +2,7 @@ import asyncio
 
 import pytest
 
-from app.qa.channel import (
-    MAX_OPERATOR_INSTRUCTIONS,
-    QaCancelled,
-    QaRunChannel,
-    with_operator_messages,
-)
+from app.qa.channel import QaCancelled, QaRunChannel, with_operator_messages
 from app.qa.envelope import JsonRpcAction, MessageType
 
 
@@ -181,18 +176,6 @@ def test_draining_does_not_erase_what_the_operator_said() -> None:
     channel.drain_operator_messages()
 
     assert channel.operator_instructions == ["메뉴로 가", "천천히"]
-
-
-def test_the_record_of_what_the_operator_said_is_bounded() -> None:
-    """An operator narrating the whole run must not make the restated block the
-    largest thing in the model's context."""
-    channel, _ = make_channel()
-    for index in range(MAX_OPERATOR_INSTRUCTIONS + 5):
-        channel.on_chat({"payload": {"message": f"지시 {index}"}})
-
-    assert len(channel.operator_instructions) == MAX_OPERATOR_INSTRUCTIONS
-    # The newest survive: an old instruction is the one most likely superseded.
-    assert channel.operator_instructions[-1] == f"지시 {MAX_OPERATOR_INSTRUCTIONS + 4}"
 
 
 def test_waiting_returns_as_soon_as_the_operator_speaks() -> None:
