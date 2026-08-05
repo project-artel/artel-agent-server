@@ -73,9 +73,11 @@ MAX_CAPTURES_PER_RUN = 12
 # run: the second search on the same subject learns nothing the first did not.
 MAX_SEARCHES_PER_RUN = 6
 
-# How much a run may add. Below the search budget because a run that learns five
-# durable rules about a game has had an unusually instructive hour; one that
-# claims more is filing observations, not knowledge.
+# How much a run may add, and how much it may correct: `record_knowledge` and
+# `update_knowledge` share this one allowance. Below the search budget because a
+# run that learns five durable rules about a game has had an unusually
+# instructive hour; one that claims more is filing observations, not knowledge.
+# See `knowledge.py` for why the two writes are capped together rather than apart.
 MAX_RECORDS_PER_RUN = 5
 
 # How much a run may erase, and the smallest number here on purpose. Deletion is

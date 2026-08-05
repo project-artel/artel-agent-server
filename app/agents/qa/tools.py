@@ -17,6 +17,7 @@ from app.agents.qa.knowledge import (
     RECORD_KNOWLEDGE_DESCRIPTION,
     RESULT_LIMIT,
     SEARCH_KNOWLEDGE_DESCRIPTION,
+    UPDATE_KNOWLEDGE_DESCRIPTION,
     render_entry_label,
     render_missing_knowledge_warning,
     render_results,
@@ -32,6 +33,7 @@ from app.qa.envelope import (
     JsonRpcAction,
     KnowledgeCreatePayload,
     KnowledgeDeletePayload,
+    KnowledgeUpdatePayload,
     LogCategory,
     MessageType,
     RunResult,
@@ -75,21 +77,22 @@ class QaRunState:
         # nothing answers a write (see `QaRunChannel.write_knowledge`), so success
         # is not something this side could count even if it wanted to.
         self.knowledge_records_attempted = 0
+        self.knowledge_updates_attempted = 0
         self.knowledge_forgets_attempted = 0
         # What `search_knowledge` has actually shown the agent, id -> summary.
-        # A deletion may only name an id from here. An agent free to pass any id
-        # could erase an entry it never read, and on the far side that id resolves
-        # to a real row — Orchestration cannot tell the difference, so the check
-        # only exists if it exists here.
+        # A correction or a deletion may only name an id from here. An agent free
+        # to pass any id could rewrite or erase an entry it never read, and on the
+        # far side that id resolves to a real row — Orchestration cannot tell the
+        # difference, so the check only exists if it exists here.
         self.knowledge_seen: dict[str, str] = {}
         # Entries this run deleted and has not written a replacement for, as
         # printable labels, oldest first.
         #
-        # There is no update tool, so correcting an entry is a delete followed by a
-        # record, and this is the only thing that knows a run is halfway through
-        # one. It is what lets a failing `record_knowledge` say what is missing
-        # instead of reporting a bare failure, and what exempts a replacement write
-        # from the record cap.
+        # `update_knowledge` is what correcting an entry should be, but a run may
+        # still delete and then record, and this is the only thing that knows one
+        # is halfway through doing so. It is what lets a failing `record_knowledge`
+        # say what is missing instead of reporting a bare failure, and what exempts
+        # a replacement write from the write cap.
         self.knowledge_deleted_unreplaced: list[str] = []
         # Handed to the vision middleware on the next model call. The tool cannot
         # return the image itself — an image block on a tool result is rejected by
@@ -104,6 +107,17 @@ class QaRunState:
         # How many compactions this run has been through. Read by the thrash guard
         # and reported at the end of the run.
         self.compactions = 0
+
+    @property
+    def knowledge_writes_attempted(self) -> int:
+        """Records and corrections against one allowance.
+
+        Capped together because they fail together: either one spends the run's
+        steps putting content into the knowledge base instead of reaching a
+        verdict, which is the whole reason `max_records_per_run` exists. Kept as
+        two counters behind one sum so a run's record can still say which it was.
+        """
+        return self.knowledge_records_attempted + self.knowledge_updates_attempted
 
     def unreported_steps(self) -> list[int]:
         """Scenario steps with no verdict yet, in order.
@@ -369,9 +383,12 @@ def build_tools(
         # The cap does not bind a replacement write. It exists to stop a run
         # narrating into the knowledge base; applied to the second half of a
         # repair it would make the budget itself the thing that loses knowledge.
-        if state.knowledge_records_attempted >= arch.max_records_per_run and not outstanding:
+        #
+        # Corrections count against the same allowance — see
+        # `QaRunState.knowledge_writes_attempted`.
+        if state.knowledge_writes_attempted >= arch.max_records_per_run and not outstanding:
             return (
-                f"You have used all {arch.max_records_per_run} knowledge records for this "
+                f"You have used all {arch.max_records_per_run} knowledge writes for this "
                 "run, so nothing was recorded. Carry on with the run and judge the "
                 "remaining steps."
             )
@@ -418,19 +435,144 @@ def build_tools(
         replaced = bool(outstanding)
         state.knowledge_deleted_unreplaced = []
         messages = channel.drain_operator_messages()
-        remaining = max(arch.max_records_per_run - state.knowledge_records_attempted, 0)
+        remaining = max(arch.max_records_per_run - state.knowledge_writes_attempted, 0)
 
         lines = [f'Sent to the knowledge base, filed under {topic}: "{fact}".']
         if replaced:
             lines.append(
                 "That completes the correction — the entry you deleted has been "
-                "replaced, and nothing is outstanding."
+                "replaced, and nothing is outstanding. Next time use "
+                "`update_knowledge`: it repairs an entry in one call, and the "
+                "replacement keeps the original's id."
             )
         lines.append(
             "Nothing answers a knowledge write, so treat this as done and do not "
-            f"send the same fact again in this run. {remaining} record(s) left."
+            f"send the same fact again in this run. {remaining} knowledge write(s) "
+            "left."
         )
         return with_operator_messages("\n\n".join(lines), messages)
+
+    @tool(
+        description=UPDATE_KNOWLEDGE_DESCRIPTION.format(
+            limit=arch.max_records_per_run, tags=", ".join(KNOWLEDGE_TAGS)
+        )
+    )
+    async def update_knowledge(
+        step: int,
+        thought: str,
+        knowledge_id: str,
+        tag: str | None = None,
+        summary: str | None = None,
+        description: str | None = None,
+    ) -> str:
+        # What the agent reads is UPDATE_KNOWLEDGE_DESCRIPTION, not this.
+        #
+        # No scene view, for the reason given on `record_knowledge` (ARTEL-180),
+        # and nothing awaited: like the other two writes this is one-way, and a
+        # tool that waited for `routeKnowledgeMutation` to answer would hang to its
+        # timeout on every call, including the ones that worked.
+        #
+        # The budget is `max_records_per_run`, shared with `record_knowledge`
+        # rather than counted apart, because both fail the run the same way — see
+        # `QaRunState.knowledge_writes_attempted`. The constraint that a repair must
+        # never be left half done by the budget still holds, from both ends: a
+        # refused correction changes nothing, since it is one call and the entry is
+        # untouched, and a delete-then-record still has its own exemption above.
+        if state.knowledge_writes_attempted >= arch.max_records_per_run:
+            return (
+                f"You have used all {arch.max_records_per_run} knowledge writes for "
+                "this run, so nothing was changed and the entry stands as it was. "
+                "Carry on with the run and judge the remaining steps."
+            )
+
+        target = (knowledge_id or "").strip()
+        if target not in state.knowledge_seen:
+            # The same guard `forget_knowledge` makes, for the same reason: on the
+            # far side this id resolves to a real row, and nothing there can tell
+            # that the agent never read it. An entry already deleted in this run is
+            # gone from `knowledge_seen` too, so a correction cannot resurrect one.
+            return (
+                f"Nothing was changed: {knowledge_id!r} is not an entry "
+                "`search_knowledge` returned in this run, and you can only correct "
+                "what you have read. Search for it first and use the id printed "
+                "with the hit."
+            )
+
+        topic = (tag or "").strip().upper() or None
+        if topic is not None and topic not in KNOWLEDGE_TAGS:
+            # Refused before it goes out, as on a record. Orchestration rejects an
+            # unknown topic and says so only on its own timeline, so a frame sent
+            # anyway would leave the run believing the entry had been corrected.
+            return (
+                f"{tag!r} is not a knowledge topic, so nothing was changed. Use one "
+                f"of {', '.join(KNOWLEDGE_TAGS)}, or leave `tag` out to keep the "
+                "topic it already has."
+            )
+
+        # An omitted field is left alone on the far side; a field sent blank is
+        # rejected there. The two are told apart here — `None` against `""` — so
+        # that "leave this as it is" cannot be spelled in a way that costs a frame
+        # and a slot to be refused invisibly.
+        fact = summary.strip() if summary is not None else None
+        detail = description.strip() if description is not None else None
+        if (summary is not None and not fact) or (description is not None and not detail):
+            return (
+                "Nothing was changed: `summary` and `description` must say something "
+                "when you send them. Leave a field out entirely to keep what the "
+                "entry already has, and call this again."
+            )
+        if topic is None and fact is None and detail is None:
+            return (
+                "Nothing was changed: a correction has to carry at least one of "
+                "`tag`, `summary` or `description`. Say what the entry should now "
+                "be, or use `forget_knowledge` if it should simply be gone."
+            )
+
+        await channel.note(thought, LogCategory.THOUGHT, step)
+        state.knowledge_updates_attempted += 1
+        try:
+            await channel.write_knowledge(
+                MessageType.KNOWLEDGE_UPDATE,
+                KnowledgeUpdatePayload(
+                    knowledge_id=target, tag=topic, summary=fact, description=detail
+                ),
+            )
+        except QaCancelled:
+            # The operator ended the run. That is not this tool's to swallow.
+            raise
+        except Exception as error:  # noqa: BLE001 - a dead socket must not end the run here
+            # Nothing left the socket, so the entry is exactly as it was and the
+            # run owes nothing. Said plainly all the same: an agent told only that
+            # something failed carries on believing the entry is now right.
+            return (
+                f"The correction could not be sent — {error}. Nothing was changed "
+                "and the entry is still on file exactly as it was."
+            )
+
+        # Still an entry this run has read, so it stays correctable and deletable —
+        # a correction is not a reason to forget having seen it. The stored summary
+        # follows the correction because it is what every later label prints: left
+        # alone, a `forget_knowledge` after this would name the sentence the agent
+        # has just replaced.
+        was = state.knowledge_seen[target]
+        state.knowledge_seen[target] = fact if fact is not None else was
+        messages = channel.drain_operator_messages()
+        remaining = max(arch.max_records_per_run - state.knowledge_writes_attempted, 0)
+
+        changed = ", ".join(
+            name
+            for name, value in (("tag", topic), ("summary", fact), ("description", detail))
+            if value is not None
+        )
+        return with_operator_messages(
+            f"Corrected {render_entry_label(target, was)}. Sent: {changed}; the rest "
+            "of the entry is left as it was. It keeps its id, so this stays "
+            "readable as a repair rather than as a deletion and a new entry.\n\n"
+            "Nothing answers a knowledge write, so treat this as done and do not "
+            f"send the same correction again in this run. {remaining} knowledge "
+            "write(s) left.",
+            messages,
+        )
 
     @tool(description=FORGET_KNOWLEDGE_DESCRIPTION.format(limit=arch.max_forgets_per_run))
     async def forget_knowledge(step: int, thought: str, knowledge_id: str) -> str:
@@ -483,10 +625,10 @@ def build_tools(
 
         return with_operator_messages(
             f"Deleted {label}. This cannot be undone from here.\n\n"
-            "If you deleted it in order to CORRECT it, call `record_knowledge` NOW "
-            "with the corrected version, before anything else. There is no update "
-            "tool: that was half of a repair, and a run that stops here has removed "
-            "the knowledge rather than fixed it.\n\n"
+            "If you deleted it in order to CORRECT it, that was `update_knowledge`, "
+            "and what you have now is half a repair: call `record_knowledge` NOW "
+            "with the corrected version, before anything else, or this run has "
+            "removed the knowledge rather than fixed it.\n\n"
             f"{remaining} deletion(s) left in this run.",
             messages,
         )
@@ -820,6 +962,7 @@ def build_tools(
         observe_scene,
         search_knowledge,
         record_knowledge,
+        update_knowledge,
         forget_knowledge,
         click_button,
         enter_text,

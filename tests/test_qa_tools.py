@@ -626,6 +626,7 @@ def test_the_agent_is_offered_exactly_these_tools() -> None:
         "observe_scene",
         "search_knowledge",
         "record_knowledge",
+        "update_knowledge",
         "forget_knowledge",
         "click_button",
         "enter_text",

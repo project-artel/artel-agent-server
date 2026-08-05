@@ -29,7 +29,9 @@ class MessageType(StrEnum):
     # them: it rejects an unknown type outright, and that rejection reaches the
     # waiting tool as silence rather than as an error it could report.
     KNOWLEDGE_SEARCH = "KNOWLEDGE_SEARCH"
-    # Writes to the project's knowledge base: one new entry, and one soft delete.
+    # Writes to the project's knowledge base: one new entry, one correction, one
+    # soft delete. Spelled exactly as Orchestration's KNOWLEDGE_MUTATION_TYPES has
+    # them, for the reason given on the search above.
     #
     # Unlike the search, these are ONE-WAY. Orchestration's `routeKnowledgeMutation`
     # answers a mutation with no frame at all — a success is silent, and a rejection
@@ -37,11 +39,14 @@ class MessageType(StrEnum):
     # operator's stream rather than back down this socket. Nothing on this side may
     # wait for a reply to one of these.
     #
-    # Orchestration also accepts KNOWLEDGE_UPDATE. It is deliberately absent here:
-    # this agent corrects an entry by deleting it and recording the corrected
-    # version, so there is no tool that could put that frame on the wire
-    # (ARTEL-189). The Orchestration path stays for other callers.
+    # KNOWLEDGE_UPDATE was deliberately absent until ARTEL-257. ARTEL-189 had the
+    # agent correct an entry by deleting it and recording the corrected version, to
+    # keep the tool surface small. What that cost is a history in which a repair
+    # and a discard are the same event — both a DELETE and nothing more — so
+    # comparing runs by whether the knowledge they wrote survived (ARTEL-239)
+    # scored the model that maintained knowledge most carefully as the worst.
     KNOWLEDGE_CREATE = "KNOWLEDGE_CREATE"
+    KNOWLEDGE_UPDATE = "KNOWLEDGE_UPDATE"
     KNOWLEDGE_DELETE = "KNOWLEDGE_DELETE"
     # Bidirectional
     ERROR = "ERROR"
@@ -337,6 +342,30 @@ class KnowledgeCreatePayload(BaseModel):
     description: str
 
 
+class KnowledgeUpdatePayload(BaseModel):
+    """A correction to one existing entry, which keeps its id and its lineage.
+
+    A third model rather than a widened create or delete, by the same rule that
+    split those two below: this is the only one of the three that names an id AND
+    carries a body, and both are load-bearing. Collapsing all three into
+    Orchestration's single `KnowledgeMutationRequest` would make every field
+    optional here too, and leave which ones each type actually requires to a
+    comment.
+
+    A field left as None is left alone on the far side — `updateFromQaTry` writes
+    only what it was given. That is what lets fixing one sentence be a frame
+    carrying one sentence, rather than a re-send of the whole entry with the parts
+    that were already right copied back over themselves. All three None is refused
+    there, so `update_knowledge` refuses it here instead of spending a frame to
+    find out.
+    """
+
+    knowledge_id: str
+    tag: str | None = None
+    summary: str | None = None
+    description: str | None = None
+
+
 class KnowledgeDeletePayload(BaseModel):
     """The soft delete of one existing entry.
 
@@ -349,7 +378,7 @@ class KnowledgeDeletePayload(BaseModel):
     `knowledge_id` is a string, and matches the wire name Orchestration maps with
     `@JsonProperty("knowledge_id")`. Ids leave Orchestration as text so a 64-bit
     value cannot lose precision on the way through JSON, and it comes back the
-    same way.
+    same way — the update above names its target the same way, for the same reason.
     """
 
     knowledge_id: str

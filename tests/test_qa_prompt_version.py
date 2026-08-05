@@ -239,9 +239,30 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v6() -> None:
+def test_the_default_qa_version_is_v7() -> None:
     """A run that names no version has to get the newest prompt."""
-    assert resolve_version("qa_run") == "v6"
+    assert resolve_version("qa_run") == "v7"
+
+
+def test_v7_is_v6_and_marks_the_tool_set_that_changed_under_it() -> None:
+    """A version whose body did not move, which is the point of it.
+
+    `update_knowledge` arrived and the "delete, then record" repair instruction
+    left with it (ARTEL-257), but none of that is prompt text: ARTEL-192 put the
+    usage policy for these tools in their descriptions and left the system prompt
+    alone. What still has to happen is that runs before and after the change fall
+    in different buckets — Orchestration files `qa_try.prompt_version` from the
+    resolved version this returns — so the version is bumped and the body is not.
+    """
+    v6 = load_prompt("qa_run", "system", "v6").body
+    v7 = load_prompt("qa_run", "system", "v7").body
+
+    assert v7 == v6
+    assert load_prompt("qa_run", "vision_directive", "v7").body == (
+        load_prompt("qa_run", "vision_directive", "v6").body
+    )
+    # The note is the only place the reason for an identical version is written.
+    assert "update_knowledge" in load_prompt("qa_run", "system", "v7").note
 
 
 def test_v4_teaches_the_live_view_and_the_value_paths() -> None:
