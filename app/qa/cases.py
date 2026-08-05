@@ -13,6 +13,10 @@ Step은 **advisory**다: 실행 시 씬이 step과 다르면 Agent가 무시하�
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# 레거시 실행 스텝(폴백). cases 없이 온 시나리오(구 저작)를 그대로 돌리기 위해 유지한다.
+# app.agents 대신 leaf 모듈에서 가져와 import 사이클(app.qa ↔ app.agents)을 피한다.
+from app.agents.scenario.schemas import ScenarioStep
+
 
 class QaStep(BaseModel):
     """cases[].steps[] 한 칸.
@@ -44,3 +48,18 @@ class QaCase(BaseModel):
     precondition: str | None = None
     expected: str = ""
     steps: list[QaStep] = Field(default_factory=list)
+
+
+class QaScenarioBody(BaseModel):
+    """Orche가 보내는 한 시나리오의 실행 본문(scenario JSON) — ARTEL-254/258.
+
+    `cases`(저작 Step 실린 조합)가 있으면 그걸 가공해 실행하고, 없으면(구 저작) `steps`
+    레거시 경로로 폴백한다. `extra="allow"`로 미지 필드는 버리지 않는다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    title: str = ""
+    description: str = ""
+    steps: list[ScenarioStep] = Field(default_factory=list)  # 레거시 폴백
+    cases: list[QaCase] = Field(default_factory=list)  # ARTEL-254/258
