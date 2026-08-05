@@ -25,7 +25,7 @@ is installed.
 
 1. Confirm goal, scope, acceptance criteria, and non-goals.
 2. Read project context, relevant code, tests, and recent changes.
-3. Use Jira and branch context provided by the user or environment. Do not create issues or branches unless explicitly requested; when they are, follow `## Jira-Driven Development Flow`.
+3. Create the Jira issue, the branch, and — once the work is ready — the PR, following `## Jira-Driven Development Flow`. These are part of doing the work; do not wait for an explicit request to create them. Reuse Jira and branch context already provided by the user or environment rather than creating a duplicate.
 4. Write a concise implementation plan; use `writing-plan` when installed.
 5. Identify architecture impact, tradeoffs, risks, and rollback.
 6. Implement the smallest coherent change.
@@ -50,21 +50,28 @@ end-to-end development. Jira access is described in `project.md`.
    - `customfield_10080` (작업 유형): `feat`, `fix`, `chore`, `docs`,
      `refactor`, or `infra`. Required; the call fails without it.
    - `customfield_10081` (레포지토리): `orchestration-server`, `agent-server`,
-     `home`, `sdk`, or `없음`. Required; the call fails without it.
+     `home`, `sdk`, `admin-page`, or `없음`. Required; the call fails without
+     it.
    - `labels`: add one only when the work belongs to a theme the two fields
      above do not already express. Reuse an existing label instead of
      inventing a near-duplicate.
 
-2. **Move to 진행 중 and create the branch.** Transition the issue, then create
-   the branch in the same step so status and branch never drift. Derive the
-   name from the issue:
+2. **Move to 진행 중.** Transition the issue. An automation watches this
+   transition and creates the branch, so status and branch never drift. The
+   generated name is:
 
    ```text
    <작업 유형>/<issue summary with spaces replaced by hyphens>-<ISSUE KEY>
    ```
 
-   For example, `chore/orchestration-jira-mcp-셋팅-ARTEL-69`. Keep Korean
-   characters as they appear in the summary. Branch from `origin/develop`.
+   For example, `chore/orchestration-jira-mcp-셋팅-ARTEL-69`. Korean characters
+   stay as they appear in the summary, and the branch starts from
+   `origin/develop`.
+
+   **The automation is not installed in every repository.** After the
+   transition, fetch and confirm the branch exists. When it does not, create it
+   manually with the same name — do not invent a different one, and do not
+   report the automation as broken before checking.
 
    The issue key in the branch name is what ties branch, commits, and PR back
    to the issue, so never create the branch before the issue exists. Keep one
@@ -86,9 +93,10 @@ end-to-end development. Jira access is described in `project.md`.
    `pair-review-critic` subagent against the implementation. Resolve or
    explicitly accept every finding before opening the PR.
 
-8. **Open the PR.** Follow `pull-request.md`, targeting `develop`. Fill in
-   `Code Walkthrough` with one entry per changed unit, and end the body with a
-   `Jira: <ISSUE KEY>` trailer so the issue links back.
+8. **Open the PR.** Do this as soon as the work is ready, without waiting to be
+   asked. Follow `pull-request.md`, targeting `develop`. Set the assignee and
+   the type label, fill in `Code Walkthrough` with one entry per changed unit,
+   and end the body with a `Jira: <ISSUE KEY>` trailer so the issue links back.
 
 Move the issue to 검토 중 when the PR opens, and to 완료 only after merge and
 required validation pass.
