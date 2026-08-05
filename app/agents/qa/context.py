@@ -38,7 +38,13 @@ from app.qa.scene import SCENE_VIEW_END, SCENE_VIEW_START_PREFIX, SCENE_VIEW_STA
 # How many of the newest scene views survive folding, in full — counted across
 # the whole message list, not per tool or per step. One tunable, so raising it
 # back up if a scenario turns out to need more lookback is a one-line change.
-DEFAULT_KEEP_SCENES = 2
+#
+# One, not two, since the live view: `SceneMemory.render_now` is appended to
+# every model call, so the current scene is always in front of the model without
+# a tool result having to carry it. What the newest tool view still adds is the
+# scene AT the moment an action landed, tied to that action's outcome lines —
+# worth one. A second would be two stale snapshots under a fresh one.
+DEFAULT_KEEP_SCENES = 1
 
 # Matches exactly what `SceneMemory.render` wrapped its output in: the start
 # marker (which carries the observation number), the view body, and the end

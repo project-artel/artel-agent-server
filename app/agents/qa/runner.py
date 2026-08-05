@@ -11,6 +11,7 @@ import logging
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import wrap_model_call
+from langchain_core.messages import HumanMessage
 
 from app.agents.qa.context import fold_stale_scenes
 from app.agents.qa.knowledge import (
@@ -166,6 +167,25 @@ class QaRunner:
         first_message = _first_message(scenario)
         tools = build_tools(channel, state, supports_vision)
 
+        @wrap_model_call
+        async def _append_current_scene(request, handler):
+            """Put the scene as it stands right now at the end of every model call.
+
+            The tool loop only ever showed the agent a scene it had asked for, so
+            a frame the game volunteered sat in `SceneMemory` unread until the
+            next tool call happened to render it. This closes that: the current
+            scene is in front of the model on every turn, whether or not it
+            looked, and it is written fresh each time rather than accumulated —
+            `request.override` touches this one call, not the graph's state, so
+            nothing here survives into the next turn to be resent.
+            """
+            view = channel.scene.render_now()
+            if view is None:  # No frame has arrived yet; there is nothing to say.
+                return await handler(request)
+            return await handler(
+                request.override(messages=[*request.messages, HumanMessage(content=view)])
+            )
+
         # The whole starting context in one place. Reading a run afterwards means
         # knowing what the model was actually given, and the prompt is assembled
         # from several pieces that are otherwise only visible in source. The
@@ -202,12 +222,21 @@ class QaRunner:
             # not the model can see. The vision middleware is added only when it
             # can — on a text-only model it would have nothing to inject and
             # nothing to trim. The two touch disjoint messages, so their order
-            # here does not matter. Usage logging is last so it wraps the others
-            # and reports what the model was actually sent, after folding.
+            # here does not matter.
+            #
+            # The live scene is appended after them: the fold has run over the
+            # tool messages and the image trim has happened, which leaves it as
+            # the actual final message the model reads. Usage logging sits
+            # innermost, after that, so it reports what was actually sent.
             middleware=(
-                [_fold_scene_views, QaCaptureVisionMiddleware(state), _log_token_usage]
+                [
+                    _fold_scene_views,
+                    QaCaptureVisionMiddleware(state),
+                    _append_current_scene,
+                    _log_token_usage,
+                ]
                 if supports_vision
-                else [_fold_scene_views, _log_token_usage]
+                else [_fold_scene_views, _append_current_scene, _log_token_usage]
             ),
         )
         # Streamed rather than invoked so the model's reasoning can be put on the
