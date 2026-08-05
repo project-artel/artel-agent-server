@@ -54,7 +54,14 @@ def test_models_api_exposes_reasoning_selection_capabilities() -> None:
         "video",
     ]
     assert catalog[LLMModel.gemini_2_5_pro]["multimodal"] is True
-    assert catalog[LLMModel.gpt_4o_mini]["reasoning"] is None
+    assert catalog[LLMModel.gpt_5_6_luna]["reasoning"] == {
+        "kind": "effort",
+        "efforts": ["max", "xhigh", "high", "medium", "low"],
+        "min_tokens": None,
+        "max_tokens": None,
+        "step": None,
+    }
+    assert catalog[LLMModel.gpt_4o]["reasoning"] is None
 
 
 def test_request_accepts_each_supported_reasoning_shape() -> None:
@@ -78,7 +85,7 @@ def test_request_accepts_each_supported_reasoning_shape() -> None:
 @pytest.mark.parametrize(
     ("model", "reasoning"),
     [
-        (LLMModel.gpt_4o_mini, {"effort": "low"}),
+        (LLMModel.gpt_4o, {"effort": "low"}),
         (LLMModel.claude_sonnet_5, {"max_tokens": 2048}),
         (LLMModel.gemini_2_5_pro, {"effort": "high"}),
     ],
@@ -160,6 +167,9 @@ def test_service_rejects_invalid_reasoning_before_saving() -> None:
                 game_instance_id=1,
                 test_scenario_id=1,
                 scenario=make_scenario(),
+                # Named rather than left to DEFAULT_MODEL: the default now
+                # reasons, and this case needs a model that does not.
+                model=LLMModel.gpt_4o,
                 reasoning=ReasoningConfig(effort=ReasoningEffort.low),
             )
 
@@ -262,7 +272,7 @@ def test_caching_is_opt_in_and_only_for_anthropic(monkeypatch) -> None:
     try:
         chat_model.build_chat_model(LLMModel.claude_opus_4_8, cache_prompt=True)
         chat_model.build_chat_model(LLMModel.claude_opus_4_8)
-        chat_model.build_chat_model(LLMModel.gpt_4o_mini, cache_prompt=True)
+        chat_model.build_chat_model(LLMModel.gpt_4o, cache_prompt=True)
     finally:
         chat_model.build_chat_model.cache_clear()
 
