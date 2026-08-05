@@ -18,8 +18,9 @@ class LLMModel(StrEnum):
     ``GET https://openrouter.ai/api/v1/models`` catalog: a model advertises
     strict json_schema support via ``structured_outputs`` in its
     ``supported_parameters`` (``response_format`` alone means json_object mode
-    only), and image input via ``image`` in ``architecture.input_modalities``.
-    Re-verify both against that endpoint before adding or renaming entries.
+    only), image input via ``image`` in ``architecture.input_modalities``, and
+    its window as ``context_length`` with ``top_provider.max_completion_tokens``.
+    Re-verify all three against that endpoint before adding or renaming entries.
     """
 
     gpt_5_6_luna = "openai/gpt-5.6-luna"
@@ -72,6 +73,17 @@ class ModelSpec:
     # Models with only `response_format` fall back to json_object mode.
     supports_strict_json: bool
     label: str
+    # What the model can be *sent*, not the window it advertises: the catalog's
+    # `context_length` minus `top_provider.max_completion_tokens`, because the
+    # completion has to fit in the same window as the prompt. Stored already
+    # subtracted so the name means what it says and no caller has to remember
+    # the reservation.
+    #
+    # This is what `QaCompactionMiddleware` measures its trigger fraction
+    # against (`app/agents/qa/compaction.py`). A value that is too high is the
+    # failure that matters: compaction would then fire after the provider has
+    # already refused the call, which is the thing it exists to prevent.
+    max_input_tokens: int
     # True when the model accepts image blocks — `image` in the catalog's
     # `architecture.input_modalities`. Verify it there like `supports_strict_json`
     # rather than assuming: Gemma 4 was carried here as text-only on the strength of
@@ -101,6 +113,7 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         provider=LLMProvider.openai,
         supports_strict_json=True,
         label="GPT-5.6 Luna",
+        max_input_tokens=922_000,
         input_modalities=("text", "image", "file"),
         # The catalog also advertises a sixth effort, `none`, which
         # `ReasoningEffort` does not model; the five below are the whole enum.
@@ -111,12 +124,14 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         provider=LLMProvider.openai,
         supports_strict_json=True,
         label="GPT-4o",
+        max_input_tokens=111_616,
         input_modalities=("text", "image", "file"),
     ),
     LLMModel.claude_sonnet_5: ModelSpec(
         provider=LLMProvider.anthropic,
         supports_strict_json=True,
         label="Claude Sonnet 5",
+        max_input_tokens=872_000,
         input_modalities=("text", "image", "file"),
         reasoning=ReasoningKind.effort,
         reasoning_efforts=tuple(ReasoningEffort),
@@ -125,6 +140,7 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         provider=LLMProvider.anthropic,
         supports_strict_json=True,
         label="Claude Opus 4.8",
+        max_input_tokens=872_000,
         input_modalities=("text", "image", "file"),
         reasoning=ReasoningKind.effort,
         reasoning_efforts=tuple(ReasoningEffort),
@@ -133,6 +149,7 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         provider=LLMProvider.google,
         supports_strict_json=True,
         label="Gemini 2.5 Flash",
+        max_input_tokens=983_041,
         input_modalities=("text", "image", "file", "audio", "video"),
         reasoning=ReasoningKind.max_tokens,
         reasoning_min_tokens=0,
@@ -143,6 +160,7 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         provider=LLMProvider.google,
         supports_strict_json=True,
         label="Gemini 2.5 Pro",
+        max_input_tokens=983_040,
         input_modalities=("text", "image", "file", "audio", "video"),
         reasoning=ReasoningKind.max_tokens,
         reasoning_min_tokens=128,
@@ -154,6 +172,7 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         provider=LLMProvider.google,
         supports_strict_json=False,
         label="Gemma 4 (free)",
+        max_input_tokens=229_376,
         input_modalities=("text", "image", "video"),
     ),
 }
@@ -210,6 +229,7 @@ def list_models() -> list[dict[str, Any]]:
             "label": spec.label,
             "provider": spec.provider.value,
             "supports_strict_json": spec.supports_strict_json,
+            "max_input_tokens": spec.max_input_tokens,
             "supports_vision": spec.supports_vision,
             "input_modalities": list(spec.input_modalities),
             "multimodal": len(spec.input_modalities) > 1,

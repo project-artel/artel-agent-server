@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -39,6 +39,53 @@ class Settings(BaseSettings):
     # run a candidate. A value naming a directory that does not exist fails at
     # startup.
     qa_prompt_version: str | None = None
+    # Compaction of the QA run's conversation; see app/agents/qa/compaction.py.
+    # `enabled` is a kill switch rather than a feature flag: a run that breaks on
+    # compaction has to be recoverable without a deploy.
+    #
+    # The trigger is a fraction of the model's `max_input_tokens`, measured over
+    # the messages as `fold_stale_scenes` leaves them — what is actually sent.
+    #
+    # `keep_messages` bounds how many messages survive verbatim, NOT how large
+    # they are. If runs ever show compaction firing on consecutive turns, the fix
+    # is a fractional keep, which bounds the preserved tail by size instead.
+    #
+    # `min_new_messages` is the thrash guard, and it is about cost rather than
+    # correctness: each compaction pays for a summary call and then invalidates
+    # the whole Anthropic prompt cache, since it rewrites the prefix that cache
+    # is keyed on.
+    #
+    # `trim_tokens` is how much history the summarizer itself reads. LangChain
+    # defaults to 4000, which drops most of a QA run before the summary is even
+    # written.
+    #
+    # The summarizer model is fixed rather than "whatever the run uses": the job
+    # is compression, and paying a frontier model's rate for it on every trigger
+    # buys nothing the run can use. It is an OpenRouter slug rather than an
+    # `LLMModel` because this module cannot import `app.llm` — importing any part
+    # of that package runs its `__init__`, which pulls in `chat_model`, which
+    # imports this module back. The validator below closes the same gap the type
+    # would have: a slug outside the catalog fails on the first `get_settings()`.
+    qa_compaction_enabled: bool = True
+    qa_compaction_trigger_fraction: float = 0.9
+    qa_compaction_keep_messages: int = 20
+    qa_compaction_min_new_messages: int = 4
+    qa_compaction_trim_tokens: int = 8000
+    qa_compaction_model: str = "openai/gpt-5.6-luna"
+
+    @field_validator("qa_compaction_model")
+    @classmethod
+    def known_model(cls, value: str) -> str:
+        from app.llm.models import LLMModel
+
+        try:
+            LLMModel(value)
+        except ValueError as error:
+            known = ", ".join(model.value for model in LLMModel)
+            raise ValueError(
+                f"qa_compaction_model '{value}' is not in the catalog. Known: {known}."
+            ) from error
+        return value
     scenario_prompt_version: str | None = None
     game_context_prompt_version: str | None = None
     knowledge_query_prompt_version: str | None = None

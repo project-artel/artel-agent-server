@@ -232,9 +232,9 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v4() -> None:
+def test_the_default_qa_version_is_v5() -> None:
     """A run that names no version has to get the newest prompt."""
-    assert resolve_version("qa_run") == "v4"
+    assert resolve_version("qa_run") == "v5"
 
 
 def test_v4_teaches_the_live_view_and_the_value_paths() -> None:

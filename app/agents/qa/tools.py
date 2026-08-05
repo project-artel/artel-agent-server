@@ -94,6 +94,25 @@ class QaRunState:
         # return the image itself — an image block on a tool result is rejected by
         # the chat/completions API every model here is reached through.
         self._pending_captures: list[PendingCapture] = []
+        # Set by `compact_context`, read and cleared by the compaction middleware
+        # before the next model call. A flag rather than the tool doing the work
+        # itself: the tool runs inside the tools node, where its own AIMessage is
+        # already in state, and rewriting the message list from there would strand
+        # that call without its result. See `app/agents/qa/compaction.py`.
+        self.compaction_requested = False
+        # How many compactions this run has been through. Read by the thrash guard
+        # and reported at the end of the run.
+        self.compactions = 0
+
+    def unreported_steps(self) -> list[int]:
+        """Scenario steps with no verdict yet, in order.
+
+        Lives here rather than in the ledger that prints it because it is derived
+        from `step_results`, and a second derivation elsewhere is how the ledger
+        and the run come to disagree about what is left.
+        """
+        reported = {result.step for result in self.step_results}
+        return [step for step in range(1, self.total_steps + 1) if step not in reported]
 
     def add_pending_capture(self, capture: PendingCapture) -> None:
         self._pending_captures.append(capture)

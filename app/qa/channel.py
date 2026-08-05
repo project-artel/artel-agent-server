@@ -42,6 +42,11 @@ MAX_SCENE_WAIT_SECONDS = 30.0
 # run still ends by its own account rather than by being killed mid-wait.
 MAX_OPERATOR_WAIT_SECONDS = 300.0
 
+# How many operator instructions the durable record keeps, for restating after a
+# compaction. A ceiling rather than a policy: an operator who narrates the whole
+# run would otherwise make the restated block the largest thing in context.
+MAX_OPERATOR_INSTRUCTIONS = 50
+
 # How long a knowledge search waits before the agent is told nobody answered.
 #
 # Shorter than an action's wait on purpose. An action is the run making progress,
@@ -99,6 +104,17 @@ class QaRunChannel:
         # Set exactly while that list has something in it, so a tool can wait on
         # the operator instead of only picking messages up in passing.
         self._operator_arrived = asyncio.Event()
+        # Everything the operator has said this run, in order — the durable record
+        # beside the delivery queue above, which is emptied as soon as a tool picks
+        # it up. Once delivered, an instruction exists only inside one tool result's
+        # text, and compaction replaces exactly that text; "it applies from now on"
+        # then stops being true halfway through a run. This list is what
+        # `render_progress_ledger` restates afterwards.
+        #
+        # Recorded in `on_chat` rather than at any tool, because that is the single
+        # funnel every operator message passes through: a tool added later cannot
+        # forget to do it.
+        self.operator_instructions: list[str] = []
 
     @property
     def qa_try_id(self) -> int:
@@ -327,6 +343,10 @@ class QaRunChannel:
     def on_chat(self, raw: dict) -> None:
         payload = ChatPayload.model_validate(raw.get("payload") or {})
         self._operator_messages.append(payload.message)
+        self.operator_instructions.append(payload.message)
+        # An operator who keeps typing must not be able to grow the ledger without
+        # bound; the newest are the ones still worth restating.
+        del self.operator_instructions[:-MAX_OPERATOR_INSTRUCTIONS]
         self._operator_arrived.set()
 
     def on_cancel(self) -> None:
