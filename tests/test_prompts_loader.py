@@ -303,6 +303,7 @@ def test_every_live_agent_has_a_v1(monkeypatch) -> None:
     try:
         assert set(known_agents()) == {
             "qa_run",
+            "qa_compaction",
             "scenario",
             "game_context",
             "knowledge_query",

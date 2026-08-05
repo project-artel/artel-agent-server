@@ -120,7 +120,13 @@ QA 런은 `create_agent` 툴 루프로 돌고, 메시지는 런이 끝날 때까
 
 - [x] **Step 3: `app/agents/qa/compaction.py` (신규)** — 핵심.
 
-  - `QA_SUMMARY_PROMPT`: langchain 기본 프롬프트는 `## ARTIFACTS`(파일/경로)를 요구해
+  - 요약 프롬프트: `app/prompts/qa_compaction/v1/summary.md`. 다른 프롬프트와 같은
+    버저닝을 쓴다. `qa_run`의 role이 아니라 **독립 agent**인 이유는 롤백 경로다 —
+    `QA_PROMPT_VERSION=v4`가 시스템 프롬프트 전용 롤백인데, v4에 이 파일이 없으므로
+    role로 넣으면 부팅이 `PromptError`로 죽는다. 요약은 다른 모델에 가는 다른 호출이다.
+    `qa_compaction_prompt_version` 설정과 `SETTINGS_VERSION_KEYS` 등록이 따라온다.
+    로더가 `{messages}` 자리표시자 선언을 검증해준다는 것이 덤이 아니라 실익이다.
+    langchain 기본 프롬프트는 `## ARTIFACTS`(파일/경로)를 요구해
     게임 런에 무의미하다. 섹션을 바꾼다 — `## SCENARIO`(제목·의도·전체 스텝 목록),
     `## WHAT HAS BEEN TRIED`(무엇을 어느 요소에 했고 게임이 어떻게 반응했는지, 실패는 왜),
     `## GAME BEHAVIOUR LEARNED`(화면 이동 경로, 대사 넘기는 키, 기다려야 하는 것 —
@@ -169,7 +175,7 @@ QA 런은 `create_agent` 툴 루프로 돌고, 메시지는 런이 끝날 때까
     새로 넣는 것이라 짝이 깨진다(dangling `tool_call_id` → 프로바이더 400). 게다가 모델
     핸들·트림·프롬프트·컷오프가 두 벌이 된다.
 
-- [x] **Step 4: `app/prompts/qa_run/v5/`** — v4를 복사하고 `system.md`에 3문장 추가:
+- [x] **Step 4: `app/prompts/qa_run/v5/` + `app/prompts/qa_compaction/v1/`** — v4를 복사하고 `system.md`에 3문장 추가:
       히스토리가 요약 + 재진술 원장으로 바뀔 수 있다, 원장이 권위이며 판정이 적힌 스텝은
       다시 하지 않는다, `compact_context`가 있고 언제 부르는지. `vision_directive.md`는
       그대로 복사.

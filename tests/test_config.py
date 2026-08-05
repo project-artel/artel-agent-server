@@ -40,6 +40,9 @@ def test_prompt_versions_default_to_unset() -> None:
     assert settings.qa_prompt_version is None
     assert settings.scenario_prompt_version is None
     assert settings.game_context_prompt_version is None
+    # Versioned apart from the run's own prompt: the summarizer is a different
+    # call to a different model, and pinning one back must not pin the other.
+    assert settings.qa_compaction_prompt_version is None
 
 
 def test_prompt_versions_can_be_pinned_per_agent(tmp_path) -> None:

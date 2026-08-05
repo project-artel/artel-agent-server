@@ -17,6 +17,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 
 from app.agents.qa.compaction import QaCompactionMiddleware, render_progress_ledger
 from app.agents.qa.tools import QaRunState
+from app.prompts import load_prompt
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import LogCategory, MessageType
 from app.qa.scene import SCENE_VIEW_END, SCENE_VIEW_START_PREFIX, SCENE_VIEW_START_SUFFIX
@@ -93,6 +94,10 @@ def build_middleware(
 ) -> QaCompactionMiddleware:
     return QaCompactionMiddleware(
         model=model,
+        # The real prompt, not a stub: `_acreate_summary` formats it with
+        # `{messages}`, so a stub without that field would pass here and fail in
+        # production.
+        summary_prompt=load_prompt("qa_compaction", "summary").body,
         run_model_max_input_tokens=max_input_tokens,
         state=state,
         channel=channel,
@@ -342,3 +347,29 @@ def test_the_tool_only_raises_a_flag() -> None:
 
     assert state.compaction_requested is True
     assert "preserved" in answer
+
+
+def test_the_summary_prompt_is_versioned_like_every_other_prompt() -> None:
+    """It is a prompt, so it lives with the prompts rather than in a constant —
+    reviewable, diffable, and pinnable to a candidate without a deploy.
+
+    Its own agent, not a role under `qa_run`: `QA_PROMPT_VERSION=v4` is the
+    documented way to roll a system-prompt change back, and it must not take this
+    with it — nor fail outright on a version that predates it.
+    """
+    from app.prompts import SETTINGS_VERSION_KEYS, available_versions
+
+    assert SETTINGS_VERSION_KEYS["qa_compaction"] == "qa_compaction_prompt_version"
+    assert available_versions("qa_compaction")[0] == "v1"
+
+    prompt = load_prompt("qa_compaction", "summary")
+    # `_acreate_summary` calls `.format(messages=...)`, and LangChain documents the
+    # `<messages>` marker as part of the constant's contract — deep agents splice
+    # instructions in just above it. The loader pins the placeholder; this pins the
+    # marker, which it cannot see.
+    assert prompt.placeholders == ("messages",)
+    assert "<messages>" in prompt.body
+
+    # And it still says the things the ledger depends on it NOT duplicating.
+    assert "restated" in prompt.body
+    assert "Never write that a step passed or failed" in prompt.body

@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     # run a candidate. A value naming a directory that does not exist fails at
     # startup.
     qa_prompt_version: str | None = None
+    # Versioned separately from `qa_prompt_version`: the summarizing prompt is a
+    # different call to a different model, and rolling one back must not roll
+    # back the other.
+    qa_compaction_prompt_version: str | None = None
     # Compaction of the QA run's conversation; see app/agents/qa/compaction.py.
     # `enabled` is a kill switch rather than a feature flag: a run that breaks on
     # compaction has to be recoverable without a deploy.

@@ -22,6 +22,13 @@ a QA run in particular:
 Two triggers, one mechanism: the automatic one at a fraction of the model's input
 budget, and `compact_context`, which the agent calls when it judges its own
 history to have become unwieldy.
+
+The summarizing prompt is a prompt like any other and lives with the rest of
+them, under `app/prompts/qa_compaction/`. Its own agent rather than a role under
+`qa_run`, because it is a different call to a different model: tying it to the
+run prompt's version would mean `QA_PROMPT_VERSION=v4`, the documented way to
+roll a system-prompt change back, silently rolling this back too — and failing
+outright on any version predating it.
 """
 
 from collections.abc import Awaitable, Callable
@@ -56,75 +63,6 @@ _SUMMARY_SOURCE = "summarization"
 # conversation. Stripped so that what is checked for failure, and what reaches the
 # log, is the summary itself rather than the sentence introducing it.
 _SUMMARY_PREAMBLE = "Here is a summary of the conversation to date:"
-
-
-QA_SUMMARY_PROMPT = """<role>
-QA Run Context Extraction
-</role>
-
-<primary_objective>
-You are compressing the working history of a QA agent that is executing an
-approved test scenario against a live Unity game, step by step, through tools.
-The history below will be REPLACED by what you write.
-</primary_objective>
-
-<what_you_do_not_need_to_carry>
-Two things are restored separately and must not be re-derived here:
-
-- The step verdicts, the steps still awaiting one, and everything the operator
-  has said. These are restated verbatim from a record, immediately after your
-  summary.
-- The current state of the screen. It is attached fresh to every request.
-
-Spend none of your words on either. Write what only the history knows.
-</what_you_do_not_need_to_carry>
-
-<instructions>
-Structure the summary with the sections below. Each is a checklist: fill it, or
-write "None" if there is genuinely nothing to report.
-
-## SCENARIO
-
-The scenario's title and what it is trying to establish, then its steps in order
-with each one's intended action and expected result.
-
-## WHAT HAS BEEN TRIED
-
-Per step attempted: what was actually clicked, typed or pressed, on which
-element, and what the game did in response. For anything that failed, say why, so
-the same dead end is not walked into twice.
-
-## GAME BEHAVIOUR LEARNED
-
-What was discovered by doing rather than by being told: which screen leads where,
-which key advances dialogue, what needs a wait before it is ready, which element
-ids or labels turned out to mean what. This is the expensive knowledge in the
-history — it cost tool calls to obtain and cannot be recovered by reasoning.
-
-## OPEN PROBLEMS
-
-Anything unresolved: a step abandoned part-way, a screen that would not respond,
-a wait that has not paid off yet.
-
-## NEXT ACTION
-
-The single concrete thing to do next.
-</instructions>
-
-<constraints>
-Never write that a step passed or failed. Verdicts are recorded elsewhere and
-restated after your summary; one invented here would contradict the record.
-Never invent an element id — only ids the history actually shows.
-Write in English regardless of the language the run is reported in. This text is
-read by a model, not by the operator.
-</constraints>
-
-Respond ONLY with the extracted context. No preamble, no closing remarks.
-
-<messages>
-Messages to summarize:
-{messages}
-</messages>"""
 
 
 COMPACT_CONTEXT_DESCRIPTION = """Compress your own conversation history.
@@ -270,6 +208,7 @@ class QaCompactionMiddleware(SummarizationMiddleware):
         self,
         *,
         model: BaseChatModel,
+        summary_prompt: str,
         run_model_max_input_tokens: int,
         state: QaRunState,
         channel: QaRunChannel,
@@ -293,7 +232,10 @@ class QaCompactionMiddleware(SummarizationMiddleware):
             # to build the run at all.
             trigger=("tokens", max(1, int(run_model_max_input_tokens * trigger_fraction))),
             keep=("messages", keep_messages),
-            summary_prompt=QA_SUMMARY_PROMPT,
+            # Passed in rather than read here, so prompt resolution stays in the
+            # one place that already does it — see `QaRunner.run`, and
+            # `app/prompts/qa_compaction/` for the text itself.
+            summary_prompt=summary_prompt,
             trim_tokens_to_summarize=trim_tokens,
             token_counter=_folded_token_counter,
         )

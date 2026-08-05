@@ -33,8 +33,11 @@ from app.qa.envelope import LogCategory
 
 logger = logging.getLogger(__name__)
 
-# Directory under app/prompts/ holding this agent's prompt versions.
+# Directories under app/prompts/ holding these agents' prompt versions. The
+# summarizing prompt is versioned apart from the run's own: it is a different call
+# to a different model, so pinning one back must not pin the other.
 PROMPT_AGENT = "qa_run"
+COMPACTION_PROMPT_AGENT = "qa_compaction"
 
 # A scene view runs long. Cut it for the console, and say it was cut — a silently
 # truncated log reads as a smaller context than the model actually saw.
@@ -165,11 +168,20 @@ class QaRunner:
         settings = self._settings
         if not settings.qa_compaction_enabled:
             return None
+        prompt = load_prompt(COMPACTION_PROMPT_AGENT, "summary")
+        logger.info(
+            "[QA] compaction on: model=%s prompt_version=%s trigger=%.2f keep=%d",
+            settings.qa_compaction_model,
+            prompt.version,
+            settings.qa_compaction_trigger_fraction,
+            settings.qa_compaction_keep_messages,
+        )
         return QaCompactionMiddleware(
             # Not the run's model, and not `cache_prompt`: summarizing is one
             # call over a prefix nothing will send again, so caching it would pay
             # the write premium for a read that never happens.
             model=build_chat_model(LLMModel(settings.qa_compaction_model)),
+            summary_prompt=prompt.body,
             run_model_max_input_tokens=get_model_spec(self._model).max_input_tokens,
             state=state,
             channel=channel,
