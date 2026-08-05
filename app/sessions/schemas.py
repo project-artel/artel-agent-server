@@ -27,6 +27,10 @@ class SessionRecord(BaseModel):
     # Output locale for generated scenarios. Default keeps records saved
     # before this field was introduced deserializing as Korean.
     locale: OutputLanguage = DEFAULT_LANGUAGE
+    # What the session's LLM spend is booked against. Optional because
+    # Orchestration may not be sending it yet; then the usage record carries a
+    # null reference instead of the wrong one.
+    test_scenario_id: int | None = None
     # Run scope (ARTEL-206). Set when the authoring session is opened from a run
     # dashboard, so the agent's case search and the orchestration-side reconcile
     # can be bound to the right run/project. Optional: callers that predate run

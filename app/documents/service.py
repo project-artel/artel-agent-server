@@ -15,6 +15,7 @@ from app.agents.game_context import GameContextAgentRequest
 from app.documents.fetch import fetch_document
 from app.documents.loader import extract_document_text
 from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.usage import set_usage_scope
 
 
 class ExtractionService:
@@ -38,7 +39,9 @@ class ExtractionService:
         source_url: str,
         filename: str,
         model: LLMModel = DEFAULT_MODEL,
+        document_id: int | None = None,
     ) -> GameContext:
+        set_usage_scope("GAME_CONTEXT", document_id)
         fetched = await fetch_document(
             source_url,
             client=self._client,

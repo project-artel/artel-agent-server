@@ -10,6 +10,7 @@ from app.llm.models import (
     get_model_spec,
     validate_reasoning,
 )
+from app.llm.usage import UsageCallback
 
 
 @lru_cache
@@ -39,7 +40,10 @@ def build_chat_model(
         headers["X-Title"] = settings.openrouter_app_title
     reasoning = validate_reasoning(model, reasoning)
 
-    extra_body: dict[str, object] = {}
+    # OpenRouter prices the call itself and reports what it charged, but only
+    # when asked — without usage.include the response carries token counts and
+    # no `cost`. Merged rather than assigned: reasoning shares this field.
+    extra_body: dict[str, object] = {"usage": {"include": True}}
     if reasoning is not None:
         extra_body["reasoning"] = reasoning.as_openrouter()
     if cache_prompt and get_model_spec(model).provider is LLMProvider.anthropic:
@@ -65,7 +69,8 @@ def build_chat_model(
         api_key=settings.openrouter_api_key or "missing",
         temperature=0.2,
         default_headers=headers or None,
-        extra_body=extra_body or None,
+        extra_body=extra_body,
+        callbacks=[UsageCallback()],
     )
 
 

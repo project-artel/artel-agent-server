@@ -31,6 +31,10 @@ class OpenSessionRequest(BaseModel):
     # pending input when the WS connects), so it must be set here, not only on the
     # per-turn message below.
     locale: OutputLanguage = DEFAULT_LANGUAGE
+    # What this session's LLM spend is booked against. Optional so an
+    # Orchestration that does not send it yet keeps working — until it does, the
+    # usage records carry a null reference.
+    test_scenario_id: int | None = None
     # Run scope (ARTEL-206): set when opened from a run dashboard. Optional so
     # pre-run-scope callers keep working.
     run_id: int | None = None
@@ -87,6 +91,7 @@ async def open_session(
         user_input=payload.user_input,
         model=payload.model,
         locale=payload.locale,
+        test_scenario_id=payload.test_scenario_id,
         run_id=payload.run_id,
         project_id=payload.project_id,
         current_scenarios=payload.current_scenarios,

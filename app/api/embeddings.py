@@ -7,6 +7,7 @@ from app.llm.embedding_model import (
     EmbeddingClient,
     EmptyEmbeddingBatchError,
 )
+from app.llm.usage import set_usage_scope
 
 
 router = APIRouter(tags=["knowledge"])
@@ -16,6 +17,9 @@ class EmbedRequest(BaseModel):
     # A list, not a single string: the caller is a backfill worker that always
     # has many rows in hand, and OpenRouter embeds a batch in one round trip.
     texts: list[str] = Field(min_length=1)
+    # What this call's LLM spend is booked against. Optional so an Orchestration
+    # that does not send it yet keeps working, with a null reference until then.
+    project_id: int | None = None
 
 
 class EmbedResponse(BaseModel):
@@ -32,6 +36,7 @@ def _client(app) -> EmbeddingClient:
 
 @router.post("/embed", response_model=EmbedResponse)
 async def embed(payload: EmbedRequest, request: Request) -> EmbedResponse:
+    set_usage_scope("EMBEDDING", payload.project_id)
     try:
         result = await _client(request.app).embed(payload.texts)
     except (EmbeddingBatchTooLargeError, EmptyEmbeddingBatchError) as error:

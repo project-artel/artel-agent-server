@@ -63,6 +63,20 @@ class Settings(BaseSettings):
     # call, so this bounds fan-out, not payload size.
     knowledge_query_batch_limit: int = 32
 
+    # Where LLM usage records are shipped. Unset switches collection off
+    # entirely — a local run or a test has nowhere to send them, and an
+    # unreachable endpoint would only produce a warning per batch.
+    orchestration_base_url: str | None = None
+    # A batch leaves once either bound is hit. The size keeps a busy QA run from
+    # holding a long backlog; the interval keeps a quiet process from holding a
+    # short one until shutdown. Neither is a correctness bound: the endpoint has
+    # no idempotency key, so nothing is ever resent.
+    llm_usage_flush_size: int = 20
+    llm_usage_flush_interval_seconds: float = 5.0
+    # Ceiling on records held while Orchestration is unreachable. Past it the
+    # oldest go, because an outage must cost accuracy rather than the process.
+    llm_usage_max_buffer: int = 1000
+
     # /extract source fetch guards. allowed_hosts empty = no host restriction
     # (rely on the caller passing presigned URLs to the expected bucket).
     extract_max_bytes: int = 20 * 1024 * 1024

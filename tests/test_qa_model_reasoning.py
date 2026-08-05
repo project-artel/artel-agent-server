@@ -234,10 +234,10 @@ def test_omitted_reasoning_is_not_sent_and_uses_a_distinct_cache_entry(
     finally:
         chat_model.build_chat_model.cache_clear()
 
-    assert created[0]["extra_body"] is None
-    assert created[1]["extra_body"] == {
-        "reasoning": {"effort": "low", "exclude": True}
-    }
+    # usage.include always rides along (it is what makes OpenRouter report cost);
+    # reasoning is the part that appears only when it was asked for.
+    assert "reasoning" not in created[0]["extra_body"]
+    assert created[1]["extra_body"]["reasoning"] == {"effort": "low", "exclude": True}
 
 
 def test_caching_is_opt_in_and_only_for_anthropic(monkeypatch) -> None:
@@ -268,8 +268,10 @@ def test_caching_is_opt_in_and_only_for_anthropic(monkeypatch) -> None:
 
     asked_anthropic, default_anthropic, asked_openai = created
     assert asked_anthropic["extra_body"]["cache_control"] == {"type": "ephemeral"}
-    assert default_anthropic["extra_body"] is None
-    assert asked_openai["extra_body"] is None
+    # extra_body always carries usage.include (cost reporting), so the check is
+    # the absence of the breakpoint, not an empty body.
+    assert "cache_control" not in default_anthropic["extra_body"]
+    assert "cache_control" not in asked_openai["extra_body"]
 
 
 def test_run_start_log_names_reasoning(monkeypatch, caplog) -> None:

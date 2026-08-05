@@ -16,6 +16,9 @@ class ExtractRequest(BaseModel):
     source_url: str
     filename: str
     model: LLMModel = DEFAULT_MODEL
+    # What this call's LLM spend is booked against. Optional so an Orchestration
+    # that does not send it yet keeps working, with a null reference until then.
+    document_id: int | None = None
 
 
 class ExtractResponse(BaseModel):
@@ -31,7 +34,10 @@ def _service(app) -> ExtractionService:
 async def extract(payload: ExtractRequest, request: Request) -> ExtractResponse:
     try:
         game_context = await _service(request.app).extract(
-            payload.source_url, payload.filename, payload.model
+            payload.source_url,
+            payload.filename,
+            payload.model,
+            document_id=payload.document_id,
         )
     except UnsupportedDocumentError as error:
         raise HTTPException(status_code=415, detail=str(error)) from error
