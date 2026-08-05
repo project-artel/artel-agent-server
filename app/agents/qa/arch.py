@@ -85,6 +85,12 @@ MAX_RECORDS_PER_RUN = 5
 # `knowledge.py` for the rest of that argument, and for the defences around it.
 MAX_FORGETS_PER_RUN = 2
 
+# How many defects one run may file. A cap at all because an agent that reports
+# the same broken screen once per step turns one bug into a page of them; ten
+# because a run that finds more than ten distinct defects has answered the
+# question the scenario was asking long before it gets there.
+MAX_ISSUES_PER_RUN = 10
+
 
 class VisionMode(StrEnum):
     """Whether the run shows the model screenshots.
@@ -121,6 +127,7 @@ class QaArchSpec(BaseModel):
     max_records_per_run: int = Field(default=MAX_RECORDS_PER_RUN, ge=0, le=50)
     max_forgets_per_run: int = Field(default=MAX_FORGETS_PER_RUN, ge=0, le=50)
     max_captures_per_run: int = Field(default=MAX_CAPTURES_PER_RUN, ge=0, le=100)
+    max_issues_per_run: int = Field(default=MAX_ISSUES_PER_RUN, ge=0, le=50)
     vision: VisionMode = VisionMode.auto
     fold_stale_scenes: bool = True
     # Compaction rewrites what the model reads once a run grows past a fraction of
@@ -165,6 +172,7 @@ class ResolvedArch(BaseModel):
     max_records_per_run: int
     max_forgets_per_run: int
     max_captures_per_run: int
+    max_issues_per_run: int
     vision: bool
     fold_stale_scenes: bool
     compaction: bool
@@ -183,7 +191,10 @@ class ResolvedArch(BaseModel):
         scenario and shortened every run by however much it looked things up.
         Captures are deliberately NOT added: the capture budget has always come
         out of the step allowance, and folding it in here would quietly widen
-        every existing run's ceiling.
+        every existing run's ceiling. Issue reports are not added for both
+        reasons at once — a report is made about the step being judged, so it
+        belongs in that step's allowance, and adding it here would widen the
+        ceiling of every run including the ones that never file one.
         """
         base = (
             self.base_tool_calls

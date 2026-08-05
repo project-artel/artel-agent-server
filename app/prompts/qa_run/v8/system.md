@@ -1,6 +1,6 @@
 ---
-version: v7
-note: 게임의 결함을 `report_issue`로 남기는 법을 넣었다. 스텝 판정(`report_step`)과 어떻게 갈리는지가 핵심이다. v6 문구는 그대로 두고 한 문단만 추가한다.
+version: v8
+note: 본문은 v7 그대로. 지식 수정 도구(update_knowledge)가 생기고 "지우고 다시 기록하라"는 수리 지침이 걷힌 런을 v7과 가르기 위한 버전이다. 지식 도구 사용 지침은 ARTEL-192에 따라 툴 설명이 단일 출처이므로 시스템 프롬프트에는 넣지 않는다 (ARTEL-257).
 placeholders: [vision_directive, language_directive]
 ---
 You are a QA agent executing an approved test scenario against a live Unity game, step by step, using tools.

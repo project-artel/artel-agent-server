@@ -48,6 +48,15 @@ class MessageType(StrEnum):
     KNOWLEDGE_CREATE = "KNOWLEDGE_CREATE"
     KNOWLEDGE_UPDATE = "KNOWLEDGE_UPDATE"
     KNOWLEDGE_DELETE = "KNOWLEDGE_DELETE"
+    # One defect the run found in the game, filed against this run.
+    #
+    # ONE-WAY, like the knowledge writes above: Orchestration's `routeIssue`
+    # answers nothing. Worse, it drops the frame silently when `payload.severity`
+    # is not on its ladder or `payload.title` is blank — the rejection becomes a
+    # row on the operator's timeline, not a reply down this socket. Nothing here
+    # may wait for an answer, and `report_issue` validates severity itself
+    # precisely because a typo would otherwise look like a successful report.
+    ISSUE = "ISSUE"
     # Bidirectional
     ERROR = "ERROR"
     # Bidirectional. The operator talking to the Agent mid-run, and its reply.
@@ -392,6 +401,46 @@ class StatusPayload(BaseModel):
     step: int | None = None
     message: str
     summary: dict | None = None
+
+
+class IssueSeverity(StrEnum):
+    """How badly the defect hurts, worst first.
+
+    Spelled exactly as Orchestration's own `IssueSeverity`: it checks the value
+    against that ladder and drops the whole frame when it does not match. A value
+    added on that side has to be added here before this agent can send it.
+    """
+
+    BLOCKER = "BLOCKER"
+    CRITICAL = "CRITICAL"
+    MAJOR = "MAJOR"
+    MINOR = "MINOR"
+    TRIVIAL = "TRIVIAL"
+
+
+class IssuePayload(BaseModel):
+    """One defect, as the run observed it.
+
+    `title` carries the display line — the one field name that differs from every
+    other frame, which uses `message`. Orchestration requires it non-blank.
+
+    The rest is not validated on the far side; it is stored whole in `issue.detail`.
+    That is the reason to name the fields here rather than accept free text: an
+    issue whose expected/actual and steps are dissolved into one paragraph cannot
+    be read back as a bug report months later.
+    """
+
+    title: str
+    severity: IssueSeverity
+    # Required, unlike the `step` on every other payload here: the agent is always
+    # working on some step when it notices a defect, even when that step passes,
+    # and an issue nobody can place on the timeline is a bug report without a
+    # location.
+    step: int
+    expected: str
+    actual: str
+    # Oldest first. What someone else has to do to see this again.
+    reproduction: list[str] = Field(default_factory=list)
 
 
 class ErrorPayload(BaseModel):

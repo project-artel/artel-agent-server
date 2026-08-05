@@ -239,12 +239,12 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v7() -> None:
+def test_the_default_qa_version_is_v8() -> None:
     """A run that names no version has to get the newest prompt."""
-    assert resolve_version("qa_run") == "v7"
+    assert resolve_version("qa_run") == "v8"
 
 
-def test_v7_is_v6_and_marks_the_tool_set_that_changed_under_it() -> None:
+def test_v8_is_v7_and_marks_the_tool_set_that_changed_under_it() -> None:
     """A version whose body did not move, which is the point of it.
 
     `update_knowledge` arrived and the "delete, then record" repair instruction
@@ -254,15 +254,15 @@ def test_v7_is_v6_and_marks_the_tool_set_that_changed_under_it() -> None:
     in different buckets — Orchestration files `qa_try.prompt_version` from the
     resolved version this returns — so the version is bumped and the body is not.
     """
-    v6 = load_prompt("qa_run", "system", "v6").body
     v7 = load_prompt("qa_run", "system", "v7").body
+    v8 = load_prompt("qa_run", "system", "v8").body
 
-    assert v7 == v6
-    assert load_prompt("qa_run", "vision_directive", "v7").body == (
-        load_prompt("qa_run", "vision_directive", "v6").body
+    assert v8 == v7
+    assert load_prompt("qa_run", "vision_directive", "v8").body == (
+        load_prompt("qa_run", "vision_directive", "v7").body
     )
     # The note is the only place the reason for an identical version is written.
-    assert "update_knowledge" in load_prompt("qa_run", "system", "v7").note
+    assert "update_knowledge" in load_prompt("qa_run", "system", "v8").note
 
 
 def test_v4_teaches_the_live_view_and_the_value_paths() -> None:
@@ -299,3 +299,23 @@ def test_v6_says_a_failed_step_does_not_end_the_run() -> None:
     # Two paragraphs added, nothing from v5 dropped.
     for paragraph in v5.split("\n\n"):
         assert paragraph in v6
+
+
+def test_v7_separates_a_game_defect_from_a_step_verdict() -> None:
+    """`report_issue` is worth nothing if the agent files step failures into it.
+
+    The two come apart in both directions and the prompt has to say so: a step
+    can fail because the scenario is wrong about the game, and a step can pass
+    while a real defect goes by. What is pinned is that distinction, not the
+    tool's own description — the cap and the severity ladder live there.
+    """
+    v6 = load_prompt("qa_run", "system", "v6").body
+    v7 = load_prompt("qa_run", "system", "v7").body
+
+    assert "report_issue" in v7
+    assert "wrong about the GAME rather than about the step" in v7
+    assert "one call per distinct defect" in v7
+
+    # One paragraph added, nothing from v6 dropped.
+    for paragraph in v6.split("\n\n"):
+        assert paragraph in v7

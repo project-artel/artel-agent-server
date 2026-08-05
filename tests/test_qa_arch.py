@@ -56,6 +56,20 @@ def test_a_changed_allowance_is_a_different_structure() -> None:
     assert structure_of(resolved())[2] != structure_of(resolved(max_searches_per_run=3))[2]
 
 
+def test_the_issue_allowance_is_part_of_the_structure_but_not_of_the_budget() -> None:
+    """Both halves matter and they pull apart.
+
+    It has to reach the fingerprint, or a run allowed one issue and a run allowed
+    ten are averaged together. It must NOT reach `tool_call_limit`, because the
+    reports are made about the step being judged and are paid for out of that
+    step's allowance — folding them into the base would widen the ceiling of
+    every run, including the ones that never file one (the same reason captures
+    are left out).
+    """
+    assert structure_of(resolved())[2] != structure_of(resolved(max_issues_per_run=3))[2]
+    assert resolved(max_issues_per_run=3).tool_call_limit(4) == resolved().tool_call_limit(4)
+
+
 def test_turning_vision_off_changes_both_the_tools_and_the_fingerprint() -> None:
     """A run without `capture_screen` is a different agent, not a setting."""
     seeing_tools, _, seeing = structure_of(resolved(vision=VisionMode.on))
