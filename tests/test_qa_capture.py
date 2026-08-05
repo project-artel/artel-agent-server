@@ -13,6 +13,7 @@ import httpx
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from app.agents.qa.arch import default_resolved_arch
 from app.agents.qa.tools import PendingCapture, QaRunState, build_tools
 from app.agents.qa.vision import (
     MAX_CAPTURES_PER_RUN,
@@ -53,7 +54,10 @@ def make(total_steps: int = 1, timeout: float = 0.05, supports_vision: bool = Tr
 
     channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=timeout)
     state = QaRunState(total_steps=total_steps)
-    tools = {tool.name: tool for tool in build_tools(channel, state, supports_vision)}
+    # Vision is a property of the resolved structure now, not of the model alone:
+    # `arch.vision` is what `build_tools` reads, and what the arch fingerprint sees.
+    arch = default_resolved_arch().model_copy(update={"vision": supports_vision})
+    tools = {tool.name: tool for tool in build_tools(channel, state, arch)}
     return channel, state, tools, sent
 
 
@@ -262,7 +266,7 @@ def test_the_per_run_cap_is_refused_with_its_reason() -> None:
     asyncio.run(run())
 
 
-def test_a_model_that_cannot_see_is_not_offered_the_tool() -> None:
+def test_a_run_that_cannot_see_is_not_offered_the_tool() -> None:
     _, _, tools, _ = make(supports_vision=False)
 
     assert "capture_screen" not in tools

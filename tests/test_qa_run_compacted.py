@@ -16,11 +16,12 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
+from app.agents.qa.arch import QaArchSpec
 from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState
 from app.agents.scenario import ScenarioDraft, ScenarioStep
-from app.config import get_settings
 from app.qa.channel import QaRunChannel
+from app.qa.run_config import resolve_run_config
 from app.qa.envelope import LogCategory, MessageType
 
 SUMMARY_TEXT = "## SCENARIO\nOne scenario.\n\n## NEXT ACTION\nReport step 2."
@@ -164,17 +165,17 @@ def compacted_run(monkeypatch: pytest.MonkeyPatch) -> tuple[ScriptedModel, QaRun
 
     # Only the agent's own request should compact: the trigger is set to the
     # model's whole budget, which this short run comes nowhere near.
-    settings = get_settings().model_copy(
-        update={
-            "qa_compaction_trigger_fraction": 1.0,
-            "qa_compaction_keep_messages": 4,
-            "qa_compaction_min_new_messages": 2,
-        }
+    config = resolve_run_config(
+        arch=QaArchSpec(
+            compaction_trigger_fraction=1.0,
+            compaction_keep_messages=4,
+            compaction_min_new_messages=2,
+        )
     )
 
     channel, sent = make_channel()
     state = QaRunState(total_steps=2)
-    asyncio.run(QaRunner(settings=settings).run(channel, scenario(), state))
+    asyncio.run(QaRunner(config).run(channel, scenario(), state))
     assert summarizer.calls == 1
     return model, state, sent
 
@@ -253,10 +254,15 @@ def test_compaction_off_leaves_both_the_middleware_and_the_tool_out(
 
     monkeypatch.setattr("app.agents.qa.runner.build_chat_model", build)
 
-    settings = get_settings().model_copy(update={"qa_compaction_enabled": False})
+    config = resolve_run_config(arch=QaArchSpec(compaction=False))
     channel, _sent = make_channel()
     state = QaRunState(total_steps=2)
-    asyncio.run(QaRunner(settings=settings).run(channel, scenario(), state))
+    asyncio.run(QaRunner(config).run(channel, scenario(), state))
+
+    # The structure records itself as compaction-free, so the run is comparable
+    # against one that had it.
+    assert config.arch.compaction is False
+    assert "compact_context" not in config.tools
 
     assert state.finished
     assert "compact_context" not in model.bound_tools

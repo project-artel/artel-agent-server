@@ -45,7 +45,16 @@ pipeline {
             }
 
             steps {
-                sh 'docker build --target runtime -t $IMAGE_TAG .'
+                // GIT_SHA and IMAGE_TAG are baked in so a QA run can record which
+                // build produced it. The agent's structure is versioned by commit
+                // and image rather than by keeping old structures in the tree, so
+                // without these a past run cannot be reproduced.
+                sh '''
+                    docker build --target runtime \
+                      --build-arg GIT_SHA=$GIT_COMMIT \
+                      --build-arg IMAGE_TAG=$IMAGE_TAG \
+                      -t $IMAGE_TAG .
+                '''
             }
         }
 

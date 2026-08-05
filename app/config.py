@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     # Applied to the root logger at startup; see app/logging_config.py.
     log_level: str = "INFO"
 
+    # What build this is, injected by the image build (see Dockerfile/Jenkinsfile).
+    # These are what makes a past run reproducible: the agent's structure is code,
+    # so it is identified by its commit and redeployed from its image rather than
+    # kept as a parallel copy in the tree. Unset in local runs, and reported as
+    # null rather than guessed — a wrong sha is worse than a missing one.
+    git_sha: str | None = None
+    image_tag: str | None = None
+
     redis_url: str = "redis://localhost:6379/0"
     session_ttl_seconds: int = 3600
     history_max_turns: int = 10

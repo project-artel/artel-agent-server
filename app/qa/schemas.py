@@ -2,9 +2,9 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.agents import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
-from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig
+from app.agents import ScenarioDraft
 from app.qa.envelope import GameState, QaChatTurn
+from app.qa.run_config import RunConfig
 
 
 class QaStepResult(BaseModel):
@@ -27,12 +27,10 @@ class QaSessionRecord(BaseModel):
     test_scenario_id: int
     # The approved test scenario the Agent executes step by step.
     scenario: ScenarioDraft
-    model: LLMModel = DEFAULT_MODEL
-    language: OutputLanguage = DEFAULT_LANGUAGE
-    # Which prompt version this run uses. None defers to QA_PROMPT_VERSION, and
-    # then to the newest version on disk.
-    prompt_version: str | None = None
-    reasoning: ReasoningConfig | None = None
+    # Settled at open, not at run start: the run has to be attributable from the
+    # moment the session exists, and the open response is what carries it back to
+    # Orchestration. Nothing here is re-decided later.
+    run_config: RunConfig
 
     # Live execution state.
     current_step: int = 0  # 0-based index into scenario.steps

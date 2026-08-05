@@ -25,8 +25,11 @@ logger = logging.getLogger(__name__)
 MAX_IMAGES_IN_REQUEST = 2
 
 # A run that keeps capturing instead of deciding is a run that will hit the
-# deadline with nothing reported.
-MAX_CAPTURES_PER_RUN = 12
+# deadline with nothing reported. The number lives in `app/agents/qa/arch.py`
+# with the run's other structural knobs — a run can be asked to use a different
+# one, and the arch fingerprint has to see it — and is re-exported here under the
+# name its callers and tests already use.
+from app.agents.qa.arch import MAX_CAPTURES_PER_RUN  # noqa: E402 - re-export
 
 DOWNLOAD_TIMEOUT_SECONDS = 15.0
 

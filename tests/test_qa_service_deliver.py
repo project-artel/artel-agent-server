@@ -51,7 +51,7 @@ async def _running_service() -> tuple[QaExecutionService, str, asyncio.Task]:
         store=InMemoryQaSessionStore(),
         runner_factory=lambda **_kwargs: runner,
     )
-    session_id = await service.open(
+    session_id, _run_config = await service.open(
         qa_try_id=7,
         game_instance_id=1,
         test_scenario_id=1,

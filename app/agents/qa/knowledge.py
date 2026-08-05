@@ -29,28 +29,34 @@ is the thing to avoid.
 from app.qa.envelope import KnowledgeSearchHit, KnowledgeSearchResultPayload
 
 # --- how much of the knowledge base one run may move -------------------------
-
-# A run that keeps looking things up instead of deciding reaches the deadline
-# with nothing reported — the same failure `MAX_CAPTURES_PER_RUN` exists to
-# prevent. Lower than the capture budget because a game's rules do not change
-# during a run: the second search on the same subject learns nothing the first
-# one did not.
-MAX_SEARCHES_PER_RUN = 6
-
-# How much a run may add. Below the search budget because a run that learns five
-# durable rules about a game has had an unusually instructive hour; one that
-# claims to have learned more is filing observations, not knowledge.
-MAX_RECORDS_PER_RUN = 5
-
-# How much a run may erase, and the smallest number in this module on purpose.
 #
-# Deletion is the least reversible thing the agent does and the least watched. A
-# wrong verdict is read by whoever reads the report; an entry wrongly deleted just
-# quietly stops being there for every run after this one, and the soft delete only
-# helps somebody who already suspects it happened. `FORGET_KNOWLEDGE_DESCRIPTION`
-# is the other half of the defence — this is the half that holds when the wording
-# does not.
-MAX_FORGETS_PER_RUN = 2
+# The numbers themselves moved to `app/agents/qa/arch.py`, where the run's other
+# structural knobs are, because a run can now be asked to use different ones and
+# the arch fingerprint has to see them. They are re-exported under their old
+# names for the callers and tests that read the defaults.
+#
+# What did not move is the argument. A run that keeps looking things up instead
+# of deciding reaches the deadline with nothing reported — the same failure
+# `MAX_CAPTURES_PER_RUN` exists to prevent — and searching is capped below
+# capturing because a game's rules do not change during a run: the second search
+# on the same subject learns nothing the first one did not. Recording is capped
+# below searching because a run that learns five durable rules about a game has
+# had an unusually instructive hour; one that claims more is filing observations,
+# not knowledge.
+#
+# Deletion is the smallest allowance of the three on purpose. It is the least
+# reversible thing the agent does and the least watched: a wrong verdict is read
+# by whoever reads the report, while an entry wrongly deleted just quietly stops
+# being there for every run after this one, and the soft delete only helps
+# somebody who already suspects it happened. `FORGET_KNOWLEDGE_DESCRIPTION` is
+# the other half of that defence — this is the half that holds when the wording
+# does not — and `QaArchSpec` refuses a spec that allows deletions without
+# allowing the replacement writes.
+from app.agents.qa.arch import (  # noqa: E402 - re-export, kept below the prose
+    MAX_FORGETS_PER_RUN,
+    MAX_RECORDS_PER_RUN,
+    MAX_SEARCHES_PER_RUN,
+)
 
 # How many hits one search brings back.
 #

@@ -4,6 +4,7 @@ import contextlib
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, model_validator
 
+from app.agents.qa.arch import DEFAULT_ARCH, QaArchSpec, resolve_arch
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
 from app.llm.models import (
     DEFAULT_MODEL,
@@ -12,6 +13,7 @@ from app.llm.models import (
     validate_reasoning,
 )
 from app.qa.envelope import ErrorPayload, MessageType, outbound_envelope
+from app.qa.run_config import RunConfig
 from app.qa.service import QaExecutionService
 from app.sessions.store import SessionExpired
 
@@ -36,15 +38,30 @@ class OpenQaSessionRequest(BaseModel):
     # QA_PROMPT_VERSION, and failing that the newest version.
     prompt_version: str | None = None
     reasoning: ReasoningConfig | None = None
+    # The agent's structure — loop bounds, per-run allowances, vision, middleware.
+    # Omit it for today's structure; set it to compare two structures without
+    # deploying twice. See `app/agents/qa/arch.py`.
+    arch: QaArchSpec = DEFAULT_ARCH
 
     @model_validator(mode="after")
-    def validate_model_reasoning(self) -> "OpenQaSessionRequest":
+    def validate_against_model(self) -> "OpenQaSessionRequest":
+        """Refuse a request the model cannot honour, rather than downgrading it.
+
+        Both checks are here rather than at the service so the caller gets a 422
+        naming the field, and so a run is never opened under settings it will not
+        actually use.
+        """
         validate_reasoning(self.model, self.reasoning)
+        resolve_arch(self.arch, self.model)
         return self
 
 
 class OpenQaSessionResponse(BaseModel):
     session_id: str
+    # What the run will actually use, with every alias and "auto" already settled.
+    # Orchestration stores this against the try; it is the only record of what a
+    # run was executed with once the request is gone.
+    run_config: RunConfig
 
 
 def _service(app) -> QaExecutionService:
@@ -72,7 +89,7 @@ async def open_qa_session(
     payload: OpenQaSessionRequest,
     request: Request,
 ) -> OpenQaSessionResponse:
-    session_id = await _service(request.app).open(
+    session_id, run_config = await _service(request.app).open(
         qa_try_id=payload.context.qa_try_id,
         game_instance_id=payload.context.game_instance_id,
         test_scenario_id=payload.context.test_scenario_id,
@@ -81,8 +98,9 @@ async def open_qa_session(
         language=payload.language,
         prompt_version=payload.prompt_version,
         reasoning=payload.reasoning,
+        arch=payload.arch,
     )
-    return OpenQaSessionResponse(session_id=session_id)
+    return OpenQaSessionResponse(session_id=session_id, run_config=run_config)
 
 
 @router.websocket("/qa-sessions/{session_id}")

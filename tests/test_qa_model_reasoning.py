@@ -21,6 +21,7 @@ from app.llm.models import (
 )
 from app.main import app
 from app.qa.channel import QaRunChannel
+from app.qa.run_config import resolve_run_config
 from app.qa.service import QaExecutionService
 from app.qa.store import InMemoryQaSessionStore
 from tests.test_qa_prompt_version import make_scenario, open_request
@@ -138,7 +139,7 @@ def test_service_persists_reasoning_and_passes_it_to_runner() -> None:
         store = InMemoryQaSessionStore()
         service = QaExecutionService(store=store, runner_factory=factory)
         reasoning = ReasoningConfig(effort=ReasoningEffort.medium)
-        session_id = await service.open(
+        session_id, run_config = await service.open(
             qa_try_id=7,
             game_instance_id=1,
             test_scenario_id=1,
@@ -147,13 +148,17 @@ def test_service_persists_reasoning_and_passes_it_to_runner() -> None:
             reasoning=reasoning,
         )
 
-        assert (await store.load(session_id)).reasoning == reasoning
+        # Returned to the caller as well as stored: Orchestration records the
+        # try, and what it has to record is the resolved form.
+        assert run_config.reasoning == reasoning
+        assert run_config.reasoning_supported is True
+        assert (await store.load(session_id)).run_config.reasoning == reasoning
 
         async def send(_frame: dict) -> None:
             return None
 
         await service.run(session_id, send)
-        assert seen[0]["reasoning"] == reasoning
+        assert seen[0]["config"].reasoning == reasoning
 
     asyncio.run(run())
 
@@ -305,8 +310,10 @@ def test_run_start_log_names_reasoning(monkeypatch, caplog) -> None:
             return None
 
         runner = QaRunner(
-            model=LLMModel.claude_sonnet_5,
-            reasoning=ReasoningConfig(effort=ReasoningEffort.high),
+            resolve_run_config(
+                model=LLMModel.claude_sonnet_5,
+                reasoning=ReasoningConfig(effort=ReasoningEffort.high),
+            )
         )
         await runner.run(
             QaRunChannel(qa_try_id=7, send=send),
@@ -323,5 +330,5 @@ def test_run_start_log_names_reasoning(monkeypatch, caplog) -> None:
         if "[QA] run starting" in record.getMessage()
     ]
     assert len(starting) == 1
-    assert "model=anthropic/claude-sonnet-5" in starting[0]
-    assert "reasoning={'effort': 'high'}" in starting[0]
+    assert "'model': 'anthropic/claude-sonnet-5'" in starting[0]
+    assert "'reasoning': {'effort': 'high'}" in starting[0]

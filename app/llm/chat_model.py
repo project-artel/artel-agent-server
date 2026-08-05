@@ -13,6 +13,12 @@ from app.llm.models import (
 from app.llm.usage import UsageCallback
 
 
+# Not a knob, but recorded with every run: a comparison between two models is
+# only a comparison if the sampling was the same, and a number that lives only
+# in this call is one nobody can check afterwards.
+TEMPERATURE = 0.2
+
+
 @lru_cache
 def build_chat_model(
     model: LLMModel,
@@ -67,7 +73,7 @@ def build_chat_model(
         model=model.value,
         base_url=settings.openrouter_base_url,
         api_key=settings.openrouter_api_key or "missing",
-        temperature=0.2,
+        temperature=TEMPERATURE,
         default_headers=headers or None,
         extra_body=extra_body,
         callbacks=[UsageCallback()],

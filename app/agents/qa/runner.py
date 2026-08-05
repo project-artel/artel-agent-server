@@ -13,53 +13,33 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import wrap_model_call
 from langchain_core.messages import HumanMessage
 
+from app.agents.qa.arch import ResolvedArch
 from app.agents.qa.compaction import QaCompactionMiddleware
 from app.agents.qa.context import fold_stale_scenes
-from app.agents.qa.knowledge import (
-    MAX_FORGETS_PER_RUN,
-    MAX_RECORDS_PER_RUN,
-    MAX_SEARCHES_PER_RUN,
-)
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.vision import QaCaptureVisionMiddleware
-from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
-from app.config import Settings, get_settings
+from app.agents.scenario import ScenarioDraft
 from app.llm.chat_model import build_chat_model
-from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig, get_model_spec
+from app.llm.models import LLMModel, get_model_spec
 from app.prompts import load_prompt
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory
+from app.qa.run_config import (
+    COMPACTION_PROMPT_AGENT,
+    COMPACTION_ROLE,
+    PROMPT_AGENT,
+    SYSTEM_ROLE,
+    VISION_ROLE,
+    RunConfig,
+    resolve_run_config,
+)
 
 logger = logging.getLogger(__name__)
-
-# Directories under app/prompts/ holding these agents' prompt versions. The
-# summarizing prompt is versioned apart from the run's own: it is a different call
-# to a different model, so pinning one back must not pin the other.
-PROMPT_AGENT = "qa_run"
-COMPACTION_PROMPT_AGENT = "qa_compaction"
 
 # A scene view runs long. Cut it for the console, and say it was cut — a silently
 # truncated log reads as a smaller context than the model actually saw.
 MAX_LOGGED_CHARS = 4000
-
-# Two bounds, because either alone leaves a hole. A call cap alone lets one
-# unanswered call hold the run open; a clock alone lets a fast loop burn budget.
-#
-# The split is by what the calls are for: BASE covers what a run spends
-# regardless of length — the opening observation, `finish_run`, and the
-# per-run allowances the tools cap themselves at — while PER_STEP covers the
-# work of one scenario step. So BASE grows when a new run-level allowance is
-# added; left alone, `search_knowledge` would have taken its budget out of the
-# steps and shortened every scenario by the amount it looked things up. The
-# knowledge writes are counted the same way, and the record allowance is the one
-# that must be there in full: a `forget_knowledge` whose replacement write cannot
-# be afforded is how this design loses knowledge.
-BASE_TOOL_CALLS = (
-    10 + MAX_SEARCHES_PER_RUN + MAX_RECORDS_PER_RUN + MAX_FORGETS_PER_RUN
-)
-TOOL_CALLS_PER_STEP = 15
-RUN_DEADLINE_SECONDS = 600.0
 
 # Content-block types that carry the model's own reasoning, and the keys those
 # blocks put it under. Providers disagree on both.
@@ -94,6 +74,93 @@ def _first_message(scenario: ScenarioDraft) -> str:
         f"Steps to execute in order:\n{json.dumps(steps, ensure_ascii=False, indent=2)}\n\n"
         "Begin. Observe the screen first."
     )
+
+
+def _build_append_current_scene(channel: QaRunChannel):
+    """Put the scene as it stands right now at the end of every model call.
+
+    The tool loop only ever showed the agent a scene it had asked for, so a frame
+    the game volunteered sat in `SceneMemory` unread until the next tool call
+    happened to render it. This closes that: the current scene is in front of the
+    model on every turn, whether or not it looked, and it is written fresh each
+    time rather than accumulated — `request.override` touches this one call, not
+    the graph's state, so nothing here survives into the next turn to be resent.
+    """
+
+    @wrap_model_call
+    async def _append_current_scene(request, handler):
+        view = channel.scene.render_now()
+        if view is None:  # No frame has arrived yet; there is nothing to say.
+            return await handler(request)
+        return await handler(
+            request.override(messages=[*request.messages, HumanMessage(content=view)])
+        )
+
+    return _append_current_scene
+
+
+def middleware_names_for(arch: ResolvedArch) -> tuple[str, ...]:
+    """Which middleware this structure wraps its model calls in, in order.
+
+    Names rather than objects, because the arch fingerprint has to be known
+    before any run state exists — before there is a channel to build the real
+    middleware against. `build_middleware` builds from this same list, so the two
+    cannot drift into disagreeing about what a run actually did.
+
+    Compaction is named first because it is the first thing that happens, but the
+    position is documentation rather than wiring: it hooks `before_model`, its own
+    graph node ahead of the model call, while everything after it wraps the call.
+    Order only sequences middleware sharing a hook.
+    """
+    names = ["compaction"] if arch.compaction else []
+    # Folding runs on every request; the scene views pile up whether or not the
+    # model can see.
+    if arch.fold_stale_scenes:
+        names.append("fold_scene_views")
+    # Only when the run can see. On a text-only run it would have nothing to
+    # inject and nothing to trim.
+    if arch.vision:
+        names.append("capture_vision")
+    # The live scene is appended after those: the fold has run over the tool
+    # messages and the image trim has happened, which leaves it as the actual
+    # final message the model reads. Usage logging sits innermost, so it reports
+    # what was actually sent.
+    names += ["append_current_scene", "log_token_usage"]
+    return tuple(names)
+
+
+def build_middleware(
+    arch: ResolvedArch,
+    state: QaRunState,
+    channel: QaRunChannel,
+    config: RunConfig,
+    on_compacted=None,
+) -> list:
+    """The middleware named by `middleware_names_for`, in that order."""
+    builders = {
+        "compaction": lambda: QaCompactionMiddleware(
+            # Not the run's model, and not `cache_prompt`: summarizing is one
+            # call over a prefix nothing will send again, so caching it would pay
+            # the write premium for a read that never happens.
+            model=build_chat_model(LLMModel(config.compaction_model)),
+            summary_prompt=load_prompt(
+                COMPACTION_PROMPT_AGENT, COMPACTION_ROLE, config.compaction_prompt_version
+            ).body,
+            run_model_max_input_tokens=get_model_spec(config.model).max_input_tokens,
+            state=state,
+            channel=channel,
+            trigger_fraction=arch.compaction_trigger_fraction,
+            keep_messages=arch.compaction_keep_messages,
+            min_new_messages=arch.compaction_min_new_messages,
+            trim_tokens=arch.compaction_trim_tokens,
+            on_compacted=on_compacted,
+        ),
+        "fold_scene_views": lambda: _fold_scene_views,
+        "capture_vision": lambda: QaCaptureVisionMiddleware(state),
+        "append_current_scene": lambda: _build_append_current_scene(channel),
+        "log_token_usage": lambda: _log_token_usage,
+    }
+    return [builders[name]() for name in middleware_names_for(arch)]
 
 
 @wrap_model_call
@@ -138,59 +205,18 @@ async def _log_token_usage(request, handler):
 class QaRunner:
     """Runs one scenario to completion over one channel."""
 
-    def __init__(
-        self,
-        model: LLMModel = DEFAULT_MODEL,
-        language: OutputLanguage = DEFAULT_LANGUAGE,
-        deadline_seconds: float = RUN_DEADLINE_SECONDS,
-        prompt_version: str | None = None,
-        reasoning: ReasoningConfig | None = None,
-        settings: Settings | None = None,
-    ) -> None:
-        self._model = model
-        self._language = language
-        self._deadline = deadline_seconds
-        # None leaves the choice to settings, and then to the newest version.
-        self._prompt_version = prompt_version
-        self._reasoning = reasoning
-        # Read here rather than taken as arguments so that `QaExecutionService`'s
-        # runner factory, which passes only the run's own options, needs no change
-        # when a compaction setting is added. Injectable for tests.
-        self._settings = settings or get_settings()
+    def __init__(self, config: RunConfig | None = None) -> None:
+        # Resolved elsewhere and only read here — see `app/qa/run_config.py` for
+        # why nothing is decided at run time any more. The default exists so a
+        # test can build a runner without restating every axis.
+        self._config = config if config is not None else resolve_run_config()
+
+    @property
+    def config(self) -> RunConfig:
+        return self._config
 
     def _tool_call_limit(self, steps: int) -> int:
-        return BASE_TOOL_CALLS + TOOL_CALLS_PER_STEP * max(steps, 1)
-
-    def _build_compaction(
-        self, channel: QaRunChannel, state: QaRunState
-    ) -> QaCompactionMiddleware | None:
-        """The compaction middleware, or None when it is switched off."""
-        settings = self._settings
-        if not settings.qa_compaction_enabled:
-            return None
-        prompt = load_prompt(COMPACTION_PROMPT_AGENT, "summary")
-        logger.info(
-            "[QA] compaction on: model=%s prompt_version=%s trigger=%.2f keep=%d",
-            settings.qa_compaction_model,
-            prompt.version,
-            settings.qa_compaction_trigger_fraction,
-            settings.qa_compaction_keep_messages,
-        )
-        return QaCompactionMiddleware(
-            # Not the run's model, and not `cache_prompt`: summarizing is one
-            # call over a prefix nothing will send again, so caching it would pay
-            # the write premium for a read that never happens.
-            model=build_chat_model(LLMModel(settings.qa_compaction_model)),
-            summary_prompt=prompt.body,
-            run_model_max_input_tokens=get_model_spec(self._model).max_input_tokens,
-            state=state,
-            channel=channel,
-            trigger_fraction=settings.qa_compaction_trigger_fraction,
-            keep_messages=settings.qa_compaction_keep_messages,
-            min_new_messages=settings.qa_compaction_min_new_messages,
-            trim_tokens=settings.qa_compaction_trim_tokens,
-            on_compacted=self._log_compaction,
-        )
+        return self._config.arch.tool_call_limit(steps)
 
     async def _log_compaction(self, summary: str, count: int) -> None:
         """The summary on the console, whole.
@@ -204,96 +230,57 @@ class QaRunner:
     async def run(
         self, channel: QaRunChannel, scenario: ScenarioDraft, state: QaRunState
     ) -> None:
-        supports_vision = get_model_spec(self._model).supports_vision
-        prompt = load_prompt(PROMPT_AGENT, "system", self._prompt_version)
+        config = self._config
+        arch = config.arch
+        # Loaded by the version resolved at open, so both halves come from one
+        # version and the text is the text `config.prompt_hashes` recorded.
+        prompt = load_prompt(PROMPT_AGENT, SYSTEM_ROLE, config.prompt_version)
         # A separate file in the same version: it is prompt text, tuned by whoever
-        # tunes the rest of it, and only reaches models that can read images.
-        # Telling a text-only model about a tool it does not have would send it
-        # looking for one.
+        # tunes the rest of it, and only reaches runs that can see. Telling a
+        # text-only model about a tool it does not have would send it looking for
+        # one.
         vision_directive = (
-            load_prompt(PROMPT_AGENT, "vision_directive", self._prompt_version).body
-            if supports_vision
+            load_prompt(PROMPT_AGENT, VISION_ROLE, config.prompt_version).body
+            if arch.vision
             else ""
         )
         system_prompt = prompt.body.format(
-            language_directive=LANGUAGE_DIRECTIVES[self._language],
+            language_directive=LANGUAGE_DIRECTIVES[config.language],
             vision_directive=vision_directive,
         )
         first_message = _first_message(scenario)
-        tools = build_tools(channel, state, supports_vision)
-
-        @wrap_model_call
-        async def _append_current_scene(request, handler):
-            """Put the scene as it stands right now at the end of every model call.
-
-            The tool loop only ever showed the agent a scene it had asked for, so
-            a frame the game volunteered sat in `SceneMemory` unread until the
-            next tool call happened to render it. This closes that: the current
-            scene is in front of the model on every turn, whether or not it
-            looked, and it is written fresh each time rather than accumulated —
-            `request.override` touches this one call, not the graph's state, so
-            nothing here survives into the next turn to be resent.
-            """
-            view = channel.scene.render_now()
-            if view is None:  # No frame has arrived yet; there is nothing to say.
-                return await handler(request)
-            return await handler(
-                request.override(messages=[*request.messages, HumanMessage(content=view)])
-            )
+        tools = build_tools(channel, state, arch)
 
         # The whole starting context in one place. Reading a run afterwards means
         # knowing what the model was actually given, and the prompt is assembled
         # from several pieces that are otherwise only visible in source. The
-        # resolved prompt version is here because the text alone does not say
-        # which candidate produced this run.
+        # resolved config goes out whole rather than as picked-out fields: an axis
+        # added later reaches the log by being in the config, not by someone
+        # remembering to add it here too.
         logger.info(
             "[QA] run starting\n"
-            "  model=%s reasoning=%s language=%s prompt_version=%s steps=%d deadline=%.0fs tools=%s\n"
+            "  config=%s steps=%d\n"
             "--- system prompt ---\n%s\n"
             "--- first message ---\n%s",
-            self._model,
-            (
-                self._reasoning.model_dump(mode="json", exclude_none=True)
-                if self._reasoning
-                else None
-            ),
-            self._language,
-            prompt.version,
+            config.model_dump(mode="json", exclude_none=True),
             len(scenario.steps),
-            self._deadline,
-            [tool.name for tool in tools],
             system_prompt,
             _clip(first_message),
         )
 
-        # Folding runs on every request; the scene views pile up whether or not
-        # the model can see. The vision middleware is added only when it can — on
-        # a text-only model it would have nothing to inject and nothing to trim.
-        # The two touch disjoint messages, so their order here does not matter.
-        #
-        # The live scene is appended after them: the fold has run over the tool
-        # messages and the image trim has happened, which leaves it as the actual
-        # final message the model reads. Usage logging sits innermost, after that,
-        # so it reports what was actually sent.
-        middleware: list = [_fold_scene_views]
-        if supports_vision:
-            middleware.append(QaCaptureVisionMiddleware(state))
-        middleware += [_append_current_scene, _log_token_usage]
-
-        # Compaction is listed first because it is the first thing that happens,
-        # but the position is documentation rather than wiring: it hooks
-        # `before_model`, which is its own graph node ahead of the model call,
-        # while everything above wraps the call itself. List order only sequences
-        # middleware sharing a hook.
-        compaction = self._build_compaction(channel, state)
-        if compaction is not None:
-            middleware.insert(0, compaction)
+        # Membership and order live in `middleware_names_for`, so the list the
+        # run actually uses and the list the fingerprint is computed from are the
+        # same list. Building them apart is how a structure changes without its
+        # identity moving.
+        middleware = build_middleware(
+            arch, state, channel, config, on_compacted=self._log_compaction
+        )
 
         agent = create_agent(
             # Prompt caching is asked for here and nowhere else: the agent loop
             # resends the whole conversation every turn, which is the one shape
             # that reads back more than it writes. See `build_chat_model`.
-            model=build_chat_model(self._model, self._reasoning, cache_prompt=True),
+            model=build_chat_model(config.model, config.reasoning, cache_prompt=True),
             tools=tools,
             system_prompt=system_prompt,
             middleware=middleware,
@@ -314,14 +301,22 @@ class QaRunner:
                 # would quietly cost the run a third of its tool budget.
                 "recursion_limit": (
                     self._tool_call_limit(len(scenario.steps))
-                    * (2 + (1 if compaction is not None else 0))
+                    * (2 + (1 if arch.compaction else 0))
                 ),
                 "run_name": "qa-scenario-run",
                 "tags": ["agent", "qa"],
+                # What a trace has to be groupable by. The prompt version and the
+                # arch identity are here for the same reason they are recorded at
+                # all: a trace that only says which model ran cannot separate a
+                # prompt change from a structural one.
                 "metadata": {
                     "qa_try_id": channel.qa_try_id,
-                    "model": self._model.value,
-                    "language": self._language.value,
+                    "model": config.model.value,
+                    "language": config.language.value,
+                    "prompt_version": config.prompt_version,
+                    "agent_arch": config.agent_arch,
+                    "agent_fingerprint": config.agent_fingerprint,
+                    "git_sha": config.git_sha,
                 },
             },
             stream_mode="updates",
@@ -426,12 +421,11 @@ class QaRunner:
         deadline still carries the verdicts it managed to record.
         """
         state = QaRunState(total_steps=len(scenario.steps))
+        deadline = self._config.arch.deadline_seconds
         try:
-            await asyncio.wait_for(
-                self.run(channel, scenario, state), timeout=self._deadline
-            )
+            await asyncio.wait_for(self.run(channel, scenario, state), timeout=deadline)
         except asyncio.TimeoutError:
-            return state, f"The run exceeded its {int(self._deadline)}s limit."
+            return state, f"The run exceeded its {int(deadline)}s limit."
         except QaCancelled:
             return state, None
         except Exception as error:  # noqa: BLE001 - the reason has to reach the timeline

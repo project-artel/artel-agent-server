@@ -18,6 +18,7 @@ from app.api.qa_sessions import OpenQaSessionRequest
 from app.prompts import load_prompt
 from app.prompts.loader import resolve_version
 from app.qa.channel import QaRunChannel
+from app.qa.run_config import resolve_run_config
 from app.qa.service import QaExecutionService
 from app.qa.store import InMemoryQaSessionStore
 
@@ -87,14 +88,14 @@ async def _run_session(prompt_version: str | None) -> str | None:
     seen: list[str | None] = []
     runner = RecordingRunner()
 
-    def factory(*, model, language, prompt_version, reasoning):
-        seen.append(prompt_version)
+    def factory(*, config):
+        seen.append(config.prompt_version)
         return runner
 
     service = QaExecutionService(
         store=InMemoryQaSessionStore(), runner_factory=factory
     )
-    session_id = await service.open(
+    session_id, _run_config = await service.open(
         qa_try_id=7,
         game_instance_id=1,
         test_scenario_id=1,
@@ -114,8 +115,14 @@ def test_the_requested_version_reaches_the_runner() -> None:
     assert asyncio.run(_run_session("v1")) == "v1"
 
 
-def test_omitting_the_version_leaves_the_choice_to_the_loader() -> None:
-    assert asyncio.run(_run_session(None)) is None
+def test_omitting_the_version_resolves_it_before_the_run() -> None:
+    """The runner never sees the alias, only the version it stands for.
+
+    `None` means "the newest", which is a name whose meaning changes the day a
+    new version directory is added. Settling it at session open is what keeps a
+    finished run attributable to the prompt it actually used.
+    """
+    assert asyncio.run(_run_session(None)) == resolve_version("qa_run")
 
 
 # --- what the run leaves behind -----------------------------------------------
@@ -153,7 +160,7 @@ def test_the_run_start_log_names_the_prompt_version(stubbed_agent, caplog) -> No
 
     with caplog.at_level(logging.INFO, logger="app.agents.qa.runner"):
         asyncio.run(
-            QaRunner(prompt_version="v1").run(
+            QaRunner(resolve_run_config(prompt_version="v1")).run(
                 channel, scenario, QaRunState(total_steps=1)
             )
         )
@@ -164,7 +171,7 @@ def test_the_run_start_log_names_the_prompt_version(stubbed_agent, caplog) -> No
         if "[QA] run starting" in record.getMessage()
     ]
     assert len(starting) == 1
-    assert "prompt_version=v1" in starting[0]
+    assert "'prompt_version': 'v1'" in starting[0]
     # The system prompt still reaches the log, rendered rather than templated.
     assert "You are a QA agent executing an approved test scenario" in starting[0]
     assert "{language_directive}" not in starting[0]
