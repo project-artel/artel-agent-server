@@ -589,6 +589,103 @@ def test_a_correction_carries_only_the_fields_the_agent_sent() -> None:
     asyncio.run(run())
 
 
+def test_a_tag_only_correction_moves_the_topic_and_nothing_else() -> None:
+    """The one successful shape where no body travels at all.
+
+    It is also the only correction that must leave `knowledge_seen` alone, and the
+    only one whose result names a single field — so it is where "send only what
+    changes" is either true of every field independently or not true at all.
+    """
+
+    async def run() -> None:
+        _, state, tools, sent = make()
+        state.knowledge_seen["41"] = "구매는 소지금이 가격 이상일 때만 가능하다"
+
+        result = await update(tools, summary=None, tag="ui")
+
+        assert corrections(sent)[-1]["payload"] == {
+            "knowledge_id": "41",
+            "tag": "UI",
+            "summary": None,
+            "description": None,
+        }
+        assert "Sent: tag;" in result
+        assert state.knowledge_seen["41"] == "구매는 소지금이 가격 이상일 때만 가능하다"
+
+    asyncio.run(run())
+
+
+def test_a_blank_tag_is_refused_rather_than_read_as_leave_it_alone() -> None:
+    """`None` and `""` are different requests, and the refusal text says so.
+
+    A blank one silently meaning "keep the topic" would make the rule the other
+    two fields are held to — omitted keeps, blank is refused — true of only some
+    of the fields, which is worse than either rule applied consistently.
+    """
+
+    async def run() -> None:
+        _, state, tools, sent = make()
+        state.knowledge_seen["41"] = "옛 규칙"
+
+        result = await update(tools, tag="   ")
+
+        assert corrections(sent) == []
+        assert "is not a knowledge topic" in result
+
+    asyncio.run(run())
+
+
+def test_a_correction_leaves_an_outstanding_deletion_outstanding() -> None:
+    """`record_knowledge` is the only thing that closes a delete-then-record repair.
+
+    A correction is a different entry's business, and clearing the flag here would
+    silence the warning that names what the run has removed and not put back.
+    """
+
+    async def run() -> None:
+        _, state, tools, sent = make()
+        state.knowledge_seen["41"] = "지워질 규칙"
+        state.knowledge_seen["42"] = "고쳐질 규칙"
+
+        await forget(tools, knowledge_id="41")
+        assert state.knowledge_deleted_unreplaced != []
+
+        await update(tools, knowledge_id="42")
+
+        assert corrections(sent) != []
+        assert state.knowledge_deleted_unreplaced == ['41 — "지워질 규칙"']
+
+    asyncio.run(run())
+
+
+def test_a_refused_correction_still_names_what_the_run_has_not_put_back() -> None:
+    """`record_knowledge` is exempt from the cap while a deletion is outstanding,
+    so a budget refusal from this tool is the only one a run can meet mid-repair.
+
+    Phrased as a bare "nothing was changed" it would read as harmless in the one
+    state where it is not, which is what `render_missing_knowledge_warning` exists
+    to prevent everywhere else.
+    """
+
+    async def run() -> None:
+        _, state, tools, _ = make()
+        state.knowledge_seen["41"] = "지워질 규칙"
+        state.knowledge_seen["42"] = "고쳐질 규칙"
+
+        await forget(tools, knowledge_id="41")
+        state.knowledge_updates_attempted = MAX_RECORDS_PER_RUN
+
+        result = await update(tools, knowledge_id="42")
+
+        assert "NOTHING WAS RECORDED" in result
+        assert "지워질 규칙" in result
+        assert "call `record_knowledge` again immediately" in result
+        # And it does not tell the run to move on while that is still owed.
+        assert "Carry on with the run" not in result
+
+    asyncio.run(run())
+
+
 def test_a_write_does_not_wait_for_an_answer_that_never_comes() -> None:
     """`routeKnowledgeMutation` replies with no frame at all — a success is silent
     and a rejection becomes a row on the run's own timeline, not a frame back down

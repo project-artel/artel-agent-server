@@ -269,9 +269,10 @@ def render_hit(index: int, hit: KnowledgeSearchHit) -> str:
     still returned, and the agent has to be able to discount it rather than treat
     the top hit as authoritative by position alone.
 
-    The id is printed because a search is the only way to reach one. `forget_knowledge`
-    takes an id and refuses one this run has not been shown, so an entry the agent
-    never read is an entry it cannot delete; unprinted, the id would make that rule
+    The id is printed because a search is the only way to reach one. Both
+    `update_knowledge` and `forget_knowledge` take an id and refuse one this run
+    has not been shown, so an entry the agent never read is an entry it can
+    neither correct nor delete; unprinted, the id would make that rule
     unsatisfiable rather than safe.
     """
     header = (

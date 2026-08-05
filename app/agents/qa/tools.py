@@ -120,8 +120,7 @@ class QaRunState:
 
         Capped together because they fail together: either one spends the run's
         steps putting content into the knowledge base instead of reaching a
-        verdict, which is the whole reason `max_records_per_run` exists. Kept as
-        two counters behind one sum so a run's record can still say which it was.
+        verdict, which is the whole reason `max_records_per_run` exists.
         """
         return self.knowledge_records_attempted + self.knowledge_updates_attempted
 
@@ -383,9 +382,10 @@ def build_tools(
                 messages,
             )
         # Remembered before the result is rendered, because this is what makes an
-        # entry deletable: `forget_knowledge` refuses an id that never came back
-        # from a search in this run. An id-less hit is skipped rather than stored
-        # under the empty string — it is not addressable, so it is not deletable.
+        # entry writable at all: `update_knowledge` and `forget_knowledge` both
+        # refuse an id that never came back from a search in this run. An id-less
+        # hit is skipped rather than stored under the empty string — it is not
+        # addressable, so it can be neither corrected nor deleted.
         for entry in answer.results:
             if entry.id:
                 state.knowledge_seen[entry.id] = entry.summary
@@ -509,11 +509,24 @@ def build_tools(
         # never be left half done by the budget still holds, from both ends: a
         # refused correction changes nothing, since it is one call and the entry is
         # untouched, and a delete-then-record still has its own exemption above.
+        outstanding = state.knowledge_deleted_unreplaced
+
+        def refused(reason: str) -> str:
+            """A refusal, with whatever the run still owes appended to it.
+
+            The rule `record_knowledge`'s refusals follow, and it applies here for
+            a reason particular to this tool: `record_knowledge` is exempt from the
+            cap while a deletion is outstanding, so a budget refusal from HERE is
+            the only one a run can meet in the middle of a delete-then-record
+            repair. Phrased as a bare "nothing was changed" it would read as
+            harmless in exactly the state where it is not.
+            """
+            return reason + render_missing_knowledge_warning(outstanding)
+
         if state.knowledge_writes_attempted >= arch.max_records_per_run:
-            return (
+            return refused(
                 f"You have used all {arch.max_records_per_run} knowledge writes for "
-                "this run, so nothing was changed and the entry stands as it was. "
-                "Carry on with the run and judge the remaining steps."
+                "this run, so nothing was changed and the entry stands as it was."
             )
 
         target = (knowledge_id or "").strip()
@@ -522,38 +535,39 @@ def build_tools(
             # far side this id resolves to a real row, and nothing there can tell
             # that the agent never read it. An entry already deleted in this run is
             # gone from `knowledge_seen` too, so a correction cannot resurrect one.
-            return (
+            return refused(
                 f"Nothing was changed: {knowledge_id!r} is not an entry "
                 "`search_knowledge` returned in this run, and you can only correct "
                 "what you have read. Search for it first and use the id printed "
                 "with the hit."
             )
 
-        topic = (tag or "").strip().upper() or None
+        # `None` and `""` are different requests and are kept apart all the way
+        # down: an omitted field is left alone on the far side, a field sent blank
+        # is rejected there. So a blank tag falls into the refusal below rather
+        # than being read as "leave the topic alone" — the two spellings must not
+        # quietly mean the same thing when the message here says they do not.
+        topic = tag.strip().upper() if tag is not None else None
         if topic is not None and topic not in KNOWLEDGE_TAGS:
             # Refused before it goes out, as on a record. Orchestration rejects an
             # unknown topic and says so only on its own timeline, so a frame sent
             # anyway would leave the run believing the entry had been corrected.
-            return (
+            return refused(
                 f"{tag!r} is not a knowledge topic, so nothing was changed. Use one "
                 f"of {', '.join(KNOWLEDGE_TAGS)}, or leave `tag` out to keep the "
                 "topic it already has."
             )
 
-        # An omitted field is left alone on the far side; a field sent blank is
-        # rejected there. The two are told apart here — `None` against `""` — so
-        # that "leave this as it is" cannot be spelled in a way that costs a frame
-        # and a slot to be refused invisibly.
         fact = summary.strip() if summary is not None else None
         detail = description.strip() if description is not None else None
         if (summary is not None and not fact) or (description is not None and not detail):
-            return (
+            return refused(
                 "Nothing was changed: `summary` and `description` must say something "
                 "when you send them. Leave a field out entirely to keep what the "
                 "entry already has, and call this again."
             )
         if topic is None and fact is None and detail is None:
-            return (
+            return refused(
                 "Nothing was changed: a correction has to carry at least one of "
                 "`tag`, `summary` or `description`. Say what the entry should now "
                 "be, or use `forget_knowledge` if it should simply be gone."
@@ -572,10 +586,11 @@ def build_tools(
             # The operator ended the run. That is not this tool's to swallow.
             raise
         except Exception as error:  # noqa: BLE001 - a dead socket must not end the run here
-            # Nothing left the socket, so the entry is exactly as it was and the
-            # run owes nothing. Said plainly all the same: an agent told only that
-            # something failed carries on believing the entry is now right.
-            return (
+            # Nothing left the socket, so this entry is exactly as it was. Said
+            # plainly all the same: an agent told only that something failed
+            # carries on believing the entry is now right. A deletion still owed
+            # from earlier is named too, for the reason `refused` gives.
+            return refused(
                 f"The correction could not be sent — {error}. Nothing was changed "
                 "and the entry is still on file exactly as it was."
             )
@@ -585,8 +600,9 @@ def build_tools(
         # follows the correction because it is what every later label prints: left
         # alone, a `forget_knowledge` after this would name the sentence the agent
         # has just replaced.
-        was = state.knowledge_seen[target]
-        state.knowledge_seen[target] = fact if fact is not None else was
+        state.knowledge_seen[target] = (
+            fact if fact is not None else state.knowledge_seen[target]
+        )
         messages = channel.drain_operator_messages()
         remaining = max(arch.max_records_per_run - state.knowledge_writes_attempted, 0)
 
@@ -595,10 +611,15 @@ def build_tools(
             for name, value in (("tag", topic), ("summary", fact), ("description", detail))
             if value is not None
         )
+        # Labelled with the summary the entry now has, not the one it had. Every
+        # other write result echoes what was sent, and a sentence quoted right
+        # after the word "Corrected" is read as the entry's current text — printing
+        # the replaced one here would teach the run the correction had not landed.
         return with_operator_messages(
-            f"Corrected {render_entry_label(target, was)}. Sent: {changed}; the rest "
-            "of the entry is left as it was. It keeps its id, so this stays "
-            "readable as a repair rather than as a deletion and a new entry.\n\n"
+            f"Corrected {render_entry_label(target, state.knowledge_seen[target])}. "
+            f"Sent: {changed}; the rest of the entry is left as it was. It keeps "
+            "its id, so this stays readable as a repair rather than as a deletion "
+            "and a new entry.\n\n"
             "Nothing answers a knowledge write, so treat this as done and do not "
             f"send the same correction again in this run. {remaining} knowledge "
             "write(s) left.",

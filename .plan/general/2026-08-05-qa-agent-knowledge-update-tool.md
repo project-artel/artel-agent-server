@@ -64,11 +64,15 @@ ARTEL-242가 그 사이 머지되어, 예산 상수는 `app/agents/qa/arch.py`�
   - 바꾼다: `forget_knowledge`의 설명과 결과 문자열이 "고치려면 `update_knowledge`"를
     먼저 가리키고, 삭제+생성 지시는 그 뒤에 안전망으로 남는다. `record_knowledge`의
     설명은 이미 있는 항목을 고치는 경우를 update로 보낸다.
-- [x] **Step 4: 프롬프트 v7**
-  - `app/prompts/qa_run/v7/{system,vision_directive}.md`. 본문은 v6과 **동일** —
+- [x] **Step 4: 프롬프트 v8**
+  - `app/prompts/qa_run/v8/{system,vision_directive}.md`. 본문은 v7과 **동일** —
     지식 도구 사용 지침은 ARTEL-192에 따라 툴 설명이 단일 출처이고, 시스템 프롬프트에는
     지식 도구 얘기가 한 줄도 없다. 버전은 도구 집합이 바뀐 런을 가르기 위한 표식이며,
     그 사실을 note에 적는다.
+  - 처음에는 v7로 잡았으나 ARTEL-246(`report_issue`)이 develop에서 v7을 먼저 가져갔다.
+    develop을 머지하며 v7은 그쪽 것을 그대로 두고 이쪽을 v8로 옮겼다.
+- [x] **Step 5: pair-review 반영** (`pair-review-critic`, VERDICT: NONPASS — must-fix 0,
+      should-fix 4). 아래 항목 전부 수정했다.
 
 ### 결정: 예산을 record와 공유한다
 
@@ -83,19 +87,36 @@ ARTEL-242가 그 사이 머지되어, 예산 상수는 `app/agents/qa/arch.py`�
   원자적이라 거부돼도 항목이 그대로 남고, 삭제가 이미 나간 경우의 재기록은 기존
   outstanding 면제가 계속 막아 준다(그 면제도 합산 총량을 읽는다).
 
+### pair-review 결과와 처리
+
+크리틱이 계약(프레임 모양), 예산 공유 결정, `knowledge_seen` 유지 세 축은 모두 통과로 봤다.
+must-fix 없음. should-fix 4건 + 비차단 2건, 전부 반영했다.
+
+| 지적 | 처리 |
+| --- | --- |
+| 성공 문자열이 **옛** 요약을 인쇄한다. "Corrected"는 바로 뒤 문장을 현재 내용으로 읽히게 한다 | 수정 후 요약으로 라벨을 찍는다 |
+| update의 거부 경로들이 `render_missing_knowledge_warning`을 안 달고, 예산 거부는 "carry on"이라고 말한다. `record_knowledge`는 outstanding일 때 예산을 면제받으므로 **수리 도중 만날 수 있는 예산 거부는 이 도구 것뿐이다** | 지역 `refused()` 헬퍼로 모든 거부와 전송 실패에 경고를 붙이고, "carry on" 문장을 뺐다 |
+| `render_hit` 문서와 `search_knowledge` 주석이 아직 "삭제 가능하게 만든다"고만 말한다 | 둘 다 수정·삭제 양쪽을 말하게 고쳤다 |
+| tag-only 수정, 그리고 "수정이 outstanding을 지우지 않는다"가 테스트에 없다 | 테스트 4개 추가 |
+| (비차단) 카운터 둘을 유지하는 이유로 든 "런 기록이 어느 쪽인지 말할 수 있다"는 소비자가 없다 | 그 문장을 뺐다 |
+| (비차단) `tag=""`는 조용히 "그대로 두기"가 되는데 `summary=""`는 거부된다 — 에러 문구가 말하는 규칙과 어긋난다 | 빈 tag도 거부로 보낸다(`""`는 `KNOWLEDGE_TAGS`에 없다) |
+
 ## Validation
 
 - **Commands run:**
-  - `.venv/bin/python -m pytest tests/test_qa_knowledge.py tests/test_qa_tools.py -q` → 90 passed
-  - `.venv/bin/python -m pytest -q` → 420 passed
-  - `resolve_run_config()` 직접 호출 → `prompt_version=v7`, `tools`에 `update_knowledge`
+  - `.venv/bin/python -m pytest -q` → 430 passed (develop 머지·리뷰 반영 후)
+  - `resolve_run_config()` 직접 호출 → `prompt_version=v8`, `tools`에 `update_knowledge`
     포함, `agent_fingerprint` 변경 확인
+  - `pair-review` (critic subagent) → NONPASS(must-fix 0) → 전건 반영
 - **새 테스트가 고정하는 것:**
   - `knowledge_seen`에 없는 id 거부 / 이 런에서 삭제한 id도 거부
   - 전송 실패 시 런 유지 + "아무것도 바뀌지 않았다" + 항목이 그대로임
   - 예산이 record와 합산으로 소진 / 합산이어도 재기록 면제는 살아 있음
   - 수정 후 `knowledge_seen` 갱신 → 이후 forget 라벨이 새 요약을 쓴다
   - `summary`를 안 보낸 수정은 라벨을 건드리지 않는다
+  - tag만 보낸 수정: 본문 없이 나가고 라벨을 안 건드린다
+  - 빈 tag는 거부된다(생략과 다른 요청이다)
+  - 수정은 outstanding 삭제를 지우지 않고, 거부되면 그 삭제를 이름으로 말한다
   - forget → record 2단 경로 회귀(런너 레벨)
   - 프레임이 `KnowledgeMutationRequest` 모양과 일치(생략 필드는 null로 나간다)
 
@@ -108,7 +129,7 @@ ARTEL-242가 그 사이 머지되어, 예산 상수는 `app/agents/qa/arch.py`�
   - 예산 공유로 "기록 5회"가 "기록+수정 합쳐 5회"가 된다. 의도된 변경이며 두 도구 설명이
     그 사실을 말한다.
 - **Rollback steps:** `git revert`. 와이어 타입 추가는 Orchestration이 이미 받는
-  타입이라 되돌려도 계약이 깨지지 않는다. 프롬프트 v7은 남아도 무해하다.
+  타입이라 되돌려도 계약이 깨지지 않는다. 프롬프트 v8은 남아도 무해하다.
 
 ## Open Questions
 
