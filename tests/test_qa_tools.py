@@ -501,6 +501,60 @@ def test_reported_steps_accumulate_and_announce_the_last_one() -> None:
     asyncio.run(run())
 
 
+def test_a_failed_step_is_told_which_step_comes_next() -> None:
+    """A failure is where the loop stops on its own, so the way on is spelled out."""
+
+    async def run() -> None:
+        _, _, tools, _ = make(total_steps=3)
+
+        result = await tools["report_step"].ainvoke(
+            {
+                "step": 1,
+                "passed": False,
+                "message": "상점이 열리지 않았다",
+                "thought": "클릭했지만 화면이 그대로다",
+            }
+        )
+
+        assert "continue with step 2" in result
+        assert "not a reason to stop" in result
+
+    asyncio.run(run())
+
+
+def test_closing_over_unreported_steps_is_pushed_back_on_once() -> None:
+    """The steps never attempted are the ones the run was opened to find out about.
+
+    The push-back has to be a one-off: a game that has stopped answering must
+    still be able to close, so the second call closes whatever the state.
+    """
+
+    async def run() -> None:
+        _, state, tools, sent = make(total_steps=3)
+        await tools["report_step"].ainvoke(
+            {"step": 1, "passed": True, "message": "ok", "thought": "통과"}
+        )
+
+        pushback = await tools["finish_run"].ainvoke(
+            {"passed": True, "summary": "그만하겠다", "thought": "여기까지만 한다"}
+        )
+
+        assert not state.finished
+        assert "2, 3" in pushback
+        assert not [frame for frame in sent if frame["payload"].get("result")]
+
+        await tools["finish_run"].ainvoke(
+            {"passed": False, "summary": "진행 불가", "thought": "게임이 응답하지 않는다"}
+        )
+
+        assert state.finished
+        terminal = sent[-1]["payload"]
+        assert terminal["result"] == "FAILED"
+        assert terminal["summary"]["failed"] == 2
+
+    asyncio.run(run())
+
+
 def test_finish_run_reports_the_tally() -> None:
     async def run() -> None:
         _, state, tools, sent = make(total_steps=2)

@@ -232,9 +232,9 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v5() -> None:
+def test_the_default_qa_version_is_v6() -> None:
     """A run that names no version has to get the newest prompt."""
-    assert resolve_version("qa_run") == "v5"
+    assert resolve_version("qa_run") == "v6"
 
 
 def test_v4_teaches_the_live_view_and_the_value_paths() -> None:
@@ -252,3 +252,22 @@ def test_v4_teaches_the_live_view_and_the_value_paths() -> None:
     # One paragraph added, nothing from v3 dropped.
     for paragraph in v3.split("\n\n"):
         assert paragraph in v4
+
+
+def test_v6_says_a_failed_step_does_not_end_the_run() -> None:
+    """Every version up to v5 said how to work, none what to do when it did not work.
+
+    A run that stops at the first failure never reaches the steps it was opened
+    to find out about, so both halves are pinned: the scenario is intent rather
+    than a script, and a verdict of failed is something to record and move past.
+    """
+    v5 = load_prompt("qa_run", "system", "v5").body
+    v6 = load_prompt("qa_run", "system", "v6").body
+
+    assert "A failed step does NOT end the run" in v6
+    assert "intent, not a script" in v6
+    assert "Never simply stop" in v6
+
+    # Two paragraphs added, nothing from v5 dropped.
+    for paragraph in v5.split("\n\n"):
+        assert paragraph in v6
