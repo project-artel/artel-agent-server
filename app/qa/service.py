@@ -5,14 +5,10 @@ from collections.abc import Awaitable, Callable
 
 from pydantic import ValidationError
 
+from app.agents.qa.arch import DEFAULT_ARCH, QaArchSpec
 from app.agents.qa.runner import QaRunner
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
-from app.llm.models import (
-    DEFAULT_MODEL,
-    LLMModel,
-    ReasoningConfig,
-    validate_reasoning,
-)
+from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig
 from app.llm.usage import set_usage_scope
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import (
@@ -22,6 +18,7 @@ from app.qa.envelope import (
     StatusPayload,
     StepStatus,
 )
+from app.qa.run_config import RunConfig, resolve_run_config
 from app.qa.schemas import QaSessionRecord
 from app.qa.store import QaSessionStore
 from app.sessions.store import SessionExpired
@@ -45,14 +42,7 @@ class QaExecutionService:
         runner_factory: Callable[..., QaRunner] | None = None,
     ) -> None:
         self._store = store
-        self._runner_factory = runner_factory or (
-            lambda *, model, language, prompt_version, reasoning: QaRunner(
-                model=model,
-                language=language,
-                prompt_version=prompt_version,
-                reasoning=reasoning,
-            )
-        )
+        self._runner_factory = runner_factory or (lambda *, config: QaRunner(config))
         self._channels: dict[str, QaRunChannel] = {}
 
     async def open(
@@ -65,21 +55,33 @@ class QaExecutionService:
         language: OutputLanguage = DEFAULT_LANGUAGE,
         prompt_version: str | None = None,
         reasoning: ReasoningConfig | None = None,
-    ) -> str:
-        validate_reasoning(model, reasoning)
+        arch: QaArchSpec = DEFAULT_ARCH,
+    ) -> tuple[str, RunConfig]:
+        """Open a session and return its id alongside what it will run with.
+
+        The config is returned rather than only stored because Orchestration is
+        what records a try, and what it must record is the resolved form — not
+        the request it sent. Resolution happens here, once: a prompt file that
+        cannot be read fails the open, where the caller still gets an error,
+        instead of failing a run that has already been reported as started.
+        """
+        run_config = resolve_run_config(
+            model=model,
+            language=language,
+            prompt_version=prompt_version,
+            reasoning=reasoning,
+            arch=arch,
+        )
         session_id = uuid.uuid4().hex
         record = QaSessionRecord(
             qa_try_id=qa_try_id,
             game_instance_id=game_instance_id,
             test_scenario_id=test_scenario_id,
             scenario=scenario,
-            model=model,
-            language=language,
-            prompt_version=prompt_version,
-            reasoning=reasoning,
+            run_config=run_config,
         )
         await self._store.save(session_id, record)
-        return session_id
+        return session_id, run_config
 
     async def ensure(self, session_id: str) -> int:
         """Return the session's qa_try_id, raising SessionExpired if it is gone.
@@ -109,12 +111,7 @@ class QaExecutionService:
         channel = QaRunChannel(qa_try_id=record.qa_try_id, send=send)
         self._channels[session_id] = channel
 
-        runner = self._runner_factory(
-            model=record.model,
-            language=record.language,
-            prompt_version=record.prompt_version,
-            reasoning=record.reasoning,
-        )
+        runner = self._runner_factory(config=record.run_config)
         try:
             state, failure = await runner.run_with_deadline(channel, record.scenario)
         finally:

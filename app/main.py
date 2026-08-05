@@ -45,7 +45,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # QA execution sessions share the Redis client (distinct `qa:` namespace).
     qa_store = RedisQaSessionStore(redis, settings.session_ttl_seconds)
-    # The runner is built per session, from that session's model and locale.
+    # The runner is built per session, from the config that session resolved at
+    # open — see `app/qa/run_config.py`.
     app.state.qa_session_service = QaExecutionService(store=qa_store)
 
     # Stateless game_context extraction: shared HTTP client for source fetches.

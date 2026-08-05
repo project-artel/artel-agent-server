@@ -10,12 +10,10 @@ from typing import Any
 
 from langchain_core.tools import BaseTool, tool
 
+from app.agents.qa.arch import ResolvedArch, default_resolved_arch
 from app.agents.qa.knowledge import (
     FORGET_KNOWLEDGE_DESCRIPTION,
     KNOWLEDGE_TAGS,
-    MAX_FORGETS_PER_RUN,
-    MAX_RECORDS_PER_RUN,
-    MAX_SEARCHES_PER_RUN,
     RECORD_KNOWLEDGE_DESCRIPTION,
     RESULT_LIMIT,
     SEARCH_KNOWLEDGE_DESCRIPTION,
@@ -23,7 +21,6 @@ from app.agents.qa.knowledge import (
     render_missing_knowledge_warning,
     render_results,
 )
-from app.agents.qa.vision import MAX_CAPTURES_PER_RUN
 from app.qa.channel import (
     KnowledgeSearchFailed,
     QaCancelled,
@@ -147,8 +144,9 @@ The picture arrives right after this result, as its own message."""
 
 
 def build_tools(
-    channel: QaRunChannel, state: QaRunState, supports_vision: bool = True
+    channel: QaRunChannel, state: QaRunState, arch: ResolvedArch | None = None
 ) -> list[BaseTool]:
+    arch = arch or default_resolved_arch()
     @tool
     async def observe_scene(step: int, thought: str, wait_seconds: float = 0.0) -> str:
         """Look at the game screen. Returns what changed since your last look.
@@ -213,16 +211,16 @@ def build_tools(
             body = f"{body}\n\nThe scene did not arrive; observe again to see the result."
         return with_operator_messages(body, messages)
 
-    @tool(description=CAPTURE_SCREEN_DESCRIPTION.format(limit=MAX_CAPTURES_PER_RUN))
+    @tool(description=CAPTURE_SCREEN_DESCRIPTION.format(limit=arch.max_captures_per_run))
     async def capture_screen(step: int, thought: str, target_id: int | None = None) -> str:
         # What the agent reads is CAPTURE_SCREEN_DESCRIPTION above, not this.
         # Returns the capture as a promise: the image itself is handed to the
         # vision middleware and arrives on the next model call.
-        if state.captures_attempted >= MAX_CAPTURES_PER_RUN:
+        if state.captures_attempted >= arch.max_captures_per_run:
             # Refused with the reason, not silently: a run that keeps looking
             # instead of deciding will reach the deadline with nothing reported.
             return (
-                f"You have used all {MAX_CAPTURES_PER_RUN} screenshots for this run. "
+                f"You have used all {arch.max_captures_per_run} screenshots for this run. "
                 "Judge the remaining steps from the scene text."
             )
 
@@ -287,7 +285,7 @@ def build_tools(
 
     @tool(
         description=SEARCH_KNOWLEDGE_DESCRIPTION.format(
-            limit=MAX_SEARCHES_PER_RUN, tags=", ".join(KNOWLEDGE_TAGS)
+            limit=arch.max_searches_per_run, tags=", ".join(KNOWLEDGE_TAGS)
         )
     )
     async def search_knowledge(
@@ -299,9 +297,9 @@ def build_tools(
         # appends the scene they produced. A search moves nothing on screen, so a
         # scene view here would be the same picture the agent already has, paid for
         # again in context — exactly what `app/agents/qa/context.py` exists to stop.
-        if state.knowledge_searches_attempted >= MAX_SEARCHES_PER_RUN:
+        if state.knowledge_searches_attempted >= arch.max_searches_per_run:
             return (
-                f"You have used all {MAX_SEARCHES_PER_RUN} knowledge searches for "
+                f"You have used all {arch.max_searches_per_run} knowledge searches for "
                 "this run. Judge the remaining steps from the scenario and what you "
                 "can see."
             )
@@ -321,7 +319,7 @@ def build_tools(
         state.knowledge_searches_attempted += 1
         answer = await channel.search_knowledge(query, topic or None, RESULT_LIMIT)
         messages = channel.drain_operator_messages()
-        remaining = MAX_SEARCHES_PER_RUN - state.knowledge_searches_attempted
+        remaining = arch.max_searches_per_run - state.knowledge_searches_attempted
 
         if answer is None:
             return with_operator_messages(
@@ -350,7 +348,7 @@ def build_tools(
 
     @tool(
         description=RECORD_KNOWLEDGE_DESCRIPTION.format(
-            limit=MAX_RECORDS_PER_RUN, tags=", ".join(KNOWLEDGE_TAGS)
+            limit=arch.max_records_per_run, tags=", ".join(KNOWLEDGE_TAGS)
         )
     )
     async def record_knowledge(
@@ -371,9 +369,9 @@ def build_tools(
         # The cap does not bind a replacement write. It exists to stop a run
         # narrating into the knowledge base; applied to the second half of a
         # repair it would make the budget itself the thing that loses knowledge.
-        if state.knowledge_records_attempted >= MAX_RECORDS_PER_RUN and not outstanding:
+        if state.knowledge_records_attempted >= arch.max_records_per_run and not outstanding:
             return (
-                f"You have used all {MAX_RECORDS_PER_RUN} knowledge records for this "
+                f"You have used all {arch.max_records_per_run} knowledge records for this "
                 "run, so nothing was recorded. Carry on with the run and judge the "
                 "remaining steps."
             )
@@ -420,7 +418,7 @@ def build_tools(
         replaced = bool(outstanding)
         state.knowledge_deleted_unreplaced = []
         messages = channel.drain_operator_messages()
-        remaining = max(MAX_RECORDS_PER_RUN - state.knowledge_records_attempted, 0)
+        remaining = max(arch.max_records_per_run - state.knowledge_records_attempted, 0)
 
         lines = [f'Sent to the knowledge base, filed under {topic}: "{fact}".']
         if replaced:
@@ -434,14 +432,14 @@ def build_tools(
         )
         return with_operator_messages("\n\n".join(lines), messages)
 
-    @tool(description=FORGET_KNOWLEDGE_DESCRIPTION.format(limit=MAX_FORGETS_PER_RUN))
+    @tool(description=FORGET_KNOWLEDGE_DESCRIPTION.format(limit=arch.max_forgets_per_run))
     async def forget_knowledge(step: int, thought: str, knowledge_id: str) -> str:
         # What the agent reads is FORGET_KNOWLEDGE_DESCRIPTION, not this.
         #
         # No scene view here either, for the reason given on `record_knowledge`.
-        if state.knowledge_forgets_attempted >= MAX_FORGETS_PER_RUN:
+        if state.knowledge_forgets_attempted >= arch.max_forgets_per_run:
             return (
-                f"You have used all {MAX_FORGETS_PER_RUN} knowledge deletion(s) for "
+                f"You have used all {arch.max_forgets_per_run} knowledge deletion(s) for "
                 "this run, so nothing was deleted. If another entry still looks "
                 "wrong, say so in `report_step` instead of deleting it."
             )
@@ -481,7 +479,7 @@ def build_tools(
         label = render_entry_label(target, state.knowledge_seen.pop(target, ""))
         state.knowledge_deleted_unreplaced.append(label)
         messages = channel.drain_operator_messages()
-        remaining = max(MAX_FORGETS_PER_RUN - state.knowledge_forgets_attempted, 0)
+        remaining = max(arch.max_forgets_per_run - state.knowledge_forgets_attempted, 0)
 
         return with_operator_messages(
             f"Deleted {label}. This cannot be undone from here.\n\n"
@@ -841,9 +839,11 @@ def build_tools(
         reply_to_operator,
     ]
 
-    # A model that cannot read images is not offered the tool at all. Left in, it
-    # would be called, cost a game round trip, and produce an image nothing can
-    # look at — and the agent would have no way to know why looking did not help.
-    if supports_vision:
+    # A run without vision is not offered the tool at all. Left in, it would be
+    # called, cost a game round trip, and produce an image nothing can look at —
+    # and the agent would have no way to know why looking did not help. This is
+    # also why the tool set is part of the arch fingerprint: a run with the tool
+    # and a run without it are two different agents, not one agent configured.
+    if arch.vision:
         tools.append(capture_screen)
     return tools

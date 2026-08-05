@@ -312,3 +312,35 @@ def test_every_live_agent_has_a_v1(monkeypatch) -> None:
             assert available_versions(agent)[0] == "v1"
     finally:
         clear_prompt_cache()
+
+
+# --- the body hash ------------------------------------------------------------
+
+
+def test_the_hash_follows_the_body(prompt_root) -> None:
+    """A version directory is a name someone chose, not a fingerprint of what is
+    in it. Editing `v3` in place leaves every run before and after the edit filed
+    under one name, and a comparison built on that silently averages two prompts.
+    """
+    write_prompt(prompt_root, "qa_run", "v1", "system", "one")
+    before = load_prompt("qa_run", "system", "v1").body_sha256
+
+    clear_prompt_cache()
+    write_prompt(prompt_root, "qa_run", "v1", "system", "one, edited")
+
+    assert load_prompt("qa_run", "system", "v1").body_sha256 != before
+
+
+def test_the_hash_ignores_the_frontmatter(prompt_root) -> None:
+    """`note` is documentation. Changing it does not change what the model read,
+    and a hash that moved with it would split one prompt into two buckets."""
+    write_prompt(prompt_root, "qa_run", "v1", "system", "one")
+    before = load_prompt("qa_run", "system", "v1").body_sha256
+
+    clear_prompt_cache()
+    (prompt_root / "qa_run" / "v1" / "system.md").write_text(
+        "---\nversion: v1\nnote: rewritten note\nplaceholders: []\n---\none\n",
+        encoding="utf-8",
+    )
+
+    assert load_prompt("qa_run", "system", "v1").body_sha256 == before

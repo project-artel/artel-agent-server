@@ -27,6 +27,7 @@ body that needs a literal brace doubles it (``{{`` and ``}}``); doubled braces
 are literal text and are not placeholders.
 """
 
+import hashlib
 import re
 from dataclasses import dataclass
 from functools import lru_cache
@@ -63,6 +64,13 @@ class PromptFile:
     note: str
     placeholders: tuple[str, ...]
     body: str
+    # sha256 of the body, and the reason a version directory is not enough to
+    # compare two runs by. A version is a name someone chose; editing `v3` in
+    # place leaves every run before and after the edit filed under the same name,
+    # and the comparison silently averages two different prompts. The frontmatter
+    # is excluded because `note` is documentation — changing it does not change
+    # what the model read.
+    body_sha256: str
 
 
 # --- parsing ------------------------------------------------------------------
@@ -265,6 +273,7 @@ def _read_prompt(agent: str, version: str, role: str) -> PromptFile:
         note=str(meta["note"]),
         placeholders=actual,
         body=body,
+        body_sha256=hashlib.sha256(body.encode()).hexdigest(),
     )
 
 
