@@ -38,7 +38,9 @@ An issue is ready when it has:
 
 1. Create or refine issue.
 2. Confirm dependencies and priority.
-3. Mark in progress only when active work starts.
+3. Mark in progress only when active work starts. In repositories wired for it,
+   this transition triggers the branch automation described in `workflow.md`;
+   confirm the branch appeared, and create it manually when it did not.
 4. Link branch, plan, and PR. The branch name carries the issue key, which is
    what ties commits and the PR back to this issue.
 5. Update scope changes in issue before implementing them.
