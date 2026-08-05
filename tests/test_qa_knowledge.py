@@ -1,17 +1,18 @@
 """The knowledge tools: the round trips, and every way they do not work.
 
-These three are the only tools that talk past the game — their correspondent is
+These four are the only tools that talk past the game — their correspondent is
 Orchestration's knowledge base rather than the SDK — so nothing in
 `tests/test_qa_tools.py` exercises this path. What is pinned here is what the run
 keeps doing when an answer is empty, late, refused, or spent: in every one of
 those the agent has to come back with something it can judge a step on, because
 knowledge is a side errand to the verdict and never a reason to stop.
 
-The writes carry a second burden the search does not. There is no update tool, so
-correcting an entry is `forget_knowledge` followed by `record_knowledge`, and the
-delete lands on the far side before the record is even attempted. "Deleted, then
-failed to record" is the one path in this design that loses knowledge outright,
-and it has its own section below.
+The writes carry a second burden the search does not. `update_knowledge` is what
+correcting an entry is (ARTEL-257) — one call, and the entry keeps its id — but
+nothing forces a run to use it, and `forget_knowledge` followed by
+`record_knowledge` still reaches the same place with the delete landing on the far
+side before the record is even attempted. "Deleted, then failed to record" is the
+one path here that loses knowledge outright, and it has its own section below.
 """
 
 import asyncio
@@ -87,6 +88,10 @@ def creates(sent: list[dict]) -> list[dict]:
     return [f for f in sent if f["type"] == MessageType.KNOWLEDGE_CREATE.value]
 
 
+def corrections(sent: list[dict]) -> list[dict]:
+    return [f for f in sent if f["type"] == MessageType.KNOWLEDGE_UPDATE.value]
+
+
 def deletes(sent: list[dict]) -> list[dict]:
     return [f for f in sent if f["type"] == MessageType.KNOWLEDGE_DELETE.value]
 
@@ -101,6 +106,17 @@ async def record(tools: dict, **overrides) -> str:
         **overrides,
     }
     return await tools["record_knowledge"].ainvoke(args)
+
+
+async def update(tools: dict, **overrides) -> str:
+    args = {
+        "step": 1,
+        "thought": "이 항목이 빌드와 어긋나 고친다",
+        "knowledge_id": "41",
+        "summary": "구매는 소지금이 가격의 절반 이상일 때 가능하다",
+        **overrides,
+    }
+    return await tools["update_knowledge"].ainvoke(args)
 
 
 async def forget(tools: dict, **overrides) -> str:
@@ -526,11 +542,155 @@ def test_a_deletion_goes_out_as_a_knowledge_delete_frame_naming_only_the_id() ->
     asyncio.run(run())
 
 
+def test_a_correction_goes_out_as_a_knowledge_update_frame() -> None:
+    """The contract with `KnowledgeMutationRequest` on the UPDATE branch.
+
+    `knowledge_id` and the three body fields, and the id as text for the same
+    64-bit reason the delete has. What the agent left out travels as null, which
+    is how `updateFromQaTry` is told to leave that column alone — a frame that
+    filled them in would overwrite the parts of the entry that were already right.
+    """
+
+    async def run() -> None:
+        _, state, tools, sent = make()
+        state.knowledge_seen["41"] = "구매는 소지금이 가격 이상일 때만 가능하다"
+
+        result = await update(tools)
+
+        assert corrections(sent)[-1]["payload"] == {
+            "knowledge_id": "41",
+            "tag": None,
+            "summary": "구매는 소지금이 가격의 절반 이상일 때 가능하다",
+            "description": None,
+        }
+        assert "keeps its id" in result
+
+    asyncio.run(run())
+
+
+def test_a_correction_carries_only_the_fields_the_agent_sent() -> None:
+    """Each field independently omissible, because a correction is usually partial."""
+
+    async def run() -> None:
+        _, state, tools, sent = make()
+        state.knowledge_seen["41"] = "옛 규칙"
+
+        await update(
+            tools, summary=None, description="할인 적용 후 가격을 기준으로 판정한다.", tag="rule"
+        )
+
+        assert corrections(sent)[-1]["payload"] == {
+            "knowledge_id": "41",
+            "tag": "RULE",
+            "summary": None,
+            "description": "할인 적용 후 가격을 기준으로 판정한다.",
+        }
+
+    asyncio.run(run())
+
+
+def test_a_tag_only_correction_moves_the_topic_and_nothing_else() -> None:
+    """The one successful shape where no body travels at all.
+
+    It is also the only correction that must leave `knowledge_seen` alone, and the
+    only one whose result names a single field — so it is where "send only what
+    changes" is either true of every field independently or not true at all.
+    """
+
+    async def run() -> None:
+        _, state, tools, sent = make()
+        state.knowledge_seen["41"] = "구매는 소지금이 가격 이상일 때만 가능하다"
+
+        result = await update(tools, summary=None, tag="ui")
+
+        assert corrections(sent)[-1]["payload"] == {
+            "knowledge_id": "41",
+            "tag": "UI",
+            "summary": None,
+            "description": None,
+        }
+        assert "Sent: tag;" in result
+        assert state.knowledge_seen["41"] == "구매는 소지금이 가격 이상일 때만 가능하다"
+
+    asyncio.run(run())
+
+
+def test_a_blank_tag_is_refused_rather_than_read_as_leave_it_alone() -> None:
+    """`None` and `""` are different requests, and the refusal text says so.
+
+    A blank one silently meaning "keep the topic" would make the rule the other
+    two fields are held to — omitted keeps, blank is refused — true of only some
+    of the fields, which is worse than either rule applied consistently.
+    """
+
+    async def run() -> None:
+        _, state, tools, sent = make()
+        state.knowledge_seen["41"] = "옛 규칙"
+
+        result = await update(tools, tag="   ")
+
+        assert corrections(sent) == []
+        assert "is not a knowledge topic" in result
+
+    asyncio.run(run())
+
+
+def test_a_correction_leaves_an_outstanding_deletion_outstanding() -> None:
+    """`record_knowledge` is the only thing that closes a delete-then-record repair.
+
+    A correction is a different entry's business, and clearing the flag here would
+    silence the warning that names what the run has removed and not put back.
+    """
+
+    async def run() -> None:
+        _, state, tools, sent = make()
+        state.knowledge_seen["41"] = "지워질 규칙"
+        state.knowledge_seen["42"] = "고쳐질 규칙"
+
+        await forget(tools, knowledge_id="41")
+        assert state.knowledge_deleted_unreplaced != []
+
+        await update(tools, knowledge_id="42")
+
+        assert corrections(sent) != []
+        assert state.knowledge_deleted_unreplaced == ['41 — "지워질 규칙"']
+
+    asyncio.run(run())
+
+
+def test_a_refused_correction_still_names_what_the_run_has_not_put_back() -> None:
+    """`record_knowledge` is exempt from the cap while a deletion is outstanding,
+    so a budget refusal from this tool is the only one a run can meet mid-repair.
+
+    Phrased as a bare "nothing was changed" it would read as harmless in the one
+    state where it is not, which is what `render_missing_knowledge_warning` exists
+    to prevent everywhere else.
+    """
+
+    async def run() -> None:
+        _, state, tools, _ = make()
+        state.knowledge_seen["41"] = "지워질 규칙"
+        state.knowledge_seen["42"] = "고쳐질 규칙"
+
+        await forget(tools, knowledge_id="41")
+        state.knowledge_updates_attempted = MAX_RECORDS_PER_RUN
+
+        result = await update(tools, knowledge_id="42")
+
+        assert "NOTHING WAS RECORDED" in result
+        assert "지워질 규칙" in result
+        assert "call `record_knowledge` again immediately" in result
+        # And it does not tell the run to move on while that is still owed.
+        assert "Carry on with the run" not in result
+
+    asyncio.run(run())
+
+
 def test_a_write_does_not_wait_for_an_answer_that_never_comes() -> None:
     """`routeKnowledgeMutation` replies with no frame at all — a success is silent
     and a rejection becomes a row on the run's own timeline, not a frame back down
     this socket. A tool that waited would hang to its timeout on every call,
-    including the ones that worked, so both writes must return with nothing
+    including the ones that worked, so all three writes must return with nothing
     inbound at all."""
 
     async def run() -> None:
@@ -539,6 +699,7 @@ def test_a_write_does_not_wait_for_an_answer_that_never_comes() -> None:
 
         # Far below KNOWLEDGE_SEARCH_TIMEOUT_SECONDS: anything that waits fails here.
         await asyncio.wait_for(record(tools), timeout=1.0)
+        await asyncio.wait_for(update(tools), timeout=1.0)
         await asyncio.wait_for(forget(tools), timeout=1.0)
 
     asyncio.run(run())
@@ -553,12 +714,14 @@ def test_the_reason_for_writing_reaches_the_timeline() -> None:
         state.knowledge_seen["41"] = "옛 규칙"
 
         await record(tools, step=2, thought="새 규칙을 남긴다")
-        await forget(tools, step=3, thought="이 항목은 더 이상 사실이 아니다")
+        await update(tools, step=3, thought="빌드에 맞게 이 항목을 고친다")
+        await forget(tools, step=4, thought="이 항목은 더 이상 사실이 아니다")
 
         rows = [f for f in sent if f["type"] == MessageType.LOG.value]
         assert [(r["payload"]["message"], r["payload"]["step"]) for r in rows] == [
             ("새 규칙을 남긴다", 2),
-            ("이 항목은 더 이상 사실이 아니다", 3),
+            ("빌드에 맞게 이 항목을 고친다", 3),
+            ("이 항목은 더 이상 사실이 아니다", 4),
         ]
         assert {r["payload"]["category"] for r in rows} == {LogCategory.THOUGHT.value}
 
@@ -659,9 +822,175 @@ def test_a_blank_field_records_nothing(blank: str) -> None:
     asyncio.run(run())
 
 
-def test_each_write_has_its_own_per_run_cap() -> None:
-    """Knowledge tidying must not eat the steps. The deletion budget is the
-    smaller of the two because deleting is the less reversible act."""
+def test_an_entry_the_run_never_read_cannot_be_corrected() -> None:
+    """The same guard the deletion makes, and it has to exist on this side too.
+
+    Orchestration resolves the id to a real row within the project and cannot tell
+    that the agent never read it, so an unguarded correction would let the run
+    overwrite an entry it has never seen — with a body written for a different one.
+    """
+
+    async def run() -> None:
+        _, state, tools, sent = make()
+
+        result = await update(tools, knowledge_id="99")
+
+        assert corrections(sent) == []
+        assert state.knowledge_updates_attempted == 0
+        assert "search_knowledge" in result
+        assert "you can only correct what you have read" in result
+
+    asyncio.run(run())
+
+
+def test_an_entry_deleted_in_this_run_cannot_be_corrected_back_into_place() -> None:
+    """A deletion takes the entry out of `knowledge_seen`, and the correction guard
+    reads the same map — so a run cannot undo its own delete through the update."""
+
+    async def run() -> None:
+        _, state, tools, sent = make()
+        state.knowledge_seen["41"] = "옛 규칙"
+
+        await forget(tools)
+        result = await update(tools)
+
+        assert corrections(sent) == []
+        assert "you can only correct what you have read" in result
+
+    asyncio.run(run())
+
+
+def test_an_unknown_tag_corrects_nothing_and_says_what_to_use() -> None:
+    """Same reason as on a record: Orchestration rejects the topic and says so only
+    on its own timeline, so a frame sent anyway would read here as success."""
+
+    async def run() -> None:
+        _, state, tools, sent = make()
+        state.knowledge_seen["41"] = "옛 규칙"
+
+        result = await update(tools, tag="GAMEPLAY")
+
+        assert corrections(sent) == []
+        assert state.knowledge_updates_attempted == 0
+        for name in KNOWLEDGE_TAGS:
+            assert name in result
+        # And it says how to mean "leave the topic alone", which is the whole
+        # difference between a field omitted and a field sent wrong.
+        assert "leave `tag` out" in result
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("blank", ["summary", "description"])
+def test_a_field_sent_blank_corrects_nothing(blank: str) -> None:
+    """Blank is refused on arrival, so it is refused here. The result has to draw
+    the line the far side draws: omitted means keep, blank means nothing."""
+
+    async def run() -> None:
+        _, state, tools, sent = make()
+        state.knowledge_seen["41"] = "옛 규칙"
+
+        result = await update(tools, **{blank: "   "})
+
+        assert corrections(sent) == []
+        assert "Nothing was changed" in result
+        assert "Leave a field out entirely to keep what the entry already has" in result
+
+    asyncio.run(run())
+
+
+def test_a_correction_that_changes_nothing_is_refused_before_it_costs_a_frame() -> None:
+    """`updateFromQaTry` rejects an update with no fields, and that rejection would
+    only ever appear on the operator's timeline. It also names the tool that DOES
+    mean "this should stop existing", which is the mistake behind an empty update."""
+
+    async def run() -> None:
+        _, state, tools, sent = make()
+        state.knowledge_seen["41"] = "옛 규칙"
+
+        result = await update(tools, summary=None)
+
+        assert corrections(sent) == []
+        assert state.knowledge_updates_attempted == 0
+        assert "at least one of" in result
+        assert "forget_knowledge" in result
+
+    asyncio.run(run())
+
+
+def test_a_correction_updates_what_the_run_has_seen() -> None:
+    """The entry is still read, so it stays correctable and deletable — and the
+    summary follows the correction, because that is what every later label prints.
+
+    Left alone, a deletion after a correction would name the sentence the agent
+    had just replaced, and the run's own record of what it removed would be wrong.
+    """
+
+    async def run() -> None:
+        _, state, tools, sent = make()
+        state.knowledge_seen["41"] = "구매는 소지금이 가격 이상일 때만 가능하다"
+
+        await update(tools)
+
+        assert state.knowledge_seen["41"] == "구매는 소지금이 가격의 절반 이상일 때 가능하다"
+
+        forgotten = await forget(tools)
+
+        assert deletes(sent) != []
+        assert "구매는 소지금이 가격의 절반 이상일 때 가능하다" in forgotten
+        assert state.knowledge_deleted_unreplaced == [
+            '41 — "구매는 소지금이 가격의 절반 이상일 때 가능하다"'
+        ]
+
+    asyncio.run(run())
+
+
+def test_a_correction_that_leaves_the_summary_alone_leaves_the_label_alone() -> None:
+    """Only what was sent moves. A description-only fix must not blank the summary
+    this side prints, which is what assigning the argument unconditionally would do."""
+
+    async def run() -> None:
+        _, state, tools, _ = make()
+        state.knowledge_seen["41"] = "구매는 소지금이 가격 이상일 때만 가능하다"
+
+        await update(tools, summary=None, description="할인 적용 후 가격 기준.")
+
+        assert state.knowledge_seen["41"] == "구매는 소지금이 가격 이상일 때만 가능하다"
+
+    asyncio.run(run())
+
+
+def test_an_undeliverable_correction_is_reported_rather_than_raised() -> None:
+    """A failed knowledge write is a side errand that failed, not a failed run.
+
+    And the entry really is untouched — nothing left the socket — so the result
+    says so rather than leaving the agent to move on believing it is now right.
+    """
+
+    async def run() -> None:
+        _, state, tools, sent = make_with_undeliverable(MessageType.KNOWLEDGE_UPDATE)
+        state.knowledge_seen["41"] = "구매는 소지금이 가격 이상일 때만 가능하다"
+
+        result = await update(tools)
+
+        assert corrections(sent) == []
+        assert "could not be sent" in result
+        assert "Nothing was changed" in result
+        assert "still on file exactly as it was" in result
+        # Untouched here as well, so the correction can simply be tried again.
+        assert state.knowledge_seen["41"] == "구매는 소지금이 가격 이상일 때만 가능하다"
+
+    asyncio.run(run())
+
+
+def test_the_writes_share_one_budget_and_the_deletion_has_its_own() -> None:
+    """Knowledge tidying must not eat the steps.
+
+    A record and a correction both put content into the knowledge base and fail
+    the run the same way, so they draw on one allowance — counted apart it would
+    be twice the ceiling nobody chose. Deleting keeps its own, smaller number,
+    because it is the less reversible act.
+    """
 
     async def run() -> None:
         _, state, tools, sent = make()
@@ -670,14 +999,53 @@ def test_each_write_has_its_own_per_run_cap() -> None:
         state.knowledge_seen["41"] = "옛 규칙"
 
         recorded = await record(tools)
+        corrected = await update(tools)
         forgotten = await forget(tools)
 
-        assert creates(sent) == [] and deletes(sent) == []
+        assert creates(sent) == [] and corrections(sent) == [] and deletes(sent) == []
         assert str(MAX_RECORDS_PER_RUN) in recorded
+        # A record spent by earlier records leaves nothing for a correction either.
+        assert str(MAX_RECORDS_PER_RUN) in corrected
+        assert "the entry stands as it was" in corrected
         assert str(MAX_FORGETS_PER_RUN) in forgotten
         # The way out of a spent deletion budget is to report, not to delete.
         assert "report_step" in forgotten
         assert MAX_FORGETS_PER_RUN < MAX_RECORDS_PER_RUN
+
+    asyncio.run(run())
+
+
+def test_corrections_spend_the_same_budget_records_do() -> None:
+    """The other direction of the shared allowance: corrections first, then a
+    record that finds the budget already gone."""
+
+    async def run() -> None:
+        _, state, tools, sent = make()
+        state.knowledge_seen["41"] = "옛 규칙"
+        state.knowledge_updates_attempted = MAX_RECORDS_PER_RUN
+
+        recorded = await record(tools)
+
+        assert creates(sent) == []
+        assert str(MAX_RECORDS_PER_RUN) in recorded
+
+    asyncio.run(run())
+
+
+def test_a_spent_budget_still_never_blocks_a_replacement_after_a_deletion() -> None:
+    """The exemption reads the shared total, so corrections cannot spend the run
+    out of its ability to put back something it already deleted."""
+
+    async def run() -> None:
+        _, state, tools, sent = make()
+        state.knowledge_seen["41"] = "옛 규칙"
+        state.knowledge_updates_attempted = MAX_RECORDS_PER_RUN
+
+        await forget(tools)
+        result = await record(tools)
+
+        assert len(creates(sent)) == 1
+        assert "completes the correction" in result
 
     asyncio.run(run())
 
@@ -855,9 +1223,10 @@ def test_a_write_neither_touches_the_game_nor_returns_a_scene() -> None:
         state.knowledge_seen["41"] = "옛 규칙"
 
         recorded = await record(tools)
+        corrected = await update(tools)
         forgotten = await forget(tools)
 
-        for result in (recorded, forgotten):
+        for result in (recorded, corrected, forgotten):
             assert SCENE_VIEW_START_PREFIX not in result
             assert "you can act on:" not in result
         assert [f for f in sent if f["type"] == MessageType.ACTION.value] == []
@@ -875,6 +1244,9 @@ def test_operator_messages_still_ride_out_on_a_write() -> None:
 
         channel.on_chat({"payload": {"message": "지식은 그만 건드리세요"}})
         assert "지식은 그만 건드리세요" in await record(tools)
+
+        channel.on_chat({"payload": {"message": "요약만 고치세요"}})
+        assert "요약만 고치세요" in await update(tools)
 
         channel.on_chat({"payload": {"message": "상점은 건너뛰세요"}})
         assert "상점은 건너뛰세요" in await forget(tools)
@@ -901,9 +1273,9 @@ def test_the_record_description_draws_the_line_it_has_to_draw() -> None:
     assert "report_step" in description
 
 
-def test_the_forget_description_sets_the_bar_high_and_names_the_second_half() -> None:
-    """The two things that make deletion survivable: not deleting over a single
-    contradiction, and never stopping between the delete and the re-record."""
+def test_the_forget_description_sets_the_bar_high_and_points_at_the_repair() -> None:
+    """What makes deletion survivable: not deleting over a single contradiction,
+    and reaching for the tool that repairs instead of the one that erases."""
     _, _, tools, _ = make()
     description = tools["forget_knowledge"].description
 
@@ -911,11 +1283,43 @@ def test_the_forget_description_sets_the_bar_high_and_names_the_second_half() ->
     # One contradiction is more often a bug than stale documentation.
     assert "ONE contradiction is not enough" in description
     assert "report_step" in description
-    # Correction is delete-then-record, in one step.
+    # Correcting is `update_knowledge`, not a deletion.
+    assert "Do NOT delete in order to correct" in description
+    assert "update_knowledge" in description
+    # The delete-then-record route is still described, as the safety net it now is.
     assert "record_knowledge" in description
     assert "IMMEDIATELY" in description
     # And deleting is only possible for what the run has read.
     assert "search_knowledge" in description
+
+
+def test_the_update_description_draws_the_line_against_forget_and_against_a_bug() -> None:
+    """Its whole job. An agent that deletes to correct breaks the lineage this
+    tool exists for; one that rewrites a rule to match a broken build teaches
+    every later run that the break is correct."""
+    _, _, tools, _ = make()
+    description = tools["update_knowledge"].description
+
+    # The shared write budget and the topics, both from the constants.
+    assert str(MAX_RECORDS_PER_RUN) in description
+    for name in KNOWLEDGE_TAGS:
+        assert name in description
+    # Correct versus delete.
+    assert "forget_knowledge" in description
+    assert "keeps its id" in description
+    # A disagreement may be a bug, and a bug is reported.
+    assert "report_step" in description
+    # Partial updates, and the id rule.
+    assert "Send only what changes" in description
+    assert "search_knowledge" in description
+
+
+def test_the_record_description_sends_a_correction_to_the_update_tool() -> None:
+    """Two entries saying different things about one rule is worse than either
+    alone: a later search gets both back and cannot tell which to believe."""
+    _, _, tools, _ = make()
+
+    assert "update_knowledge" in tools["record_knowledge"].description
 
 
 # --- the whole loop -----------------------------------------------------------
@@ -1109,12 +1513,14 @@ def test_a_hit_missing_a_field_is_still_delivered(field: str) -> None:
 def test_a_run_corrects_an_entry_by_deleting_it_and_recording_the_new_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The correction, end to end: a real `QaRunner`, a real tool loop, a real channel.
+    """The safety net, end to end: a real `QaRunner`, a real tool loop, a real channel.
 
-    This is the shape the tool descriptions ask for and the only shape that does
-    not lose knowledge — search, delete, record, all inside one step, before the
-    verdict. What it pins beyond the individual tools is that the ids survive the
-    trip: the delete quotes an id the agent could only have read off the search
+    No longer the shape the tool descriptions ask for — that is `update_knowledge`
+    now — but still a shape a model can choose, and the one that loses knowledge if
+    it stops halfway. Kept as a regression: search, delete, record, all inside one
+    step, before the verdict, with the run told after the delete that it owes the
+    second call. What it pins beyond the individual tools is that the ids survive
+    the trip: the delete quotes an id the agent could only have read off the search
     result the graph handed it a turn earlier.
     """
     model = ScriptedModel(
@@ -1238,3 +1644,124 @@ def test_a_run_corrects_an_entry_by_deleting_it_and_recording_the_new_one(
         if isinstance(m, ToolMessage) and isinstance(m.content, str)
     ]
     assert "record_knowledge" in after_delete[-1]
+
+
+def test_a_run_corrects_an_entry_in_place_with_the_update_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The correction as it is now meant to happen: search, then one update.
+
+    The point of the whole change is what the knowledge base is left holding — one
+    entry, with its own id, carrying the corrected text. Nothing was deleted, so
+    nothing is outstanding at any moment of the run, and the history records a
+    repair rather than a discard followed by an unrelated-looking creation.
+
+    Driven through a real `QaRunner` for the reason the search test is: a tool that
+    works when invoked directly and stalls inside the graph looks identical in
+    every unit test above.
+    """
+    model = ScriptedModel(
+        turns=[
+            {
+                "tool_calls": [
+                    {
+                        "name": "search_knowledge",
+                        "args": {
+                            "step": 1,
+                            "thought": "구매 규칙을 확인한다",
+                            "query": "골드가 모자라면 구매 버튼이 어떻게 되나",
+                        },
+                        "id": "1",
+                    }
+                ]
+            },
+            {
+                "tool_calls": [
+                    {
+                        "name": "update_knowledge",
+                        "args": {
+                            "step": 1,
+                            "thought": "빌드가 문서와 다르다. 항목을 고친다",
+                            "knowledge_id": "41",
+                            "summary": "구매는 소지금이 가격의 절반 이상이면 가능하다",
+                            "description": "할인 적용 후 가격을 기준으로 판정한다.",
+                        },
+                        "id": "2",
+                    }
+                ]
+            },
+            {
+                "tool_calls": [
+                    {
+                        "name": "report_step",
+                        "args": {
+                            "step": 1,
+                            "passed": True,
+                            "message": "구매가 가능했다",
+                            "thought": "판정",
+                        },
+                        "id": "3",
+                    }
+                ]
+            },
+            {
+                "tool_calls": [
+                    {
+                        "name": "finish_run",
+                        "args": {"passed": True, "summary": "통과", "thought": "종료"},
+                        "id": "4",
+                    }
+                ]
+            },
+            {"content": "done"},
+        ]
+    )
+    monkeypatch.setattr(
+        "app.agents.qa.runner.build_chat_model",
+        lambda _model, reasoning=None, **_: model,
+    )
+
+    sent: list[dict] = []
+
+    async def send(frame: dict) -> None:
+        """Orchestration answers a search and says nothing at all to a write."""
+        sent.append(frame)
+        if frame["type"] == MessageType.KNOWLEDGE_SEARCH.value:
+            channel.on_knowledge_search_result(
+                {
+                    "correlationId": frame["messageId"],
+                    "payload": {"query": "골드", "model": "e5", "results": [hit(id="41")]},
+                }
+            )
+
+    channel = QaRunChannel(qa_try_id=1, send=send)
+    state = QaRunState(total_steps=1)
+    scenario = ScenarioDraft(
+        title="구매 규칙 확인",
+        description="구매 조건이 문서대로인지 확인한다.",
+        steps=[
+            ScenarioStep(
+                step=1,
+                title="구매 시도",
+                state="상점",
+                action="구매를 누른다",
+                expected="구매가 된다",
+            )
+        ],
+    )
+
+    asyncio.run(QaRunner().run(channel, scenario, state))
+
+    assert state.finished
+    # One frame, naming the entry that already existed. Nothing was deleted and
+    # nothing was created, which is the whole difference this tool makes.
+    assert corrections(sent)[0]["payload"] == {
+        "knowledge_id": "41",
+        "tag": None,
+        "summary": "구매는 소지금이 가격의 절반 이상이면 가능하다",
+        "description": "할인 적용 후 가격을 기준으로 판정한다.",
+    }
+    assert deletes(sent) == [] and creates(sent) == []
+    assert state.knowledge_deleted_unreplaced == []
+    # And the id stays readable, so the run could still act on the entry after.
+    assert state.knowledge_seen["41"] == "구매는 소지금이 가격의 절반 이상이면 가능하다"

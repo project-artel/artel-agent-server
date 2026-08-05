@@ -12,13 +12,15 @@ reason `vision.py` keeps the capture budget and image handling: they are these
 tools' own subject matter, and the numbers, the vocabulary and the wording that
 teaches the agent to ration them all have to move together.
 
-**There is no update.** An entry is corrected by deleting it and recording the
-corrected version, which is two calls where the knowledge base offers one. That
-choice buys a smaller tool surface and pays for it with a gap: a run that deletes
-and then fails to record has removed knowledge rather than fixed it. Everything
-in this module that reads as over-careful — `render_missing_knowledge_warning`,
-the deletion budget being the smallest number here, the replacement write being
-exempt from the record cap — exists to make that gap loud and narrow.
+**A correction is one call.** `update_knowledge` changes an entry in place, so it
+keeps its id and the knowledge base keeps a record that the entry was repaired
+rather than thrown away (ARTEL-257). Until that tool existed, correcting meant a
+delete followed by a record, and that route is still walkable — nothing stops a
+run from taking it. What is left over from it here is a safety net rather than
+the way through: `render_missing_knowledge_warning`, the replacement write being
+exempt from the write cap, and the deletion budget being the smallest allowance
+in the run. A run that deletes and then fails to record has removed knowledge
+rather than fixed it, and that stays true now that there is a better way to do it.
 
 Nothing in this module touches the game. Neither a search nor a write changes a
 screen, so no scene view is produced and none is appended to any result — see
@@ -43,6 +45,14 @@ from app.qa.envelope import KnowledgeSearchHit, KnowledgeSearchResultPayload
 # below searching because a run that learns five durable rules about a game has
 # had an unusually instructive hour; one that claims more is filing observations,
 # not knowledge.
+#
+# `max_records_per_run` is the budget for BOTH writes that put content into the
+# knowledge base — `record_knowledge` and `update_knowledge` draw on it together.
+# They are capped as one because they fail as one: either spends the run's steps
+# tidying the knowledge base instead of reaching a verdict. A second allowance
+# would double that ceiling without anyone choosing to, and would widen
+# `ResolvedArch.tool_call_limit` with it for a tool that mostly replaces calls
+# rather than adding them.
 #
 # Deletion is the smallest allowance of the three on purpose. It is the least
 # reversible thing the agent does and the least watched: a wrong verdict is read
@@ -113,12 +123,14 @@ whenever you are unsure which the answer would be filed under.
 An empty result is an answer. It means the documents do not cover this, not that
 something went wrong — judge the step on what you can see and carry on."""
 
-# The two write descriptions carry the whole usage policy for these tools, per
+# The three write descriptions carry the whole usage policy for these tools, per
 # ARTEL-192: the tool description is the single source, and the system prompt is
 # left alone. What each one has to teach is not "how to call it" — the arguments
 # are obvious — but where the line is. For recording, the line between a rule and
-# this run's own state; for deleting, the line between stale knowledge and a bug.
-# An agent that gets either wrong degrades the knowledge base for every run after.
+# this run's own state; for correcting and deleting, the line between an entry
+# that should be repaired and one that should simply be gone, and behind both the
+# line between stale knowledge and a bug. An agent that gets any of them wrong
+# degrades the knowledge base for every run after.
 RECORD_KNOWLEDGE_DESCRIPTION = """Write down something you learned about this game, so later runs start knowing it.
 
 Use this when the run taught you a RULE the scenario did not state: what a
@@ -143,11 +155,37 @@ the fact itself, phrased as you would answer someone who asked. `description` is
 what stands behind it: the condition, the exception, what you saw that
 established it.
 
-You get {limit} of these for the whole run, so spend them on what was worth
-learning.
+Use `update_knowledge` instead when an entry already covers this and is merely
+wrong: recording a second version of a rule leaves both in the knowledge base,
+and a later run gets them both back and cannot tell which one to believe.
+
+A run gets {limit} knowledge writes in total, shared with `update_knowledge`, so
+spend them on what was worth learning.
 
 Nothing answers a knowledge write, so send each fact once — a repeat files it
 twice, and no one will tell you."""
+
+UPDATE_KNOWLEDGE_DESCRIPTION = """Correct a knowledge entry that is wrong or out of date.
+
+This is how knowledge gets FIXED. The entry keeps its id and its history, so the
+project can tell a rule that was repaired from one that was thrown away. That is
+the whole difference between this and `forget_knowledge`: correct what should be
+right, delete only what should be gone with nothing put in its place.
+
+`knowledge_id` must be the id of an entry `search_knowledge` returned to you in
+this run — it is printed with each hit. You cannot correct what you have not read.
+
+Send only what changes: `tag` (one of {tags}), `summary`, `description`. Whatever
+you leave out stays exactly as it is, so fixing one sentence does not mean
+retyping the entry. At least one of the three is required.
+
+The bar is the one `forget_knowledge` sets, and for the same reason. ONE
+disagreement between an entry and what you saw is more often a BUG than stale
+knowledge, and a bug belongs in `report_step` — rewriting the rule to match a
+broken build teaches every later run that the break is correct.
+
+A run gets {limit} knowledge writes in total, shared with `record_knowledge`.
+Nothing answers a knowledge write, so send each correction once."""
 
 FORGET_KNOWLEDGE_DESCRIPTION = """Delete a knowledge entry that is no longer true.
 
@@ -168,11 +206,12 @@ search result; deleting a correct one costs it the answer entirely.
 this run — it is printed with each hit. You cannot delete something you have not
 read.
 
-There is no update tool, and that is deliberate. To CORRECT an entry: delete it,
-then call `record_knowledge` with the corrected version IMMEDIATELY, in the same
-step, before anything else. Those two calls are one repair. A run that makes the
-first and not the second has deleted that knowledge rather than fixed it, and
-nothing here can undo it for you.
+Do NOT delete in order to correct. `update_knowledge` repairs an entry in one
+call and leaves the project able to tell a repair from a discard; deleting and
+re-recording loses that and can leave the knowledge simply gone. If you do take
+that route anyway, call `record_knowledge` IMMEDIATELY afterwards, in the same
+step, before anything else — a run that stops between the two has removed the
+knowledge rather than fixed it, and nothing here can undo it for you.
 
 `thought` is why this entry is wrong. It is the only record of the reasoning
 behind the deletion, so write what someone would need who later asks whether this
@@ -192,10 +231,11 @@ def render_entry_label(knowledge_id: str, summary: str) -> str:
 def render_missing_knowledge_warning(deleted: list[str]) -> str:
     """The sentence that must appear whenever a write fails after a delete did not.
 
-    This is the one path in this design that loses knowledge. There is no update
-    tool, so correcting an entry is a delete followed by a record, and the gap
-    between the two is real: the delete is already applied on the far side and
-    nothing here can take it back. Every way `record_knowledge` can fail routes
+    This is the one path here that loses knowledge. `update_knowledge` is what a
+    correction should be, but nothing forces a run to use it: an agent that
+    deletes and then records is still doing something the tools allow, and the gap
+    between those two calls is real — the delete is already applied on the far side
+    and nothing here can take it back. Every way `record_knowledge` can fail routes
     through this, so no failure of it can be phrased as though nothing were at
     stake.
 
@@ -229,9 +269,10 @@ def render_hit(index: int, hit: KnowledgeSearchHit) -> str:
     still returned, and the agent has to be able to discount it rather than treat
     the top hit as authoritative by position alone.
 
-    The id is printed because a search is the only way to reach one. `forget_knowledge`
-    takes an id and refuses one this run has not been shown, so an entry the agent
-    never read is an entry it cannot delete; unprinted, the id would make that rule
+    The id is printed because a search is the only way to reach one. Both
+    `update_knowledge` and `forget_knowledge` take an id and refuse one this run
+    has not been shown, so an entry the agent never read is an entry it can
+    neither correct nor delete; unprinted, the id would make that rule
     unsatisfiable rather than safe.
     """
     header = (
