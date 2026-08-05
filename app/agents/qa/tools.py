@@ -63,6 +63,10 @@ class QaRunState:
         self.finished = False
         # The observation the agent last saw, so the next look is a diff.
         self.watermark = 0
+        # How many times `finish_run` was reached. The first attempt made with
+        # steps still unreported is pushed back on; a second one closes the run
+        # regardless, so a game that genuinely cannot go on is never trapped.
+        self.finish_attempts = 0
         # Attempts, not successes. A game whose SDK does not know the capture action
         # refuses every one of them, and counting only what worked would leave that
         # loop unbounded — the cap has to bind on the failing case too.
@@ -744,19 +748,45 @@ def build_tools(
             ),
         )
         remaining = state.total_steps - len(state.step_results)
-        if remaining > 0:
-            return f"Recorded. {remaining} step(s) left."
-        return "Recorded. That was the last step — finish the run."
+        if remaining <= 0:
+            return "Recorded. That was the last step — finish the run."
+        # The verdict is recorded either way; what differs is the pull to keep
+        # going. A failure is where the loop is most tempted to call it a day, so
+        # that is where the next move has to be spelled out rather than implied.
+        body = f"Recorded. {remaining} step(s) left — continue with step {step + 1}."
+        if passed:
+            return body
+        return f"{body} A failed step is not a reason to stop."
 
     @tool
     async def finish_run(passed: bool, summary: str, thought: str) -> str:
         """End the run. Call this once, after the last step has been reported.
+
+        A step with no verdict yet is worth attempting before you close: the run
+        was opened to find out about all of them. Calling this with steps still
+        unreported sends you back to them once.
 
         `thought` is how you reached the overall verdict; it goes on the timeline.
         """
         await channel.note(thought, LogCategory.THOUGHT)
         total = state.total_steps
         passed_count = sum(1 for result in state.step_results if result.passed)
+        state.finish_attempts += 1
+
+        # A step the agent never attempted is the failure this whole change is
+        # about, so closing over one costs a round trip. Only the first, though:
+        # the second call closes whatever the state, because a run the game has
+        # abandoned still has to be able to end.
+        unreported = state.unreported_steps()
+        if unreported and state.finish_attempts == 1:
+            listed = ", ".join(str(step) for step in unreported)
+            return (
+                f"{len(unreported)} step(s) still have no verdict: {listed}. Go "
+                "attempt them — a step you have not tried may still pass. If the "
+                "game truly cannot go on, report them failed with the reason, then "
+                "call `finish_run` again."
+            )
+
         state.finished = True
         await channel.emit(
             MessageType.STATUS,
