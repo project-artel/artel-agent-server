@@ -8,6 +8,7 @@ These pin the frames themselves — category, step, and the actions inside them.
 
 import asyncio
 
+from app.agents.qa.arch import default_resolved_arch
 from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.vision import MAX_CAPTURES_PER_RUN
 from app.qa.channel import QaRunChannel
@@ -501,6 +502,151 @@ def test_reported_steps_accumulate_and_announce_the_last_one() -> None:
     asyncio.run(run())
 
 
+def test_a_reported_issue_goes_out_as_an_issue_frame_with_its_evidence() -> None:
+    """The far side reads `title` and `severity` and stores the rest as detail,
+    so both the display field and the ladder value are pinned here."""
+
+    async def run() -> None:
+        _, state, tools, sent = make(total_steps=1)
+
+        result = await tools["report_issue"].ainvoke(
+            {
+                "step": 2,
+                "severity": "MAJOR",
+                "title": "상점에서 산 아이템이 인벤토리에 없다",
+                "expected": "구매 후 인벤토리에 아이템이 추가된다",
+                "actual": "골드만 줄고 인벤토리는 그대로다",
+                "reproduction": ["상점을 연다", "회복약을 산다", "인벤토리를 연다"],
+                "thought": "구매 처리는 됐는데 지급이 빠졌다",
+            }
+        )
+
+        issues = [frame for frame in sent if frame["type"] == MessageType.ISSUE.value]
+        assert len(issues) == 1
+        payload = issues[0]["payload"]
+        assert payload["title"] == "상점에서 산 아이템이 인벤토리에 없다"
+        assert payload["severity"] == "MAJOR"
+        assert payload["step"] == 2
+        assert payload["reproduction"][0] == "상점을 연다"
+        assert state.issues_attempted == 1
+        assert "9 issue(s) left" in result
+
+        # 근거를 남긴 이유도 타임라인에 있어야 한다.
+        assert logs(sent)[-1]["payload"]["message"] == "구매 처리는 됐는데 지급이 빠졌다"
+
+    asyncio.run(run())
+
+
+def test_a_severity_off_the_ladder_files_nothing_at_all() -> None:
+    """Orchestration drops such a frame without answering, so the agent would
+    believe it had reported the defect. The check has to be on this side."""
+
+    async def run() -> None:
+        _, state, tools, sent = make(total_steps=1)
+
+        # 먼저 유효한 보고를 하나 해 둔다: 그 뒤의 오타가 앞의 성공에 묻히면 안 된다.
+        await tools["report_issue"].ainvoke(
+            {
+                "step": 1,
+                "severity": "MINOR",
+                "title": "제목이 잘린다",
+                "expected": "제목이 다 보인다",
+                "actual": "끝이 잘린다",
+                "reproduction": ["타이틀 화면을 연다"],
+                "thought": "레이아웃 문제",
+            }
+        )
+        result = await tools["report_issue"].ainvoke(
+            {
+                "step": 2,
+                "severity": "SEVERE",
+                "title": "게임이 멈춘다",
+                "expected": "계속 진행된다",
+                "actual": "멈춘다",
+                "reproduction": ["2스텝을 진행한다"],
+                "thought": "심각해 보인다",
+            }
+        )
+
+        assert "not a severity" in result
+        assert "BLOCKER/CRITICAL/MAJOR/MINOR/TRIVIAL" in result
+        # 프레임은 유효했던 첫 건 하나뿐이고, 실패한 호출은 예산도 쓰지 않는다.
+        assert len([frame for frame in sent if frame["type"] == MessageType.ISSUE.value]) == 1
+        assert state.issues_attempted == 1
+
+    asyncio.run(run())
+
+
+def test_a_blank_title_files_nothing_either() -> None:
+    """The far side drops a title-less frame as silently as a bad severity, so the
+    other required field needs the same guard."""
+
+    async def run() -> None:
+        _, state, tools, sent = make(total_steps=1)
+
+        result = await tools["report_issue"].ainvoke(
+            {
+                "step": 1,
+                "severity": "MAJOR",
+                "title": "   ",
+                "expected": "된다",
+                "actual": "안 된다",
+                "reproduction": ["연다"],
+                "thought": "제목을 빠뜨렸다",
+            }
+        )
+
+        assert "needs a title" in result
+        assert [frame for frame in sent if frame["type"] == MessageType.ISSUE.value] == []
+        assert state.issues_attempted == 0
+
+    asyncio.run(run())
+
+
+def test_the_issue_budget_stops_at_its_cap() -> None:
+    async def run() -> None:
+        sent: list[dict] = []
+
+        async def send(frame: dict) -> None:
+            sent.append(frame)
+
+        channel = QaRunChannel(qa_try_id=7, send=send)
+        state = QaRunState(total_steps=1)
+        arch = default_resolved_arch().model_copy(update={"max_issues_per_run": 1})
+        tools = {tool.name: tool for tool in build_tools(channel, state, arch=arch)}
+
+        first = await tools["report_issue"].ainvoke(
+            {
+                "step": 1,
+                "severity": "BLOCKER",
+                "title": "첫 번째",
+                "expected": "된다",
+                "actual": "안 된다",
+                "reproduction": ["연다"],
+                "thought": "치명적",
+            }
+        )
+        second = await tools["report_issue"].ainvoke(
+            {
+                "step": 1,
+                "severity": "BLOCKER",
+                "title": "두 번째",
+                "expected": "된다",
+                "actual": "안 된다",
+                "reproduction": ["연다"],
+                "thought": "또 있다",
+            }
+        )
+
+        assert "0 issue(s) left" in first
+        assert "all 1 issues" in second
+        assert len([frame for frame in sent if frame["type"] == MessageType.ISSUE.value]) == 1
+        # 상한은 툴 설명에도 드러나야 한다 — 모르면 배분할 수 없다.
+        assert "You may file 1 of these" in tools["report_issue"].description
+
+    asyncio.run(run())
+
+
 def test_a_failed_step_is_told_which_step_comes_next() -> None:
     """A failure is where the loop stops on its own, so the way on is spelled out."""
 
@@ -641,6 +787,7 @@ def test_the_agent_is_offered_exactly_these_tools() -> None:
         "reset_game",
         "wait_for_operator",
         "report_step",
+        "report_issue",
         "finish_run",
         "reply_to_operator",
         "capture_screen",

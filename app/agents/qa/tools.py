@@ -29,6 +29,8 @@ from app.qa.channel import (
     with_operator_messages,
 )
 from app.qa.envelope import (
+    IssuePayload,
+    IssueSeverity,
     JsonRpcAction,
     KnowledgeCreatePayload,
     KnowledgeDeletePayload,
@@ -76,6 +78,10 @@ class QaRunState:
         # is not something this side could count even if it wanted to.
         self.knowledge_records_attempted = 0
         self.knowledge_forgets_attempted = 0
+        # Attempts once more. A report the far side drops still cost the run a
+        # call, and a cap that only counted accepted ones would not bound the
+        # loop where every report is being rejected.
+        self.issues_attempted = 0
         # What `search_knowledge` has actually shown the agent, id -> summary.
         # A deletion may only name an id from here. An agent free to pass any id
         # could erase an entry it never read, and on the far side that id resolves
@@ -141,6 +147,31 @@ You get {limit} screenshots for the whole run and no more, so spend them on the
 steps where looking is what decides the verdict.
 
 The picture arrives right after this result, as its own message."""
+
+
+# Interpolated for the same reason as the capture description above: the cap is
+# the part the agent has to ration, and a docstring cannot name it.
+REPORT_ISSUE_DESCRIPTION = """File a defect you found in the GAME, with the evidence for it.
+
+This is not the step verdict — `report_step` is. Use this when what you saw is
+wrong regardless of the scenario: a crash, a button that does nothing, a value
+that goes the wrong way, text that overflows its box. A step can fail without
+being a defect (the scenario may describe the game wrongly), and a step can pass
+while you notice one in passing.
+
+`severity` is one of {severities}, worst first:
+- BLOCKER: the game cannot be played past this point.
+- CRITICAL: a core feature is broken and nothing works around it.
+- MAJOR: an important feature is broken but there is a way around it.
+- MINOR: small or local damage.
+- TRIVIAL: cosmetic — wording, alignment, a wrong colour.
+
+`expected` and `actual` are what should have happened and what did. `reproduction`
+is the shortest list of steps that shows it again, oldest first; write it for
+someone who was not here.
+
+You may file {limit} of these in one run. One defect, one call — do not file the
+same broken screen again on the next step."""
 
 
 def build_tools(
@@ -756,6 +787,60 @@ def build_tools(
             return body
         return f"{body} A failed step is not a reason to stop."
 
+    @tool(
+        description=REPORT_ISSUE_DESCRIPTION.format(
+            severities="/".join(s.value for s in IssueSeverity),
+            limit=arch.max_issues_per_run,
+        )
+    )
+    async def report_issue(
+        step: int,
+        severity: str,
+        title: str,
+        expected: str,
+        actual: str,
+        reproduction: list[str],
+        thought: str,
+    ) -> str:
+        if state.issues_attempted >= arch.max_issues_per_run:
+            return (
+                f"You have filed all {arch.max_issues_per_run} issues this run "
+                "allows. Nothing was sent. Carry the remaining findings in the "
+                "run summary instead."
+            )
+        # Both required fields are checked here rather than left to Orchestration,
+        # and for the same reason: a frame with a blank title or an unknown
+        # severity is dropped there without a reply, so an agent that got either
+        # wrong would go on believing it had reported the defect.
+        if not title.strip():
+            return (
+                "An issue needs a title — one line naming the defect — so nothing "
+                "was filed. Call this again with one."
+            )
+        try:
+            checked = IssueSeverity(severity.strip().upper())
+        except ValueError:
+            allowed = "/".join(s.value for s in IssueSeverity)
+            return (
+                f"'{severity}' is not a severity, so nothing was filed. Call this "
+                f"again with one of {allowed}."
+            )
+        state.issues_attempted += 1
+        await channel.note(thought, LogCategory.THOUGHT, step)
+        await channel.emit(
+            MessageType.ISSUE,
+            IssuePayload(
+                title=title,
+                severity=checked,
+                step=step,
+                expected=expected,
+                actual=actual,
+                reproduction=reproduction,
+            ),
+        )
+        remaining = arch.max_issues_per_run - state.issues_attempted
+        return f"Filed as {checked.value}. {remaining} issue(s) left this run."
+
     @tool
     async def finish_run(passed: bool, summary: str, thought: str) -> str:
         """End the run. Call this once, after the last step has been reported.
@@ -835,6 +920,7 @@ def build_tools(
         reset_game,
         wait_for_operator,
         report_step,
+        report_issue,
         finish_run,
         reply_to_operator,
     ]

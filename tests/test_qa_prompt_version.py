@@ -239,9 +239,9 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v6() -> None:
+def test_the_default_qa_version_is_v7() -> None:
     """A run that names no version has to get the newest prompt."""
-    assert resolve_version("qa_run") == "v6"
+    assert resolve_version("qa_run") == "v7"
 
 
 def test_v4_teaches_the_live_view_and_the_value_paths() -> None:
@@ -278,3 +278,23 @@ def test_v6_says_a_failed_step_does_not_end_the_run() -> None:
     # Two paragraphs added, nothing from v5 dropped.
     for paragraph in v5.split("\n\n"):
         assert paragraph in v6
+
+
+def test_v7_separates_a_game_defect_from_a_step_verdict() -> None:
+    """`report_issue` is worth nothing if the agent files step failures into it.
+
+    The two come apart in both directions and the prompt has to say so: a step
+    can fail because the scenario is wrong about the game, and a step can pass
+    while a real defect goes by. What is pinned is that distinction, not the
+    tool's own description — the cap and the severity ladder live there.
+    """
+    v6 = load_prompt("qa_run", "system", "v6").body
+    v7 = load_prompt("qa_run", "system", "v7").body
+
+    assert "report_issue" in v7
+    assert "wrong about the GAME rather than about the step" in v7
+    assert "one call per distinct defect" in v7
+
+    # One paragraph added, nothing from v6 dropped.
+    for paragraph in v6.split("\n\n"):
+        assert paragraph in v7
