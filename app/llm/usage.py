@@ -34,7 +34,7 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-USAGE_PATH = "/api/orchestration/llm-usage"
+USAGE_PATH = "/internal/llm-usage"
 
 # The receiving side answers 400 above this, so a backlog is cut into requests
 # rather than sent as one oversized one.
