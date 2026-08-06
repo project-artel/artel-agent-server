@@ -240,9 +240,9 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v7() -> None:
+def test_the_default_qa_version_is_v8() -> None:
     """A run that names no version has to get the newest prompt."""
-    assert resolve_version("qa_run") == "v7"
+    assert resolve_version("qa_run") == "v8"
 
 
 def test_v4_teaches_the_live_view_and_the_value_paths() -> None:
@@ -299,3 +299,26 @@ def test_v7_separates_a_game_defect_from_a_step_verdict() -> None:
     # One paragraph added, nothing from v6 dropped.
     for paragraph in v6.split("\n\n"):
         assert paragraph in v7
+
+
+def test_v8_teaches_running_authored_cases_without_touching_v7() -> None:
+    """저작 Step(cases) 실행 규칙을 새 버전에 넣는다 — v7 문구는 회귀 고정.
+
+    핵심은 세 가지가 프롬프트에 박히는 것이다: `reach_first`는 판정 없이 도달하는
+    사전조건이라는 것, 못 도달하면 SETUP-FAILED이고 그건 게임 결함(issue)이 아니라는
+    것, do/verify/hint는 강제가 아니라 어드바이저리라는 것. 도구 설명이 아니라 이
+    구분이 프롬프트가 져야 할 몫이다.
+    """
+    v7 = load_prompt("qa_run", "system", "v7").body
+    v8 = load_prompt("qa_run", "system", "v8").body
+
+    assert "reach_first" in v8
+    assert "SETUP-FAILED" in v8
+    # 도달 실패는 이슈가 아니다 — 이 한 줄이 없으면 setup 실패마다 오탐 이슈가 쌓인다.
+    assert "do NOT `report_issue`" in v8
+    # hint는 시도할 근거지 강제가 아니다(어드바이저리).
+    assert "not one you must use" in v8
+
+    # One paragraph added, nothing from v7 dropped.
+    for paragraph in v7.split("\n\n"):
+        assert paragraph in v8

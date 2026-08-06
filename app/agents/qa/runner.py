@@ -6,7 +6,6 @@ a game that never volunteered its state left the run idle forever.
 """
 
 import asyncio
-import json
 import logging
 
 from langchain.agents import create_agent
@@ -16,13 +15,14 @@ from langchain_core.messages import HumanMessage
 from app.agents.qa.arch import ResolvedArch
 from app.agents.qa.compaction import QaCompactionMiddleware
 from app.agents.qa.context import fold_stale_scenes
+from app.agents.qa.plan import build_execution_plan
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.vision import QaCaptureVisionMiddleware
-from app.agents.scenario import ScenarioDraft
 from app.llm.chat_model import build_chat_model
 from app.llm.models import LLMModel, get_model_spec
 from app.prompts import load_prompt
+from app.qa.cases import QaScenarioBody
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory
 from app.qa.run_config import (
@@ -56,24 +56,6 @@ def _clip(text: str) -> str:
     if len(text) <= MAX_LOGGED_CHARS:
         return text
     return f"{text[:MAX_LOGGED_CHARS]}\n… [{len(text) - MAX_LOGGED_CHARS} more characters]"
-
-
-def _first_message(scenario: ScenarioDraft) -> str:
-    steps = [
-        {
-            "step": step.step,
-            "title": step.title,
-            "state": step.state,
-            "action": step.action,
-            "expected": step.expected,
-        }
-        for step in scenario.steps
-    ]
-    return (
-        f"Scenario: {scenario.title} — {scenario.description}\n\n"
-        f"Steps to execute in order:\n{json.dumps(steps, ensure_ascii=False, indent=2)}\n\n"
-        "Begin. Observe the screen first."
-    )
 
 
 def _build_append_current_scene(channel: QaRunChannel):
@@ -228,7 +210,7 @@ class QaRunner:
         logger.info("[QA] context compacted #%d\n%s", count, _clip(summary))
 
     async def run(
-        self, channel: QaRunChannel, scenario: ScenarioDraft, state: QaRunState
+        self, channel: QaRunChannel, scenario: QaScenarioBody, state: QaRunState
     ) -> None:
         config = self._config
         arch = config.arch
@@ -248,7 +230,10 @@ class QaRunner:
             language_directive=LANGUAGE_DIRECTIVES[config.language],
             vision_directive=vision_directive,
         )
-        first_message = _first_message(scenario)
+        # cases[](저작 Step)가 있으면 case당 판정 스텝으로 전개하고, 없으면 레거시 steps로
+        # 폴백한다(ARTEL-261). 스텝 수·첫 메시지 모두 이 계획에서 나온다.
+        plan = build_execution_plan(scenario)
+        first_message = plan.first_message
         tools = build_tools(channel, state, arch)
 
         # The whole starting context in one place. Reading a run afterwards means
@@ -263,7 +248,7 @@ class QaRunner:
             "--- system prompt ---\n%s\n"
             "--- first message ---\n%s",
             config.model_dump(mode="json", exclude_none=True),
-            len(scenario.steps),
+            plan.total_steps,
             system_prompt,
             _clip(first_message),
         )
@@ -291,7 +276,7 @@ class QaRunner:
         # a run that only shows actions gives no way to tell a considered decision
         # from a lucky one.
         async for update in agent.astream(
-            {"messages": [("user", _first_message(scenario))]},
+            {"messages": [("user", first_message)]},
             # recursion_limit counts graph steps, so it bounds tool calls as well
             # as the model turns between them.
             {
@@ -300,7 +285,7 @@ class QaRunner:
                 # ahead of the model. Left at a flat 2, turning compaction on
                 # would quietly cost the run a third of its tool budget.
                 "recursion_limit": (
-                    self._tool_call_limit(len(scenario.steps))
+                    self._tool_call_limit(plan.total_steps)
                     * (2 + (1 if arch.compaction else 0))
                 ),
                 "run_name": "qa-scenario-run",
@@ -413,14 +398,14 @@ class QaRunner:
                     await channel.note(text, LogCategory.THOUGHT)
 
     async def run_with_deadline(
-        self, channel: QaRunChannel, scenario: ScenarioDraft
+        self, channel: QaRunChannel, scenario: QaScenarioBody
     ) -> tuple[QaRunState, str | None]:
         """Returns the state and, when the run did not close cleanly, why.
 
         The state is built here and handed down so that a run cut short by the
         deadline still carries the verdicts it managed to record.
         """
-        state = QaRunState(total_steps=len(scenario.steps))
+        state = QaRunState(total_steps=build_execution_plan(scenario).total_steps)
         deadline = self._config.arch.deadline_seconds
         try:
             await asyncio.wait_for(self.run(channel, scenario, state), timeout=deadline)
