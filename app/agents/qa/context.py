@@ -33,6 +33,11 @@ import re
 
 from langchain_core.messages import BaseMessage, ToolMessage
 
+from app.agents.qa.knowledge import (
+    NEIGHBOUR_BLOCK_END,
+    NEIGHBOUR_BLOCK_START_PREFIX,
+    NEIGHBOUR_BLOCK_START_SUFFIX,
+)
 from app.qa.scene import SCENE_VIEW_END, SCENE_VIEW_START_PREFIX, SCENE_VIEW_START_SUFFIX
 
 # How many of the newest scene views survive folding, in full — counted across
@@ -129,4 +134,81 @@ def fold_stale_scenes(
         if kept <= keep:
             continue
         result[index] = message.model_copy(update={"content": _fold_content(message.content)})
+    return result
+
+
+# How many of the newest neighbour blocks survive folding, counted per message
+# — one search produces one message, so this is "the newest N searches keep
+# their neighbours".
+DEFAULT_KEEP_NEIGHBOUR_BLOCKS = 1
+
+_NEIGHBOUR_PATTERN = re.compile(
+    re.escape(NEIGHBOUR_BLOCK_START_PREFIX)
+    + r"(?P<of>[^>]*)"
+    + re.escape(NEIGHBOUR_BLOCK_START_SUFFIX)
+    + r".*?"
+    + re.escape(NEIGHBOUR_BLOCK_END),
+    re.DOTALL,
+)
+
+
+def _neighbour_placeholder(of: str) -> str:
+    # Plain text rather than the marker syntax, for the reason `_placeholder`
+    # gives. Names the entry so the instruction is actionable: unlike a folded
+    # scene, which `observe_scene` gets back with no argument, this one needs an id.
+    return (
+        f"[neighbours of {of} folded. Call expand_knowledge on {of} to see them "
+        "again — they were volunteered by the search, not asked for.]"
+    )
+
+
+def _fold_neighbours(content: str) -> str:
+    return _NEIGHBOUR_PATTERN.sub(
+        lambda match: _neighbour_placeholder(match.group("of")), content
+    )
+
+
+def fold_stale_knowledge(
+    messages: list[BaseMessage], keep: int = DEFAULT_KEEP_NEIGHBOUR_BLOCKS
+) -> list[BaseMessage]:
+    """Return `messages` with all but the newest `keep` neighbour blocks folded.
+
+    Same contract as `fold_stale_scenes`: pure, model-input only, idempotent,
+    `ToolMessage.content` only, unchanged messages returned as the same objects.
+
+    **Only the neighbour block is folded. A hit's own summary and description are
+    never touched**, and that line is the whole design.
+
+    `fold_stale_scenes` folds a scene because the game moved on and
+    `observe_scene` gets it back for nothing. A knowledge description is not
+    stale — the documentation did not change while the run was going — and
+    getting it back costs a search out of a budget of six. Folding it would tell
+    the agent to spend a scarce resource undoing the fold, which is a materially
+    worse bargain than the scene case.
+
+    The neighbour block is the opposite on both counts. It was never asked for —
+    the search volunteered it — and it is exactly recoverable by
+    `expand_knowledge`, which has its own separate allowance. So this bounds the
+    growth the graph feature introduced, and leaves the older debt that
+    `app/agents/qa/knowledge.py` records about unfolded search results exactly
+    where it is rather than quietly settling it inside an unrelated change.
+
+    Interaction with compaction: `SummarizationMiddleware` replaces old messages
+    wholesale, so a folded block may be summarised away entirely. Not a conflict —
+    this fold is model-input only and never touches what is stored.
+    """
+    result: list[BaseMessage] = list(messages)
+    kept = 0
+    for index in range(len(result) - 1, -1, -1):
+        message = result[index]
+        if not isinstance(message, ToolMessage) or not isinstance(message.content, str):
+            continue
+        if not _NEIGHBOUR_PATTERN.search(message.content):
+            continue
+        kept += 1
+        if kept <= keep:
+            continue
+        result[index] = message.model_copy(
+            update={"content": _fold_neighbours(message.content)}
+        )
     return result
