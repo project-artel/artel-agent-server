@@ -26,6 +26,14 @@ from app.sessions.redis_store import RedisSessionStore
 from app.sessions.service import SessionService
 
 
+# Every business route lives here. The prefix is the trust boundary: what is
+# under it is unauthenticated server-to-server traffic from orchestration, and
+# what is outside it is not. `/health` and the docs entry points stay outside
+# because they are container and tooling surface, not product API. See
+# `.agents/docs/project.md`, "API 표면과 신뢰 경계".
+INTERNAL_PREFIX = "/internal"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
@@ -101,13 +109,17 @@ def create_app() -> FastAPI:
         openapi_url="/openapi.json",
         lifespan=lifespan,
     )
+    # `/health` only. Outside the prefix on purpose: the container health check
+    # and monitoring reach it, and it carries nothing that needs the boundary.
     app.include_router(api_router)
-    app.include_router(sessions_router)
-    app.include_router(qa_sessions_router)
-    app.include_router(extract_router)
-    app.include_router(embeddings_router)
-    app.include_router(knowledge_queries_router)
-    app.include_router(models_router)
+    # Everything else. The prefix is applied at mount time, so the route modules
+    # themselves stay free of it — a router does not decide where it is mounted.
+    app.include_router(sessions_router, prefix=INTERNAL_PREFIX)
+    app.include_router(qa_sessions_router, prefix=INTERNAL_PREFIX)
+    app.include_router(extract_router, prefix=INTERNAL_PREFIX)
+    app.include_router(embeddings_router, prefix=INTERNAL_PREFIX)
+    app.include_router(knowledge_queries_router, prefix=INTERNAL_PREFIX)
+    app.include_router(models_router, prefix=INTERNAL_PREFIX)
     return app
 
 

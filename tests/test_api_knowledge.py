@@ -166,6 +166,6 @@ def test_both_endpoints_are_published_in_the_contract() -> None:
 
     schema = TestClient(app).get("/openapi.json").json()
 
-    assert "/embed" in schema["paths"]
-    assert "/knowledge-queries" in schema["paths"]
-    assert schema["paths"]["/embed"]["post"]["tags"] == ["knowledge"]
+    assert "/internal/embed" in schema["paths"]
+    assert "/internal/knowledge-queries" in schema["paths"]
+    assert schema["paths"]["/internal/embed"]["post"]["tags"] == ["knowledge"]

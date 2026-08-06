@@ -29,7 +29,7 @@ from tests.test_qa_prompt_version import make_scenario, open_request
 
 def test_models_api_exposes_reasoning_selection_capabilities() -> None:
     catalog = {
-        item["id"]: item for item in TestClient(app).get("/models").json()
+        item["id"]: item for item in TestClient(app).get("/internal/models").json()
     }
 
     assert set(catalog) == {model.value for model in LLMModel}
