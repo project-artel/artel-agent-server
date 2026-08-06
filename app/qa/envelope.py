@@ -20,6 +20,8 @@ class MessageType(StrEnum):
     CANCEL = "CANCEL"
     # The answer to a KNOWLEDGE_SEARCH, correlated by that frame's messageId.
     KNOWLEDGE_SEARCH_RESULT = "KNOWLEDGE_SEARCH_RESULT"
+    # The answer to a KNOWLEDGE_EXPAND, correlated the same way.
+    KNOWLEDGE_EXPAND_RESULT = "KNOWLEDGE_EXPAND_RESULT"
     # Agent -> Orchestration
     LOG = "LOG"
     ACTION = "ACTION"
@@ -29,6 +31,9 @@ class MessageType(StrEnum):
     # them: it rejects an unknown type outright, and that rejection reaches the
     # waiting tool as silence rather than as an error it could report.
     KNOWLEDGE_SEARCH = "KNOWLEDGE_SEARCH"
+    # Walks the knowledge graph out from one entry (ARTEL-275). Answered, like the
+    # search and for the same reason: the tool that asks parks on the reply.
+    KNOWLEDGE_EXPAND = "KNOWLEDGE_EXPAND"
     # Writes to the project's knowledge base: one new entry, one correction, one
     # soft delete. Spelled exactly as Orchestration's KNOWLEDGE_MUTATION_TYPES has
     # them, for the reason given on the search above.
@@ -48,6 +53,14 @@ class MessageType(StrEnum):
     KNOWLEDGE_CREATE = "KNOWLEDGE_CREATE"
     KNOWLEDGE_UPDATE = "KNOWLEDGE_UPDATE"
     KNOWLEDGE_DELETE = "KNOWLEDGE_DELETE"
+    # Asserts or withdraws a relation between two entries (ARTEL-274). ONE-WAY like
+    # the writes above, and that is what makes local validation load-bearing rather
+    # than defensive: Orchestration's rejection becomes a row on the operator's
+    # timeline and never reaches the tool, so a frame this side should not have sent
+    # is reported to the model as a success. `link_knowledge` and `unlink_knowledge`
+    # check the relation, the note and the endpoints themselves for that reason.
+    KNOWLEDGE_LINK = "KNOWLEDGE_LINK"
+    KNOWLEDGE_UNLINK = "KNOWLEDGE_UNLINK"
     # One defect the run found in the game, filed against this run.
     #
     # ONE-WAY, like the knowledge writes above: Orchestration's `routeIssue`
@@ -229,6 +242,43 @@ class ActionResultPayload(BaseModel):
     results: list[ActionResultItem] = Field(default_factory=list)
 
 
+class KnowledgeNeighbour(BaseModel):
+    """One entry hanging off another by a relation, or by similarity.
+
+    Every field defaults and unknown ones are kept, for the reason
+    `KnowledgeSearchHit` gives: a neighbour that failed validation would take the
+    whole answer down with it and leave the asking tool sitting until its timeout.
+
+    `origin` is the discriminator, not `relation`. A neighbour reached by an EDGE
+    is something a run asserted deliberately, with a written reason in `note`; a
+    VECTOR one is a machine guess with nobody standing behind it, and `relation`
+    reads "SIMILAR" only as a label. Weighing them the same is the mistake this
+    field exists to prevent.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str = ""
+    # LEADS_TO|CONTRADICTS|REFINES|DEPENDS_ON|REPLACES, or SIMILAR for a vector
+    # neighbour. A plain string for the same reason `tag` is one below.
+    relation: str = ""
+    origin: str = ""
+    # OUT|IN from the entry this hangs off; NONE for symmetric relations and for
+    # vector neighbours, where a direction word would invent a claim.
+    direction: str = ""
+    # Why the relation was asserted. None for a vector neighbour — nobody asserted it.
+    note: str | None = None
+    tag: str = ""
+    source: str = ""
+    summary: str = ""
+    depth: int = 1
+    # Cosine similarity, VECTOR only.
+    score: float | None = None
+    # Which entry this hangs off. Useful at depth 2, where it says where a
+    # neighbour branched from.
+    via: str = ""
+
+
 class KnowledgeSearchHit(BaseModel):
     """One piece of project knowledge the search matched.
 
@@ -252,6 +302,30 @@ class KnowledgeSearchHit(BaseModel):
     # distance before sending precisely so nobody downstream has to remember which
     # direction is good.
     score: float = 0.0
+    # Entries one hop from this one (ARTEL-275). Defaults to empty, so an
+    # Orchestration that predates the graph — or one with `expand-search-hits`
+    # turned off — simply sends hits without it and nothing here notices.
+    neighbors: list[KnowledgeNeighbour] = Field(default_factory=list)
+
+
+class KnowledgeExpandResultPayload(BaseModel):
+    """The answer to one KNOWLEDGE_EXPAND.
+
+    An empty `neighbors` is a normal answer: the entry may simply have no
+    relations yet, and on a run with `knowledge_mode=off` it is always empty.
+
+    `truncated` says a cap cut something off. It rides along rather than being
+    inferred from the count because the caps are Orchestration's and this side
+    does not know them — and a silently truncated list reads as "that is all
+    there is", which is the one thing it is not.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str = ""
+    summary: str = ""
+    neighbors: list[KnowledgeNeighbour] = Field(default_factory=list)
+    truncated: bool = False
 
 
 class KnowledgeSearchResultPayload(BaseModel):
@@ -391,6 +465,59 @@ class KnowledgeDeletePayload(BaseModel):
     """
 
     knowledge_id: str
+
+
+class KnowledgeExpandPayload(BaseModel):
+    """A request to walk the graph out from one entry.
+
+    No project and no scope travel with it, for the reason `KnowledgeSearchPayload`
+    gives — both come from the run on the far side.
+
+    `depth` is a request, not a guarantee: Orchestration clamps it to its own
+    ceiling rather than refusing, so a value past the limit costs a shallower
+    answer instead of a failed tool call.
+    """
+
+    knowledge_id: str
+    depth: int
+    include_similar: bool = True
+
+
+class KnowledgeLinkPayload(BaseModel):
+    """One relation asserted between two entries.
+
+    Both endpoints are ids the run has been shown. Orchestration folds them to the
+    baseline entry they represent before storing, so an id that names a
+    scope-local shadow still records the relation where every run can read it.
+
+    `note` is required here and NOT NULL on the far side. An edge nobody can audit
+    is an edge nobody can remove with confidence, and for `LEADS_TO` the note is
+    not the reason but the ACTION — it is what makes the route usable by a run
+    that has never walked it.
+    """
+
+    from_knowledge_id: str
+    to_knowledge_id: str
+    relation: str
+    note: str
+
+
+class KnowledgeUnlinkPayload(BaseModel):
+    """The withdrawal of one relation.
+
+    Named by its endpoints and relation rather than by an edge id, because this
+    side has never seen an edge id — the id printed with a neighbour is the
+    knowledge id. Exposing edge ids would add a second id space to everything the
+    agent reads, for the sake of one tool.
+
+    No note. Why a relation was withdrawn is carried by the tool's `thought`,
+    which is already the run's record of its reasoning, and there is no surviving
+    row to attach it to.
+    """
+
+    from_knowledge_id: str
+    to_knowledge_id: str
+    relation: str
 
 
 class StatusPayload(BaseModel):

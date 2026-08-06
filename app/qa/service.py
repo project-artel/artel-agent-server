@@ -177,6 +177,8 @@ class QaExecutionService:
                 channel.on_action_result(raw)
             elif message_type == MessageType.KNOWLEDGE_SEARCH_RESULT:
                 channel.on_knowledge_search_result(raw)
+            elif message_type == MessageType.KNOWLEDGE_EXPAND_RESULT:
+                channel.on_knowledge_expand_result(raw)
             elif message_type == MessageType.ERROR:
                 # Always accepted, answered or not. ERROR is a legitimate frame in
                 # both directions, so answering it with "unsupported inbound frame"

@@ -239,9 +239,37 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v8() -> None:
-    """A run that names no version has to get the newest prompt."""
-    assert resolve_version("qa_run") == "v8"
+def test_the_default_qa_version_is_v9() -> None:
+    """A run that names no version has to get the newest prompt.
+
+    This is also the trap in adding a version: `resolve_version` returns the
+    highest-numbered directory, so creating one silently repoints every run that
+    has not pinned `qa_prompt_version`. That is why v9 ships in the same change
+    as the tools it talks about — a prompt that names `link_knowledge` before the
+    tool exists teaches the agent to reach for something that is not there.
+    """
+    assert resolve_version("qa_run") == "v9"
+
+
+def test_v9_structures_the_body_and_adds_the_knowledge_base_section() -> None:
+    """v9 is v8's sentences under headings, plus the one section that is new.
+
+    The screen-map habit spans `observe_scene`, `record_knowledge` and
+    `link_knowledge`, and no single tool description is its home — which is why
+    it goes in the system prompt without contradicting ARTEL-192, whose rule is
+    that how to CALL one tool stays in that tool's description.
+    """
+    v8 = load_prompt("qa_run", "system", "v8").body
+    v9 = load_prompt("qa_run", "system", "v9").body
+
+    assert "## The knowledge base" in v9
+    assert "### The screen map" in v9
+    assert "### Removing a link" in v9
+    assert "## The knowledge base" not in v8
+    # v8's body survives: a sentence carried over verbatim proves it is the same
+    # prompt with structure, not a rewrite.
+    assert "A failed step does NOT end the run." in v8
+    assert "Report it failed with what you saw" in v9
 
 
 def test_v8_is_v7_and_marks_the_tool_set_that_changed_under_it() -> None:

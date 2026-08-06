@@ -63,9 +63,12 @@ from app.qa.envelope import KnowledgeSearchHit, KnowledgeSearchResultPayload
 # does not — and `QaArchSpec` refuses a spec that allows deletions without
 # allowing the replacement writes.
 from app.agents.qa.arch import (  # noqa: E402 - re-export, kept below the prose
+    MAX_EXPANDS_PER_RUN,
     MAX_FORGETS_PER_RUN,
+    MAX_LINKS_PER_RUN,
     MAX_RECORDS_PER_RUN,
     MAX_SEARCHES_PER_RUN,
+    MAX_UNLINKS_PER_RUN,
 )
 
 # How many hits one search brings back.
@@ -89,6 +92,31 @@ MAX_DESCRIPTION_CHARS = 500
 # as results that are quietly too broad — and that rejection would otherwise cost
 # a round trip and a slot out of the run's budget.
 KNOWLEDGE_TAGS = ("CONTROL", "RULE", "OBJECTIVE", "UI", "MISC")
+
+# The relations one entry can carry to another, as Orchestration defines them.
+# Checked here so a bad one costs nothing: a link frame is ONE-WAY, so a rejection
+# on the far side never reaches the tool — it would be reported to the model as a
+# success while nothing was written.
+#
+# There is deliberately no catch-all. An agent with one easy option and four hard
+# ones picks the easy one, and the graph degrades to untyped; the tool description
+# says instead that if none of the five fits, do not link.
+KNOWLEDGE_RELATIONS = ("LEADS_TO", "CONTRADICTS", "REFINES", "DEPENDS_ON", "REPLACES")
+
+# The label a vector neighbour is printed under. Never sent: Orchestration's CHECK
+# constraint has no such relation, because a stored similarity turns silently false
+# the moment the embedding model changes.
+SIMILAR_LABEL = "SIMILAR"
+
+# Per neighbour line. A neighbour is an orientation, not the entry itself — enough
+# to decide whether to spend a search reading it in full. Long enough for a real
+# sentence, short enough that eight of them stay a handful of lines.
+MAX_NEIGHBOUR_SUMMARY_CHARS = 120
+
+# The deepest walk this side will ask for. Orchestration clamps to its own ceiling
+# anyway; this keeps the number the tool description promises and the number the
+# agent actually gets from drifting apart.
+MAX_EXPAND_DEPTH = 2
 
 # Written out rather than left as a docstring so the per-run cap and the tag list
 # come from the constants above. An agent told only that searching is "limited"
@@ -144,6 +172,14 @@ That question is what rules out this run's own state. "The player has 500 gold",
 about the game, and filing them poisons the answers later runs get. "Buying is
 blocked while gold is below the price" is knowledge; "buying is blocked right
 now" is not.
+
+Screens count, and they are the most useful thing you can leave behind. File one
+entry per screen — a scene, and also each panel, overlay, dialog or tab that
+changes what you can act on, since a shop panel over the town is somewhere you can
+act and is its own place. Tag it {ui_tag}, say what the screen is for and what can
+be done there, and connect it to the screens it leads to with `link_knowledge`.
+The same test applies: "the top bar carries a gold counter" is the screen, "the
+gold counter reads 340" is this moment.
 
 Do NOT record what the scenario already told you. Do NOT record a bug: a build
 behaving wrongly is a finding for `report_step`, not a rule to teach the next
@@ -218,6 +254,113 @@ behind the deletion, so write what someone would need who later asks whether thi
 should have been deleted at all."""
 
 
+LINK_KNOWLEDGE_DESCRIPTION = """Record that two knowledge entries are related, and how.
+
+An entry that stands alone is worth less than the same entry placed among its
+neighbours: a later run gets it back with the exception, the precondition or the
+contradiction already attached, instead of having to search three more times for
+them.
+
+`relation` is one of {relations}, and each means something a reader ACTS on:
+
+- `LEADS_TO` — from one screen to another. `from` is where you were, `to` is where
+  you ended up. This is what builds the game's map.
+- `CONTRADICTS` — the two cannot both be true. The most valuable link there is,
+  and the one most often left unrecorded, because the moment you notice it is
+  usually the moment you are busy deciding which of them to believe.
+- `REFINES` — `from` is a narrower case, exception or condition of `to`. Point it
+  FROM the specific TO the general.
+- `DEPENDS_ON` — `from` only holds while `to` holds. A precondition.
+- `REPLACES` — `from` supersedes `to`, which you have deleted or are about to.
+
+If none of the five fits, do NOT link. Two entries being about vaguely the same
+subject is not a relation — searching already finds those, and a link that says
+nothing crowds out the ones that say something.
+
+`note` is required and it is the only record of why you thought the connection was
+real, so write what someone would need who later asks whether it should be there.
+For `LEADS_TO` the note is not the reason but the ACTION — "the Shop button on the
+town top bar", "Escape, or the X in the panel's top right" — because that sentence
+is what makes the route usable by a run that has never walked it. A condition
+belongs there too: "the Continue button, only after a save exists".
+
+Both ids must be ones this run has been shown, either as a search hit or as a
+neighbour line under one.
+
+A run gets {limit} links. Nothing answers a link, so send each one once."""
+
+UNLINK_KNOWLEDGE_DESCRIPTION = """Remove a relation between two knowledge entries.
+
+The bar is lower than deleting an entry — both entries survive, and what is lost
+is one connection and the sentence behind it. But it is just as quiet: a route you
+remove simply stops being there, for every run after this one, with nobody
+prompted to look.
+
+The mistake to avoid is removing a link because the BUILD is broken. A door that
+will not open is far more often a bug than a route that no longer exists, and that
+belongs in `report_issue` — unlink it and you have deleted the map instead of
+reporting the breakage. Before removing a `LEADS_TO`, read its note: a route
+recorded as conditional is not gone just because the condition is not met right now.
+
+Remove a link when the connection itself was wrong: the route never existed, the
+two entries do not actually contradict, the precondition was misread.
+
+Name it the way you saw it — `from_knowledge_id`, `to_knowledge_id` and the same
+`relation`. Your `thought` is the only record of why it went away, so write it there.
+
+A run gets {limit} of these."""
+
+EXPAND_KNOWLEDGE_DESCRIPTION = """Follow a knowledge entry's relations further than the search already showed you.
+
+Every search hit already arrives with its closest neighbours listed under it, so
+reach for this only when you need MORE than that: what lies two hops out, or what
+else in the knowledge base is simply about the same thing.
+
+`depth` 1 is the neighbours you have; 2 goes one further. Anything larger is
+clamped rather than refused.
+
+The answer mixes two kinds of thing and they are NOT worth the same. A neighbour
+marked with a relation from {relations} was asserted by a run that wrote down why —
+its `note` is that reason. One marked `{similar}` is a machine guess from text
+similarity, with nobody standing behind it and no note at all. Treat the first as
+a claim and the second as a hint about where to look next.
+
+`knowledge_id` must be one this run has been shown. A run gets {limit} expansions."""
+
+
+def render_neighbour(neighbour) -> str:
+    """One neighbour, folded to a single line.
+
+    The note does NOT ride along here. It is the auditor's field and it can be as
+    long as the reasoning that produced it; inlined under every hit it would
+    roughly double what an expanded search costs the transcript, for something the
+    agent can get in full from `expand_knowledge`. The glyph carries the one
+    distinction that must survive the fold: `↳` was asserted by somebody, `~` was
+    computed.
+    """
+    glyph = "~" if neighbour.origin == "VECTOR" else "↳"
+    label = (neighbour.relation or "related").lower()
+    if neighbour.direction == "IN" and neighbour.relation in _REVERSED:
+        label = _REVERSED[neighbour.relation]
+    if neighbour.score is not None:
+        label = f"{label} {neighbour.score:.2f}"
+    summary = neighbour.summary or ""
+    if len(summary) > MAX_NEIGHBOUR_SUMMARY_CHARS:
+        summary = f"{summary[:MAX_NEIGHBOUR_SUMMARY_CHARS]}…"
+    return f"   {glyph} [id {neighbour.id or 'unknown'} · {label}] {summary}".rstrip()
+
+
+# How a relation reads when the entry you are looking at is on the receiving end.
+# `CONTRADICTS` is absent on purpose: it is symmetric, and a direction word there
+# would invent a claim the graph never made.
+_REVERSED = {
+    "LEADS_TO": "reached from",
+    "REFINES": "refined by",
+    "DEPENDS_ON": "required by",
+    "REPLACES": "replaced by",
+}
+
+
 def render_entry_label(knowledge_id: str, summary: str) -> str:
     """How one knowledge entry is named back to the agent.
 
@@ -283,7 +426,45 @@ def render_hit(index: int, hit: KnowledgeSearchHit) -> str:
     lines = [header, f"   {hit.summary}"] if hit.summary else [header]
     if body:
         lines.append(f"   {body}")
+    lines.extend(render_neighbour(n) for n in hit.neighbors)
     return "\n".join(lines)
+
+
+def render_expansion(payload, remaining: int) -> str:
+    """What the model reads after an expansion that ran.
+
+    The note IS printed here, unlike in a hit's folded neighbour lines. This is
+    the call the agent spent a budget slot on precisely to see more, and for a
+    `LEADS_TO` the note is the whole payload — it is where the route stops being
+    a fact about the graph and becomes something you can walk.
+    """
+    budget = f"{remaining} knowledge expansion(s) left in this run."
+    if not payload.neighbors:
+        return (
+            "Nothing is linked to that entry, and nothing else in the knowledge "
+            "base is close enough to it to mention. That is an answer, not an "
+            f"error.\n\n{budget}"
+        )
+    lines = []
+    for neighbour in payload.neighbors:
+        lines.append(render_neighbour(neighbour))
+        if neighbour.note:
+            lines.append(f"     {neighbour.note}")
+    listing = "\n".join(lines)
+    header = f"Around {payload.id}"
+    if payload.summary:
+        header = f'{header} — "{payload.summary}"'
+    truncated = (
+        "\n\nThere was more than this and the rest was cut. Expand from one of "
+        "these instead of assuming this is the whole neighbourhood."
+        if payload.truncated
+        else ""
+    )
+    return (
+        f"{header}:\n\n{listing}\n\n"
+        "A relation was asserted by a run that wrote down why. A `similar` entry "
+        f"is a text-similarity guess with nobody behind it.{truncated}\n\n{budget}"
+    )
 
 
 def render_results(payload: KnowledgeSearchResultPayload, remaining: int) -> str:

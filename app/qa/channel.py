@@ -17,6 +17,8 @@ from app.qa.envelope import (
     ChatPayload,
     GameState,
     JsonRpcAction,
+    KnowledgeExpandPayload,
+    KnowledgeExpandResultPayload,
     KnowledgeSearchPayload,
     KnowledgeSearchResultPayload,
     LogCategory,
@@ -90,6 +92,10 @@ class QaRunChannel:
             asyncio.Future[KnowledgeSearchResultPayload | KnowledgeSearchFailed] | None
         ) = None
         self._pending_knowledge_id: str | None = None
+        self._expand_waiter: (
+            asyncio.Future[KnowledgeExpandResultPayload | KnowledgeSearchFailed] | None
+        ) = None
+        self._pending_expand_id: str | None = None
         self.scene = SceneMemory()
         self.cancelled = False
         # Operator messages that arrived since the agent last looked. Delivered
@@ -248,6 +254,44 @@ class QaRunChannel:
             self._knowledge_waiter = None
             self._pending_knowledge_id = None
 
+    async def expand_knowledge(
+        self, knowledge_id: str, depth: int, include_similar: bool
+    ) -> KnowledgeExpandResultPayload | KnowledgeSearchFailed | None:
+        """Walk the knowledge graph out from one entry. `None` means no answer came.
+
+        Same three outcomes as `search_knowledge`, and the same argument for
+        returning rather than raising.
+
+        This gets its OWN waiter rather than sharing the search's, for the reason
+        the action waiter is separate from that one: two frames in flight whose
+        replies can resolve each other's futures is a bug that shows up as an
+        expansion answering a search with the wrong content, and nothing about
+        the payload would make it obvious. The timeout is the search's, because
+        the work on the far side is the same shape — a couple of indexed queries.
+        """
+        self._raise_if_cancelled()
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[KnowledgeExpandResultPayload | KnowledgeSearchFailed] = (
+            loop.create_future()
+        )
+        self._expand_waiter = waiter
+
+        frame = self._frame(
+            MessageType.KNOWLEDGE_EXPAND,
+            KnowledgeExpandPayload(
+                knowledge_id=knowledge_id, depth=depth, include_similar=include_similar
+            ),
+        )
+        self._pending_expand_id = frame["messageId"]
+        await self._send(frame)
+        try:
+            return await asyncio.wait_for(waiter, timeout=KNOWLEDGE_SEARCH_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            self._expand_waiter = None
+            self._pending_expand_id = None
+
     async def write_knowledge(self, message_type: MessageType, payload) -> None:
         """Write to the project's knowledge base. Nothing comes back, by design.
 
@@ -297,6 +341,13 @@ class QaRunChannel:
             KnowledgeSearchResultPayload.model_validate(raw.get("payload") or {})
         )
 
+    def on_knowledge_expand_result(self, raw: dict) -> None:
+        if not self._answers_pending_expand(raw):
+            return
+        self._resolve_expand(
+            KnowledgeExpandResultPayload.model_validate(raw.get("payload") or {})
+        )
+
     def on_error(self, raw: dict) -> bool:
         """An inbound ERROR. True when it was the answer to something we asked.
 
@@ -311,14 +362,19 @@ class QaRunChannel:
         requires a `code`. Validating here would drop exactly the frame that
         exists to unblock a waiting tool.
         """
-        if not self._answers_pending_search(raw):
-            return False
         payload = raw.get("payload") or {}
         reason = payload.get("message") if isinstance(payload, dict) else None
-        self._resolve_knowledge(
-            KnowledgeSearchFailed(reason=str(reason or "no reason given"))
-        )
-        return True
+        failure = KnowledgeSearchFailed(reason=str(reason or "no reason given"))
+        if self._answers_pending_search(raw):
+            self._resolve_knowledge(failure)
+            return True
+        # An expansion that could not run is answered the same way, so its waiter
+        # has to be released here too — otherwise the tool sits out the full
+        # timeout on a failure Orchestration already reported.
+        if self._answers_pending_expand(raw):
+            self._resolve_expand(failure)
+            return True
+        return False
 
     def _answers_pending_search(self, raw: dict) -> bool:
         """Whether this frame is the reply to the search currently in flight.
@@ -332,11 +388,23 @@ class QaRunChannel:
             return False
         return raw.get("correlationId") == self._pending_knowledge_id
 
+    def _answers_pending_expand(self, raw: dict) -> bool:
+        """Whether this frame is the reply to the expansion currently in flight."""
+        if self._pending_expand_id is None:
+            return False
+        return raw.get("correlationId") == self._pending_expand_id
+
     def _resolve_knowledge(
         self, answer: KnowledgeSearchResultPayload | KnowledgeSearchFailed
     ) -> None:
         if self._knowledge_waiter is not None and not self._knowledge_waiter.done():
             self._knowledge_waiter.set_result(answer)
+
+    def _resolve_expand(
+        self, answer: KnowledgeExpandResultPayload | KnowledgeSearchFailed
+    ) -> None:
+        if self._expand_waiter is not None and not self._expand_waiter.done():
+            self._expand_waiter.set_result(answer)
 
     def on_chat(self, raw: dict) -> None:
         payload = ChatPayload.model_validate(raw.get("payload") or {})
