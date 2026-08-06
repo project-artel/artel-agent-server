@@ -3,6 +3,9 @@ import asyncio
 import pytest
 from langchain_core.runnables import RunnableLambda
 from langchain_core.tracers.context import collect_runs
+from pydantic import ValidationError
+
+from app.prompts import load_prompt
 
 from app.agents import (
     AgentContext,
@@ -13,6 +16,7 @@ from app.agents import (
     ScenarioGenerationError,
     ScenarioPlan,
 )
+from app.agents.scenario.schemas import ScenarioCasePlan
 from app.agents.scenario.prompt import (
     LANGUAGE_DIRECTIVES,
     build_first_message,
@@ -30,12 +34,12 @@ def _result(message: str = "Authored two scenarios.") -> ScenarioAgentResult:
             ScenarioPlan(
                 title="Login reward flow",
                 description="Verify the login reward flow.",
-                case_ids=[11, 12],
+                cases=[ScenarioCasePlan(case_id=11), ScenarioCasePlan(case_id=12)],
             ),
             ScenarioPlan(
                 title="Shop purchase flow",
                 description="Verify the shop purchase flow.",
-                case_ids=[21],
+                cases=[ScenarioCasePlan(case_id=21)],
             ),
         ],
     )
@@ -113,7 +117,7 @@ def test_scenario_agent_returns_multi_scenario_result() -> None:
         "Login reward flow",
         "Shop purchase flow",
     ]
-    assert out.scenarios[0].case_ids == [11, 12]
+    assert [c.case_id for c in out.scenarios[0].cases] == [11, 12]
 
 
 def test_scenario_agent_raises_when_no_structured_response() -> None:
@@ -143,7 +147,7 @@ def test_scenario_agent_binds_the_search_tool() -> None:
     asyncio.run(agent.run(_request(), _CTX, _channel()))
 
     assert seen["tools"] == ["search_test_cases"]
-    # The system prompt is the resolved v2 text, language directive substituted.
+    # The system prompt is the resolved latest (v3) text, language directive substituted.
     assert "search_test_cases" in seen["system_prompt"]
     assert "{" not in seen["system_prompt"]
 
@@ -160,17 +164,64 @@ def test_empty_scenarios_is_a_valid_result() -> None:
 
 
 def test_scenario_result_parses_string_case_ids_as_ints() -> None:
-    """Search hits carry string ids; the plan stores them as ints (spec)."""
+    """Search hits carry string ids; each case's case_id stores them as ints (spec)."""
     parsed = ScenarioAgentResult.model_validate(
         {
             "message": "ok",
             "scenarios": [
-                {"title": "t", "description": "d", "case_ids": ["7", "8"]}
+                {"title": "t", "description": "d", "cases": [{"case_id": "7"}, {"case_id": "8"}]}
             ],
         }
     )
 
-    assert parsed.scenarios[0].case_ids == [7, 8]
+    assert [c.case_id for c in parsed.scenarios[0].cases] == [7, 8]
+
+
+def test_scenario_case_carries_authored_setup_and_guide_steps() -> None:
+    """각 case가 저작 Step(setup 도달 / guide 실행)을 함께 싣는다(ARTEL-281)."""
+    from app.agents.scenario.schemas import AuthoredStepKind
+
+    parsed = ScenarioAgentResult.model_validate(
+        {
+            "message": "m",
+            "scenarios": [
+                {
+                    "title": "t",
+                    "description": "d",
+                    "cases": [
+                        {
+                            "case_id": 1,
+                            "steps": [
+                                {"kind": "setup", "intent": "타이틀로 이동", "hint": "Esc"},
+                                {"kind": "guide", "intent": "시작을 누른다"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    steps = parsed.scenarios[0].cases[0].steps
+    assert [s.kind for s in steps] == [AuthoredStepKind.setup, AuthoredStepKind.guide]
+    assert steps[0].hint == "Esc"
+    assert steps[1].hint is None
+
+
+def test_verify_is_not_an_authored_step_kind() -> None:
+    """검증(verify) step은 만들지 않는다 — 검증은 케이스 expected로 흡수(기획)."""
+    with pytest.raises(ValidationError):
+        ScenarioCasePlan.model_validate({"case_id": 1, "steps": [{"kind": "verify", "intent": "x"}]})
+
+
+def test_scenario_prompt_v3_authors_steps_and_v2_does_not() -> None:
+    """v3는 case별 Step 저작을 지시하고, v2(선택만)는 그대로 둔다(회귀 고정)."""
+    v2 = load_prompt("scenario", "system", "v2").body
+    v3 = load_prompt("scenario", "system", "v3").body
+
+    assert "case_ids" in v2            # v2: 케이스를 id로 선택만
+    assert "`cases`" in v3             # v3: cases[]로 자리별 저작
+    assert "setup" in v3 and "guide" in v3   # 두 종류의 Step을 저작
 
 
 def test_scenario_result_scenario_id_edit_vs_add() -> None:
@@ -179,8 +230,8 @@ def test_scenario_result_scenario_id_edit_vs_add() -> None:
         {
             "message": "ok",
             "scenarios": [
-                {"scenario_id": "5", "title": "edit", "description": "d", "case_ids": [1]},
-                {"title": "add", "description": "d", "case_ids": [2]},
+                {"scenario_id": "5", "title": "edit", "description": "d", "cases": [{"case_id": 1}]},
+                {"title": "add", "description": "d", "cases": [{"case_id": 2}]},
             ],
         }
     )
@@ -198,7 +249,7 @@ def test_first_message_carries_current_scenarios() -> None:
                     scenario_id=42,
                     title="Checkout flow",
                     description="Verify checkout.",
-                    case_ids=[1, 2],
+                    cases=[ScenarioCasePlan(case_id=1), ScenarioCasePlan(case_id=2)],
                 )
             ]
         )
@@ -225,8 +276,8 @@ def test_system_prompt_uses_requested_language_directive() -> None:
     assert LANGUAGE_DIRECTIVES[OutputLanguage.en] in en_body
     assert "한국어" in ko_body
     assert "English" in en_body
-    # v2 is the newest scenario prompt version and the default.
-    assert version == "v2"
+    # v3 is the newest scenario prompt version and the default (ARTEL-281).
+    assert version == "v3"
 
 
 def test_first_message_carries_the_run_goal_and_context() -> None:

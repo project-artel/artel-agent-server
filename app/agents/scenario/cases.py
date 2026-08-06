@@ -62,8 +62,10 @@ you are sure which category the cases you want are filed under — a wrong one h
 them rather than sharpening the search.
 
 Each hit prints its `id`, category, title, verification status, a similarity
-score, and its precondition/expected. Put the ids of the cases that belong in a
-scenario into that scenario's `case_ids`.
+score, and its precondition/expected. For each case that belongs in a scenario,
+add a `cases[]` entry with its `case_id`, and author that entry's `steps`
+(`setup` to reach the case's precondition, `guide` to carry the case out) — see
+the system prompt for how.
 
 You get {limit} searches for the whole turn, so spend them on distinct scenarios
 rather than re-asking the same thing. An empty result is an answer: it means no
@@ -93,7 +95,7 @@ def render_hit(index: int, hit) -> str:
     """One hit, with the provenance the agent needs to weigh and reference it.
 
     The id leads because referencing it is the whole point — a scenario's
-    `case_ids` are these ids. The verification status and score qualify the
+    `cases[].case_id` are these ids. The verification status and score qualify the
     match: a weak or unverified case is still returned, and the agent has to be
     able to discount it rather than trust the top hit by position alone.
     """
@@ -130,6 +132,7 @@ def render_results(payload: TestCaseSearchResult, remaining: int) -> str:
     )
     return (
         f"Existing cases matching your search:\n\n{hits}\n\n"
-        "Reference the ones a scenario needs by putting their ids in that "
-        f"scenario's `case_ids`.\n\n{budget}"
+        "Reference the ones a scenario needs as `cases[]` entries — each an id in "
+        "`case_id`, with authored `steps` (setup/guide) you write for that "
+        f"position.\n\n{budget}"
     )

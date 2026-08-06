@@ -11,6 +11,7 @@ from app.agents import (
     ScenarioAgentResult,
     ScenarioPlan,
 )
+from app.agents.scenario.schemas import ScenarioCasePlan
 from app.api.sessions import router as sessions_router
 from app.sessions import (
     InMemorySessionStore,
@@ -28,7 +29,7 @@ def _result(message: str = "Here are the scenarios.") -> ScenarioAgentResult:
             ScenarioPlan(
                 title="Shop purchase flow",
                 description="Verify the shop purchase flow.",
-                case_ids=[1, 2],
+                cases=[ScenarioCasePlan(case_id=1), ScenarioCasePlan(case_id=2)],
             )
         ],
     )
@@ -191,7 +192,7 @@ def test_session_record_defaults_current_scenarios_when_missing() -> None:
 def test_open_stores_current_scenarios() -> None:
     service, _, store = _service()
     current = [
-        ScenarioPlan(scenario_id=7, title="Checkout", description="d", case_ids=[1])
+        ScenarioPlan(scenario_id=7, title="Checkout", description="d", cases=[ScenarioCasePlan(case_id=1)])
     ]
 
     session_id = asyncio.run(
@@ -209,7 +210,7 @@ def test_run_turn_refreshes_current_scenarios_and_reaches_agent() -> None:
     asyncio.run(service.start_first_turn(session_id, _channel()))
 
     updated = [
-        ScenarioPlan(scenario_id=9, title="Login", description="d", case_ids=[3])
+        ScenarioPlan(scenario_id=9, title="Login", description="d", cases=[ScenarioCasePlan(case_id=3)])
     ]
     asyncio.run(
         service.run_turn(
@@ -260,7 +261,7 @@ def test_ws_flow_open_first_turn_and_turn() -> None:
         first = ws.receive_json()
         assert first["type"] == "result"
         assert first["scenarios"][0]["title"] == "Shop purchase flow"
-        assert first["scenarios"][0]["case_ids"] == [1, 2]
+        assert [c["case_id"] for c in first["scenarios"][0]["cases"]] == [1, 2]
 
         ws.send_json({"type": "turn", "user_input": "make it shorter", "draft": None})
         second = ws.receive_json()
@@ -278,7 +279,7 @@ def test_ws_accepts_current_scenarios_and_round_trips_scenario_id() -> None:
         message="edited",
         scenarios=[
             ScenarioPlan(
-                scenario_id=42, title="Checkout", description="d", case_ids=[1]
+                scenario_id=42, title="Checkout", description="d", cases=[ScenarioCasePlan(case_id=1)]
             )
         ],
     )
@@ -292,7 +293,7 @@ def test_ws_accepts_current_scenarios_and_round_trips_scenario_id() -> None:
         json={
             "user_input": "edit checkout",
             "current_scenarios": [
-                {"scenario_id": 42, "title": "Checkout", "description": "d", "case_ids": [1]}
+                {"scenario_id": 42, "title": "Checkout", "description": "d", "cases": [{"case_id": 1}]}
             ],
         },
     )
@@ -311,7 +312,7 @@ def test_ws_accepts_current_scenarios_and_round_trips_scenario_id() -> None:
                 "type": "turn",
                 "user_input": "again",
                 "current_scenarios": [
-                    {"scenario_id": 42, "title": "Checkout", "description": "d", "case_ids": [1, 2]}
+                    {"scenario_id": 42, "title": "Checkout", "description": "d", "cases": [{"case_id": 1}, {"case_id": 2}]}
                 ],
             }
         )

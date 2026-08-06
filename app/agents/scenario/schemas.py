@@ -66,15 +66,51 @@ class ScenarioAgentRequest(BaseModel):
     locale: OutputLanguage = DEFAULT_LANGUAGE
 
 
+class AuthoredStepKind(StrEnum):
+    """저작 Step의 종류(ARTEL-281). `setup`은 사전조건 도달(판정 없이 fast-forward),
+    `guide`는 실행. 검증(verify)은 만들지 않는다 — 케이스의 `expected`로 흡수한다(기획)."""
+
+    setup = "setup"
+    guide = "guide"
+
+
+class AuthoredStep(BaseModel):
+    """한 케이스 자리에 대한 실행 가이드 한 칸(ARTEL-254/261/281).
+
+    실행 시 Agent에겐 **advisory**다: 씬이 다르면 무시하고 자기 판단으로 간다. `hint`는 사람/에이전트가
+    아는 지름길(키·백도어)이고 강제가 아니다. 판정 여부(`assert`)는 Orche가 `kind`에서 유도한다
+    (setup=판정 안 함). 그래서 여기선 kind/intent/hint/input만 만든다.
+    """
+
+    kind: AuthoredStepKind = AuthoredStepKind.guide
+    intent: str
+    hint: str | None = None
+    # "keyboard" | "click" 같은 조작 방식(있으면). 없으면 null.
+    input: str | None = None
+
+
+class ScenarioCasePlan(BaseModel):
+    """시나리오의 한 자리 = 참조할 기존 TestCase(id) + 그 자리의 저작 Step(ARTEL-281).
+
+    Step 저작의 1책임은 Agent다. 각 자리마다 사전조건 도달(setup)과 실행(guide) 가이드를
+    케이스의 precondition/expected와 게임 맥락에서 만든다. Step은 자리 전용이라, 같은 케이스가
+    여러 자리에 와도 자리마다 다르다.
+    """
+
+    # search_test_cases가 돌려준 기존 TestCase id(문자열로 오면 int로 coerce).
+    case_id: int
+    steps: list[AuthoredStep] = Field(default_factory=list)
+
+
 class ScenarioPlan(BaseModel):
     """One scenario the run goal was decomposed into.
 
-    Deliberately NOT a ``ScenarioDraft``: the run-scoped authoring agent no longer
-    writes step bodies. TestCases live only in the orchestration server, so a
-    scenario is expressed as references to the cases that make it up
-    (``case_ids``), and Orchestration links them (`test_scenario_case`) and adds
-    the scenario to the run. ``ScenarioDraft``/``ScenarioStep`` stay for the QA
-    execution agent, which still runs an approved step-based scenario.
+    Deliberately NOT a ``ScenarioDraft``: the run-scoped authoring agent references
+    EXISTING TestCases (which live only in the orchestration server) rather than
+    writing step bodies for them. A scenario is the ordered cases that make it up
+    (``cases``), each with its authored Steps; Orchestration links them
+    (`test_scenario_case`, with the steps) and adds the scenario to the run.
+    ``ScenarioDraft``/``ScenarioStep`` stay for the QA execution agent.
     """
 
     # None = a brand-new scenario to add; an id = edit that existing scenario
@@ -84,11 +120,11 @@ class ScenarioPlan(BaseModel):
     scenario_id: int | None = None
     title: str
     description: str
-    # Ids of existing TestCases (from `search_test_cases`) this scenario is built
-    # from. The search returns ids as strings on the wire; they are numeric on the
-    # far side, so the plan carries them as ints. May be empty only alongside an
-    # empty `scenarios` on the result — a scenario with no cases is not authored.
-    case_ids: list[int] = Field(default_factory=list)
+    # The ordered cases this scenario is built from (from `search_test_cases`),
+    # each with its authored Steps. Order is the scenario's flow. May be empty only
+    # alongside an empty `scenarios` on the result — a scenario with no cases is not
+    # authored.
+    cases: list[ScenarioCasePlan] = Field(default_factory=list)
 
 
 class ScenarioAgentResult(BaseModel):

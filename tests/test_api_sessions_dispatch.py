@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.agents import ScenarioAgent, ScenarioAgentResult, ScenarioPlan
+from app.agents.scenario.schemas import ScenarioCasePlan
 from app.api.sessions import router as sessions_router
 from app.sessions import InMemorySessionStore, SessionService
 from app.sessions.channel import TestCaseSearchResult
@@ -30,7 +31,7 @@ class SearchingAgent(ScenarioAgent):
                     ScenarioPlan(
                         title="Shop",
                         description="Verify shop.",
-                        case_ids=[int(hit.id) for hit in answer.results],
+                        cases=[ScenarioCasePlan(case_id=int(hit.id)) for hit in answer.results],
                     )
                 ],
             )
@@ -87,7 +88,7 @@ def test_search_result_routes_to_the_channel_and_a_turn_is_busy() -> None:
         )
         result = ws.receive_json()
         assert result["type"] == "result"
-        assert result["scenarios"][0]["case_ids"] == [7]
+        assert [c["case_id"] for c in result["scenarios"][0]["cases"]] == [7]
 
 
 def test_an_unsupported_inbound_frame_is_reported() -> None:

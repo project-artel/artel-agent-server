@@ -14,13 +14,13 @@ PROMPT_AGENT = "scenario"
 # OutputLanguage member.
 LANGUAGE_DIRECTIVES: dict[OutputLanguage, str] = {
     OutputLanguage.ko: (
-        "출력의 모든 자연어 값(message, 그리고 각 시나리오의 title과 description)을 "
-        "한국어로 작성한다. JSON 키와 case_ids의 숫자는 바꾸지 않는다."
+        "출력의 모든 자연어 값(message, 각 시나리오의 title·description, 그리고 각 Step의 "
+        "intent·hint)을 한국어로 작성한다. JSON 키와 cases의 case_id 숫자는 바꾸지 않는다."
     ),
     OutputLanguage.en: (
-        "Write every natural-language value (message, and each scenario's title "
-        "and description) in English. Do not change JSON keys or the numbers in "
-        "case_ids."
+        "Write every natural-language value (message, each scenario's title and "
+        "description, and each step's intent and hint) in English. Do not change "
+        "JSON keys or the case_id numbers in cases."
     ),
 }
 
