@@ -14,7 +14,7 @@ from app.llm.models import (
 )
 from app.qa.envelope import ErrorPayload, MessageType, outbound_envelope
 from app.qa.run_config import RunConfig
-from app.qa.schemas import QaScenario
+from app.qa.schemas import QaRunScenario, QaScenario
 from app.qa.service import QaExecutionService
 from app.sessions.store import SessionExpired
 
@@ -23,11 +23,48 @@ router = APIRouter(tags=["qa"])
 
 
 class QaContext(BaseModel):
-    qa_try_id: int
+    """QA_Run 세션이 실행할 것 (ARTEL-258).
+
+    런 단위: `scenarios`는 런의 시나리오들(각자 qa_try_id + 실행 본문)이며 순서대로 실행된다.
+    레거시 단일 시나리오 호출(qa_try_id/test_scenario_id/scenario)도 받아 1-시나리오 런으로
+    정규화한다 — Orche가 run-scoped로 바뀌기 전까지의 하위호환.
+    """
+
     game_instance_id: int
-    test_scenario_id: int
+    qa_run_id: int | None = None
+    scenarios: list[QaRunScenario] = []
+
+    # --- 레거시 단일 시나리오 (하위호환) ---
+    qa_try_id: int | None = None
+    test_scenario_id: int | None = None
     # The approved test scenario the Agent executes: an ordered Step list (재설계).
-    scenario: QaScenario
+    scenario: QaScenario | None = None
+
+    @model_validator(mode="after")
+    def normalize(self) -> "QaContext":
+        if not self.scenarios:
+            if (
+                self.scenario is None
+                or self.qa_try_id is None
+                or self.test_scenario_id is None
+            ):
+                raise ValueError(
+                    "QA context requires scenarios[] or a single "
+                    "(qa_try_id, test_scenario_id, scenario)"
+                )
+            self.scenarios = [
+                QaRunScenario(
+                    qa_try_id=self.qa_try_id,
+                    test_scenario_id=self.test_scenario_id,
+                    scenario=self.scenario,
+                )
+            ]
+            if self.qa_run_id is None:
+                # 단일 시나리오 런의 run id는 그 try id로 대신한다(전용 run이 없으므로).
+                self.qa_run_id = self.qa_try_id
+        elif self.qa_run_id is None:
+            raise ValueError("run-scoped QA context requires qa_run_id")
+        return self
 
 
 class OpenQaSessionRequest(BaseModel):
@@ -91,10 +128,9 @@ async def open_qa_session(
     request: Request,
 ) -> OpenQaSessionResponse:
     session_id, run_config = await _service(request.app).open(
-        qa_try_id=payload.context.qa_try_id,
+        qa_run_id=payload.context.qa_run_id,
         game_instance_id=payload.context.game_instance_id,
-        test_scenario_id=payload.context.test_scenario_id,
-        scenario=payload.context.scenario,
+        scenarios=payload.context.scenarios,
         model=payload.model,
         language=payload.language,
         prompt_version=payload.prompt_version,

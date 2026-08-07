@@ -8,7 +8,7 @@ run died exactly this way, on `{"id": 1, "success": true, "error": ""}`.
 
 import asyncio
 
-from app.qa.schemas import QaCaseRef, QaScenario, QaStep
+from app.qa.schemas import QaCaseRef, QaRunScenario, QaScenario, QaStep
 from app.qa.service import QaExecutionService
 from app.qa.store import InMemoryQaSessionStore
 
@@ -55,10 +55,11 @@ async def _running_service() -> tuple[QaExecutionService, str, asyncio.Task]:
         runner_factory=lambda **_kwargs: runner,
     )
     session_id, _run_config = await service.open(
-        qa_try_id=7,
+        qa_run_id=7,
         game_instance_id=1,
-        test_scenario_id=1,
-        scenario=make_scenario(),
+        scenarios=[
+            QaRunScenario(qa_try_id=7, test_scenario_id=1, scenario=make_scenario())
+        ],
     )
 
     async def send(_frame: dict) -> None:

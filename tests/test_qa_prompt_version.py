@@ -14,7 +14,7 @@ from app.agents.qa import runner as runner_module
 from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState, build_tools
 from app.api.qa_sessions import OpenQaSessionRequest
-from app.qa.schemas import QaCaseRef, QaScenario, QaStep
+from app.qa.schemas import QaCaseRef, QaRunScenario, QaScenario, QaStep
 from app.prompts import load_prompt
 from app.prompts.loader import resolve_version
 from app.qa.channel import QaRunChannel
@@ -99,10 +99,11 @@ async def _run_session(prompt_version: str | None) -> str | None:
         store=InMemoryQaSessionStore(), runner_factory=factory
     )
     session_id, _run_config = await service.open(
-        qa_try_id=7,
+        qa_run_id=7,
         game_instance_id=1,
-        test_scenario_id=1,
-        scenario=make_scenario(),
+        scenarios=[
+            QaRunScenario(qa_try_id=7, test_scenario_id=1, scenario=make_scenario())
+        ],
         prompt_version=prompt_version,
     )
 

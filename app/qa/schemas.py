@@ -1,8 +1,6 @@
-from typing import Literal
-
 from pydantic import BaseModel, Field
 
-from app.qa.envelope import GameState, QaChatTurn
+from app.qa.envelope import QaChatTurn
 from app.qa.run_config import RunConfig
 
 
@@ -45,33 +43,36 @@ class QaStepResult(BaseModel):
     message: str
 
 
-# Phase of the per-step loop the session is currently in.
-#   need_action -> waiting to plan/emit the ACTION for the current step
-#   need_result -> ACTION sent, waiting for the ACTION_RESULT to verify
-#   done        -> terminal (completed, failed, or cancelled)
-QaPhase = Literal["need_action", "need_result", "done"]
+class QaRunScenario(BaseModel):
+    """런 안의 시나리오 하나 = 자기 qa_try_id + 실행 본문(스텝 리스트) (ARTEL-258).
+
+    qa_try는 시나리오당이라 각 시나리오가 자기 `qa_try_id`를 들고 다닌다 — 프레임은 실행
+    중인 시나리오의 try로 stamp된다. `scenario`는 그 시나리오의 실행 본문(재설계 Step 리스트).
+    """
+
+    qa_try_id: int
+    test_scenario_id: int
+    scenario: QaScenario
 
 
 class QaSessionRecord(BaseModel):
+    """QA_Run 세션 하나 = 런의 시나리오들을 순차 실행 (ARTEL-258/259).
+
+    세션은 **런 단위**(WS 유지). qa_try·채널은 시나리오당이고, 시나리오 사이는 ResetPolicy가
+    게임을 초기화한다. `run_config`는 open에서 확정한다 — 세션이 열리는 순간부터 귀속 가능해야
+    하므로 여기서 한 번 결정하고 재결정하지 않는다.
+    """
+
     # Frozen at session open (from POST /qa-sessions context).
-    qa_try_id: int
+    qa_run_id: int
     game_instance_id: int
-    test_scenario_id: int
-    # The approved test scenario the Agent executes: an ordered Step list (재설계).
-    scenario: QaScenario
+    # The run's scenarios, executed in order — each carries its own qa_try_id.
+    scenarios: list[QaRunScenario]
     # Settled at open, not at run start: the run has to be attributable from the
     # moment the session exists, and the open response is what carries it back to
     # Orchestration. Nothing here is re-decided later.
     run_config: RunConfig
-
-    # Live execution state.
-    current_step: int = 0  # 0-based index into scenario.steps
-    phase: QaPhase = "need_action"
-    sequence: int = 0  # monotonic per-session outbound counter
-    latest_game_state: GameState | None = None
-    last_action_message_id: str | None = None
-    step_results: list[QaStepResult] = Field(default_factory=list)
-    # Operator conversation. Trimmed to the most recent turns on every append:
-    # the whole record is rewritten to Redis each turn, so it cannot grow without
-    # bound, and only the recent turns are what steer the next decision.
+    # Operator conversation (run-scoped). Trimmed to the most recent turns on every
+    # append: the whole record is rewritten to Redis each turn, so it cannot grow
+    # without bound, and only the recent turns are what steer the next decision.
     chat: list[QaChatTurn] = Field(default_factory=list)

@@ -22,6 +22,7 @@ from app.llm.models import (
 from app.main import app
 from app.qa.channel import QaRunChannel
 from app.qa.run_config import resolve_run_config
+from app.qa.schemas import QaRunScenario
 from app.qa.service import QaExecutionService
 from app.qa.store import InMemoryQaSessionStore
 from tests.test_qa_prompt_version import make_scenario, open_request
@@ -140,10 +141,11 @@ def test_service_persists_reasoning_and_passes_it_to_runner() -> None:
         service = QaExecutionService(store=store, runner_factory=factory)
         reasoning = ReasoningConfig(effort=ReasoningEffort.medium)
         session_id, run_config = await service.open(
-            qa_try_id=7,
+            qa_run_id=7,
             game_instance_id=1,
-            test_scenario_id=1,
-            scenario=make_scenario(),
+            scenarios=[
+                QaRunScenario(qa_try_id=7, test_scenario_id=1, scenario=make_scenario())
+            ],
             model=LLMModel.claude_sonnet_5,
             reasoning=reasoning,
         )
@@ -168,10 +170,13 @@ def test_service_rejects_invalid_reasoning_before_saving() -> None:
         service = QaExecutionService(InMemoryQaSessionStore())
         with pytest.raises(ValueError, match="does not support"):
             await service.open(
-                qa_try_id=7,
+                qa_run_id=7,
                 game_instance_id=1,
-                test_scenario_id=1,
-                scenario=make_scenario(),
+                scenarios=[
+                    QaRunScenario(
+                        qa_try_id=7, test_scenario_id=1, scenario=make_scenario()
+                    )
+                ],
                 # Named rather than left to DEFAULT_MODEL: the default now
                 # reasons, and this case needs a model that does not.
                 model=LLMModel.gpt_4o,
