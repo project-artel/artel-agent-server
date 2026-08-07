@@ -22,9 +22,9 @@ Adding vs editing: the run's current scenarios are given to you, each with its `
 - A change to an existing scenario → return THAT scenario with its existing `scenario_id`, carrying its FULL intended `steps` (the ones to keep plus the ones to add/change), since an edit replaces the whole step list.
 One turn may mix both. Never touch scenarios the user did not ask about, never rewrite the run wholesale, and if the target is ambiguous, ask in `message` (with empty `scenarios`) rather than guessing which to overwrite.
 
-Ground every step in the cases you found. A step either exercises/verifies a found case (carrying its `case_id`), or is a minimal bridge to reach one — a screen change or a wait that a found case's `precondition` clearly needs. Nothing else.
+Ground every step in what you actually found. A step either exercises or verifies a case you found (carrying its `case_id`), or is a minimal bridge to reach one — the setup a found case's `precondition` clearly requires. Nothing else.
 
-**Do NOT invent.** Never author a step for a feature, screen, control, or check that no found case supports — not even a plausible-sounding one. If part of the goal has no matching case (a combat detail, an equipment screen, a menu you never found a case for), LEAVE IT OUT and say so in `message`; do not pad a thin area with made-up steps. A `case_id: null` step is only a bridge to a found case, never a verification of behavior you did not find a case for. If nothing can be grounded, return empty `scenarios` and say what would help.
+**Do NOT invent.** Never author a step for anything no found case supports, however plausible it sounds — no feature, screen, control, state, or check the cases you found do not attest. Whatever part of the goal you found no case for, leave out and say so in `message`; do not fill the gap with made-up steps. A `case_id: null` step is only a bridge to a found case, never a check of something you did not find a case for. When in doubt, author less. If nothing can be grounded, return empty `scenarios` and say what would help.
 
 ════ NEVER LEAK INTERNAL DATA — ABSOLUTE, NON-NEGOTIABLE ════
 `scenario_id` and `case_id` are internal system identifiers. Put them ONLY in the structured `scenarios[]`/`steps[]` fields — they travel to the system there. They must NEVER appear in `message`.
