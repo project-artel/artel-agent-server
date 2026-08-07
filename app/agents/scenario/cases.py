@@ -47,11 +47,12 @@ MAX_TEXT_CHARS = 300
 # Written out rather than left as a docstring so the per-turn cap comes from the
 # constant above. An agent told only that searching is "limited" spends the
 # budget at the first opportunity.
-SEARCH_TEST_CASES_DESCRIPTION = """Find existing TestCases to build a scenario from.
+SEARCH_TEST_CASES_DESCRIPTION = """Find existing TestCases a scenario should verify.
 
 TestCases already exist in the project — imported or written earlier — and a
-scenario you author is a SELECTION of them, referenced by id. This is how you see
-them: they are not in your context, so search for the ones a scenario needs.
+scenario you author is an ordered flow of steps whose verification points map to
+these cases. This is how you see them: they are not in your context, so search
+for the ones a scenario needs.
 
 `query` is a description in your own words of the behaviour a scenario should
 cover — "상점에서 골드로 아이템 구매", "튜토리얼 첫 진입 흐름" — not a keyword.
@@ -62,14 +63,15 @@ you are sure which category the cases you want are filed under — a wrong one h
 them rather than sharpening the search.
 
 Each hit prints its `id`, category, title, verification status, a similarity
-score, and its precondition/expected. Put the ids of the cases that belong in a
-scenario into that scenario's `case_ids`.
+score, and its precondition/expected. Write the step(s) that exercise a case and
+set that step's `case_id` to the case's `id` — the step observing its expected
+result is the case's verification step.
 
 You get {limit} searches for the whole turn, so spend them on distinct scenarios
 rather than re-asking the same thing. An empty result is an answer: it means no
-case matches, NOT that something went wrong. Do not invent a case or a scenario
-to cover the gap — return the scenarios you could build, and say in `message`
-what is still missing."""
+case matches, NOT that something went wrong. Do not invent a case — you may still
+write the action steps and leave their `case_id` null, and say in `message` what
+is still missing."""
 
 
 class TestCaseSearchState:
@@ -92,10 +94,10 @@ def _clip(text: str) -> str:
 def render_hit(index: int, hit) -> str:
     """One hit, with the provenance the agent needs to weigh and reference it.
 
-    The id leads because referencing it is the whole point — a scenario's
-    `case_ids` are these ids. The verification status and score qualify the
-    match: a weak or unverified case is still returned, and the agent has to be
-    able to discount it rather than trust the top hit by position alone.
+    The id leads because referencing it is the whole point — a verification
+    step's `case_id` is one of these ids. The verification status and score
+    qualify the match: a weak or unverified case is still returned, and the agent
+    has to be able to discount it rather than trust the top hit by position alone.
     """
     header = (
         f"{index}. [id {hit.id} · {hit.category or 'UNCATEGORISED'} · "
@@ -130,6 +132,6 @@ def render_results(payload: TestCaseSearchResult, remaining: int) -> str:
     )
     return (
         f"Existing cases matching your search:\n\n{hits}\n\n"
-        "Reference the ones a scenario needs by putting their ids in that "
-        f"scenario's `case_ids`.\n\n{budget}"
+        "For each case a scenario verifies, write the step(s) that exercise it and "
+        f"set that step's `case_id` to the case's id.\n\n{budget}"
     )

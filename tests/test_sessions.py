@@ -11,6 +11,7 @@ from app.agents import (
     ScenarioAgentResult,
     ScenarioPlan,
 )
+from app.agents.scenario.schemas import AuthoredStep
 from app.api.sessions import router as sessions_router
 from app.sessions import (
     InMemorySessionStore,
@@ -28,7 +29,10 @@ def _result(message: str = "Here are the scenarios.") -> ScenarioAgentResult:
             ScenarioPlan(
                 title="Shop purchase flow",
                 description="Verify the shop purchase flow.",
-                case_ids=[1, 2],
+                steps=[
+                    AuthoredStep(action="Open the shop", case_id=1),
+                    AuthoredStep(action="Buy an item and confirm gold drops", case_id=2),
+                ],
             )
         ],
     )
@@ -191,7 +195,12 @@ def test_session_record_defaults_current_scenarios_when_missing() -> None:
 def test_open_stores_current_scenarios() -> None:
     service, _, store = _service()
     current = [
-        ScenarioPlan(scenario_id=7, title="Checkout", description="d", case_ids=[1])
+        ScenarioPlan(
+            scenario_id=7,
+            title="Checkout",
+            description="d",
+            steps=[AuthoredStep(action="Confirm checkout", case_id=1)],
+        )
     ]
 
     session_id = asyncio.run(
@@ -209,7 +218,12 @@ def test_run_turn_refreshes_current_scenarios_and_reaches_agent() -> None:
     asyncio.run(service.start_first_turn(session_id, _channel()))
 
     updated = [
-        ScenarioPlan(scenario_id=9, title="Login", description="d", case_ids=[3])
+        ScenarioPlan(
+            scenario_id=9,
+            title="Login",
+            description="d",
+            steps=[AuthoredStep(action="Confirm login", case_id=3)],
+        )
     ]
     asyncio.run(
         service.run_turn(
@@ -260,7 +274,7 @@ def test_ws_flow_open_first_turn_and_turn() -> None:
         first = ws.receive_json()
         assert first["type"] == "result"
         assert first["scenarios"][0]["title"] == "Shop purchase flow"
-        assert first["scenarios"][0]["case_ids"] == [1, 2]
+        assert [step["case_id"] for step in first["scenarios"][0]["steps"]] == [1, 2]
 
         ws.send_json({"type": "turn", "user_input": "make it shorter", "draft": None})
         second = ws.receive_json()
@@ -278,7 +292,10 @@ def test_ws_accepts_current_scenarios_and_round_trips_scenario_id() -> None:
         message="edited",
         scenarios=[
             ScenarioPlan(
-                scenario_id=42, title="Checkout", description="d", case_ids=[1]
+                scenario_id=42,
+                title="Checkout",
+                description="d",
+                steps=[AuthoredStep(action="Confirm checkout", case_id=1)],
             )
         ],
     )
@@ -292,7 +309,12 @@ def test_ws_accepts_current_scenarios_and_round_trips_scenario_id() -> None:
         json={
             "user_input": "edit checkout",
             "current_scenarios": [
-                {"scenario_id": 42, "title": "Checkout", "description": "d", "case_ids": [1]}
+                {
+                    "scenario_id": 42,
+                    "title": "Checkout",
+                    "description": "d",
+                    "steps": [{"action": "Confirm checkout", "case_id": 1}],
+                }
             ],
         },
     )
@@ -311,7 +333,15 @@ def test_ws_accepts_current_scenarios_and_round_trips_scenario_id() -> None:
                 "type": "turn",
                 "user_input": "again",
                 "current_scenarios": [
-                    {"scenario_id": 42, "title": "Checkout", "description": "d", "case_ids": [1, 2]}
+                    {
+                        "scenario_id": 42,
+                        "title": "Checkout",
+                        "description": "d",
+                        "steps": [
+                            {"action": "Add to cart", "case_id": 1},
+                            {"action": "Confirm checkout", "case_id": 2},
+                        ],
+                    }
                 ],
             }
         )
