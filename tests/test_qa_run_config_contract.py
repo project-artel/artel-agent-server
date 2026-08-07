@@ -34,7 +34,7 @@ client = TestClient(app)
 
 
 def open_session(**extra) -> dict:
-    response = client.post("/qa-sessions", json=open_request(**extra))
+    response = client.post("/internal/qa-sessions", json=open_request(**extra))
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -115,7 +115,7 @@ def test_a_requested_structure_comes_back_resolved() -> None:
 
 def test_an_out_of_range_knob_is_refused() -> None:
     response = client.post(
-        "/qa-sessions", json=open_request(arch={"tool_calls_per_step": 10_000})
+        "/internal/qa-sessions", json=open_request(arch={"tool_calls_per_step": 10_000})
     )
 
     assert response.status_code == 422
@@ -123,6 +123,8 @@ def test_an_out_of_range_knob_is_refused() -> None:
 
 def test_an_unknown_knob_is_refused_rather_than_ignored() -> None:
     """Silently dropping it would record a structure the caller did not ask for."""
-    response = client.post("/qa-sessions", json=open_request(arch={"nonsense": 1}))
+    response = client.post(
+        "/internal/qa-sessions", json=open_request(arch={"nonsense": 1})
+    )
 
     assert response.status_code == 422
