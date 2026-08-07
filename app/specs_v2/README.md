@@ -53,22 +53,6 @@ Content-Type: application/json
 응답은 `ready_specs`, `review_specs`, `connected_flows`와 각 개수를 포함한다.
 요청 경로에서 파일, 데이터베이스, LLM을 사용하지 않는다.
 
-같은 모듈은 로컬 진단 CLI로도 실행할 수 있다.
-
-```bash
-python3 -m app.specs_v2.cli \
-  /path/to/report.json \
-  --out out/specs-v2/report
-```
-
-각 실행은 오직 전달받은 SDK JSON 하나만 사용하며 다음 파일을 만든다.
-
-- `<name>.specs.csv`: 해당 capture 안의 실행 가능한 최종 Ready 투영. 엄격한 `ready`와 중간 단계인 `candidate`를 status로 구분하며, 상태 flow 연결과 포괄된 간접 이벤트 provenance를 포함한다.
-- `<name>.review.csv`: 해당 capture 안에서 검토 또는 지원 불가로 판정된 명세
-- `<name>.flows.csv`: Ready에 통합된 상태 연결만 모아 보는 전용 flow 뷰
-- `<name>.json`: 근거·계약·시나리오 전체 구조
-- `<name>.md`: 사람이 읽는 상세 분석 보고서
-
 Editor 명세를 생성할 때 DevBuild 결과를 읽지 않으며, DevBuild 명세도 Editor 결과를 읽지 않는다. 한쪽에만 있는 기능 역시 해당 capture의 근거가 충분하면 그쪽 명세에 포함된다.
 SDK 원본 provenance인 `capture=player`는 보존하되, `development=true`인 Player 산출물은 사람이 구분하기 쉽도록 명세의 `artifact` 열에서 `devbuild`로 표시한다.
 
@@ -102,8 +86,6 @@ UI 대상은 안정적인 hierarchy path를 기본 식별자로 유지한다. SD
 충돌 명세의 테스트 스텝은 `OnTriggerEnter2D`만 표시하지 않고 call path 첫 method의 owner type을 함께 기록한다. 따라서 동일한 최종 효과로 이어지는 서로 다른 외부 충돌 원인은 별도 행으로 유지하면서 사람이 구분할 수 있다.
 
 Animator의 `SetTrigger`, `ResetTrigger`, `Play`, `CrossFade`, `CrossFadeInFixedTime` 호출은 상태명/파라미터명과 나머지 인수가 literal일 때 exact 기대값으로 취급한다. 충돌 callback 자체는 trigger로 보존하지만 런타임 생성 인스턴스의 scene placement나 target binding이 없으면 해당 명세는 Review에 남긴다.
-
-`prototype_v2.compare`는 capture 차이를 조사하기 위한 선택적 진단 도구일 뿐이다. 그 결과는 개별 명세의 포함 여부나 품질을 결정하지 않으며 최종 명세 산출 경로에 포함되지 않는다.
 
 ## 테스트
 
