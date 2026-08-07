@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from app.agents.qa.arch import DEFAULT_ARCH, QaArchSpec
 from app.agents.qa.runner import QaRunner
-from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
+from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage
 from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig
 from app.llm.usage import set_usage_scope
 from app.qa.channel import QaRunChannel
@@ -19,7 +19,7 @@ from app.qa.envelope import (
     StepStatus,
 )
 from app.qa.run_config import RunConfig, resolve_run_config
-from app.qa.schemas import QaSessionRecord
+from app.qa.schemas import QaScenario, QaSessionRecord
 from app.qa.store import QaSessionStore
 from app.sessions.store import SessionExpired
 
@@ -50,7 +50,7 @@ class QaExecutionService:
         qa_try_id: int,
         game_instance_id: int,
         test_scenario_id: int,
-        scenario: ScenarioDraft,
+        scenario: QaScenario,
         model: LLMModel = DEFAULT_MODEL,
         language: OutputLanguage = DEFAULT_LANGUAGE,
         prompt_version: str | None = None,

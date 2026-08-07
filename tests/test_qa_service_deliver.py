@@ -8,22 +8,25 @@ run died exactly this way, on `{"id": 1, "success": true, "error": ""}`.
 
 import asyncio
 
-from app.agents.scenario import ScenarioDraft, ScenarioStep
+from app.qa.schemas import QaCaseRef, QaScenario, QaStep
 from app.qa.service import QaExecutionService
 from app.qa.store import InMemoryQaSessionStore
 
 
-def make_scenario() -> ScenarioDraft:
-    return ScenarioDraft(
+def make_scenario() -> QaScenario:
+    return QaScenario(
         title="튜토리얼",
         description="튜토리얼 진입을 확인한다",
         steps=[
-            ScenarioStep(
-                step=1,
-                title="시작",
-                state="타이틀 화면",
+            QaStep(
                 action="시작 버튼을 누른다",
-                expected="튜토리얼 화면으로 넘어간다",
+                case_id=1,
+                case=QaCaseRef(
+                    id=1,
+                    precondition="타이틀 화면",
+                    test_step="시작",
+                    expected="튜토리얼 화면으로 넘어간다",
+                ),
             )
         ],
     )

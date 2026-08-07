@@ -33,7 +33,7 @@ from app.agents.qa.knowledge import (
 )
 from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState, build_tools
-from app.agents.scenario import ScenarioDraft, ScenarioStep
+from app.qa.schemas import QaCaseRef, QaScenario, QaStep
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import LogCategory, MessageType
 from app.qa.scene import SCENE_VIEW_START_PREFIX
@@ -1457,16 +1457,14 @@ def test_a_run_searches_knowledge_and_carries_on_to_its_verdict(
 
     channel = QaRunChannel(qa_try_id=1, send=send)
     state = QaRunState(total_steps=1)
-    scenario = ScenarioDraft(
+    scenario = QaScenario(
         title="구매 실패 확인",
         description="골드가 모자랄 때 구매가 막히는지 확인한다.",
         steps=[
-            ScenarioStep(
-                step=1,
-                title="구매 시도",
-                state="상점",
+            QaStep(
                 action="구매를 누른다",
-                expected="구매가 되지 않는다",
+                case_id=1,
+                case=QaCaseRef(id=1, precondition="상점", test_step="구매 시도", expected="구매가 되지 않는다"),
             )
         ],
     )
@@ -1612,16 +1610,14 @@ def test_a_run_corrects_an_entry_by_deleting_it_and_recording_the_new_one(
 
     channel = QaRunChannel(qa_try_id=1, send=send)
     state = QaRunState(total_steps=1)
-    scenario = ScenarioDraft(
+    scenario = QaScenario(
         title="구매 규칙 확인",
         description="구매 조건이 문서대로인지 확인한다.",
         steps=[
-            ScenarioStep(
-                step=1,
-                title="구매 시도",
-                state="상점",
+            QaStep(
                 action="구매를 누른다",
-                expected="구매가 된다",
+                case_id=1,
+                case=QaCaseRef(id=1, precondition="상점", test_step="구매 시도", expected="구매가 된다"),
             )
         ],
     )
@@ -1736,16 +1732,14 @@ def test_a_run_corrects_an_entry_in_place_with_the_update_tool(
 
     channel = QaRunChannel(qa_try_id=1, send=send)
     state = QaRunState(total_steps=1)
-    scenario = ScenarioDraft(
+    scenario = QaScenario(
         title="구매 규칙 확인",
         description="구매 조건이 문서대로인지 확인한다.",
         steps=[
-            ScenarioStep(
-                step=1,
-                title="구매 시도",
-                state="상점",
+            QaStep(
                 action="구매를 누른다",
-                expected="구매가 된다",
+                case_id=1,
+                case=QaCaseRef(id=1, precondition="상점", test_step="구매 시도", expected="구매가 된다"),
             )
         ],
     )

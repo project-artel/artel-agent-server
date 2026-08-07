@@ -5,7 +5,7 @@ from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, model_validator
 
 from app.agents.qa.arch import DEFAULT_ARCH, QaArchSpec, resolve_arch
-from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
+from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage
 from app.llm.models import (
     DEFAULT_MODEL,
     LLMModel,
@@ -14,6 +14,7 @@ from app.llm.models import (
 )
 from app.qa.envelope import ErrorPayload, MessageType, outbound_envelope
 from app.qa.run_config import RunConfig
+from app.qa.schemas import QaScenario
 from app.qa.service import QaExecutionService
 from app.sessions.store import SessionExpired
 
@@ -25,8 +26,8 @@ class QaContext(BaseModel):
     qa_try_id: int
     game_instance_id: int
     test_scenario_id: int
-    # The approved test scenario the Agent executes step by step.
-    scenario: ScenarioDraft
+    # The approved test scenario the Agent executes: an ordered Step list (재설계).
+    scenario: QaScenario
 
 
 class OpenQaSessionRequest(BaseModel):
