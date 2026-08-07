@@ -25,6 +25,10 @@ startup (see ``validate_prompts``) rather than in the middle of a run:
 Placeholder extraction follows ``str.format`` / LangChain f-string rules, so a
 body that needs a literal brace doubles it (``{{`` and ``}}``); doubled braces
 are literal text and are not placeholders.
+
+Neither invariant says anything about a released version staying put, which is
+the rule the rest of this module is built on. ``app.prompts.lock`` enforces that
+one, against a committed hash rather than against git history.
 """
 
 import hashlib
@@ -216,6 +220,21 @@ def available_versions(agent: str) -> tuple[str, ...]:
     return tuple(name for _number, name in sorted(numbered))
 
 
+def roles_in(agent: str, version: str) -> tuple[str, ...]:
+    """The roles one version directory defines, sorted.
+
+    A role is the stem of a ``.md`` file, so ``system.md`` is the ``system``
+    role. Shared with ``app.prompts.lock`` on purpose: if what gets validated
+    and what gets locked disagreed about which files count, a prompt could ship
+    outside the lock and nothing would say so.
+    """
+    directory = PROMPTS_ROOT / agent / version
+    roles = tuple(sorted(path.stem for path in directory.glob("*.md")))
+    if not roles:
+        raise PromptError(f"{directory}: contains no .md prompt files.")
+    return roles
+
+
 def _configured_version(agent: str) -> str | None:
     key = SETTINGS_VERSION_KEYS.get(agent)
     if key is None:
@@ -298,11 +317,7 @@ def validate_prompts() -> None:
     """
     for agent in known_agents():
         for version in available_versions(agent):
-            directory = PROMPTS_ROOT / agent / version
-            roles = sorted(path.stem for path in directory.glob("*.md"))
-            if not roles:
-                raise PromptError(f"{directory}: contains no .md prompt files.")
-            for role in roles:
+            for role in roles_in(agent, version):
                 _read_prompt(agent, version, role)
 
     for agent in SETTINGS_VERSION_KEYS:
