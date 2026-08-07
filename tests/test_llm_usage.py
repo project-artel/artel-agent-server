@@ -1,4 +1,5 @@
 import asyncio
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import httpx
@@ -6,6 +7,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 
 from app.llm.usage import (
+    USAGE_PATH,
     UsageBuffer,
     UsageCallback,
     build_usage_http_client,
@@ -256,6 +258,37 @@ def test_a_broken_response_never_reaches_the_caller() -> None:
     asyncio.run(scenario())  # a usage-less completion is a gap, not a failure
 
     assert sender.payloads == []
+
+
+def test_post_sends_to_the_internal_llm_usage_path() -> None:
+    """The real `_post` (no `send=` injection) must target USAGE_PATH.
+
+    Every other test injects `send=`, which bypasses `_post` and the URL it
+    builds from `USAGE_PATH` entirely. This is the only test that exercises
+    that assembly, so it is what actually catches the path drifting.
+    """
+    buffer = UsageBuffer(base_url="http://orchestration.test")
+    # `raise_for_status` needs a request attached to the response, same as a
+    # real httpx transport would set.
+    ok_response = httpx.Response(
+        200, request=httpx.Request("POST", "http://orchestration.test")
+    )
+
+    async def scenario() -> AsyncMock:
+        with patch(
+            "httpx.AsyncClient.post",
+            new=AsyncMock(return_value=ok_response),
+        ) as mock_post:
+            await buffer._post({"records": []})
+        await buffer.stop()
+        return mock_post
+
+    mock_post = asyncio.run(scenario())
+
+    assert USAGE_PATH == "/internal/llm-usage"
+    mock_post.assert_awaited_once_with(
+        "http://orchestration.test/internal/llm-usage", json={"records": []}
+    )
 
 
 def test_the_oldest_records_go_when_the_buffer_fills() -> None:
