@@ -12,13 +12,20 @@ from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.arch import ResolvedArch, default_resolved_arch
 from app.agents.qa.knowledge import (
+    EXPAND_KNOWLEDGE_DESCRIPTION,
     FORGET_KNOWLEDGE_DESCRIPTION,
+    KNOWLEDGE_RELATIONS,
     KNOWLEDGE_TAGS,
+    LINK_KNOWLEDGE_DESCRIPTION,
+    MAX_EXPAND_DEPTH,
     RECORD_KNOWLEDGE_DESCRIPTION,
     RESULT_LIMIT,
     SEARCH_KNOWLEDGE_DESCRIPTION,
+    SIMILAR_LABEL,
+    UNLINK_KNOWLEDGE_DESCRIPTION,
     UPDATE_KNOWLEDGE_DESCRIPTION,
     render_entry_label,
+    render_expansion,
     render_missing_knowledge_warning,
     render_results,
 )
@@ -35,6 +42,8 @@ from app.qa.envelope import (
     JsonRpcAction,
     KnowledgeCreatePayload,
     KnowledgeDeletePayload,
+    KnowledgeLinkPayload,
+    KnowledgeUnlinkPayload,
     KnowledgeUpdatePayload,
     LogCategory,
     MessageType,
@@ -100,6 +109,18 @@ class QaRunState:
         # say what is missing instead of reporting a bare failure, and what exempts
         # a replacement write from the write cap.
         self.knowledge_deleted_unreplaced: list[str] = []
+        # Entries shown only as a one-line neighbour, id -> summary. NEVER popped.
+        #
+        # Kept apart from `knowledge_seen` because the two license different
+        # things. `seen` means read in full and is what `update_knowledge` and
+        # `forget_knowledge` require — deletion is the most destructive thing the
+        # agent does, and a 120-character line is not having read the entry.
+        # `glimpsed` is enough to assert a relation or to expand from, neither of
+        # which destroys anything and both of which a summary can justify.
+        self.knowledge_glimpsed: dict[str, str] = {}
+        self.knowledge_links_attempted = 0
+        self.knowledge_unlinks_attempted = 0
+        self.knowledge_expands_attempted = 0
         # Handed to the vision middleware on the next model call. The tool cannot
         # return the image itself — an image block on a tool result is rejected by
         # the chat/completions API every model here is reached through.
@@ -113,6 +134,22 @@ class QaRunState:
         # How many compactions this run has been through. Read by the thrash guard
         # and reported at the end of the run.
         self.compactions = 0
+
+    def remember_glimpsed(self, neighbours) -> None:
+        """Record neighbour lines the agent was shown.
+
+        Without this the agent is printed ids it then cannot use at all — every
+        graph tool refuses an endpoint the run has not been shown. An id-less
+        neighbour is skipped rather than stored under the empty string, for the
+        same reason an id-less hit is.
+        """
+        for neighbour in neighbours:
+            if neighbour.id:
+                self.knowledge_glimpsed[neighbour.id] = neighbour.summary
+
+    def knows_of(self, knowledge_id: str) -> bool:
+        """Whether this run has been shown this entry at all, in full or as a line."""
+        return knowledge_id in self.knowledge_seen or knowledge_id in self.knowledge_glimpsed
 
     @property
     def knowledge_writes_attempted(self) -> int:
@@ -389,11 +426,20 @@ def build_tools(
         for entry in answer.results:
             if entry.id:
                 state.knowledge_seen[entry.id] = entry.summary
+            # Neighbours are recorded SEPARATELY, and the difference is the point.
+            # `knowledge_seen` means "read in full", and that is the precondition
+            # `update_knowledge` and `forget_knowledge` rest on; a clipped one-line
+            # summary is not having read something. Putting neighbours in here
+            # would let a run delete an entry it has only glimpsed, which is the
+            # first regression this feature could ship.
+            state.remember_glimpsed(entry.neighbors)
         return with_operator_messages(render_results(answer, remaining), messages)
 
     @tool(
         description=RECORD_KNOWLEDGE_DESCRIPTION.format(
-            limit=arch.max_records_per_run, tags=", ".join(KNOWLEDGE_TAGS)
+            limit=arch.max_records_per_run,
+            tags=", ".join(KNOWLEDGE_TAGS),
+            ui_tag="UI",
         )
     )
     async def record_knowledge(
@@ -535,6 +581,15 @@ def build_tools(
             # far side this id resolves to a real row, and nothing there can tell
             # that the agent never read it. An entry already deleted in this run is
             # gone from `knowledge_seen` too, so a correction cannot resurrect one.
+            if target in state.knowledge_glimpsed:
+                # Named as a neighbour line but never read in full. Said apart from
+                # the case below because otherwise the agent meets a refusal it
+                # cannot explain — it can see the id right there in the transcript.
+                return refused(
+                    f"Nothing was changed: you have seen {knowledge_id!r} only as a "
+                    "neighbour line, which is a clipped summary rather than the "
+                    "entry. Search for it so you read it in full, then correct it."
+                )
             return refused(
                 f"Nothing was changed: {knowledge_id!r} is not an entry "
                 "`search_knowledge` returned in this run, and you can only correct "
@@ -644,6 +699,13 @@ def build_tools(
             # to a real row and has no way to know the agent never read it, so this
             # check exists here or nowhere. An id already deleted in this run is
             # gone from `knowledge_seen` too, which is what stops a second delete.
+            if target in state.knowledge_glimpsed:
+                return (
+                    f"Nothing was deleted: you have seen {knowledge_id!r} only as a "
+                    "neighbour line, which is a clipped summary rather than the "
+                    "entry. Deleting on that is exactly what this guard is for — "
+                    "search for it, read it in full, and decide then."
+                )
             return (
                 f"Nothing was deleted: {knowledge_id!r} is not an entry "
                 "`search_knowledge` returned in this run, and you can only delete "
@@ -684,6 +746,202 @@ def build_tools(
             f"{remaining} deletion(s) left in this run.",
             messages,
         )
+
+    @tool(
+        description=LINK_KNOWLEDGE_DESCRIPTION.format(
+            limit=arch.max_links_per_run, relations=", ".join(KNOWLEDGE_RELATIONS)
+        )
+    )
+    async def link_knowledge(
+        step: int,
+        thought: str,
+        from_knowledge_id: str,
+        to_knowledge_id: str,
+        relation: str,
+        note: str,
+    ) -> str:
+        # What the agent reads is LINK_KNOWLEDGE_DESCRIPTION, not this.
+        #
+        # Not routed through `_run`, for the same reason the other knowledge tools
+        # are not: nothing here touches the game.
+        #
+        # EVERY check below happens before the frame goes out, and that is not
+        # defensiveness. A link is one-way — Orchestration's rejection becomes a
+        # row on the operator's timeline and never comes back down this socket — so
+        # a frame that should not have been sent is reported to the model as a
+        # success while nothing was written.
+        if state.knowledge_links_attempted >= arch.max_links_per_run:
+            return (
+                f"You have used all {arch.max_links_per_run} knowledge links for this "
+                "run, so nothing was linked. Spend the rest of the run judging steps."
+            )
+
+        kind = (relation or "").strip().upper()
+        if kind not in KNOWLEDGE_RELATIONS:
+            return (
+                f"{relation!r} is not a knowledge relation, so nothing was sent. "
+                f"Use one of {', '.join(KNOWLEDGE_RELATIONS)} — and if none of them "
+                "fits, do not link these two at all."
+            )
+
+        reason = (note or "").strip()
+        if not reason:
+            # The far side stores `note` NOT NULL and would drop this frame in
+            # silence. Refused here so the agent learns the link did not happen.
+            return (
+                "Nothing was linked: `note` is required. It is the only record of "
+                "why you thought the connection was real — and for LEADS_TO it is "
+                "what you did to get there, which is what makes the route usable."
+            )
+
+        source = (from_knowledge_id or "").strip()
+        target = (to_knowledge_id or "").strip()
+        if source == target:
+            return "Nothing was linked: an entry cannot be related to itself."
+        for endpoint in (source, target):
+            if not state.knows_of(endpoint):
+                return (
+                    f"Nothing was linked: {endpoint!r} is not an entry this run has "
+                    "been shown. Search for it first and use the id printed with the "
+                    "hit or with a neighbour line."
+                )
+
+        await channel.note(thought, LogCategory.THOUGHT, step)
+        state.knowledge_links_attempted += 1
+        try:
+            await channel.write_knowledge(
+                MessageType.KNOWLEDGE_LINK,
+                KnowledgeLinkPayload(
+                    from_knowledge_id=source,
+                    to_knowledge_id=target,
+                    relation=kind,
+                    note=reason,
+                ),
+            )
+        except QaCancelled:
+            raise
+        except Exception as error:  # noqa: BLE001 - a dead socket must not end the run here
+            return f"The link could not be sent — {error}. Nothing was linked."
+        messages = channel.drain_operator_messages()
+        remaining = arch.max_links_per_run - state.knowledge_links_attempted
+        return with_operator_messages(
+            f"Sent: {source} {kind.lower()} {target}. Nothing answers a link, so do "
+            f"not send it again.\n\n{remaining} link(s) left in this run.",
+            messages,
+        )
+
+    @tool(description=UNLINK_KNOWLEDGE_DESCRIPTION.format(limit=arch.max_unlinks_per_run))
+    async def unlink_knowledge(
+        step: int,
+        thought: str,
+        from_knowledge_id: str,
+        to_knowledge_id: str,
+        relation: str,
+    ) -> str:
+        # What the agent reads is UNLINK_KNOWLEDGE_DESCRIPTION, not this.
+        #
+        # Validated locally for the same reason `link_knowledge` is: one-way frame,
+        # so a rejection would be invisible to the model.
+        if state.knowledge_unlinks_attempted >= arch.max_unlinks_per_run:
+            return (
+                f"You have used all {arch.max_unlinks_per_run} knowledge unlink(s) for "
+                "this run, so nothing was removed. If another link still looks wrong, "
+                "say so in `report_issue` instead."
+            )
+
+        kind = (relation or "").strip().upper()
+        if kind not in KNOWLEDGE_RELATIONS:
+            return (
+                f"{relation!r} is not a knowledge relation, so nothing was sent. "
+                f"Name the relation as it was printed to you, one of "
+                f"{', '.join(KNOWLEDGE_RELATIONS)}."
+            )
+
+        source = (from_knowledge_id or "").strip()
+        target = (to_knowledge_id or "").strip()
+        for endpoint in (source, target):
+            if not state.knows_of(endpoint):
+                return (
+                    f"Nothing was removed: {endpoint!r} is not an entry this run has "
+                    "been shown, so you have not seen the link you are removing."
+                )
+
+        await channel.note(thought, LogCategory.THOUGHT, step)
+        state.knowledge_unlinks_attempted += 1
+        try:
+            await channel.write_knowledge(
+                MessageType.KNOWLEDGE_UNLINK,
+                KnowledgeUnlinkPayload(
+                    from_knowledge_id=source, to_knowledge_id=target, relation=kind
+                ),
+            )
+        except QaCancelled:
+            raise
+        except Exception as error:  # noqa: BLE001 - a dead socket must not end the run here
+            return f"The unlink could not be sent — {error}. Nothing was removed."
+        messages = channel.drain_operator_messages()
+        remaining = arch.max_unlinks_per_run - state.knowledge_unlinks_attempted
+        return with_operator_messages(
+            f"Sent: removing {source} {kind.lower()} {target}. Nothing answers an "
+            f"unlink, so do not send it again.\n\n{remaining} unlink(s) left in this run.",
+            messages,
+        )
+
+    @tool(
+        description=EXPAND_KNOWLEDGE_DESCRIPTION.format(
+            limit=arch.max_expands_per_run,
+            relations=", ".join(KNOWLEDGE_RELATIONS),
+            similar=SIMILAR_LABEL,
+        )
+    )
+    async def expand_knowledge(
+        step: int, thought: str, knowledge_id: str, depth: int = 1
+    ) -> str:
+        # What the agent reads is EXPAND_KNOWLEDGE_DESCRIPTION, not this.
+        #
+        # Three outcomes handled exactly as `search_knowledge` handles them, and
+        # for the same reason: none of timeout, refusal or empty answer is a reason
+        # to fail the step.
+        if state.knowledge_expands_attempted >= arch.max_expands_per_run:
+            return (
+                f"You have used all {arch.max_expands_per_run} knowledge expansions "
+                "for this run. The neighbours already printed with your searches are "
+                "what you have."
+            )
+
+        target = (knowledge_id or "").strip()
+        if not state.knows_of(target):
+            return (
+                f"{target!r} is not an entry this run has been shown, so nothing was "
+                "expanded. Search for it first and use the id printed with the hit."
+            )
+
+        await channel.note(thought, LogCategory.THOUGHT, step)
+        state.knowledge_expands_attempted += 1
+        # Clamped here as well as on the far side. Orchestration clamps rather than
+        # refuses, so this only saves a round trip — but it also keeps the number
+        # the agent is told about and the number it gets from drifting apart.
+        answer = await channel.expand_knowledge(
+            target, max(1, min(depth, MAX_EXPAND_DEPTH)), include_similar=True
+        )
+        messages = channel.drain_operator_messages()
+        remaining = arch.max_expands_per_run - state.knowledge_expands_attempted
+
+        if answer is None:
+            return with_operator_messages(
+                "The knowledge base did not answer in time. Carry on with what you "
+                f"already have. {remaining} expansion(s) left.",
+                messages,
+            )
+        if isinstance(answer, KnowledgeSearchFailed):
+            return with_operator_messages(
+                f"The expansion could not run — {answer.reason}. This says nothing "
+                f"about the game. {remaining} expansion(s) left.",
+                messages,
+            )
+        # Same split as a search: what the expansion showed is glimpsed, not read.
+        state.remember_glimpsed(answer.neighbors)
+        return with_operator_messages(render_expansion(answer, remaining), messages)
 
     @tool
     async def click_button(step: int, target_id: int, thought: str) -> str:
@@ -1070,6 +1328,9 @@ def build_tools(
         record_knowledge,
         update_knowledge,
         forget_knowledge,
+        link_knowledge,
+        unlink_knowledge,
+        expand_knowledge,
         click_button,
         enter_text,
         press_key,

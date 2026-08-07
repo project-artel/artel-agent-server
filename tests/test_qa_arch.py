@@ -172,7 +172,11 @@ def test_the_default_budget_matches_what_runs_had_before() -> None:
     inside, `search_knowledge` would spend its budget on the scenario and shorten
     every run by however much it looked things up."""
     arch = resolved()
-    base = 10 + 6 + 5 + 2
+    # base + searches + records + forgets + links + unlinks + expands. The graph
+    # allowances join the base for the same reason the others did: they are
+    # run-scoped, not per-step, so leaving them inside the step allowance would
+    # shorten every run by however much it walked the graph.
+    base = 10 + 6 + 5 + 2 + 3 + 2 + 3
 
     assert arch.tool_call_limit(1) == base + 15
     assert arch.tool_call_limit(4) == base + 60

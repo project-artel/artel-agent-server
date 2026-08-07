@@ -85,6 +85,24 @@ MAX_RECORDS_PER_RUN = 5
 # `knowledge.py` for the rest of that argument, and for the defences around it.
 MAX_FORGETS_PER_RUN = 2
 
+# How many relations a run may assert between entries (ARTEL-274). Below the
+# record budget because a run that learns five durable rules rarely establishes
+# more than a few relations among them, and because each link is a durable claim
+# that every later run reads.
+MAX_LINKS_PER_RUN = 3
+
+# How many it may withdraw. The same number as `MAX_FORGETS_PER_RUN`, but for a
+# different reason: withdrawing a link is far less destructive than deleting an
+# entry — the two entries survive, and what is lost is one connection and the
+# sentence behind it. What the two share is that both are QUIET. A route removed
+# by mistake simply stops being there, and nobody is prompted to look.
+MAX_UNLINKS_PER_RUN = 2
+
+# How many times a run may walk the graph further than the hop that already came
+# with its searches. Below the search budget because an expansion is only useful
+# after a search, and the automatic one-hop already covers the common case.
+MAX_EXPANDS_PER_RUN = 3
+
 # How many defects one run may file. A cap at all because an agent that reports
 # the same broken screen once per step turns one bug into a page of them; ten
 # because a run that finds more than ten distinct defects has answered the
@@ -126,6 +144,9 @@ class QaArchSpec(BaseModel):
     max_searches_per_run: int = Field(default=MAX_SEARCHES_PER_RUN, ge=0, le=50)
     max_records_per_run: int = Field(default=MAX_RECORDS_PER_RUN, ge=0, le=50)
     max_forgets_per_run: int = Field(default=MAX_FORGETS_PER_RUN, ge=0, le=50)
+    max_links_per_run: int = Field(default=MAX_LINKS_PER_RUN, ge=0, le=50)
+    max_unlinks_per_run: int = Field(default=MAX_UNLINKS_PER_RUN, ge=0, le=50)
+    max_expands_per_run: int = Field(default=MAX_EXPANDS_PER_RUN, ge=0, le=50)
     max_captures_per_run: int = Field(default=MAX_CAPTURES_PER_RUN, ge=0, le=100)
     max_issues_per_run: int = Field(default=MAX_ISSUES_PER_RUN, ge=0, le=50)
     vision: VisionMode = VisionMode.auto
@@ -155,6 +176,30 @@ class QaArchSpec(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def graph_tools_need_searches(self) -> "QaArchSpec":
+        """An id can only be linked, unlinked or expanded after a search showed it.
+
+        Both graph tools refuse an endpoint the run has not been shown, and the
+        only things that show one are a search and the neighbours that ride along
+        with it. A spec that allows them with no searches therefore enables tools
+        that can never legally be called — the run pays for them in its tool-call
+        ceiling and can never spend them.
+
+        Unlike `forgets_need_records` this asks for no paired write: withdrawing a
+        link is not something that leaves a hole somebody has to fill.
+        """
+        graph_calls = (
+            self.max_links_per_run + self.max_unlinks_per_run + self.max_expands_per_run
+        )
+        if graph_calls > 0 and self.max_searches_per_run == 0:
+            raise QaArchError(
+                "max_links_per_run / max_unlinks_per_run / max_expands_per_run "
+                "require max_searches_per_run > 0: an entry the run was never "
+                "shown can be neither linked nor expanded."
+            )
+        return self
+
 
 DEFAULT_ARCH = QaArchSpec()
 
@@ -171,6 +216,9 @@ class ResolvedArch(BaseModel):
     max_searches_per_run: int
     max_records_per_run: int
     max_forgets_per_run: int
+    max_links_per_run: int
+    max_unlinks_per_run: int
+    max_expands_per_run: int
     max_captures_per_run: int
     max_issues_per_run: int
     vision: bool
@@ -201,6 +249,9 @@ class ResolvedArch(BaseModel):
             + self.max_searches_per_run
             + self.max_records_per_run
             + self.max_forgets_per_run
+            + self.max_links_per_run
+            + self.max_unlinks_per_run
+            + self.max_expands_per_run
         )
         return base + self.tool_calls_per_step * max(steps, 1)
 
