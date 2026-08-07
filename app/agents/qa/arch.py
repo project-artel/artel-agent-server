@@ -151,6 +151,11 @@ class QaArchSpec(BaseModel):
     max_issues_per_run: int = Field(default=MAX_ISSUES_PER_RUN, ge=0, le=50)
     vision: VisionMode = VisionMode.auto
     fold_stale_scenes: bool = True
+    # Folds the neighbour blocks the search volunteers, and only those (ARTEL-277).
+    # Separate from `fold_stale_scenes` because the two are independently useful
+    # to turn off: what they fold is recovered by different tools out of
+    # different budgets.
+    fold_stale_knowledge: bool = True
     # Compaction rewrites what the model reads once a run grows past a fraction of
     # its context, so a run with it and a run without it are two agents even with
     # the same tools. `None` defers to the deployment's own setting, which is what
@@ -223,6 +228,7 @@ class ResolvedArch(BaseModel):
     max_issues_per_run: int
     vision: bool
     fold_stale_scenes: bool
+    fold_stale_knowledge: bool
     compaction: bool
     compaction_trigger_fraction: float
     compaction_keep_messages: int

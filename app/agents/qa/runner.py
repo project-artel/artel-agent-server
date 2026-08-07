@@ -15,7 +15,7 @@ from langchain_core.messages import HumanMessage
 
 from app.agents.qa.arch import ResolvedArch
 from app.agents.qa.compaction import QaCompactionMiddleware
-from app.agents.qa.context import fold_stale_scenes
+from app.agents.qa.context import fold_stale_knowledge, fold_stale_scenes
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.vision import QaCaptureVisionMiddleware
@@ -117,6 +117,12 @@ def middleware_names_for(arch: ResolvedArch) -> tuple[str, ...]:
     # model can see.
     if arch.fold_stale_scenes:
         names.append("fold_scene_views")
+    # A separate middleware rather than one more job inside the fold above. The
+    # two have to be switchable independently — they are experiment axes, and the
+    # fingerprint hashes this list's order — and what they fold is recovered by
+    # different tools out of different budgets.
+    if arch.fold_stale_knowledge:
+        names.append("fold_knowledge_neighbours")
     # Only when the run can see. On a text-only run it would have nothing to
     # inject and nothing to trim.
     if arch.vision:
@@ -156,6 +162,7 @@ def build_middleware(
             on_compacted=on_compacted,
         ),
         "fold_scene_views": lambda: _fold_scene_views,
+        "fold_knowledge_neighbours": lambda: _fold_knowledge_neighbours,
         "capture_vision": lambda: QaCaptureVisionMiddleware(state),
         "append_current_scene": lambda: _build_append_current_scene(channel),
         "log_token_usage": lambda: _log_token_usage,
@@ -172,6 +179,17 @@ async def _fold_scene_views(request, handler):
     see `app/agents/qa/context.py` for the fold itself.
     """
     return await handler(request.override(messages=fold_stale_scenes(request.messages)))
+
+
+@wrap_model_call
+async def _fold_knowledge_neighbours(request, handler):
+    """Fold volunteered neighbour blocks out of what one model call receives.
+
+    Model-input only, like the scene fold above. Only the neighbour lines go —
+    the hits themselves stay, because re-reading one costs a search and the run
+    only has six. See `app/agents/qa/context.py`.
+    """
+    return await handler(request.override(messages=fold_stale_knowledge(request.messages)))
 
 
 @wrap_model_call

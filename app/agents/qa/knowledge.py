@@ -118,6 +118,17 @@ MAX_NEIGHBOUR_SUMMARY_CHARS = 120
 # agent actually gets from drifting apart.
 MAX_EXPAND_DEPTH = 2
 
+# The markers `render_hit` wraps a hit's neighbour lines in, so the folding
+# middleware can find and replace exactly that span (ARTEL-277).
+#
+# The start marker carries the HIT's id rather than a running serial, unlike the
+# scene view's observation number. A folded scene tells the agent to call
+# `observe_scene`, which takes no argument; a folded neighbour block has to tell
+# it to call `expand_knowledge` on something, and that something is this id.
+NEIGHBOUR_BLOCK_START_PREFIX = "<<neighbours of "
+NEIGHBOUR_BLOCK_START_SUFFIX = ">>"
+NEIGHBOUR_BLOCK_END = "<</neighbours>>"
+
 # Written out rather than left as a docstring so the per-run cap and the tag list
 # come from the constants above. An agent told only that searching is "limited"
 # spends the budget at the first opportunity, and a tag list that drifts from the
@@ -426,7 +437,16 @@ def render_hit(index: int, hit: KnowledgeSearchHit) -> str:
     lines = [header, f"   {hit.summary}"] if hit.summary else [header]
     if body:
         lines.append(f"   {body}")
-    lines.extend(render_neighbour(n) for n in hit.neighbors)
+    if hit.neighbors:
+        # Wrapped so `fold_stale_knowledge` can replace exactly this span and
+        # nothing else — the hit's own summary and description must survive, and
+        # a fold that guessed at where the neighbours start would eventually eat
+        # one of them.
+        lines.append(
+            f"{NEIGHBOUR_BLOCK_START_PREFIX}{hit.id or 'unknown'}{NEIGHBOUR_BLOCK_START_SUFFIX}"
+        )
+        lines.extend(render_neighbour(n) for n in hit.neighbors)
+        lines.append(NEIGHBOUR_BLOCK_END)
     return "\n".join(lines)
 
 
