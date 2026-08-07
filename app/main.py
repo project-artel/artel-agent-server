@@ -13,6 +13,7 @@ from app.api.models import router as models_router
 from app.api.qa_sessions import router as qa_sessions_router
 from app.api.routes import router as api_router
 from app.api.sessions import router as sessions_router
+from app.api.specs_v2 import router as specs_v2_router
 from app.config import get_settings
 from app.documents import ExtractionService
 from app.llm import build_embedding_client
@@ -120,6 +121,7 @@ def create_app() -> FastAPI:
     app.include_router(embeddings_router, prefix=INTERNAL_PREFIX)
     app.include_router(knowledge_queries_router, prefix=INTERNAL_PREFIX)
     app.include_router(models_router, prefix=INTERNAL_PREFIX)
+    app.include_router(specs_v2_router, prefix=INTERNAL_PREFIX)
     return app
 
 
