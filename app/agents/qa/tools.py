@@ -67,8 +67,16 @@ class PendingCapture:
 class QaRunState:
     """What the loop has done so far, for the tools that need to know."""
 
-    def __init__(self, total_steps: int) -> None:
+    def __init__(
+        self,
+        total_steps: int,
+        step_meta: list[tuple[int | None, bool]] | None = None,
+    ) -> None:
         self.total_steps = total_steps
+        # 스텝별 (case_id, is_verification). report_step이 각 판정에 이를 붙이고, TC 판정(파생)은
+        # `case_units`가 이 표로 구간을 잘라 그 구간 검증 스텝의 판정으로 정한다. 비면 단일-계층
+        # 폴백(case_id/is_verification 미상) — 구식 호출자·테스트 호환용.
+        self.step_meta: list[tuple[int | None, bool]] = step_meta or []
         self.step_results: list[QaStepResult] = []
         self.finished = False
         # The observation the agent last saw, so the next look is a diff.
@@ -170,6 +178,62 @@ class QaRunState:
         """
         reported = {result.step for result in self.step_results}
         return [step for step in range(1, self.total_steps + 1) if step not in reported]
+
+    def case_units(self) -> list[dict]:
+        """연속 동일 case_id = 한 TC 구간. **TC 판정 = 그 구간의 검증(마지막) 스텝 판정**(2단 판정).
+
+        `step_meta`(권위)로 구간을 자르고, 각 구간의 검증 스텝 판정을 `step_results`에서 찾아
+        TC의 passed/message로 삼는다. 중간 스텝의 성공/실패는 각 스텝에 그대로 남아있고(steps),
+        TC 판정과 별개다 — 중간이 실패해도 검증이 통과하면 TC는 통과다.
+        """
+        by_step = {result.step: result for result in self.step_results}
+        units: list[dict] = []
+        prev_cid: int | None = None
+        for index, (cid, is_verification) in enumerate(self.step_meta, start=1):
+            if cid is None:
+                prev_cid = None
+                continue
+            if not units or cid != prev_cid:
+                units.append(
+                    {"case_no": len(units) + 1, "case_id": cid, "steps": [], "verify_step": None}
+                )
+            unit = units[-1]
+            unit["steps"].append(index)
+            if is_verification:
+                unit["verify_step"] = index
+            prev_cid = cid
+        for unit in units:
+            # 검증 스텝(없으면 구간 마지막 스텝)의 판정이 곧 TC 판정.
+            decisive = unit["verify_step"] or (unit["steps"][-1] if unit["steps"] else None)
+            result = by_step.get(decisive) if decisive else None
+            unit["passed"] = bool(result and result.passed)
+            unit["message"] = result.message if result else ""
+        return units
+
+    def build_summary(self) -> dict:
+        """종단 STATUS에 싣는 2단 요약. steps[]가 원천, cases[]는 파생(구간 검증 스텝).
+
+        finish_run(정상 종료)과 service._send_terminal(중단/실패)이 같은 형태를 내도록 한 곳에서
+        만든다 — 두 경로가 다른 요약을 내면 다운스트림이 종료 사유마다 다른 스키마를 보게 된다.
+        """
+        total = self.total_steps
+        steps_passed = sum(1 for result in self.step_results if result.passed)
+        cases = self.case_units()
+        cases_passed = sum(1 for unit in cases if unit["passed"])
+        return {
+            "steps": {
+                "total": total,
+                "passed": steps_passed,
+                "failed": total - steps_passed,
+                "items": [result.model_dump() for result in self.step_results],
+            },
+            "cases": {
+                "total": len(cases),
+                "passed": cases_passed,
+                "failed": len(cases) - cases_passed,
+                "items": cases,
+            },
+        }
 
     def add_pending_capture(self, capture: PendingCapture) -> None:
         self._pending_captures.append(capture)
@@ -1184,16 +1248,33 @@ def build_tools(
         """Record the verdict for one scenario step, with the evidence for it.
 
         Call this once per step, right after you have observed the result of that
-        step's action. `message` should cite what you saw, and `thought` is how
-        you reached the verdict — it goes on the timeline beside it.
+        step's action. For a step that verifies an expected result, `passed` is
+        whether that result occurred (this is also its test case's verdict); for
+        any other step, `passed` is whether you carried the action out. `message`
+        should cite what you saw, and `thought` is how you reached the verdict.
         """
         await channel.note(thought, LogCategory.THOUGHT, step)
-        state.step_results.append(QaStepResult(step=step, passed=passed, message=message))
+        # 이 스텝이 어느 TC에 속하고 그 구간의 검증 스텝인지를 판정에 붙인다(2단 판정). step_meta가
+        # 없으면(구식 호출자) 미상으로 둔다.
+        case_id, is_verification = (
+            state.step_meta[step - 1] if 0 <= step - 1 < len(state.step_meta) else (None, False)
+        )
+        state.step_results.append(
+            QaStepResult(
+                step=step,
+                passed=passed,
+                message=message,
+                case_id=case_id,
+                is_verification=is_verification,
+            )
+        )
         await channel.emit(
             MessageType.STATUS,
             StatusPayload(
                 status=StepStatus.COMPLETED if passed else StepStatus.FAILED,
                 step=step,
+                case_id=case_id,
+                is_verification=is_verification,
                 message=message,
             ),
         )
@@ -1273,8 +1354,6 @@ def build_tools(
         `thought` is how you reached the overall verdict; it goes on the timeline.
         """
         await channel.note(thought, LogCategory.THOUGHT)
-        total = state.total_steps
-        passed_count = sum(1 for result in state.step_results if result.passed)
         state.finish_attempts += 1
 
         # A step the agent never attempted is the failure this whole change is
@@ -1298,12 +1377,7 @@ def build_tools(
                 status=StepStatus.COMPLETED,
                 result=RunResult.PASSED if passed else RunResult.FAILED,
                 message=summary,
-                summary={
-                    "total": total,
-                    "passed": passed_count,
-                    "failed": total - passed_count,
-                    "steps": [result.model_dump() for result in state.step_results],
-                },
+                summary=state.build_summary(),
             ),
         )
         return "The run is closed."

@@ -69,55 +69,59 @@ def _action_line(step: QaStep) -> str:
     return f"{line}  ({'; '.join(extras)})" if extras else line
 
 
-def _unit_count(scenario: QaScenario) -> int:
-    """판정 단위(연속 동일 case_id = 한 TC 구간) 수. report_step은 이 수만큼 1..N으로 온다."""
-    count = 0
-    prev: int | None = None
-    for step in scenario.steps:
+def _step_plan(scenario: QaScenario) -> list[tuple[int | None, bool]]:
+    """스텝별 (case_id, is_verification). **연속 동일 case_id = 한 TC 구간**이고, 그 구간의
+    **마지막 스텝 = 검증 스텝**(is_verification=True). case_id 없는 스텝은 검증이 아니다.
+
+    report_step은 전체 스텝 수만큼 1..S로 오며, 이 표가 각 판정에 case_id·검증여부를 붙인다.
+    TC 판정 = 그 구간 검증 스텝의 판정(파생)이라 여기 하드코딩되지 않는다.
+    """
+    steps = scenario.steps
+    plan: list[tuple[int | None, bool]] = []
+    for idx, step in enumerate(steps):
         cid = step.case_id
-        if cid is not None and cid != prev:
-            count += 1
-        prev = cid
-    return count
+        # 구간의 마지막 스텝(다음 스텝의 case_id가 다르거나 끝)이면 검증 스텝.
+        nxt = steps[idx + 1].case_id if idx + 1 < len(steps) else None
+        is_verification = cid is not None and nxt != cid
+        plan.append((cid, is_verification))
+    return plan
 
 
 def _plan(scenario: QaScenario) -> str:
-    """새 계약(steps[])을 실행 첫 메시지로 변환한다(재설계 2026-08-07).
+    """새 계약(steps[])을 실행 첫 메시지로 변환한다(2단 판정 2026-08-08).
 
-    **연속된 동일 `case_id` = 한 TC 판정 구간**이다. 각 구간은 `step`(=report 번호) + `precondition`
-    (구간 진입 시 충족 검증) + `do`(구간의 행위들) + `expected`(구간 끝 판정)로 제시된다. `case_id`가
-    없는 스텝은 `do_only`(수행만, 판정 없음)로 나간다. 판정 단위는 case(구간)이지 개별 스텝이 아니다.
+    **모든 스텝을 판정한다**: report_step(step, passed, message)를 전체 스텝(1..S)마다 호출한다.
+    각 스텝은 `do`(행위)를 갖고, TC 구간의 첫 스텝엔 `precondition`, 마지막(검증) 스텝엔 `verify`
+    (기대결과)가 붙는다. `verify`가 있는 스텝의 passed는 **기대결과가 나왔는가**(그게 그 TC의 최종
+    판정), 그 외 스텝의 passed는 **그 행위를 수행/성립했는가**다.
     """
+    plan = _step_plan(scenario)
     items: list[dict] = []
-    unit_no = 0
-    for step in scenario.steps:
-        action = _action_line(step)
-        cid = step.case_id
-        if cid is not None and items and items[-1].get("case_id") == cid:
-            items[-1]["do"].append(action)
-        elif cid is not None:
-            unit_no += 1
-            case = step.case
-            items.append(
-                {
-                    "step": unit_no,
-                    "case_id": cid,
-                    "precondition": case.precondition if case else None,
-                    "do": [action],
-                    "expected": case.expected if case else "",
-                }
-            )
-        else:
-            items.append({"do_only": action})
+    prev_cid: int | None = None
+    for idx, step in enumerate(scenario.steps):
+        cid, is_verification = plan[idx]
+        case = step.case
+        item: dict = {"step": idx + 1, "do": _action_line(step)}
+        if cid is not None:
+            item["case_id"] = cid
+            # 구간의 첫 스텝에만 사전조건을 건다(구간 진입 검증).
+            if cid != prev_cid and case and case.precondition:
+                item["precondition"] = case.precondition
+            if is_verification:
+                item["verify"] = case.expected if case else ""
+        items.append(item)
+        prev_cid = cid
     return (
         f"Scenario: {scenario.title} — {scenario.description}\n\n"
-        "Execute the items below in order. An item with a `step` number is a TEST CASE you judge; "
-        "an item with only `do_only` is an action you just perform (no verdict).\n"
-        "For each test case: ensure its `precondition` holds before its `do` actions — if you cannot "
-        "reach it, call report_step(step, passed=false) with a message beginning 'SETUP-FAILED:' and "
-        "do NOT report_issue (an unreachable precondition is not a defect). Otherwise carry out its "
-        "`do` actions and judge against `expected` with report_step(step, passed, message). `try:` and "
-        "`via:` are advisory hints, not required.\n\n"
+        "Execute the steps below in order and call report_step(step, passed, message) for EVERY step.\n"
+        "- A step with `verify` is the TEST CASE's verdict: `passed` = whether that expected result "
+        "actually occurred. That verdict is the whole case's verdict.\n"
+        "- Any other step: `passed` = whether you carried the action out (did it happen), not a "
+        "quality judgment.\n"
+        "- A `precondition` must hold before that case's first step. If you cannot reach it, report "
+        "its steps passed=false with a message beginning 'SETUP-FAILED:' and do NOT report_issue "
+        "(an unreachable precondition is not a defect).\n"
+        "- `try:` and `via:` are advisory hints, not required.\n\n"
         f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
         "Begin. Observe the screen first."
     )
@@ -314,7 +318,7 @@ class QaRunner:
             vision_directive=vision_directive,
         )
         first_message = _plan(scenario)
-        total_units = _unit_count(scenario)
+        total_steps = len(scenario.steps)
         tools = build_tools(channel, state, arch)
 
         # The whole starting context in one place. Reading a run afterwards means
@@ -329,7 +333,7 @@ class QaRunner:
             "--- system prompt ---\n%s\n"
             "--- first message ---\n%s",
             config.model_dump(mode="json", exclude_none=True),
-            total_units,
+            total_steps,
             system_prompt,
             _clip(first_message),
         )
@@ -366,7 +370,7 @@ class QaRunner:
                 # ahead of the model. Left at a flat 2, turning compaction on
                 # would quietly cost the run a third of its tool budget.
                 "recursion_limit": (
-                    self._tool_call_limit(total_units)
+                    self._tool_call_limit(total_steps)
                     * (2 + (1 if arch.compaction else 0))
                 ),
                 "run_name": "qa-scenario-run",
@@ -486,7 +490,8 @@ class QaRunner:
         The state is built here and handed down so that a run cut short by the
         deadline still carries the verdicts it managed to record.
         """
-        state = QaRunState(total_steps=_unit_count(scenario))
+        step_meta = _step_plan(scenario)
+        state = QaRunState(total_steps=len(scenario.steps), step_meta=step_meta)
         deadline = self._config.arch.deadline_seconds
         try:
             await asyncio.wait_for(self.run(channel, scenario, state), timeout=deadline)

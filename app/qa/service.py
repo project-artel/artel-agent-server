@@ -164,15 +164,9 @@ class QaExecutionService:
         message: str,
         state=None,
     ) -> None:
-        summary = None
-        if state is not None:
-            passed = sum(1 for item in state.step_results if item.passed)
-            summary = {
-                "total": state.total_steps,
-                "passed": passed,
-                "failed": state.total_steps - passed,
-                "steps": [item.model_dump() for item in state.step_results],
-            }
+        # 정상 종료(finish_run)와 같은 2단 요약 형태(steps+cases)를 낸다 — 다운스트림이 종료
+        # 사유마다 다른 스키마를 보지 않도록. build_summary가 유일한 생성 지점이다.
+        summary = state.build_summary() if state is not None else None
         await channel.emit(
             MessageType.STATUS,
             StatusPayload(status=status, result=result, message=message, summary=summary),

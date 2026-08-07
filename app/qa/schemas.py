@@ -38,9 +38,17 @@ class QaScenario(BaseModel):
 
 
 class QaStepResult(BaseModel):
+    """스텝 하나의 판정(2단 판정 2026-08-08). **모든 스텝**에 성공/실패를 남긴다.
+
+    검증 스텝(`is_verification`=구간의 마지막 스텝)은 기대결과 충족 여부, 그 외 스텝은
+    그 행위를 수행/성립했는지를 판정한다. `case_id`는 이 스텝이 속한 TC(없으면 단순 행위).
+    """
+
     step: int
     passed: bool
     message: str
+    case_id: int | None = None
+    is_verification: bool = False
 
 
 class QaRunScenario(BaseModel):
