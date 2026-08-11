@@ -409,6 +409,12 @@ class KnowledgeSearchPayload(BaseModel):
     # singular — so a value read off a hit can be fed straight back as a filter.
     tag: str | None = None
     limit: int
+    # Which scenario step asked. `search_knowledge` has always taken this and never
+    # sent it, which is why `knowledge_usage.step` was null on every row ever
+    # written. It is a COORDINATE, not a filter: the far side records it and the
+    # results do not change. Optional because an Orchestration that predates it
+    # ignores unknown payload fields, so neither side has to deploy first.
+    step: int | None = None
 
 
 class KnowledgeCreatePayload(BaseModel):
@@ -481,6 +487,10 @@ class KnowledgeExpandPayload(BaseModel):
     knowledge_id: str
     depth: int
     include_similar: bool = True
+    # Carried for the same reason the search carries it: an expansion writes
+    # `knowledge_usage` rows too, and a coordinate on one of the two paths but not
+    # the other leaves half the table unable to say when it was read.
+    step: int | None = None
 
 
 class KnowledgeLinkPayload(BaseModel):
@@ -532,6 +542,24 @@ class StatusPayload(BaseModel):
     is_verification: bool = False
     message: str
     summary: dict | None = None
+    # Knowledge this verdict actually rested on (ARTEL-293). Only a per-step frame
+    # ever carries it, and only `report_step` fills it: knowledge bears on the
+    # judgement of a step, not on an individual click. Attached to the acting tools
+    # instead, an entry used across a ten-click step would score ten times what the
+    # same entry scores on a one-click step, and the metric would measure action
+    # count rather than usefulness.
+    #
+    # SELF-REPORTED, unlike everything Orchestration observes for itself. A model
+    # that used an entry and did not say so is invisible here, so the count leans
+    # LOW. That is the safe direction, and it is not corrected by pressing the
+    # model to cite more — pressure buys citations of whatever is at hand, and
+    # then the bias has no known direction at all.
+    used_knowledge_ids: list[str] = Field(default_factory=list)
+    # How many ids `report_step` threw away because this run had never been shown
+    # them. Sent rather than dropped because the hallucinated-citation RATE is
+    # itself a comparison between models — discarded in silence, that signal is
+    # gone, and a model that invents ids scores exactly like one that does not.
+    rejected_knowledge_id_count: int = 0
 
 
 class IssueSeverity(StrEnum):

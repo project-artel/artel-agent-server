@@ -128,3 +128,14 @@ def test_an_unknown_knob_is_refused_rather_than_ignored() -> None:
     )
 
     assert response.status_code == 422
+
+
+def test_the_response_says_this_run_can_report_citations() -> None:
+    """Orchestration confirms a finished run's uncited knowledge rows as
+    `cited=false`, and must not do that to a run that had no way to report one.
+
+    `null` (could not report) and `false` (could and did not) are different
+    answers, and the only honest way to tell them apart after the fact is a mark
+    left on the run at the time. This field is that mark.
+    """
+    assert open_session()["run_config"]["citation_reporting"] is True

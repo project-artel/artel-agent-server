@@ -140,3 +140,8 @@ SDK가 추가한 `set_axis`·`set_button` 액션([ARTEL-292](https://artel-asm.a
 ## Open Questions
 
 - v10 `note`에 SDK 이슈 키(ARTEL-292)를 남길지. v8 note가 ARTEL-257을 남긴 선례가 있어 남기는 쪽으로 간다
+
+## Merge Log
+
+- 2026-08-11 develop 머지: ARTEL-294(인용 보고, #65)가 먼저 머지되며 `qa_run/v10`을 가져갔다. 릴리즈된 버전은 고치지 않는다는 규칙(`app/prompts/lock.py`)에 따라 축 문단은 **v11**로 옮겼다 — v11 `system.md` = develop의 v10 본문 + 축 문단, `vision_directive.md`는 v10 그대로 복사.
+- 이에 따라 이 문서에서 v10으로 적힌 계획은 모두 v11로 읽는다. 테스트도 `test_the_default_qa_version_is_v11`, `test_v11_teaches_the_axis_fallback_and_ties_it_to_the_knowledge_base`, `test_v11_defines_the_same_roles_as_v10`으로 옮겼고, lock은 `python -m app.prompts.lock --write`로 재생성했다.

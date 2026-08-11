@@ -243,7 +243,7 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v10() -> None:
+def test_the_default_qa_version_is_v11() -> None:
     """A run that names no version has to get the newest prompt.
 
     This is also the trap in adding a version: `resolve_version` returns the
@@ -253,7 +253,7 @@ def test_the_default_qa_version_is_v10() -> None:
     `set_input_axis` before the tool exists teaches the agent to reach for
     something that is not there.
     """
-    assert resolve_version("qa_run") == "v10"
+    assert resolve_version("qa_run") == "v11"
 
 
 def test_v9_structures_the_body_and_adds_the_knowledge_base_section() -> None:
@@ -277,7 +277,7 @@ def test_v9_structures_the_body_and_adds_the_knowledge_base_section() -> None:
     assert "Report it failed with what you saw" in v9
 
 
-def test_v10_teaches_the_axis_fallback_and_ties_it_to_the_knowledge_base() -> None:
+def test_v11_teaches_the_axis_fallback_and_ties_it_to_the_knowledge_base() -> None:
     """A tool the prompt never mentions is a tool the agent will not reach for.
 
     The agent cannot tell whether a game reads `GetKey` or `GetAxis` — there is
@@ -288,31 +288,31 @@ def test_v10_teaches_the_axis_fallback_and_ties_it_to_the_knowledge_base() -> No
     agent that works it out and does not write it down makes every later run pay
     the same wasted round trip.
     """
-    v9 = load_prompt("qa_run", "system", "v9").body
     v10 = load_prompt("qa_run", "system", "v10").body
+    v11 = load_prompt("qa_run", "system", "v11").body
 
-    assert "set_input_axis" in v10
-    assert "set_input_axis" not in v9
-    assert "record_knowledge" in v10
-    assert "Horizontal" in v10
-    # An axis is state you set, like a held key. v9 already said that about keys;
-    # v10 has to extend it rather than leave a second way to poison later steps.
-    assert "return it to 0" in v10
+    assert "set_input_axis" in v11
+    assert "set_input_axis" not in v10
+    assert "record_knowledge" in v11
+    assert "Horizontal" in v11
+    # An axis is state you set, like a held key. v10 already said that about keys;
+    # v11 has to extend it rather than leave a second way to poison later steps.
+    assert "return it to 0" in v11
 
-    # One section added, nothing from v9 dropped.
-    for paragraph in v9.split("\n\n"):
-        assert paragraph in v10
+    # One section added, nothing from v10 dropped.
+    for paragraph in v10.split("\n\n"):
+        assert paragraph in v11
 
 
-def test_v10_defines_the_same_roles_as_v9() -> None:
+def test_v11_defines_the_same_roles_as_v10() -> None:
     """A version directory missing a role breaks only the runs that need it.
 
-    `vision_directive` is loaded from the resolved version, so a v10 without it
+    `vision_directive` is loaded from the resolved version, so a v11 without it
     raises at run time for a vision run and never for a text-only one. Nothing
     else in the suite would notice: the lock records what is on disk, and the
     body assertions only read `system`.
     """
-    assert roles_in("qa_run", "v10") == roles_in("qa_run", "v9")
+    assert roles_in("qa_run", "v11") == roles_in("qa_run", "v10")
 
 
 def test_v8_is_v7_and_marks_the_tool_set_that_changed_under_it() -> None:
@@ -390,3 +390,23 @@ def test_v7_separates_a_game_defect_from_a_step_verdict() -> None:
     # One paragraph added, nothing from v6 dropped.
     for paragraph in v6.split("\n\n"):
         assert paragraph in v7
+
+
+def test_v10_adds_the_citation_section_and_keeps_v9_intact() -> None:
+    """The citation guidance is a new version, not an edit to a released one.
+
+    It also has to stay UNPRESSURED. Pushing a model to cite more buys citations
+    of whatever is at hand, and the known under-reporting bias becomes a
+    contamination whose direction nobody knows — so the section says what counts,
+    says most steps cite nothing, and stops there.
+    """
+    v9 = load_prompt("qa_run", "system", "v9").body
+    v10 = load_prompt("qa_run", "system", "v10").body
+
+    assert "### Saying what you used" in v10
+    assert "used_knowledge_ids" in v10 and "used_knowledge_ids" not in v9
+    # An empty list is stated as a complete answer, not as a failure to comply.
+    assert "an empty list is a complete answer" in v10
+    # Everything v9 said, v10 still says: the addition is an insertion, not a rewrite.
+    for paragraph in v9.split("\n\n"):
+        assert paragraph in v10

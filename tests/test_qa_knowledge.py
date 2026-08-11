@@ -193,6 +193,9 @@ def test_a_search_goes_out_as_a_knowledge_search_frame() -> None:
             "query": "골드가 모자라면 어떻게 되나",
             "tag": None,
             "limit": RESULT_LIMIT,
+            # 검색을 부른 스텝. 결과를 바꾸지 않는 좌표이고, 이것이 실려야
+            # Orchestration의 knowledge_usage.step이 채워진다(ARTEL-294).
+            "step": 2,
         }
         assert "구매는 소지금이" in result
 
