@@ -696,7 +696,7 @@ def test_closing_over_unreported_steps_is_pushed_back_on_once() -> None:
         assert state.finished
         terminal = sent[-1]["payload"]
         assert terminal["result"] == "FAILED"
-        assert terminal["summary"]["failed"] == 2
+        assert terminal["summary"]["steps"]["failed"] == 2
 
     asyncio.run(run())
 
@@ -718,8 +718,52 @@ def test_finish_run_reports_the_tally() -> None:
         assert state.finished
         terminal = sent[-1]["payload"]
         assert terminal["result"] == "FAILED"
-        assert terminal["summary"]["passed"] == 1
-        assert terminal["summary"]["failed"] == 1
+        assert terminal["summary"]["steps"]["passed"] == 1
+        assert terminal["summary"]["steps"]["failed"] == 1
+
+    asyncio.run(run())
+
+
+def test_two_tier_summary_case_verdict_is_its_verification_step() -> None:
+    """2단 판정: 모든 스텝에 성공/실패, TC 판정 = 그 구간 검증(마지막) 스텝 판정.
+
+    중간 스텝이 실패해도 검증 스텝이 통과하면 그 TC는 통과다 — 그리고 중간 실패는
+    steps에 그대로 남아 보인다(사용자 요구).
+    """
+
+    async def run() -> None:
+        # TC 12 = 스텝 1,2,3(3=검증). standalone 4. TC 20 = 스텝 5(검증).
+        step_meta = [(12, False), (12, False), (12, True), (None, False), (20, True)]
+        _, state, tools, sent = make(total_steps=5)
+        state.step_meta = step_meta
+        verdicts = [
+            (1, True, "did a1"),
+            (2, False, "a2 안됨"),   # 중간 실패
+            (3, True, "기대결과 나옴"),  # 검증 통과 → TC12 통과
+            (4, True, "did a4"),
+            (5, False, "기대결과 안나옴"),  # 검증 실패 → TC20 실패
+        ]
+        for step, passed, message in verdicts:
+            await tools["report_step"].ainvoke(
+                {"step": step, "passed": passed, "message": message, "thought": "t"}
+            )
+
+        await tools["finish_run"].ainvoke(
+            {"passed": False, "summary": "요약", "thought": "종합"}
+        )
+
+        summary = sent[-1]["payload"]["summary"]
+        # 모든 스텝이 보인다(중간 실패 포함).
+        assert summary["steps"]["total"] == 5
+        assert summary["steps"]["passed"] == 3
+        assert summary["steps"]["failed"] == 2
+        # TC 판정은 검증 스텝에서 파생.
+        cases = {c["case_id"]: c for c in summary["cases"]["items"]}
+        assert summary["cases"]["total"] == 2
+        assert cases[12]["passed"] is True   # 중간(2) 실패했지만 검증(3) 통과
+        assert cases[12]["steps"] == [1, 2, 3]
+        assert cases[12]["verify_step"] == 3
+        assert cases[20]["passed"] is False
 
     asyncio.run(run())
 

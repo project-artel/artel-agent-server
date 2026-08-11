@@ -526,6 +526,10 @@ class StatusPayload(BaseModel):
     # terminal run frame — so Orchestration can read it uniformly.
     result: RunResult | None = None
     step: int | None = None
+    # Per-step 판정 프레임에만 채워진다(2단 판정): 이 스텝이 속한 TC(`case_id`)와 그 스텝이
+    # 구간의 검증(마지막) 스텝인지(`is_verification`). Orche/FE가 스텝을 TC로 묶어 표시한다.
+    case_id: int | None = None
+    is_verification: bool = False
     message: str
     summary: dict | None = None
 

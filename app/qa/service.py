@@ -6,8 +6,9 @@ from collections.abc import Awaitable, Callable
 from pydantic import ValidationError
 
 from app.agents.qa.arch import DEFAULT_ARCH, QaArchSpec
+from app.agents.qa.reset import DEFAULT_RESET_POLICY, ResetPolicy
 from app.agents.qa.runner import QaRunner
-from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage, ScenarioDraft
+from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage
 from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig
 from app.llm.usage import set_usage_scope
 from app.qa.channel import QaRunChannel
@@ -19,7 +20,7 @@ from app.qa.envelope import (
     StepStatus,
 )
 from app.qa.run_config import RunConfig, resolve_run_config
-from app.qa.schemas import QaSessionRecord
+from app.qa.schemas import QaRunScenario, QaSessionRecord
 from app.qa.store import QaSessionStore
 from app.sessions.store import SessionExpired
 
@@ -40,30 +41,33 @@ class QaExecutionService:
         self,
         store: QaSessionStore,
         runner_factory: Callable[..., QaRunner] | None = None,
+        reset_policy: ResetPolicy | None = None,
     ) -> None:
         self._store = store
         self._runner_factory = runner_factory or (lambda *, config: QaRunner(config))
+        # 시나리오 사이 게임 초기화 정책(seam). 기본은 전체 초기화; 나중에 최소-초기화로 교체.
+        self._reset_policy = reset_policy or DEFAULT_RESET_POLICY
         self._channels: dict[str, QaRunChannel] = {}
 
     async def open(
         self,
-        qa_try_id: int,
+        qa_run_id: int,
         game_instance_id: int,
-        test_scenario_id: int,
-        scenario: ScenarioDraft,
+        scenarios: list[QaRunScenario],
         model: LLMModel = DEFAULT_MODEL,
         language: OutputLanguage = DEFAULT_LANGUAGE,
         prompt_version: str | None = None,
         reasoning: ReasoningConfig | None = None,
         arch: QaArchSpec = DEFAULT_ARCH,
     ) -> tuple[str, RunConfig]:
-        """Open a session and return its id alongside what it will run with.
+        """Open a run-scoped session and return its id alongside what it will run with.
 
-        The config is returned rather than only stored because Orchestration is
-        what records a try, and what it must record is the resolved form — not
-        the request it sent. Resolution happens here, once: a prompt file that
-        cannot be read fails the open, where the caller still gets an error,
-        instead of failing a run that has already been reported as started.
+        A session is one QA_Run: the run's scenarios execute in order over one
+        socket, resetting the game between them. The config is resolved here once
+        (a prompt file that cannot be read fails the open, where the caller still
+        gets an error, instead of failing a run that has already been reported as
+        started) and returned because Orchestration records the resolved form, not
+        the request.
         """
         run_config = resolve_run_config(
             model=model,
@@ -74,23 +78,24 @@ class QaExecutionService:
         )
         session_id = uuid.uuid4().hex
         record = QaSessionRecord(
-            qa_try_id=qa_try_id,
+            qa_run_id=qa_run_id,
             game_instance_id=game_instance_id,
-            test_scenario_id=test_scenario_id,
-            scenario=scenario,
+            scenarios=scenarios,
             run_config=run_config,
         )
         await self._store.save(session_id, record)
         return session_id, run_config
 
     async def ensure(self, session_id: str) -> int:
-        """Return the session's qa_try_id, raising SessionExpired if it is gone.
+        """Return a qa_try_id to stamp connection-level frames with, or raise SessionExpired.
 
-        Used on WS connect, and to stamp connection-level ERROR frames with the
-        real try id (Orchestration rejects frames whose qaTryId has no active try).
+        The first scenario's try. Connection-level ERRORs happen before any
+        scenario runs, and Orchestration rejects a frame whose qaTryId has no
+        active try, so it must name a real one. Per-scenario frames use their own
+        try (see [run]).
         """
         record = await self._load(session_id)
-        return record.qa_try_id
+        return record.scenarios[0].qa_try_id
 
     async def close(self, session_id: str) -> None:
         self._channels.pop(session_id, None)
@@ -99,35 +104,57 @@ class QaExecutionService:
     # --- the run --------------------------------------------------------------
 
     async def run(self, session_id: str, send: Send) -> None:
-        """Drive one scenario to completion, sending frames as it goes.
+        """Drive the run's scenarios in order, resetting the game between them.
 
-        Returns when the run is over — cleanly, cancelled, or cut short — having
-        already sent a terminal STATUS in every case. The caller closes the socket.
+        One session is one QA_Run. Each scenario runs on its own channel (stamped
+        with that scenario's qa_try_id) to its own deadline; a clean scenario
+        closes itself with a terminal STATUS via `finish_run`, a cut-short one is
+        closed here. A **failed scenario does not stop the run** — the next one
+        still runs (ARTEL-242). Only an operator CANCEL stops the whole run.
+        Between scenarios the ResetPolicy puts the game back so the next one starts
+        from a known state.
         """
         record = await self._load(session_id)
-        # Every model call the run makes from here inherits this label; the
-        # contextvar rides the run's task and its children.
-        set_usage_scope("QA_RUN", record.qa_try_id)
-        channel = QaRunChannel(qa_try_id=record.qa_try_id, send=send)
-        self._channels[session_id] = channel
+        total = len(record.scenarios)
 
-        runner = self._runner_factory(config=record.run_config)
-        try:
-            state, failure = await runner.run_with_deadline(channel, record.scenario)
-        finally:
-            self._channels.pop(session_id, None)
+        for index, item in enumerate(record.scenarios):
+            # Every model call inherits this label; the contextvar rides the task.
+            set_usage_scope("QA_RUN", item.qa_try_id)
+            channel = QaRunChannel(qa_try_id=item.qa_try_id, send=send)
+            self._channels[session_id] = channel
 
-        if channel.cancelled:
-            await self._send_terminal(channel, StepStatus.CANCELLED, None, "QA run cancelled.")
-            return
-        if failure is not None:
-            # The agent never closed the run, so nothing else will say it ended.
-            await channel.emit(
-                MessageType.ERROR, ErrorPayload(message=failure, code="run_incomplete")
-            )
-            await self._send_terminal(
-                channel, StepStatus.FAILED, RunResult.FAILED, failure, state
-            )
+            # Reset before every scenario but the first — the first act of this
+            # scenario's try, so the reset frame is attributed to a try about to be
+            # active. (Resetting before the first is a future setting.)
+            if index > 0:
+                await self._reset_policy.between_scenarios(channel, index, total)
+                if channel.cancelled:
+                    self._channels.pop(session_id, None)
+                    await self._send_terminal(
+                        channel, StepStatus.CANCELLED, None, "QA run cancelled."
+                    )
+                    return
+
+            runner = self._runner_factory(config=record.run_config)
+            try:
+                state, failure = await runner.run_with_deadline(channel, item.scenario)
+            finally:
+                self._channels.pop(session_id, None)
+
+            if channel.cancelled:
+                await self._send_terminal(
+                    channel, StepStatus.CANCELLED, None, "QA run cancelled."
+                )
+                return
+            if failure is not None:
+                # The agent never closed this scenario, so nothing else will say it
+                # ended. Report it and carry on to the next scenario.
+                await channel.emit(
+                    MessageType.ERROR, ErrorPayload(message=failure, code="run_incomplete")
+                )
+                await self._send_terminal(
+                    channel, StepStatus.FAILED, RunResult.FAILED, failure, state
+                )
 
     async def _send_terminal(
         self,
@@ -137,15 +164,9 @@ class QaExecutionService:
         message: str,
         state=None,
     ) -> None:
-        summary = None
-        if state is not None:
-            passed = sum(1 for item in state.step_results if item.passed)
-            summary = {
-                "total": state.total_steps,
-                "passed": passed,
-                "failed": state.total_steps - passed,
-                "steps": [item.model_dump() for item in state.step_results],
-            }
+        # 정상 종료(finish_run)와 같은 2단 요약 형태(steps+cases)를 낸다 — 다운스트림이 종료
+        # 사유마다 다른 스키마를 보지 않도록. build_summary가 유일한 생성 지점이다.
+        summary = state.build_summary() if state is not None else None
         await channel.emit(
             MessageType.STATUS,
             StatusPayload(status=status, result=result, message=message, summary=summary),

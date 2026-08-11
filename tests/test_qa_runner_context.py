@@ -20,7 +20,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from app.agents.qa.context import DEFAULT_KEEP_SCENES
 from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState
-from app.agents.scenario import ScenarioDraft, ScenarioStep
+from app.qa.schemas import QaCaseRef, QaScenario, QaStep
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import MessageType
 from app.qa.scene import CURRENT_SCENE_END, CURRENT_SCENE_START
@@ -81,12 +81,12 @@ def make_channel() -> tuple[QaRunChannel, list[dict]]:
     return channel, sent
 
 
-def scenario() -> ScenarioDraft:
-    return ScenarioDraft(
+def scenario() -> QaScenario:
+    return QaScenario(
         title="시작 확인",
         description="시작 화면이 뜨는지 확인한다.",
         steps=[
-            ScenarioStep(step=1, title="시작", state="메인 메뉴", action="관찰", expected="화면이 보인다")
+            QaStep(action="관찰", case_id=1, case=QaCaseRef(id=1, precondition="메인 메뉴", test_step="시작", expected="화면이 보인다"))
         ],
     )
 

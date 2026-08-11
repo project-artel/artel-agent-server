@@ -19,12 +19,12 @@ from app.agents.qa.context import fold_stale_knowledge, fold_stale_scenes
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.vision import QaCaptureVisionMiddleware
-from app.agents.scenario import ScenarioDraft
 from app.llm.chat_model import build_chat_model
 from app.llm.models import LLMModel, get_model_spec
 from app.prompts import load_prompt
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory
+from app.qa.schemas import QaScenario, QaStep
 from app.qa.run_config import (
     COMPACTION_PROMPT_AGENT,
     COMPACTION_ROLE,
@@ -58,20 +58,71 @@ def _clip(text: str) -> str:
     return f"{text[:MAX_LOGGED_CHARS]}\n… [{len(text) - MAX_LOGGED_CHARS} more characters]"
 
 
-def _first_message(scenario: ScenarioDraft) -> str:
-    steps = [
-        {
-            "step": step.step,
-            "title": step.title,
-            "state": step.state,
-            "action": step.action,
-            "expected": step.expected,
-        }
-        for step in scenario.steps
-    ]
+def _action_line(step: QaStep) -> str:
+    """스텝의 행위 한 줄. hint/input은 강제가 아닌 어드바이저리 근거로 덧붙인다."""
+    line = step.action.strip() or "(no action)"
+    extras: list[str] = []
+    if step.hint:
+        extras.append(f"try: {step.hint.strip()}")
+    if step.input:
+        extras.append(f"via: {step.input.strip()}")
+    return f"{line}  ({'; '.join(extras)})" if extras else line
+
+
+def _step_plan(scenario: QaScenario) -> list[tuple[int | None, bool]]:
+    """스텝별 (case_id, is_verification). **연속 동일 case_id = 한 TC 구간**이고, 그 구간의
+    **마지막 스텝 = 검증 스텝**(is_verification=True). case_id 없는 스텝은 검증이 아니다.
+
+    report_step은 전체 스텝 수만큼 1..S로 오며, 이 표가 각 판정에 case_id·검증여부를 붙인다.
+    TC 판정 = 그 구간 검증 스텝의 판정(파생)이라 여기 하드코딩되지 않는다.
+    """
+    steps = scenario.steps
+    plan: list[tuple[int | None, bool]] = []
+    for idx, step in enumerate(steps):
+        cid = step.case_id
+        # 구간의 마지막 스텝(다음 스텝의 case_id가 다르거나 끝)이면 검증 스텝.
+        nxt = steps[idx + 1].case_id if idx + 1 < len(steps) else None
+        is_verification = cid is not None and nxt != cid
+        plan.append((cid, is_verification))
+    return plan
+
+
+def _plan(scenario: QaScenario) -> str:
+    """새 계약(steps[])을 실행 첫 메시지로 변환한다(2단 판정 2026-08-08).
+
+    **모든 스텝을 판정한다**: report_step(step, passed, message)를 전체 스텝(1..S)마다 호출한다.
+    각 스텝은 `do`(행위)를 갖고, TC 구간의 첫 스텝엔 `precondition`, 마지막(검증) 스텝엔 `verify`
+    (기대결과)가 붙는다. `verify`가 있는 스텝의 passed는 **기대결과가 나왔는가**(그게 그 TC의 최종
+    판정), 그 외 스텝의 passed는 **그 행위를 수행/성립했는가**다.
+    """
+    plan = _step_plan(scenario)
+    items: list[dict] = []
+    prev_cid: int | None = None
+    for idx, step in enumerate(scenario.steps):
+        cid, is_verification = plan[idx]
+        case = step.case
+        item: dict = {"step": idx + 1, "do": _action_line(step)}
+        if cid is not None:
+            item["case_id"] = cid
+            # 구간의 첫 스텝에만 사전조건을 건다(구간 진입 검증).
+            if cid != prev_cid and case and case.precondition:
+                item["precondition"] = case.precondition
+            if is_verification:
+                item["verify"] = case.expected if case else ""
+        items.append(item)
+        prev_cid = cid
     return (
         f"Scenario: {scenario.title} — {scenario.description}\n\n"
-        f"Steps to execute in order:\n{json.dumps(steps, ensure_ascii=False, indent=2)}\n\n"
+        "Execute the steps below in order and call report_step(step, passed, message) for EVERY step.\n"
+        "- A step with `verify` is the TEST CASE's verdict: `passed` = whether that expected result "
+        "actually occurred. That verdict is the whole case's verdict.\n"
+        "- Any other step: `passed` = whether you carried the action out (did it happen), not a "
+        "quality judgment.\n"
+        "- A `precondition` must hold before that case's first step. If you cannot reach it, report "
+        "its steps passed=false with a message beginning 'SETUP-FAILED:' and do NOT report_issue "
+        "(an unreachable precondition is not a defect).\n"
+        "- `try:` and `via:` are advisory hints, not required.\n\n"
+        f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
         "Begin. Observe the screen first."
     )
 
@@ -246,7 +297,7 @@ class QaRunner:
         logger.info("[QA] context compacted #%d\n%s", count, _clip(summary))
 
     async def run(
-        self, channel: QaRunChannel, scenario: ScenarioDraft, state: QaRunState
+        self, channel: QaRunChannel, scenario: QaScenario, state: QaRunState
     ) -> None:
         config = self._config
         arch = config.arch
@@ -266,7 +317,8 @@ class QaRunner:
             language_directive=LANGUAGE_DIRECTIVES[config.language],
             vision_directive=vision_directive,
         )
-        first_message = _first_message(scenario)
+        first_message = _plan(scenario)
+        total_steps = len(scenario.steps)
         tools = build_tools(channel, state, arch)
 
         # The whole starting context in one place. Reading a run afterwards means
@@ -281,7 +333,7 @@ class QaRunner:
             "--- system prompt ---\n%s\n"
             "--- first message ---\n%s",
             config.model_dump(mode="json", exclude_none=True),
-            len(scenario.steps),
+            total_steps,
             system_prompt,
             _clip(first_message),
         )
@@ -309,7 +361,7 @@ class QaRunner:
         # a run that only shows actions gives no way to tell a considered decision
         # from a lucky one.
         async for update in agent.astream(
-            {"messages": [("user", _first_message(scenario))]},
+            {"messages": [("user", first_message)]},
             # recursion_limit counts graph steps, so it bounds tool calls as well
             # as the model turns between them.
             {
@@ -318,7 +370,7 @@ class QaRunner:
                 # ahead of the model. Left at a flat 2, turning compaction on
                 # would quietly cost the run a third of its tool budget.
                 "recursion_limit": (
-                    self._tool_call_limit(len(scenario.steps))
+                    self._tool_call_limit(total_steps)
                     * (2 + (1 if arch.compaction else 0))
                 ),
                 "run_name": "qa-scenario-run",
@@ -431,14 +483,15 @@ class QaRunner:
                     await channel.note(text, LogCategory.THOUGHT)
 
     async def run_with_deadline(
-        self, channel: QaRunChannel, scenario: ScenarioDraft
+        self, channel: QaRunChannel, scenario: QaScenario
     ) -> tuple[QaRunState, str | None]:
         """Returns the state and, when the run did not close cleanly, why.
 
         The state is built here and handed down so that a run cut short by the
         deadline still carries the verdicts it managed to record.
         """
-        state = QaRunState(total_steps=len(scenario.steps))
+        step_meta = _step_plan(scenario)
+        state = QaRunState(total_steps=len(scenario.steps), step_meta=step_meta)
         deadline = self._config.arch.deadline_seconds
         try:
             await asyncio.wait_for(self.run(channel, scenario, state), timeout=deadline)

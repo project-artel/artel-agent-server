@@ -19,7 +19,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from app.agents.qa.arch import QaArchSpec
 from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState
-from app.agents.scenario import ScenarioDraft, ScenarioStep
+from app.qa.schemas import QaCaseRef, QaScenario, QaStep
 from app.qa.channel import QaRunChannel
 from app.qa.run_config import resolve_run_config
 from app.qa.envelope import LogCategory, MessageType
@@ -105,13 +105,13 @@ def make_channel() -> tuple[QaRunChannel, list[dict]]:
     return channel, sent
 
 
-def scenario() -> ScenarioDraft:
-    return ScenarioDraft(
+def scenario() -> QaScenario:
+    return QaScenario(
         title="시작 확인",
         description="시작 화면과 시작 버튼을 확인한다.",
         steps=[
-            ScenarioStep(step=1, title="시작 화면", state="메인 메뉴", action="관찰", expected="화면이 보인다"),
-            ScenarioStep(step=2, title="시작 버튼", state="메인 메뉴", action="관찰", expected="버튼이 보인다"),
+            QaStep(action="관찰", case_id=1, case=QaCaseRef(id=1, precondition="메인 메뉴", test_step="시작 화면", expected="화면이 보인다")),
+            QaStep(action="관찰", case_id=2, case=QaCaseRef(id=2, precondition="메인 메뉴", test_step="시작 버튼", expected="버튼이 보인다")),
         ],
     )
 

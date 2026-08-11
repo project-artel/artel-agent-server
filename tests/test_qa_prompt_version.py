@@ -13,8 +13,8 @@ import pytest
 from app.agents.qa import runner as runner_module
 from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState, build_tools
-from app.agents.scenario import ScenarioDraft, ScenarioStep
 from app.api.qa_sessions import OpenQaSessionRequest
+from app.qa.schemas import QaCaseRef, QaRunScenario, QaScenario, QaStep
 from app.prompts import load_prompt
 from app.prompts.loader import resolve_version
 from app.qa.channel import QaRunChannel
@@ -28,17 +28,20 @@ async def _ignore(_frame: dict) -> None:
     return None
 
 
-def make_scenario() -> ScenarioDraft:
-    return ScenarioDraft(
+def make_scenario() -> QaScenario:
+    return QaScenario(
         title="튜토리얼",
         description="튜토리얼 진입을 확인한다",
         steps=[
-            ScenarioStep(
-                step=1,
-                title="시작",
-                state="타이틀 화면",
+            QaStep(
                 action="시작 버튼을 누른다",
-                expected="튜토리얼 화면으로 넘어간다",
+                case_id=1,
+                case=QaCaseRef(
+                    id=1,
+                    precondition="타이틀 화면",
+                    test_step="시작",
+                    expected="튜토리얼 화면으로 넘어간다",
+                ),
             )
         ],
     )
@@ -96,10 +99,11 @@ async def _run_session(prompt_version: str | None) -> str | None:
         store=InMemoryQaSessionStore(), runner_factory=factory
     )
     session_id, _run_config = await service.open(
-        qa_try_id=7,
+        qa_run_id=7,
         game_instance_id=1,
-        test_scenario_id=1,
-        scenario=make_scenario(),
+        scenarios=[
+            QaRunScenario(qa_try_id=7, test_scenario_id=1, scenario=make_scenario())
+        ],
         prompt_version=prompt_version,
     )
 
