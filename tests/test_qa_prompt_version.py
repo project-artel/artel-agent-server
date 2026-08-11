@@ -243,16 +243,17 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v9() -> None:
+def test_the_default_qa_version_is_v10() -> None:
     """A run that names no version has to get the newest prompt.
 
     This is also the trap in adding a version: `resolve_version` returns the
     highest-numbered directory, so creating one silently repoints every run that
-    has not pinned `qa_prompt_version`. That is why v9 ships in the same change
-    as the tools it talks about — a prompt that names `link_knowledge` before the
-    tool exists teaches the agent to reach for something that is not there.
+    has not pinned `qa_prompt_version`. That is why each version ships in the same
+    change as the tools it talks about — a prompt that names `used_knowledge_ids`
+    before `report_step` takes one teaches the agent to reach for something that
+    is not there.
     """
-    assert resolve_version("qa_run") == "v9"
+    assert resolve_version("qa_run") == "v10"
 
 
 def test_v9_structures_the_body_and_adds_the_knowledge_base_section() -> None:
@@ -351,3 +352,23 @@ def test_v7_separates_a_game_defect_from_a_step_verdict() -> None:
     # One paragraph added, nothing from v6 dropped.
     for paragraph in v6.split("\n\n"):
         assert paragraph in v7
+
+
+def test_v10_adds_the_citation_section_and_keeps_v9_intact() -> None:
+    """The citation guidance is a new version, not an edit to a released one.
+
+    It also has to stay UNPRESSURED. Pushing a model to cite more buys citations
+    of whatever is at hand, and the known under-reporting bias becomes a
+    contamination whose direction nobody knows — so the section says what counts,
+    says most steps cite nothing, and stops there.
+    """
+    v9 = load_prompt("qa_run", "system", "v9").body
+    v10 = load_prompt("qa_run", "system", "v10").body
+
+    assert "### Saying what you used" in v10
+    assert "used_knowledge_ids" in v10 and "used_knowledge_ids" not in v9
+    # An empty list is stated as a complete answer, not as a failure to comply.
+    assert "an empty list is a complete answer" in v10
+    # Everything v9 said, v10 still says: the addition is an insertion, not a rewrite.
+    for paragraph in v9.split("\n\n"):
+        assert paragraph in v10

@@ -52,6 +52,11 @@ SYSTEM_ROLE = "system"
 VISION_ROLE = "vision_directive"
 COMPACTION_ROLE = "summary"
 
+# This build reports citations. Declared as a constant rather than written inline
+# so that a build which one day cannot — a stripped tool set, a structure without
+# `report_step` — has one place to say so instead of a literal to hunt for.
+CITATION_REPORTING = True
+
 
 class RunConfig(BaseModel):
     """One run's execution settings, with nothing left to interpret."""
@@ -76,6 +81,21 @@ class RunConfig(BaseModel):
     agent_fingerprint: str
     arch: ResolvedArch
     tools: list[str]
+    # Whether this build's `report_step` can report which knowledge a verdict
+    # rested on (ARTEL-293/294).
+    #
+    # Constant `True` here, and that is the point: Orchestration confirms every
+    # run's uncited `knowledge_usage` rows as `cited=false` when the try ends, and
+    # it must not do that to a run that had no way to report a citation. Those two
+    # cases have to stay apart — `null` is "could not report", `false` is "could
+    # and did not" — and the only honest way to tell them apart later is a mark
+    # left on the row at the time. A run from before this field simply has no key
+    # in `run_config`, so it stays null forever, which is correct.
+    #
+    # Not derived from `prompt_version` on the far side: that would tie a data
+    # question to a version-numbering scheme, and it cannot answer at all for a
+    # run whose Agent never reported its settings.
+    citation_reporting: bool
     # Compaction summarizes with its own model and its own prompt version, so a
     # run's context can be rewritten by something the run's own model and prompt
     # axes do not describe. Null when the structure has compaction off.
@@ -144,6 +164,7 @@ def resolve_run_config(
         agent_fingerprint=fingerprint,
         arch=resolved_arch,
         tools=list(tools),
+        citation_reporting=CITATION_REPORTING,
         compaction_model=compaction_model,
         compaction_prompt_version=compaction_prompt.version if compaction_prompt else None,
         git_sha=settings.git_sha,

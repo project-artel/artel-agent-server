@@ -559,3 +559,61 @@ def test_the_relation_vocabulary_has_no_catch_all() -> None:
 def test_the_neighbour_clip_is_small_enough_to_stay_a_handful_of_lines() -> None:
     """Eight neighbours at this width is the budget ARTEL-275 sized the caps for."""
     assert MAX_NEIGHBOUR_SUMMARY_CHARS <= 160
+
+
+def test_citing_something_only_glimpsed_is_allowed() -> None:
+    """The mirror of the two refusals above, and the reason `knows_of` exists.
+
+    `update_knowledge` and `forget_knowledge` demand `knowledge_seen` because they
+    destroy something. A citation destroys nothing — it records that a line the
+    run was shown is what changed its mind — so the bar is `knows_of`, and an
+    entry met only as a neighbour line clears it.
+    """
+
+    async def run() -> None:
+        channel, state, tools, sent = make(total_steps=1)
+
+        task = answer_search(
+            channel, sent, [KnowledgeSearchHit(id="1", neighbors=[neighbour(id="42")])]
+        )
+        await tools["search_knowledge"].ainvoke(
+            {"step": 1, "thought": "찾아본다", "query": "상점"}
+        )
+        await task
+        assert "42" not in state.knowledge_seen and "42" in state.knowledge_glimpsed
+
+        await tools["report_step"].ainvoke(
+            {
+                "step": 1,
+                "passed": True,
+                "message": "이웃 줄이 말한 대로였다",
+                "thought": "그 한 줄이 판정을 바꿨다",
+                "used_knowledge_ids": ["42"],
+            }
+        )
+
+        payload = frames(sent, MessageType.STATUS)[0]["payload"]
+        assert payload["used_knowledge_ids"] == ["42"]
+        assert payload["rejected_knowledge_id_count"] == 0
+
+    asyncio.run(run())
+
+
+def test_an_expansion_says_which_step_asked() -> None:
+    """The expansion writes usage rows too, so it carries the same coordinate."""
+
+    async def run() -> None:
+        channel, state, tools, sent = make(total_steps=1)
+        state.knowledge_seen["1"] = "마을"
+
+        task = answer_expand(
+            channel, sent, KnowledgeExpandResultPayload(id="1", neighbors=[neighbour()])
+        )
+        await tools["expand_knowledge"].ainvoke(
+            {"step": 4, "thought": "관계를 따라간다", "knowledge_id": "1"}
+        )
+        await task
+
+        assert frames(sent, MessageType.KNOWLEDGE_EXPAND)[0]["payload"]["step"] == 4
+
+    asyncio.run(run())

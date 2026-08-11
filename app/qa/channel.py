@@ -219,7 +219,7 @@ class QaRunChannel:
             self._pending_action_id = None
 
     async def search_knowledge(
-        self, query: str, tag: str | None, limit: int
+        self, query: str, tag: str | None, limit: int, step: int | None = None
     ) -> KnowledgeSearchResultPayload | KnowledgeSearchFailed | None:
         """Ask the project's knowledge base a question. `None` means no answer came.
 
@@ -242,7 +242,7 @@ class QaRunChannel:
 
         frame = self._frame(
             MessageType.KNOWLEDGE_SEARCH,
-            KnowledgeSearchPayload(query=query, tag=tag, limit=limit),
+            KnowledgeSearchPayload(query=query, tag=tag, limit=limit, step=step),
         )
         self._pending_knowledge_id = frame["messageId"]
         await self._send(frame)
@@ -255,7 +255,7 @@ class QaRunChannel:
             self._pending_knowledge_id = None
 
     async def expand_knowledge(
-        self, knowledge_id: str, depth: int, include_similar: bool
+        self, knowledge_id: str, depth: int, include_similar: bool, step: int | None = None
     ) -> KnowledgeExpandResultPayload | KnowledgeSearchFailed | None:
         """Walk the knowledge graph out from one entry. `None` means no answer came.
 
@@ -279,7 +279,10 @@ class QaRunChannel:
         frame = self._frame(
             MessageType.KNOWLEDGE_EXPAND,
             KnowledgeExpandPayload(
-                knowledge_id=knowledge_id, depth=depth, include_similar=include_similar
+                knowledge_id=knowledge_id,
+                depth=depth,
+                include_similar=include_similar,
+                step=step,
             ),
         )
         self._pending_expand_id = frame["messageId"]
