@@ -1114,6 +1114,54 @@ def build_tools(
         )
 
     @tool
+    async def set_input_axis(step: int, axis_name: str, value: float, thought: str) -> str:
+        """Drive a named input axis, for a game that reads axes rather than keys.
+
+        `axis_name` is a Unity Input Manager axis and is CASE SENSITIVE —
+        "Horizontal", "Vertical", "Jump" are the stock ones. `value` runs from
+        -1 to 1: 1 and -1 are the two directions, 0 is centred. A value outside
+        that range is refused, and so is an axis the game has not set up, so a
+        misspelled name comes back as an error rather than as silence.
+
+        Use this when `hold_key` does nothing. A game that reads
+        `Input.GetAxis("Horizontal")` cannot see a held key at all: the key tool
+        reports success and the character does not move.
+
+        Nothing centres this for you. Call it again with 0 before you judge the
+        step, or every step after it runs with the axis pushed over.
+        """
+        return await _run(
+            [JsonRpcAction(id=1, method="set_axis", params=[axis_name, value])],
+            thought,
+            f"Setting axis {axis_name} to {value}",
+            step,
+        )
+
+    @tool
+    async def set_input_button(step: int, axis_name: str, pressed: bool, thought: str) -> str:
+        """Hold or release a named input button, for a game that reads buttons by name.
+
+        In Unity a button IS an axis: "Jump" is an axis entry whose positive side
+        is a key, and the game may read it with `GetButton("Jump")` instead of
+        checking the key itself. `axis_name` is that name, CASE SENSITIVE, and an
+        axis the game has not set up comes back as an error.
+
+        `pressed=True` holds it, `pressed=False` lets go. Release is what reports
+        the button coming up, so a game watching for that edge needs the second
+        call and not a value of 0.
+
+        Nothing releases this for you. Call it with `pressed=False` before you
+        judge the step, or the game keeps seeing the button down for the rest of
+        the run.
+        """
+        return await _run(
+            [JsonRpcAction(id=1, method="set_button", params=[axis_name, pressed])],
+            thought,
+            f"{'Holding' if pressed else 'Releasing'} button {axis_name}",
+            step,
+        )
+
+    @tool
     async def release_key(step: int, key_code: str, thought: str) -> str:
         """Let go of a key held by `hold_key`. `key_code` must be the same one."""
         return await _run(
@@ -1413,6 +1461,8 @@ def build_tools(
         release_mouse_button,
         hold_key,
         release_key,
+        set_input_axis,
+        set_input_button,
         drag_pointer,
         pause_game_time,
         resume_game_time,

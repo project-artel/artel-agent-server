@@ -236,6 +236,65 @@ def test_holding_and_releasing_a_key_carry_the_key_code() -> None:
     asyncio.run(run())
 
 
+def test_the_axis_tools_carry_the_axis_name_and_what_to_do_with_it() -> None:
+    """Order matters in the params: the SDK reads them positionally.
+
+    Both tools name the axis first, and the second slot is what differs — a
+    number for the axis, a flag for the button. Swapped, the SDK refuses the call
+    rather than acting on the wrong thing, but the run has still lost the step.
+    """
+
+    async def run() -> None:
+        _, _, tools, sent = make()
+        await tools["set_input_axis"].ainvoke(
+            {"step": 1, "axis_name": "Horizontal", "value": 1, "thought": "오른쪽으로 민다"}
+        )
+        await tools["set_input_axis"].ainvoke(
+            {"step": 1, "axis_name": "Horizontal", "value": 0, "thought": "축을 가운데로 되돌린다"}
+        )
+        await tools["set_input_button"].ainvoke(
+            {"step": 1, "axis_name": "Jump", "pressed": True, "thought": "점프를 누른다"}
+        )
+        await tools["set_input_button"].ainvoke(
+            {"step": 1, "axis_name": "Jump", "pressed": False, "thought": "점프를 놓는다"}
+        )
+
+        emitted = [frame["payload"]["actions"][0] for frame in actions(sent)]
+        assert [(item["method"], item["params"]) for item in emitted] == [
+            ("set_axis", ["Horizontal", 1]),
+            ("set_axis", ["Horizontal", 0]),
+            ("set_button", ["Jump", True]),
+            ("set_button", ["Jump", False]),
+        ]
+
+    asyncio.run(run())
+
+
+def test_every_tool_that_leaves_input_set_names_its_own_way_out() -> None:
+    """Nothing prompts the undo except the description saying it exists.
+
+    The key and mouse pairs have a partner tool, so the name alone hints at it.
+    The axis tools do not — you undo `set_input_axis` by calling it again with 0
+    — so if the description does not say so, the way back is written nowhere the
+    model will read, and every later step runs with the axis pushed over.
+    """
+    _, _, tools, _ = make()
+
+    # Descriptions are wrapped prose, so a phrase spanning a line break is one
+    # the raw string does not contain. Normalise rather than reflow the docstring
+    # to suit the assertion.
+    described = {
+        name: " ".join(tool.description.split()) for name, tool in tools.items()
+    }
+
+    assert "again with 0" in described["set_input_axis"]
+    assert "pressed=False" in described["set_input_button"]
+    for name in ("set_input_axis", "set_input_button"):
+        assert "before you judge the step" in described[name], (
+            f"{name} does not say when to undo what it set"
+        )
+
+
 def test_a_drag_goes_out_as_one_batch_in_order() -> None:
     """The order is the drag. Split across calls, anything could land between them.
 
@@ -829,6 +888,8 @@ def test_the_agent_is_offered_exactly_these_tools() -> None:
         "release_mouse_button",
         "hold_key",
         "release_key",
+        "set_input_axis",
+        "set_input_button",
         "drag_pointer",
         "pause_game_time",
         "resume_game_time",
