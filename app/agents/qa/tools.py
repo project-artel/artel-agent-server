@@ -462,7 +462,7 @@ def build_tools(
 
         await channel.note(thought, LogCategory.THOUGHT, step)
         state.knowledge_searches_attempted += 1
-        answer = await channel.search_knowledge(query, topic or None, RESULT_LIMIT)
+        answer = await channel.search_knowledge(query, topic or None, RESULT_LIMIT, step)
         messages = channel.drain_operator_messages()
         remaining = arch.max_searches_per_run - state.knowledge_searches_attempted
 
@@ -986,7 +986,7 @@ def build_tools(
         # refuses, so this only saves a round trip — but it also keeps the number
         # the agent is told about and the number it gets from drifting apart.
         answer = await channel.expand_knowledge(
-            target, max(1, min(depth, MAX_EXPAND_DEPTH)), include_similar=True
+            target, max(1, min(depth, MAX_EXPAND_DEPTH)), include_similar=True, step=step
         )
         messages = channel.drain_operator_messages()
         remaining = arch.max_expands_per_run - state.knowledge_expands_attempted
@@ -1244,7 +1244,13 @@ def build_tools(
         return with_operator_messages("The operator answered.", messages)
 
     @tool
-    async def report_step(step: int, passed: bool, message: str, thought: str) -> str:
+    async def report_step(
+        step: int,
+        passed: bool,
+        message: str,
+        thought: str,
+        used_knowledge_ids: list[str] = [],
+    ) -> str:
         """Record the verdict for one scenario step, with the evidence for it.
 
         Call this once per step, right after you have observed the result of that
@@ -1252,8 +1258,33 @@ def build_tools(
         whether that result occurred (this is also its test case's verdict); for
         any other step, `passed` is whether you carried the action out. `message`
         should cite what you saw, and `thought` is how you reached the verdict.
+
+        `used_knowledge_ids` is for knowledge base entries that actually bore on
+        THIS verdict — ones you read and then judged differently because of. Give
+        the ids as they were printed to you, whether by a search or as a neighbour
+        line. Leave it empty when the step was decided by what you could see;
+        that is the ordinary case and nothing is lost by saying so.
         """
+        # The empty list default is never mutated — the ids are read once, below.
+        # It is spelled as a literal rather than as `None` because this is a tool
+        # schema the model fills in: an optional array is something it can simply
+        # omit, while a nullable one invites it to send `null` and then wonder
+        # whether that meant "none" or "unknown".
         await channel.note(thought, LogCategory.THOUGHT, step)
+        # `knows_of`, NOT `knowledge_seen`. An entry shown only as a one-line
+        # neighbour can still be what a verdict rested on, and citing it destroys
+        # nothing. `knowledge_seen` is the bar for `update_knowledge` and
+        # `forget_knowledge` because those DO destroy something, and a 120-character
+        # line is not having read the entry — that boundary is deliberate and this
+        # tool sits on the other side of it.
+        #
+        # Duplicates are folded first: citing one entry twice is one citation, and
+        # counting it twice would make "how much knowledge this verdict used" a
+        # function of how the model happened to phrase the list.
+        cited: list[str] = []
+        rejected: list[str] = []
+        for entry in dict.fromkeys(used_knowledge_ids):
+            (cited if state.knows_of(entry) else rejected).append(entry)
         # 이 스텝이 어느 TC에 속하고 그 구간의 검증 스텝인지를 판정에 붙인다(2단 판정). step_meta가
         # 없으면(구식 호출자) 미상으로 둔다.
         case_id, is_verification = (
@@ -1268,6 +1299,11 @@ def build_tools(
                 is_verification=is_verification,
             )
         )
+        # The verdict frame stays a PER-STEP one: `result` is left null, so
+        # Orchestration's routeStatus logs it and the run goes on. Citations ride
+        # along here rather than in a frame of their own precisely so they cannot
+        # change that — a second frame type would be a second thing to get wrong
+        # about ending the run.
         await channel.emit(
             MessageType.STATUS,
             StatusPayload(
@@ -1276,18 +1312,33 @@ def build_tools(
                 case_id=case_id,
                 is_verification=is_verification,
                 message=message,
+                used_knowledge_ids=cited,
+                rejected_knowledge_id_count=len(rejected),
             ),
         )
         remaining = state.total_steps - len(state.step_results)
+        # Said out loud, not dropped. The verdict itself is already recorded, so
+        # this is not a refusal — but an agent told nothing would carry on
+        # believing the entry was credited, and the ids it invents are exactly
+        # what nobody would otherwise notice.
+        note = (
+            ""
+            if not rejected
+            else (
+                f"\n\n{len(rejected)} of the ids you cited are not entries this run "
+                f"has been shown, so they were not recorded: {rejected}. The verdict "
+                "stands. Cite only ids printed to you by a search or a neighbour line."
+            )
+        )
         if remaining <= 0:
-            return "Recorded. That was the last step — finish the run."
+            return f"Recorded. That was the last step — finish the run.{note}"
         # The verdict is recorded either way; what differs is the pull to keep
         # going. A failure is where the loop is most tempted to call it a day, so
         # that is where the next move has to be spelled out rather than implied.
         body = f"Recorded. {remaining} step(s) left — continue with step {step + 1}."
-        if passed:
-            return body
-        return f"{body} A failed step is not a reason to stop."
+        if not passed:
+            body = f"{body} A failed step is not a reason to stop."
+        return f"{body}{note}"
 
     @tool(
         description=REPORT_ISSUE_DESCRIPTION.format(

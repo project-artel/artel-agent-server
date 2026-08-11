@@ -868,3 +868,106 @@ def test_every_tool_takes_a_thought() -> None:
 
     for name, tool in tools.items():
         assert "thought" in tool.args, f"{name} would act without recording why"
+
+
+# --- citations (ARTEL-294) ----------------------------------------------------
+
+
+def test_a_verdict_without_citations_still_goes_out() -> None:
+    """The default has to be a working call.
+
+    A model that never fills the field must produce exactly the run it produced
+    before the field existed — the metric is worth nothing if adding it changed
+    how runs behave.
+    """
+
+    async def run() -> None:
+        _, _, tools, sent = make(total_steps=1)
+
+        await tools["report_step"].ainvoke(
+            {"step": 1, "passed": True, "message": "상점이 열렸다", "thought": "화면이 바뀌었다"}
+        )
+
+        payload = [f for f in sent if f["type"] == MessageType.STATUS.value][0]["payload"]
+        assert payload["used_knowledge_ids"] == []
+        assert payload["rejected_knowledge_id_count"] == 0
+
+    asyncio.run(run())
+
+
+def test_a_verdict_carries_the_knowledge_it_rested_on() -> None:
+    async def run() -> None:
+        _, state, tools, sent = make(total_steps=1)
+        state.knowledge_seen["42"] = "점프는 스페이스바"
+
+        await tools["report_step"].ainvoke(
+            {
+                "step": 1,
+                "passed": True,
+                "message": "스페이스바로 점프했다",
+                "thought": "지식이 말한 조작이 맞았다",
+                "used_knowledge_ids": ["42"],
+            }
+        )
+
+        payload = [f for f in sent if f["type"] == MessageType.STATUS.value][0]["payload"]
+        assert payload["used_knowledge_ids"] == ["42"]
+        # 스텝 판정은 런을 끝내지 않는다. 인용이 그 규칙을 바꾸면 안 된다.
+        assert payload["result"] is None
+
+    asyncio.run(run())
+
+
+def test_an_id_this_run_never_saw_is_dropped_and_counted() -> None:
+    """The hallucinated-citation rate is itself a comparison between models.
+
+    Dropped in silence, a model that invents ids would score exactly like one
+    that does not — so the count rides on the frame and the agent is told.
+    """
+
+    async def run() -> None:
+        _, state, tools, sent = make(total_steps=1)
+        state.knowledge_seen["42"] = "본 것"
+
+        result = await tools["report_step"].ainvoke(
+            {
+                "step": 1,
+                "passed": True,
+                "message": "됐다",
+                "thought": "판정",
+                "used_knowledge_ids": ["42", "999", "없는-id"],
+            }
+        )
+
+        payload = [f for f in sent if f["type"] == MessageType.STATUS.value][0]["payload"]
+        assert payload["used_knowledge_ids"] == ["42"]
+        assert payload["rejected_knowledge_id_count"] == 2
+        # 판정 자체는 기록됐다는 것과, 무엇이 빠졌는지가 둘 다 모델에게 가야 한다.
+        assert "Recorded." in result
+        assert "not entries this run has been shown" in result
+
+    asyncio.run(run())
+
+
+def test_a_search_says_which_step_asked() -> None:
+    """`step` was taken by the tool and never sent, which is why every
+    `knowledge_usage` row ever written has a null one."""
+
+    async def run() -> None:
+        channel, _, tools, sent = make(total_steps=1)
+
+        task = asyncio.create_task(
+            tools["search_knowledge"].ainvoke(
+                {"step": 3, "thought": "규칙을 확인한다", "query": "점프"}
+            )
+        )
+        for _ in range(50):
+            searches = [f for f in sent if f["type"] == MessageType.KNOWLEDGE_SEARCH.value]
+            if searches:
+                break
+            await asyncio.sleep(0)
+        task.cancel()
+
+        assert searches[0]["payload"]["step"] == 3
+
+    asyncio.run(run())
