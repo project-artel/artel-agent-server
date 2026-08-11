@@ -66,15 +66,28 @@ class ScenarioAgentRequest(BaseModel):
     locale: OutputLanguage = DEFAULT_LANGUAGE
 
 
-class ScenarioPlan(BaseModel):
-    """One scenario the run goal was decomposed into.
+class AuthoredStep(BaseModel):
+    """저작된 시나리오 스텝 하나 = 행위 하나 (재설계 2026-08-08, ARTEL-284).
 
-    Deliberately NOT a ``ScenarioDraft``: the run-scoped authoring agent no longer
-    writes step bodies. TestCases live only in the orchestration server, so a
-    scenario is expressed as references to the cases that make it up
-    (``case_ids``), and Orchestration links them (`test_scenario_case`) and adds
-    the scenario to the run. ``ScenarioDraft``/``ScenarioStep`` stay for the QA
-    execution agent, which still runs an approved step-based scenario.
+    Orche 저장 계약(`ScenarioResult`/`ScenarioStep`)·QA 실행 계약(`app/qa` QaStep)과 동일한
+    필드명이다. `case_id`가 있으면 그 스텝은 해당 TC 검증 구간에 속한다(연속 동일 case_id = 한
+    구간, 마지막 스텝이 기대결과 검증). 없으면 판정 대상 아닌 단순 행위(이동·연결). `hint`/`input`은
+    강제가 아닌 어드바이저리 근거.
+    """
+
+    action: str
+    case_id: int | None = None
+    hint: str | None = None
+    input: str | None = None
+
+
+class ScenarioPlan(BaseModel):
+    """One scenario the run goal was decomposed into (재설계 2026-08-08, ARTEL-284).
+
+    시나리오 = 순서 있는 `steps` 리스트. 각 스텝은 행위 하나이며, 검증 대상 TC를 `case_id`로
+    옵션 참조한다(연속 동일 case_id = 한 TC 검증 구간). Orche(`ScenarioReconcileService`)가
+    이 steps를 시나리오 payload로 통째 upsert한다 — 구 조합 테이블(test_scenario_case)은 폐기.
+    ``ScenarioDraft``/``ScenarioStep``(v1 실행 초안)은 별개로 남는다.
     """
 
     # None = a brand-new scenario to add; an id = edit that existing scenario
@@ -84,11 +97,9 @@ class ScenarioPlan(BaseModel):
     scenario_id: int | None = None
     title: str
     description: str
-    # Ids of existing TestCases (from `search_test_cases`) this scenario is built
-    # from. The search returns ids as strings on the wire; they are numeric on the
-    # far side, so the plan carries them as ints. May be empty only alongside an
-    # empty `scenarios` on the result — a scenario with no cases is not authored.
-    case_ids: list[int] = Field(default_factory=list)
+    # 시나리오 본문 = 순서 있는 스텝 리스트. 검증 스텝은 `search_test_cases`로 찾은 TC의 id를
+    # `case_id`로 단다. 빈 리스트는 `scenarios`가 비어있을 때만 정상(저작할 게 없는 턴).
+    steps: list[AuthoredStep] = Field(default_factory=list)
 
 
 class ScenarioAgentResult(BaseModel):

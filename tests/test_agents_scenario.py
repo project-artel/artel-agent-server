@@ -13,6 +13,7 @@ from app.agents import (
     ScenarioGenerationError,
     ScenarioPlan,
 )
+from app.agents.scenario.schemas import AuthoredStep
 from app.agents.scenario.prompt import (
     LANGUAGE_DIRECTIVES,
     build_first_message,
@@ -30,12 +31,19 @@ def _result(message: str = "Authored two scenarios.") -> ScenarioAgentResult:
             ScenarioPlan(
                 title="Login reward flow",
                 description="Verify the login reward flow.",
-                case_ids=[11, 12],
+                steps=[
+                    AuthoredStep(action="Open the login reward popup", case_id=11),
+                    AuthoredStep(action="Observe the reward is granted", case_id=11),
+                    AuthoredStep(action="Return to the lobby"),
+                    AuthoredStep(action="Confirm the reward badge shows", case_id=12),
+                ],
             ),
             ScenarioPlan(
                 title="Shop purchase flow",
                 description="Verify the shop purchase flow.",
-                case_ids=[21],
+                steps=[
+                    AuthoredStep(action="Buy an item and confirm gold drops", case_id=21)
+                ],
             ),
         ],
     )
@@ -113,7 +121,7 @@ def test_scenario_agent_returns_multi_scenario_result() -> None:
         "Login reward flow",
         "Shop purchase flow",
     ]
-    assert out.scenarios[0].case_ids == [11, 12]
+    assert [step.case_id for step in out.scenarios[0].steps] == [11, 11, None, 12]
 
 
 def test_scenario_agent_raises_when_no_structured_response() -> None:
@@ -143,7 +151,7 @@ def test_scenario_agent_binds_the_search_tool() -> None:
     asyncio.run(agent.run(_request(), _CTX, _channel()))
 
     assert seen["tools"] == ["search_test_cases"]
-    # The system prompt is the resolved v2 text, language directive substituted.
+    # The system prompt is the resolved v3 text, language directive substituted.
     assert "search_test_cases" in seen["system_prompt"]
     assert "{" not in seen["system_prompt"]
 
@@ -159,18 +167,25 @@ def test_empty_scenarios_is_a_valid_result() -> None:
     assert out.message == "No matching cases yet."
 
 
-def test_scenario_result_parses_string_case_ids_as_ints() -> None:
-    """Search hits carry string ids; the plan stores them as ints (spec)."""
+def test_scenario_result_parses_string_case_id_as_int() -> None:
+    """Search hits carry string ids; a step's case_id stores them as ints (spec)."""
     parsed = ScenarioAgentResult.model_validate(
         {
             "message": "ok",
             "scenarios": [
-                {"title": "t", "description": "d", "case_ids": ["7", "8"]}
+                {
+                    "title": "t",
+                    "description": "d",
+                    "steps": [
+                        {"action": "do", "case_id": "7"},
+                        {"action": "verify", "case_id": "8"},
+                    ],
+                }
             ],
         }
     )
 
-    assert parsed.scenarios[0].case_ids == [7, 8]
+    assert [step.case_id for step in parsed.scenarios[0].steps] == [7, 8]
 
 
 def test_scenario_result_scenario_id_edit_vs_add() -> None:
@@ -179,8 +194,13 @@ def test_scenario_result_scenario_id_edit_vs_add() -> None:
         {
             "message": "ok",
             "scenarios": [
-                {"scenario_id": "5", "title": "edit", "description": "d", "case_ids": [1]},
-                {"title": "add", "description": "d", "case_ids": [2]},
+                {
+                    "scenario_id": "5",
+                    "title": "edit",
+                    "description": "d",
+                    "steps": [{"action": "a", "case_id": 1}],
+                },
+                {"title": "add", "description": "d", "steps": [{"action": "b", "case_id": 2}]},
             ],
         }
     )
@@ -198,7 +218,10 @@ def test_first_message_carries_current_scenarios() -> None:
                     scenario_id=42,
                     title="Checkout flow",
                     description="Verify checkout.",
-                    case_ids=[1, 2],
+                    steps=[
+                        AuthoredStep(action="Add to cart", case_id=1),
+                        AuthoredStep(action="Confirm checkout succeeds", case_id=2),
+                    ],
                 )
             ]
         )
@@ -225,8 +248,8 @@ def test_system_prompt_uses_requested_language_directive() -> None:
     assert LANGUAGE_DIRECTIVES[OutputLanguage.en] in en_body
     assert "한국어" in ko_body
     assert "English" in en_body
-    # v2 is the newest scenario prompt version and the default.
-    assert version == "v2"
+    # v3 is the newest scenario prompt version and the default.
+    assert version == "v3"
 
 
 def test_first_message_carries_the_run_goal_and_context() -> None:
