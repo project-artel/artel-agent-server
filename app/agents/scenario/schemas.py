@@ -67,7 +67,7 @@ class ScenarioAgentRequest(BaseModel):
 
 
 class AuthoredStep(BaseModel):
-    """저작된 시나리오 스텝 하나 = 행위 하나 (재설계 2026-08-08, ARTEL-284).
+    """작성된 시나리오 스텝 하나 = 행위 하나 (재설계 2026-08-08, ARTEL-284).
 
     Orche 저장 계약(`ScenarioResult`/`ScenarioStep`)·QA 실행 계약(`app/qa` QaStep)과 동일한
     필드명이다. `case_id`가 있으면 그 스텝은 해당 TC 검증 구간에 속한다(연속 동일 case_id = 한
@@ -98,7 +98,7 @@ class ScenarioPlan(BaseModel):
     title: str
     description: str
     # 시나리오 본문 = 순서 있는 스텝 리스트. 검증 스텝은 `search_test_cases`로 찾은 TC의 id를
-    # `case_id`로 단다. 빈 리스트는 `scenarios`가 비어있을 때만 정상(저작할 게 없는 턴).
+    # `case_id`로 단다. 빈 리스트는 `scenarios`가 비어있을 때만 정상(작성할 게 없는 턴).
     steps: list[AuthoredStep] = Field(default_factory=list)
 
 
