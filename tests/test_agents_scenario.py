@@ -13,7 +13,8 @@ from app.agents import (
     ScenarioGenerationError,
     ScenarioPlan,
 )
-from app.agents.scenario.schemas import AuthoredStep
+from app.agents.scenario.cases import NO_CATALOG_NOTICE, render_catalog
+from app.agents.scenario.schemas import AuthoredStep, TestCaseCatalogEntry
 from app.agents.scenario.prompt import (
     LANGUAGE_DIRECTIVES,
     build_first_message,
@@ -150,8 +151,9 @@ def test_scenario_agent_binds_the_search_tool() -> None:
     agent = ScenarioAgent(agent_factory=factory)
     asyncio.run(agent.run(_request(), _CTX, _channel()))
 
+    # No catalog on this request, so the turn falls back to the search tool.
     assert seen["tools"] == ["search_test_cases"]
-    # The system prompt is the resolved v3 text, language directive substituted.
+    # The system prompt is the resolved v4 text, every placeholder substituted.
     assert "search_test_cases" in seen["system_prompt"]
     assert "{" not in seen["system_prompt"]
 
@@ -248,8 +250,8 @@ def test_system_prompt_uses_requested_language_directive() -> None:
     assert LANGUAGE_DIRECTIVES[OutputLanguage.en] in en_body
     assert "한국어" in ko_body
     assert "English" in en_body
-    # v3 is the newest scenario prompt version and the default.
-    assert version == "v3"
+    # v4 is the newest scenario prompt version and the default.
+    assert version == "v4"
 
 
 def test_first_message_carries_the_run_goal_and_context() -> None:
@@ -266,3 +268,113 @@ def test_language_directives_cover_every_language() -> None:
 def test_select_structured_method_by_model() -> None:
     assert select_structured_method(LLMModel.gpt_5_6_luna) == "json_schema"
     assert select_structured_method(LLMModel.gemma_4_free) == "json_mode"
+
+
+# ── The case catalog (ARTEL-319) ─────────────────────────────────────────────
+#
+# Three promises, and none of them fails loudly when broken. A catalogued turn
+# that still gets the search tool just spends turns re-finding what it holds; a
+# render that reorders costs the prompt cache and nothing else; a clipped body
+# produces a plausible wrong step. So each one is pinned here.
+
+
+def _catalog() -> list[TestCaseCatalogEntry]:
+    return [
+        TestCaseCatalogEntry(
+            id=11,
+            category="로그인",
+            title="게스트 계정으로 로그인에 성공한다",
+            precondition="앱을 최초 실행한 상태",
+            expected="임시 계정이 발급되고 로비로 진입한다",
+            verification_status="VERIFIED",
+        ),
+        TestCaseCatalogEntry(
+            id=57,
+            category="스테이지",
+            title="힌트를 쓰면 글자 하나가 공개된다",
+            precondition=None,
+            expected="보유 수량이 1 줄고 글자가 표시된다",
+            verification_status="DRAFT",
+        ),
+    ]
+
+
+def test_catalogued_turn_gets_no_tools_and_the_cases_in_its_prompt() -> None:
+    """With the cases in context, a search could only return what it already has."""
+    seen: dict[str, object] = {}
+
+    def factory(*, model, tools, system_prompt):
+        seen["tools"] = [tool.name for tool in tools]
+        seen["system_prompt"] = system_prompt
+        return RunnableLambda(
+            lambda _inputs: {"messages": [], "structured_response": _result()}
+        )
+
+    agent = ScenarioAgent(agent_factory=factory)
+    asyncio.run(agent.run(_request(case_catalog=_catalog()), _CTX, _channel()))
+
+    assert seen["tools"] == []
+    prompt = seen["system_prompt"]
+    assert "id 11" in prompt and "id 57" in prompt
+    assert "게스트 계정으로 로그인에 성공한다" in prompt
+    assert NO_CATALOG_NOTICE not in prompt
+
+
+def test_empty_catalog_keeps_the_search_path() -> None:
+    """The fallback is also the rollback: orchestration can stop sending one."""
+    seen: dict[str, object] = {}
+
+    def factory(*, model, tools, system_prompt):
+        seen["tools"] = [tool.name for tool in tools]
+        seen["system_prompt"] = system_prompt
+        return RunnableLambda(
+            lambda _inputs: {"messages": [], "structured_response": _result()}
+        )
+
+    agent = ScenarioAgent(agent_factory=factory)
+    asyncio.run(agent.run(_request(case_catalog=[]), _CTX, _channel()))
+
+    assert seen["tools"] == ["search_test_cases"]
+    # Not a blank section: an empty block reads as "this project has no cases",
+    # and the agent would stop rather than search.
+    assert NO_CATALOG_NOTICE in seen["system_prompt"]
+
+
+def test_render_catalog_preserves_arrival_order() -> None:
+    """Orchestration sorts by id; re-sorting here would move the cached prefix."""
+    reversed_entries = list(reversed(_catalog()))
+    rendered = render_catalog(reversed_entries)
+
+    assert rendered.index("id 57") < rendered.index("id 11")
+
+
+def test_render_catalog_prints_bodies_whole() -> None:
+    """Unlike a search hit, these are the material steps are written from."""
+    long_expected = "가" * 900
+    rendered = render_catalog(
+        [
+            TestCaseCatalogEntry(
+                id=1,
+                category="상점",
+                title="구매",
+                precondition="보석 100개 이상",
+                expected=long_expected,
+                verification_status="VERIFIED",
+            )
+        ]
+    )
+
+    assert long_expected in rendered
+    assert "truncated" not in rendered
+    assert "precondition: 보석 100개 이상" in rendered
+
+
+def test_catalogued_system_prompt_is_byte_identical_across_turns() -> None:
+    """The prompt cache only pays off while this block does not move."""
+    request = _request(case_catalog=_catalog())
+    first, _ = build_system_prompt(request)
+    second, _ = build_system_prompt(request)
+
+    assert first == second
+    # And a placeholder left unsubstituted would silently ship "{case_catalog}".
+    assert "{" not in first

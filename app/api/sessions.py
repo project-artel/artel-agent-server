@@ -12,6 +12,7 @@ from app.agents import (
     ScenarioDraft,
     ScenarioGenerationError,
     ScenarioPlan,
+    TestCaseCatalogEntry,
 )
 from app.llm.models import DEFAULT_MODEL, LLMModel
 from app.sessions.channel import ScenarioChannel
@@ -25,6 +26,10 @@ router = APIRouter(tags=["scenario"])
 class OpenSessionRequest(BaseModel):
     unity_context: dict = Field(default_factory=dict)
     game_context: dict = Field(default_factory=dict)
+    # Every TestCase in the project (ARTEL-319), frozen at open like the contexts
+    # above. Optional so an Orchestration that does not send one keeps working —
+    # those sessions fall back to `search_test_cases`.
+    case_catalog: list[TestCaseCatalogEntry] = Field(default_factory=list)
     user_input: str
     model: LLMModel = DEFAULT_MODEL
     # Applies to the whole session, including the first turn (run from the stored
@@ -88,6 +93,7 @@ async def open_session(
     session_id = await _service(request.app).open(
         unity_context=payload.unity_context,
         game_context=payload.game_context,
+        case_catalog=payload.case_catalog,
         user_input=payload.user_input,
         model=payload.model,
         locale=payload.locale,

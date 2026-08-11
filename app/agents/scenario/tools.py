@@ -1,9 +1,17 @@
 """The tools the scenario authoring agent drives its search with.
 
-One tool for now: `search_test_cases`. It mirrors the QA agent's
-`search_knowledge` wrapper (`app/agents/qa/tools.py`) — a per-turn budget, and
-the three search outcomes formatted for the model to act on — over the scenario
-session's own channel rather than the QA envelope.
+One tool: `search_test_cases`. It mirrors the QA agent's `search_knowledge`
+wrapper (`app/agents/qa/tools.py`) — a per-turn budget, and the three search
+outcomes formatted for the model to act on — over the scenario session's own
+channel rather than the QA envelope.
+
+Since ARTEL-319 a session that received the project's case catalog gets NO tools:
+the cases are already in the prompt, so a search could only return what the agent
+is holding, and offering it would spend turns re-finding them. The tool is handed
+over only when the catalog is empty — an orchestration that does not send one, or
+a non-member session — which is also the rollback path if the catalog is turned
+off upstream. Neither this wrapper nor the embedding search behind it is dead
+code; it is the branch that carries those sessions.
 """
 
 from __future__ import annotations
@@ -26,7 +34,21 @@ if TYPE_CHECKING:
     from app.sessions.channel import ScenarioChannel
 
 
-def build_tools(channel: ScenarioChannel, state: TestCaseSearchState) -> list[BaseTool]:
+def build_tools(
+    channel: ScenarioChannel,
+    state: TestCaseSearchState,
+    *,
+    has_catalog: bool = False,
+) -> list[BaseTool]:
+    """The turn's tools. Empty when the agent already holds the case catalog.
+
+    Taking the tool away rather than telling the prompt not to use it is
+    deliberate: a tool in reach gets called, and every call it makes here would
+    spend a turn re-finding cases already in its context.
+    """
+    if has_catalog:
+        return []
+
     # Imported here, not at module load, to keep the agent layer free of an
     # app.sessions import at import time (that would cycle through the service).
     from app.sessions.channel import TestCaseSearchFailed

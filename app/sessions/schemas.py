@@ -2,7 +2,12 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.agents import DEFAULT_LANGUAGE, OutputLanguage, ScenarioPlan
+from app.agents import (
+    DEFAULT_LANGUAGE,
+    OutputLanguage,
+    ScenarioPlan,
+    TestCaseCatalogEntry,
+)
 from app.llm.models import DEFAULT_MODEL, LLMModel
 
 
@@ -19,6 +24,10 @@ class SessionRecord(BaseModel):
     # Frozen at session open (Unity SDK snapshot + user-provided game context).
     unity_context: dict = Field(default_factory=dict)
     game_context: dict = Field(default_factory=dict)
+    # Every TestCase in the project (ARTEL-319), also frozen at open. Kept on
+    # the record rather than re-fetched per turn so the prompt's cached prefix
+    # stays byte-identical for the life of the session.
+    case_catalog: list[TestCaseCatalogEntry] = Field(default_factory=list)
     # Full conversation turns; windowed for prompt reconstruction by the service.
     history: list[HistoryTurn] = Field(default_factory=list)
     # First user input, consumed when the WS connects to run the first turn.

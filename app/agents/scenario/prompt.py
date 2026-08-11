@@ -2,6 +2,7 @@ import json
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
+from app.agents.scenario.cases import render_catalog
 from app.agents.scenario.schemas import OutputLanguage, ScenarioAgentRequest
 from app.prompts import PromptFile, load_prompt
 
@@ -26,9 +27,25 @@ LANGUAGE_DIRECTIVES: dict[OutputLanguage, str] = {
 
 
 def build_system_prompt(request: ScenarioAgentRequest) -> tuple[str, str]:
-    """The system prompt body and the resolved version it came from."""
+    """The system prompt body and the resolved version it came from.
+
+    The project's whole case catalog is rendered in here rather than into the
+    turn's human message (where `game_context` sits) — on purpose, and it is the
+    only reason this is worth doing at all. Providers cache a prompt by its
+    prefix, and the message list is ``[system, *history, this turn]``: the system
+    block is the one part that is byte-identical on every turn of a session, so a
+    catalog placed there is paid for once. The same text in the turn's message is
+    at the end of the list, after everything cacheable, and would be re-billed in
+    full on every single turn.
+
+    That is also why the catalog is a session snapshot upstream and why nothing
+    here re-sorts it — see `cases.render_catalog`.
+    """
     system: PromptFile = load_prompt(PROMPT_AGENT, "system")
-    body = system.body.format(language_directive=LANGUAGE_DIRECTIVES[request.locale])
+    body = system.body.format(
+        case_catalog=render_catalog(request.case_catalog),
+        language_directive=LANGUAGE_DIRECTIVES[request.locale],
+    )
     return body, system.version
 
 
