@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -503,6 +503,44 @@ def _active_scene_verdict(condition: dict[str, Any], scene: str | None) -> bool 
     return False if values and all(value is False for value in values) else None
 
 
+# 가드와 효과가 동시에 참인 순간이 없는 레코드. 상태가 아니라 전이이므로, 상태로
+# 읽는 트리거(진입해 관찰)와 짝지으면 어느 순간에도 참이 아닌 행이 된다.
+MISTIMED = "trigger_reads_a_transition_as_a_state"
+
+
+def _contradictory(condition: dict[str, Any]) -> bool:
+    """한 조건 안에 서로 반대인 항이 함께 있는가.
+
+    코루틴의 루프 조건과 탈출 조건이 한 경로에 합성되면
+    `i < 총개수 그리고 i >= 총개수` 가 된다. 둘 다 참인 순간은 없으므로 그 행은
+    일어나지 않는다. 읽는 사람이 만들 수 없는 전제를 주는 것보다 안 내는 것이 낫다.
+
+    `every` 안에서만 본다. `either` 는 서로 반대인 갈래를 담는 것이 정상이다.
+    """
+    if condition.get("kind") != "every":
+        return any(
+            _contradictory(part)
+            for part in condition.get("parts") or ()
+            if isinstance(part, dict)
+        )
+    seen: set[tuple[str, str, str]] = set()
+    for part in condition.get("parts") or ():
+        if not isinstance(part, dict):
+            continue
+        if _contradictory(part):
+            return True
+        if part.get("kind") != "test":
+            continue
+        left, operator, right = (
+            str(part.get("left")),
+            str(part.get("operator")),
+            str(part.get("right")),
+        )
+        if (left, FLIP.get(operator, operator), right) in seen:
+            return True
+        seen.add((left, operator, right))
+    return False
+
 def _quality(trigger: Trigger, assertions: list[Assertion], issues: list[str]) -> Quality:
     issues = [issue for issue in issues if issue not in DERIVATION_NOTES]
     if any(issue.startswith("observation_unsupported") for issue in issues):
@@ -725,6 +763,60 @@ def _condition_before_updates(
     return projected
 
 
+def _gates(graph: EvidenceGraph) -> list[PathFact]:
+    """입력으로 열리는 대기 지점. 자기 입력을 들고 있지 않으면 한 홉 옆에서 빌린다.
+
+    코루틴의 대기는 대리자로 넘겨진 조각이고, 그 조각이 키를 직접 읽으면 `inputs` 가
+    채워진다. 직접 읽지 않고 **읽는 메서드를 부르면** 비어 있다 — 입력이 없는 것이
+    아니라 한 홉 옆에 있는 것이다. 근거는 그것을 `calls` 에 적어 두었다.
+
+    빈 것을 없는 것으로 세면 대기가 둘인데 하나만 보이고, **두 대기 사이에서 일어난
+    일이 뒤쪽 대기의 결과로 붙는다.** 첫 대기에서 눌러 일어난 변화가 두 번째 입력의
+    기대 결과가 되어, 어느 순간에도 참이 아닌 행이 된다.
+
+    빌릴 때 그 조각의 가드도 함께 산다. 키를 읽는 가지가 조건부면 그 조건이 곧 "이
+    상태에서 눌러야 열린다" 이고, 그것이 사전 조건이다.
+    """
+
+    reads_input: dict[str, list[PathFact]] = {}
+    for path in graph.paths:
+        if path.inputs:
+            reads_input.setdefault(path.source_signature, []).append(path)
+
+    gates: list[PathFact] = []
+    for path in graph.paths:
+        if (
+            path.handed_over_at is None
+            or not path.handed_over_to
+            or "reached-through-delegate" not in path.gaps
+            or len(path.call_path) < 2
+        ):
+            continue
+        if path.inputs:
+            gates.append(path)
+            continue
+        # 같은 진입점에서 온 것만 빌린다. 다른 진입점의 같은 메서드는 같은 키를 읽되
+        # 다른 조건 아래서 읽고, 그 조건은 이 대기의 것이 아니다.
+        borrowed = [
+            found
+            for call in path.calls
+            for found in reads_input.get(str(call.get("target")), ())
+            if found.entry_id == path.entry_id
+        ]
+        # 부르는 곳이 여럿이면 어느 입력이 이 대기를 여는지 근거가 말하지 않는다.
+        if len(borrowed) != 1:
+            continue
+        gates.append(
+            replace(
+                path,
+                id=f"{path.id}~gate",
+                inputs=borrowed[0].inputs,
+                condition=_combine_conditions(path.condition, borrowed[0].condition),
+            )
+        )
+    return gates
+
+
 def _coroutine_resume_contracts(
     graph: EvidenceGraph,
     contracts: list[Contract],
@@ -737,15 +829,7 @@ def _coroutine_resume_contracts(
     key, coroutine, or game type.
     """
 
-    waits = [
-        path
-        for path in graph.paths
-        if path.inputs
-        and path.handed_over_at is not None
-        and path.handed_over_to
-        and "reached-through-delegate" in path.gaps
-        and len(path.call_path) >= 2
-    ]
+    waits = _gates(graph)
     resumed: list[Contract] = []
     superseded: set[str] = set()
     for wait in waits:
@@ -807,12 +891,14 @@ def _coroutine_resume_contracts(
             upstream_paths = [
                 path
                 for path in coroutine_paths
+                # 호출 자체가 대기보다 뒤여야 한다. 같은 구간의 가드가 뒤에서
+                # 평가된다는 것은 **가드**가 뒤라는 말이지 호출이 뒤라는 말이 아니다.
+                # 앞의 호출까지 받아 주면 루프를 한 바퀴 돌아 닿는 결과가 이번 입력의
+                # 기대가 되어, 같은 기대를 정반대 전제로 두 번 내게 된다.
                 if any(
                     _call_matches_signature(call, next_signature)
-                    and (
-                        (isinstance(call.get("offset"), int) and call["offset"] > handoff)
-                        or any(offset > handoff for offset in _condition_offsets(path.condition))
-                    )
+                    and isinstance(call.get("offset"), int)
+                    and call["offset"] > handoff
                     for call in path.calls
                 )
             ]
@@ -1315,6 +1401,28 @@ def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]
             for note in notes:
                 if note not in contract.issues:
                     contract.issues.append(note)
+        # 가드를 스스로 뒤집는 레코드를 상태로 읽고 있으면 그 행은 트리거가 틀렸다.
+        if contract.trigger.kind in {"scene_entry", "continuous", "control_check"}:
+            # `SourceRef.record_id` 는 경로 id 를 담는다. 이름과 내용이 어긋난
+            # 자리라 둘 다로 찾는다.
+            wanted = {ref.record_id for ref in contract.source_refs}
+            source = next(
+                (
+                    path
+                    for path in graph.paths
+                    if path.id in wanted or path.record_id in wanted
+                ),
+                None,
+            )
+            if source is not None and answers.negates_own_guard(
+                contract.condition, source.effects
+            ):
+                if MISTIMED not in contract.issues:
+                    contract.issues.append(MISTIMED)
+                contract.quality = _quality(
+                    contract.trigger, contract.assertions, contract.issues
+                )
+
         # What no branch could restate stays unreadable, and a row resting on it
         # cannot be set up or confirmed. Said rather than dropped: the behaviour
         # is real and someone may still write the premise another way.

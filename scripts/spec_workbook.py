@@ -2,6 +2,8 @@
 
     .venv/bin/python scripts/spec_workbook.py <report.json> [out.xlsx]
 
+같은 이름의 `.json` 도 나란히 쓴다 — 서비스가 낸 그대로다.
+
 `/internal/specs/v2/generate` 와 같은 것을 만든다 — 같은 서비스 함수를 부르므로
 API 를 띄우지 않고 본 것이 API 가 낼 것과 다를 수 없다.
 
@@ -132,7 +134,14 @@ def main(report_path: str, out_path: str | None = None) -> None:
         payload = generate_spec_payload(json.load(handle))
     target = Path(out_path or Path(report_path).with_suffix(".xlsx").name)
     workbook(payload).save(target)
-    print(f"{target}  {payload['artifact']}  {payload['summary']}")
+    # 통합문서가 되기 전의 산출물도 같이 남긴다. 시트는 사람이 읽으라고 열을 줄이고
+    # 순서를 바꾸지만, 이 파일은 서비스가 낸 그대로여서 무엇이 시트에서 빠졌는지
+    # 되짚을 수 있고 다음 단계가 다시 뽑지 않고 집어 갈 수 있다.
+    beside = target.with_suffix(".json")
+    beside.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"{target}  {beside}  {payload['artifact']}  {payload['summary']}")
 
 
 if __name__ == "__main__":
