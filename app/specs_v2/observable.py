@@ -106,17 +106,27 @@ def readable(expression: Any) -> bool:
     return True
 
 
+def value_of(detail: Any) -> str:
+    """The value an assignment carries, without the API's own second argument.
+
+    `SetText(value, syncTextInputBox)` reaches the evidence as
+    `streamingText, true`, and the flag is not part of what anyone checks. Read
+    in one place because two readers of the same field disagreeing is how
+    `_, true` reached a test step: the rewrite dropped the flag and saw a masked
+    parameter, the sentence kept it and saw a value.
+    """
+    value = str(detail or "").strip()
+    if value.endswith(", true") or value.endswith(", false"):
+        value = value.rsplit(",", 1)[0].strip()
+    return value
+
+
 def _equality(effect: dict[str, Any]) -> tuple[str, str] | None:
     """The equality an assignment leaves behind, when both sides are readable."""
     if effect.get("kind") not in {"ui-value", "write", "active-state"}:
         return None
     target = str(effect.get("target") or "").strip()
-    # `render` appends the assignment's second operand for UI writes; the value
-    # is the first. Splitting here rather than in the caller keeps the shape of
-    # `detail` in one place.
-    value = str(effect.get("detail") or "").strip()
-    if value.endswith(", true") or value.endswith(", false"):
-        value = value.rsplit(",", 1)[0].strip()
+    value = value_of(effect.get("detail"))
     if not FIELD_CHAIN.match(target):
         return None
     if not (FIELD_CHAIN.match(value) or value in EMPTY):

@@ -325,7 +325,9 @@ def _resolve_value(
     scene: str | None,
 ) -> tuple[Any, str, list[ProofEdge]]:
     kind = effect.get("kind")
-    detail = effect.get("detail")
+    # The API's own second argument is not part of the value. Left in, a masked
+    # parameter reads as the value `_, true` and goes out as something to check.
+    detail = observable.value_of(effect.get("detail")) if effect.get("detail") is not None else None
     if kind == "scene":
         return effect.get("target"), "exact", []
     if kind in {"quit", "destroy"}:
