@@ -22,10 +22,6 @@ class SpecRow(BaseModel):
     scene: str
     ui_text: str
     ui_sprite: str
-    flow_role: str
-    state_before: str
-    state_after: str
-    flow_id: str
     review_reason: str
     supporting_state: str
     artifact: str
@@ -37,25 +33,6 @@ class SpecRow(BaseModel):
     contract_ids: str
 
 
-class ConnectedFlowRow(BaseModel):
-    precondition: str
-    test_step: str
-    expected_result: str
-    flow_role: str
-    state_before: str
-    state_after: str
-    scene: str
-    ui_text: str
-    ui_sprite: str
-    artifact: str
-    capture: str
-    build_evidence: str
-    flow_id: str
-    spec_id: str
-    contract_ids: str
-    evidence: str
-
-
 class SpecGenerationSummary(BaseModel):
     graph_nodes: int
     graph_edges: int
@@ -65,7 +42,6 @@ class SpecGenerationSummary(BaseModel):
     candidate_specs: int
     review_specs: int
     unsupported_specs: int
-    connected_flows: int
 
 
 class SpecGenerationResponse(BaseModel):
@@ -76,7 +52,6 @@ class SpecGenerationResponse(BaseModel):
     summary: SpecGenerationSummary
     ready_specs: list[SpecRow]
     review_specs: list[SpecRow]
-    connected_flows: list[ConnectedFlowRow]
 
 
 @router.post("/specs/v2/generate", response_model=SpecGenerationResponse)

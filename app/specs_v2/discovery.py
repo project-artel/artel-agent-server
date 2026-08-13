@@ -190,37 +190,79 @@ def _settled_by_pins(condition: dict[str, Any], pins: list[Pin]) -> bool | None:
 
 
 def _gesture_inputs(condition: dict[str, Any]) -> list[str]:
+    """The inputs the condition tree actually gates on, kept apart from `inputs[]`.
+
+    `inputs[]` lists every input the analyser saw inside the method. The tree
+    says which of them a branch waits for, and the two differ whenever one is
+    there to be excluded: `anyKeyDown && !GetMouseButtonDown(2)` lists the mouse
+    button and gates on the key alone.
+
+    Reading the list instead of the tree is how a step came to say `any 또는 2`,
+    asking a tester to press the button the code refuses.
+    """
     values: list[str] = []
     for leaf in condition_leaves(condition):
         if leaf.get("kind") != "gesture":
             continue
         raw = leaf.get("input") or ""
-        found = re.search(r"(?:key|mouse):([^ ]+)", raw)
+        # `key:Space:down` and `key:any (down)` are the same shape said two ways.
+        # Only the control belongs here; the phase is added back once, so what
+        # comes out matches what `inputs[]` calls the same button.
+        found = re.search(r"(?:key|mouse):([^\s:]+)", raw)
         value = found.group(1) if found else raw
         if value and value not in values:
             values.append(value)
     return values
 
 
+def _alternatives(condition: dict[str, Any]) -> bool:
+    """Whether the tree offers the gated inputs as a choice.
+
+    `either(every(Right, …), every(Up, …))` is a choice and reads as `또는`.
+    `every(…, key:any)` is not, whatever else the method mentions. The word is
+    the tree's to give; inventing it puts a disjunction in the sheet the code
+    never wrote.
+    """
+    if condition.get("kind") == "either":
+        return True
+    return any(
+        _alternatives(part)
+        for part in condition.get("parts") or ()
+        if isinstance(part, dict)
+    )
+
+
 def _input_label(path: PathFact) -> tuple[str, str, str | None] | None:
-    inputs = []
-    kinds = []
-    for item in path.inputs:
-        control = item.get("control")
-        if not control:
-            continue
-        kind = item.get("kind")
-        if kind and kind not in kinds:
-            kinds.append(kind)
-        prefix = "not " if item.get("absent") else ""
-        value = f"{prefix}{control}:{item.get('phase') or 'unknown'}"
-        if value not in inputs:
-            inputs.append(value)
-    if not inputs:
-        inputs = _gesture_inputs(path.condition)
-    if not inputs:
+    """What a tester presses — and nothing the code presses back against.
+
+    Taken from the condition tree rather than from `inputs[]`. The list is read
+    only for the kind, which the tree does not carry, and only where every gated
+    input agrees on one.
+    """
+    gated = _gesture_inputs(path.condition)
+    if not gated:
+        # The tree names no input at all. Then it is not disagreeing with the
+        # list, it is silent, and the list is all there is. Only where the tree
+        # does speak is it the one to believe — that is where an input appears
+        # in the list to be excluded rather than waited for.
+        gated = [
+            str(item.get("control"))
+            for item in path.inputs
+            if item.get("control") and not item.get("absent")
+        ]
+        gated = list(dict.fromkeys(gated))
+    if not gated:
         return None
-    return "/".join(inputs), "input-expression", kinds[0] if len(kinds) == 1 else None
+    kinds = {
+        item.get("kind")
+        for item in path.inputs
+        if item.get("control") in gated and item.get("kind")
+    }
+    separator = "/" if _alternatives(path.condition) else " 그리고 "
+    joined = separator.join(
+        value if ":" in value else f"{value}:down" for value in gated
+    )
+    return joined, "input-expression", kinds.pop() if len(kinds) == 1 else None
 
 
 def _candidate_scenes(graph: EvidenceGraph, path: PathFact) -> list[str | None]:
@@ -1395,7 +1437,9 @@ def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]
     known = Answers.of([path for path in graph.paths if not path.folded])
     for contract in contracts:
         asserted = {item.target for item in contract.assertions if item.target}
-        condition, notes = known.resolve(contract.condition, asserted)
+        condition, notes = known.resolve(
+            contract.condition, asserted, tuple(contract.call_path)
+        )
         if notes:
             contract.condition = condition
             for note in notes:

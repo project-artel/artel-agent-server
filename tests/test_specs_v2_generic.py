@@ -108,3 +108,97 @@ def test_a_reference_is_recognised_by_what_the_evidence_assigns_it() -> None:
         )[0]["right"]
         == "0"
     )
+
+
+def test_a_step_asks_only_for_what_the_branch_waits_on() -> None:
+    """`anyKeyDown && !GetMouseButtonDown(2)` lists the button and gates on the key."""
+    from app.specs_v2.discovery import _input_label
+
+    class Path:
+        condition = {
+            "kind": "every",
+            "parts": [
+                {"kind": "test", "left": "Some.flag", "operator": "!=", "right": "0"},
+                {"kind": "gesture", "input": "key:any (down)"},
+            ],
+        }
+        inputs = [
+            {"kind": "key", "control": "any", "phase": "down", "absent": False},
+            # Present in the method only so the branch can refuse it.
+            {"kind": "mouse", "control": "2", "phase": "down", "absent": False},
+        ]
+
+    label, _, kind = _input_label(Path())
+
+    assert "2" not in label
+    assert kind == "key"
+
+
+def test_a_choice_is_the_trees_word_to_give() -> None:
+    """`either` is a choice. `every` is not, whatever else the method mentions."""
+    from app.specs_v2.discovery import _input_label
+
+    def path(condition, controls):
+        class Path:
+            pass
+
+        item = Path()
+        item.condition = condition
+        item.inputs = [
+            {"kind": "key", "control": name, "phase": "down", "absent": False}
+            for name in controls
+        ]
+        return item
+
+    choice = {
+        "kind": "either",
+        "parts": [
+            {"kind": "gesture", "input": "key:Up (down)"},
+            {"kind": "gesture", "input": "key:Down (down)"},
+        ],
+    }
+    together = {**choice, "kind": "every"}
+
+    assert "/" in _input_label(path(choice, ["Up", "Down"]))[0]
+    assert "/" not in _input_label(path(together, ["Up", "Down"]))[0]
+
+
+def test_a_silent_tree_leaves_the_list_as_the_only_account() -> None:
+    """Not disagreeing — saying nothing. Then the list is all there is."""
+    from app.specs_v2.discovery import _input_label
+
+    class Path:
+        condition = {"kind": "always"}
+        inputs = [{"kind": "key", "control": "Enter", "phase": "down", "absent": False}]
+
+    assert _input_label(Path())[0] == "Enter:down"
+
+
+def test_a_parameter_is_read_as_what_the_call_site_passed() -> None:
+    """Inside the method it is a name on the stack; the caller says what became it."""
+
+    class Caller:
+        source_signature = "System.Void Any.Type::Outer()"
+        call_path = ("System.Void Any.Type::Outer()",)
+        condition = {"kind": "always"}
+        effects: list = []
+        calls = [
+            {"target": "System.Void Any.Type::Inner(System.Int32)", "args": "Holder.value"}
+        ]
+
+    known = Answers.of([Caller()])
+    premise = observable.qualify(
+        {"kind": "test", "left": "incoming", "operator": "==", "right": "1", "context": "arg:0"},
+        "Any.Type.Inner",
+    )
+    resolved, notes = known.resolve(
+        premise,
+        set(),
+        ("System.Void Any.Type::Outer()", "System.Void Any.Type::Inner(System.Int32)"),
+    )
+
+    assert resolved["left"] == "Holder.value"
+    assert notes
+    # The marks that said "this is a parameter" are spent once it stopped being one.
+    assert "localFrames" not in resolved
+    assert observable.unreadable_atoms(resolved) == []

@@ -53,7 +53,8 @@ def method_of(signature: Any) -> str:
 class Answers:
     """One lookup, gathered once per report."""
 
-    # (caller, callee) → the literal that call site passes. Keyed by the pair
+    # (caller, callee) → what that call site passes, when it passes one thing a
+    # reader can be asked for: a literal, or a field. Keyed by the pair
     # because a callee is called both ways: `SetAnyKeyPromptVisible(true)` when
     # the typing finishes and `(false)` when the next line starts. There is no
     # answer for the method and there is one for each route to it.
@@ -86,8 +87,19 @@ class Answers:
             for call in path.calls:
                 argument = str(call.get("args") or "").strip()
                 callee = method_of(call.get("target"))
-                if here and callee and LITERAL_ARG.match(argument):
+                if not (here and callee) or "," in argument:
+                    # More than one argument and which parameter a premise names
+                    # is not something the evidence says. It gives the arguments
+                    # as one string and the parameter by the name the method
+                    # gave it, and nothing joins the two.
+                    continue
+                if LITERAL_ARG.match(argument):
                     passed.setdefault((here, callee), set()).add(argument.lower())
+                elif observable.FIELD_CHAIN.match(argument):
+                    # A field reaches the callee as a parameter, and inside the
+                    # callee the premise names the parameter — unreadable, while
+                    # the field it came from is not.
+                    passed.setdefault((here, callee), set()).add(argument)
 
             equalities = [pair for pair in map(_equality, path.effects) if pair]
             for effect in path.effects:
@@ -121,6 +133,32 @@ class Answers:
             references=references,
         )
 
+    def _binding(
+        self, condition: dict[str, Any] | None, route: tuple[str, ...]
+    ) -> tuple[str, str] | None:
+        """(parameter name, what the call site passed), when both are unambiguous."""
+        if len(route) < 2:
+            return None
+        answer = self.passed.get((method_of(route[-2]), method_of(route[-1])))
+        if not answer or LITERAL_ARG.match(answer):
+            return None
+        name = self.sole_parameter(condition)
+        return (name, answer) if name else None
+
+    def sole_parameter(self, condition: dict[str, Any] | None) -> str | None:
+        """The one unreadable bare name a method's premises use, if there is one.
+
+        With a single argument and a single such name the binding is not a
+        guess: there is nothing else the argument could have become.
+        """
+        names = {
+            _bare_of(leaf.get(side))
+            for leaf in observable._leaves(condition)
+            for side in ("left", "right")
+            if side in (leaf.get("localFrames") or {})
+        }
+        return names.pop() if len(names) == 1 else None
+
     def for_parameter(self, path: Any) -> str | None:
         """The literal the route to this path passed, for a value it could not read.
 
@@ -134,7 +172,10 @@ class Answers:
         )
 
     def resolve(
-        self, condition: dict[str, Any] | None, asserted: set[str]
+        self,
+        condition: dict[str, Any] | None,
+        asserted: set[str],
+        route: tuple[str, ...] = (),
     ) -> tuple[dict[str, Any] | None, list[str]]:
         """Say each premise through whatever the evidence can answer it with.
 
@@ -152,6 +193,11 @@ class Answers:
         subjects = {observable.subject(item) for item in asserted}
         notes: list[str] = []
 
+        # A parameter is unreadable inside the method and the call site says what
+        # became it. Done first and by name, because after `qualify` the premise
+        # spells the parameter with its frame in front and no longer looks bare.
+        bound = self._binding(condition, route)
+
         def walk(node: dict[str, Any]) -> dict[str, Any]:
             if node.get("kind") in {"every", "either"}:
                 return {**node, "parts": [walk(part) for part in node.get("parts") or ()]}
@@ -159,6 +205,22 @@ class Answers:
                 return node
 
             changed = dict(node)
+            if bound:
+                for side in ("left", "right"):
+                    frames = changed.get("localFrames") or {}
+                    if side in frames and str(changed[side]).endswith(f".{bound[0]}"):
+                        changed[side] = bound[1]
+                        changed.setdefault("boundArguments", {})[side] = bound[0]
+                        # The marks that said "this is a parameter" are spent
+                        # once the parameter has been replaced by what became it.
+                        # Left in place they keep the premise unreadable after it
+                        # has stopped being one.
+                        changed = {
+                            key: value
+                            for key, value in changed.items()
+                            if key not in {"localFrames", "context"}
+                        }
+                        notes.append(SUBSTITUTED)
             # `!= 0` on a reference is `!= null`. Left as zero it reads as a
             # number to compare against, and the reader never shows one.
             if str(changed.get("right") or "").strip() == "0" and str(
@@ -237,6 +299,10 @@ def negates_own_guard(condition: dict[str, Any] | None, effects: Any) -> bool:
         if operator == "==" and after and after != right:
             return True
     return False
+
+
+def _bare_of(name: Any) -> str:
+    return str(name or "").rsplit(".", 1)[-1]
 
 
 def _equality(effect: dict[str, Any]) -> tuple[str, str] | None:

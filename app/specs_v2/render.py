@@ -28,10 +28,6 @@ SPEC_FIELDNAMES = [
     "scene",
     "ui_text",
     "ui_sprite",
-    "flow_role",
-    "state_before",
-    "state_after",
-    "flow_id",
     "review_reason",
     "supporting_state",
     "artifact",
@@ -411,10 +407,6 @@ def _scenario_row(
         "scene": scenario.scene or "미확정",
         "ui_text": ui_text,
         "ui_sprite": ui_sprite,
-        "flow_role": "",
-        "state_before": "",
-        "state_after": "",
-        "flow_id": "",
         "precondition": precondition_text(
             scenario.scene,
             first.condition if condition_override is None else condition_override,
@@ -491,38 +483,11 @@ def _base_spec_id(spec_id: str) -> str:
     return ":".join(parts[:2]) if len(parts) >= 2 else spec_id
 
 
-def _integrate_flow_metadata(
-    rows: list[dict[str, str]],
-    flow_rows: list[dict[str, str]],
-) -> None:
-    exact: dict[tuple[str, str, str, str], list[dict[str, str]]] = defaultdict(list)
-    by_scenario: dict[tuple[str, str, str], list[dict[str, str]]] = defaultdict(list)
-    for flow in flow_rows:
-        exact[
-            (flow["spec_id"], flow["precondition"], flow["test_step"], flow["expected_result"])
-        ].append(flow)
-        by_scenario[
-            (_base_spec_id(flow["spec_id"]), flow["precondition"], flow["test_step"])
-        ].append(flow)
-    for row in rows:
-        matches = exact.get(
-            (row["spec_id"], row["precondition"], row["test_step"], row["expected_result"])
-        ) or by_scenario.get(
-            (_base_spec_id(row["spec_id"]), row["precondition"], row["test_step"]),
-            [],
-        )
-        for field in ("flow_role", "state_before", "state_after", "flow_id"):
-            row[field] = " / ".join(
-                dict.fromkeys(match[field] for match in matches if match.get(field))
-            )
-
-
 def _spec_rows(
     result: DiscoveryResult,
     scenarios: list[Scenario],
     contracts: dict[str, Contract],
     covered_by: dict[str, list[Scenario]] | None = None,
-    flow_rows: list[dict[str, str]] | None = None,
 ) -> list[dict[str, str]]:
     covered_by = covered_by or {}
     scene_rank = {scene: index for index, scene in enumerate(result.scenes)}
@@ -555,17 +520,12 @@ def _spec_rows(
             covered_scenarios=covered_by.get(scenario.id),
         )
     ]
-    _integrate_flow_metadata(ordered_rows, flow_rows or [])
     original_rank = {id(row): index for index, row in enumerate(ordered_rows)}
     ordered_rows.sort(
         key=lambda row: (
             scene_rank.get(row["scene"], len(scene_rank)),
             row["scene"],
             status_rank[row["status"]],
-            0 if row["flow_id"] else 1,
-            row["flow_id"],
-            row["flow_role"] != "initialization" if row["flow_id"] else False,
-            row["state_before"],
             original_rank[id(row)],
         )
     )
@@ -578,162 +538,15 @@ def _write_spec_csv(
     scenarios: list[Scenario],
     contracts: dict[str, Contract],
     covered_by: dict[str, list[Scenario]] | None = None,
-    flow_rows: list[dict[str, str]] | None = None,
 ) -> None:
     rows = _spec_rows(
         result,
         scenarios,
         contracts,
         covered_by,
-        flow_rows,
     )
     with path.open("w", encoding="utf-8-sig", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=SPEC_FIELDNAMES)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def _flow_rows(
-    result: DiscoveryResult,
-    contracts: dict[str, Contract],
-    scenarios: list[Scenario] | None = None,
-    covered_by: dict[str, list[Scenario]] | None = None,
-) -> list[dict[str, str]]:
-    covered_by = covered_by or {}
-    grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
-    for scenario in result.scenarios if scenarios is None else scenarios:
-        if scenario.quality != "ready" or scenario.trigger.kind not in {"scene_entry", "input"}:
-            continue
-        projected_states = _projected_supporting_states(
-            scenario,
-            covered_by.get(scenario.id),
-        )
-        writes = [
-            state
-            for state in projected_states
-            if state.operation == "write" and state.target
-        ]
-        if not writes:
-            continue
-        first = contracts[scenario.contracts[0]]
-        projections = (
-            project_input_cases(first.condition, scenario.trigger.target or "입력 미확정")
-            if scenario.trigger.kind == "input"
-            else []
-        )
-        cases = projections or [None]
-        for state in writes:
-            for assertion_index, assertion in enumerate(scenario.assertions):
-                if not assertion.target:
-                    continue
-                group_key = (
-                    scenario.scene or "미확정",
-                    state.target or "",
-                    assertion.target,
-                    assertion.operation,
-                )
-                for index, projection in enumerate(cases):
-                    condition = projection.condition if projection is not None else first.condition
-                    suffix_parts: list[str] = []
-                    if projection is not None and len(cases) > 1:
-                        suffix_parts.append(f"input-{index + 1}")
-                    if len(scenario.assertions) > 1:
-                        suffix_parts.append(f"assertion-{assertion_index + 1}")
-                    row = _scenario_row(
-                        result,
-                        scenario,
-                        contracts,
-                        assertions=[assertion],
-                        row_suffix="-".join(suffix_parts) or None,
-                        condition_override=condition,
-                        input_target=projection.label if projection is not None else None,
-                        covered_scenarios=covered_by.get(scenario.id),
-                    )
-                    before, after = state_transition(state.target or "", state.value, condition)
-                    grouped[group_key].append(
-                        {
-                            "row": row,
-                            "role": "transition" if scenario.trigger.kind == "input" else "initialization",
-                            "state_before": before,
-                            "state_after": after,
-                        }
-                    )
-
-    scene_rank = {scene: index for index, scene in enumerate(result.scenes)}
-    output: list[dict[str, str]] = []
-    for group_key, members in grouped.items():
-        roles = {member["role"] for member in members}
-        if roles != {"initialization", "transition"}:
-            continue
-        flow_raw = json.dumps(group_key, ensure_ascii=False, sort_keys=True)
-        flow_id = f"flow:{hashlib.sha1(flow_raw.encode()).hexdigest()[:12]}"
-        members.sort(
-            key=lambda member: (
-                member["role"] != "initialization",
-                member["state_before"],
-                member["row"]["test_step"],
-                member["row"]["spec_id"],
-            )
-        )
-        for member in members:
-            row = member["row"]
-            output.append(
-                {
-                    "precondition": row["precondition"],
-                    "test_step": row["test_step"],
-                    "expected_result": row["expected_result"],
-                    "flow_role": member["role"],
-                    "state_before": member["state_before"],
-                    "state_after": member["state_after"],
-                    "scene": row["scene"],
-                    "ui_text": row["ui_text"],
-                    "ui_sprite": row["ui_sprite"],
-                    "artifact": row["artifact"],
-                    "capture": row["capture"],
-                    "build_evidence": row["build_evidence"],
-                    "flow_id": flow_id,
-                    "spec_id": row["spec_id"],
-                    "contract_ids": row["contract_ids"],
-                    "evidence": row["evidence"],
-                }
-            )
-    output.sort(
-        key=lambda row: (
-            scene_rank.get(row["scene"], len(scene_rank)),
-            row["scene"],
-            row["flow_id"],
-            row["flow_role"] != "initialization",
-            row["state_before"],
-            row["test_step"],
-        )
-    )
-    return output
-
-
-def _write_flow_csv(
-    path: Path,
-    rows: list[dict[str, str]],
-) -> None:
-    fieldnames = [
-        "precondition",
-        "test_step",
-        "expected_result",
-        "flow_role",
-        "state_before",
-        "state_after",
-        "scene",
-        "ui_text",
-        "ui_sprite",
-        "artifact",
-        "capture",
-        "build_evidence",
-        "flow_id",
-        "spec_id",
-        "contract_ids",
-        "evidence",
-    ]
-    with path.open("w", encoding="utf-8-sig", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -782,7 +595,7 @@ def markdown(result: DiscoveryResult, limit: int = 30) -> str:
 
 def project_rows(
     result: DiscoveryResult,
-) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     """Project one discovery result without filesystem side effects."""
 
     contracts = {item.id: item for item in result.contracts}
@@ -790,25 +603,18 @@ def project_rows(
         [item for item in result.scenarios if item.quality in {"ready", "candidate"}],
         contracts,
     )
-    flow_scenarios = [item for item in visible_scenarios if item.quality == "ready"]
-    flow_covered_by = {
-        scenario_id: [item for item in covered if item.quality == "ready"]
-        for scenario_id, covered in covered_by.items()
-    }
-    flow_rows = _flow_rows(result, contracts, flow_scenarios, flow_covered_by)
     ready_rows = _spec_rows(
         result,
         visible_scenarios,
         contracts,
         covered_by,
-        flow_rows,
     )
     review_rows = _spec_rows(
         result,
         [item for item in result.scenarios if item.quality not in {"ready", "candidate"}],
         contracts,
     )
-    return ready_rows, review_rows, flow_rows
+    return ready_rows, review_rows
 
 
 def write_outputs(
@@ -822,10 +628,9 @@ def write_outputs(
     md_path = base.with_suffix(".md")
     specs_path = base.with_suffix(".specs.csv")
     review_path = base.with_suffix(".review.csv")
-    flows_path = base.with_suffix(".flows.csv")
     json_path.write_text(json.dumps(result.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
     md_path.write_text(markdown(result, limit=limit), encoding="utf-8")
-    ready_rows, review_rows, flow_rows = project_rows(result)
+    ready_rows, review_rows = project_rows(result)
     with specs_path.open("w", encoding="utf-8-sig", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=SPEC_FIELDNAMES)
         writer.writeheader()
@@ -834,5 +639,4 @@ def write_outputs(
         writer = csv.DictWriter(stream, fieldnames=SPEC_FIELDNAMES)
         writer.writeheader()
         writer.writerows(review_rows)
-    _write_flow_csv(flows_path, flow_rows)
-    return json_path, md_path, specs_path, review_path, flows_path
+    return json_path, md_path, specs_path, review_path
