@@ -7,6 +7,7 @@ the other, so `app/agents/qa/tools.py` can simply `await`.
 """
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -28,6 +29,8 @@ from app.qa.envelope import (
     outbound_envelope,
 )
 from app.qa.scene import SceneMemory
+
+logger = logging.getLogger(__name__)
 
 # How long a tool waits for the game before giving up on one request.
 #
@@ -68,6 +71,22 @@ KNOWLEDGE_WRITE_TIMEOUT_SECONDS = 5.0
 
 class QaCancelled(Exception):
     """Raised inside the agent loop when the operator ends the run."""
+
+
+@dataclass(frozen=True)
+class _PendingRequest:
+    """One request waiting on its answer.
+
+    Carries the request's own type beside the future because the answer is
+    checked against it (ARTEL-367). Orchestration echoes the request type in a
+    write's result, and nothing was reading that echo — a mismatch would have
+    put the wrong id into `knowledge_seen`, and the next correction would go to
+    the wrong entry. Nothing produces a mismatch today; the point is that if
+    something started to, no one would find out.
+    """
+
+    waiter: "asyncio.Future[Any]"
+    request_type: str
 
 
 @dataclass(frozen=True)
@@ -120,7 +139,7 @@ class QaRunChannel:
         # cancellation and its late-answer rule are the game's, not the knowledge
         # base's, and folding it in here would spread this change across a path
         # this issue does not touch.
-        self._pending: dict[str, asyncio.Future[Any]] = {}
+        self._pending: dict[str, _PendingRequest] = {}
         self.scene = SceneMemory()
         self.cancelled = False
         # Operator messages that arrived since the agent last looked. Delivered
@@ -325,7 +344,7 @@ class QaRunChannel:
         waiter: asyncio.Future[Any] = loop.create_future()
         frame = self._frame(message_type, payload)
         message_id = frame["messageId"]
-        self._pending[message_id] = waiter
+        self._pending[message_id] = _PendingRequest(waiter, str(message_type))
         try:
             await self._send(frame)
             return await asyncio.wait_for(waiter, timeout=timeout)
@@ -364,7 +383,31 @@ class QaRunChannel:
         self._resolve(raw, KnowledgeExpandResultPayload.model_validate(raw.get("payload") or {}))
 
     def on_knowledge_write_result(self, raw: dict) -> None:
-        self._resolve(raw, KnowledgeWriteResultPayload.model_validate(raw.get("payload") or {}))
+        """A write's answer, checked against what was asked (ARTEL-367).
+
+        Orchestration echoes the request type in the payload. Matching it costs a
+        comparison and buys the one thing correlation alone cannot give: if the two
+        ever disagree, the answer is dropped instead of being believed. Believing it
+        would file the wrong id under `knowledge_seen`, and every correction after
+        that would land on the wrong entry — silently, because the id is real.
+
+        Dropped rather than surfaced as a failure. A mismatch is a protocol fault on
+        the far side, not something the run can act on, and turning it into a tool
+        failure would make the model rewrite a fact that may well have been stored.
+        The tool times out into "cannot confirm", which is what the situation is.
+        """
+        payload = KnowledgeWriteResultPayload.model_validate(raw.get("payload") or {})
+        correlation = raw.get("correlationId")
+        pending = self._pending.get(correlation) if isinstance(correlation, str) else None
+        if pending is not None and payload.type and payload.type != pending.request_type:
+            logger.warning(
+                "[QA] a %s answer arrived for a %s request (correlation %s); dropped",
+                payload.type,
+                pending.request_type,
+                correlation,
+            )
+            return
+        self._resolve(raw, payload)
 
     def on_error(self, raw: dict) -> bool:
         """An inbound ERROR. True when it was the answer to something we asked.
@@ -393,10 +436,10 @@ class QaRunChannel:
         key exists to prevent.
         """
         correlation = raw.get("correlationId")
-        waiter = self._pending.get(correlation) if isinstance(correlation, str) else None
-        if waiter is None or waiter.done():
+        pending = self._pending.get(correlation) if isinstance(correlation, str) else None
+        if pending is None or pending.waiter.done():
             return False
-        waiter.set_result(answer)
+        pending.waiter.set_result(answer)
         return True
 
     def on_chat(self, raw: dict) -> None:
@@ -416,9 +459,9 @@ class QaRunChannel:
         # the search only, so an expansion the operator interrupted still sat out
         # its full 20 seconds — a bug the per-kind fields made easy to miss and the
         # map makes impossible to have.
-        for waiter in self._pending.values():
-            if not waiter.done():
-                waiter.cancel()
+        for pending in self._pending.values():
+            if not pending.waiter.done():
+                pending.waiter.cancel()
         # A tool parked on the operator has no action to cancel, so wake it and
         # let it find the cancellation itself.
         self._operator_arrived.set()
