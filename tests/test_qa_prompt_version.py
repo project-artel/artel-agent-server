@@ -16,7 +16,7 @@ from app.agents.qa.tools import QaRunState, build_tools
 from app.api.qa_sessions import OpenQaSessionRequest
 from app.qa.schemas import QaCaseRef, QaRunScenario, QaScenario, QaStep
 from app.prompts import load_prompt
-from app.prompts.loader import resolve_version
+from app.prompts.loader import resolve_version, roles_in
 from app.qa.channel import QaRunChannel
 from app.qa.run_config import resolve_run_config
 from app.qa.service import QaExecutionService
@@ -243,17 +243,17 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v10() -> None:
+def test_the_default_qa_version_is_v11() -> None:
     """A run that names no version has to get the newest prompt.
 
     This is also the trap in adding a version: `resolve_version` returns the
     highest-numbered directory, so creating one silently repoints every run that
-    has not pinned `qa_prompt_version`. That is why each version ships in the same
-    change as the tools it talks about — a prompt that names `used_knowledge_ids`
-    before `report_step` takes one teaches the agent to reach for something that
-    is not there.
+    has not pinned `qa_prompt_version`. That is why each version ships in the
+    same change as the tools it talks about — a prompt that names
+    `set_input_axis` before the tool exists teaches the agent to reach for
+    something that is not there.
     """
-    assert resolve_version("qa_run") == "v10"
+    assert resolve_version("qa_run") == "v11"
 
 
 def test_v9_structures_the_body_and_adds_the_knowledge_base_section() -> None:
@@ -275,6 +275,44 @@ def test_v9_structures_the_body_and_adds_the_knowledge_base_section() -> None:
     # prompt with structure, not a rewrite.
     assert "A failed step does NOT end the run." in v8
     assert "Report it failed with what you saw" in v9
+
+
+def test_v11_teaches_the_axis_fallback_and_ties_it_to_the_knowledge_base() -> None:
+    """A tool the prompt never mentions is a tool the agent will not reach for.
+
+    The agent cannot tell whether a game reads `GetKey` or `GetAxis` — there is
+    no runtime API for the binding, so the SDK cannot tell it either. Trying and
+    watching the screen is the only way, which makes the fallback a habit
+    spanning `hold_key`, `set_input_axis` and `record_knowledge`, and no single
+    tool description is its home. What is pinned here is the recording half: an
+    agent that works it out and does not write it down makes every later run pay
+    the same wasted round trip.
+    """
+    v10 = load_prompt("qa_run", "system", "v10").body
+    v11 = load_prompt("qa_run", "system", "v11").body
+
+    assert "set_input_axis" in v11
+    assert "set_input_axis" not in v10
+    assert "record_knowledge" in v11
+    assert "Horizontal" in v11
+    # An axis is state you set, like a held key. v10 already said that about keys;
+    # v11 has to extend it rather than leave a second way to poison later steps.
+    assert "return it to 0" in v11
+
+    # One section added, nothing from v10 dropped.
+    for paragraph in v10.split("\n\n"):
+        assert paragraph in v11
+
+
+def test_v11_defines_the_same_roles_as_v10() -> None:
+    """A version directory missing a role breaks only the runs that need it.
+
+    `vision_directive` is loaded from the resolved version, so a v11 without it
+    raises at run time for a vision run and never for a text-only one. Nothing
+    else in the suite would notice: the lock records what is on disk, and the
+    body assertions only read `system`.
+    """
+    assert roles_in("qa_run", "v11") == roles_in("qa_run", "v10")
 
 
 def test_v8_is_v7_and_marks_the_tool_set_that_changed_under_it() -> None:
