@@ -56,6 +56,10 @@ end-to-end development. Jira access is described in `project.md`.
      above do not already express. Reuse an existing label instead of
      inventing a near-duplicate.
 
+   When the deliverable changes more than one repository, this issue is the
+   umbrella and each repository gets its own issue — read
+   `## Multi-Repository Work` below before setting the fields above.
+
 2. **Move to 진행 중.** Transition the issue. An automation watches this
    transition and creates the branch, so status and branch never drift. The
    generated name is:
@@ -100,6 +104,44 @@ end-to-end development. Jira access is described in `project.md`.
 
 Move the issue to 검토 중 when the PR opens, and to 완료 only after merge and
 required validation pass.
+
+## Multi-Repository Work
+
+One deliverable that changes more than one repository is filed as an umbrella
+issue plus one issue per repository, linked together. `issue.md` defines the
+structure, the link types, and the grouping label; this section covers the
+pipeline.
+
+1. **Create the umbrella issue.** Issue type `작업`, 레포지토리 `없음`, parented
+   to the Epic that owns the outcome. Record the acceptance criteria for the
+   whole deliverable and the merge order — the repository that defines an API,
+   schema, or SDK surface merges before the ones that consume it. Give it the
+   `xrepo-<slug>` grouping label. The umbrella gets no branch and no PR.
+
+2. **Create one issue per repository.** Same `jira_create_issue` call as step 1
+   of `## Jira-Driven Development Flow`, with that repository's 레포지토리
+   option, its own 작업 유형, its own assignee accountId, its repository Epic as
+   `parent`, and the same `xrepo-<slug>` label. Then link it: `relates to` the
+   umbrella, plus `blocks` on the issue whose repository must merge first.
+
+3. **Run steps 2–8 of `## Jira-Driven Development Flow` once per repository
+   issue**, in that repository's checkout or worktree, in merge order. A child
+   issue is developed exactly like a standalone one — its own branch from the
+   automation, plan, plan review, implementation, testing, pair review, and PR,
+   with the same 진행 중 / 검토 중 / 완료 transitions. Nothing is skipped because
+   the slice is small.
+
+4. **Keep the trail on the child issue.** The branch name, commit trailers, and
+   the PR `Jira:` trailer all carry the child issue key, never the umbrella key.
+
+5. **Report up as you go.** Whenever a child changes state, comment the rolled-up
+   status on the umbrella: which repositories are merged, which are waiting, and
+   any change to the merge order or the shared contract. Move the umbrella to
+   완료 last, after every child is merged and validated.
+
+Do not file the children as `Subtask`. That issue type has neither 작업 유형 nor
+레포지토리, so its issues fall out of the repository filters and the branch
+automation has no prefix to derive a branch name from.
 
 ## Change Rules
 
