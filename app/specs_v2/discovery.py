@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from . import observable
 from .graph import (
     EvidenceGraph,
     PathFact,
@@ -48,6 +49,15 @@ CONTINUOUS_METHODS = {"Update", "FixedUpdate", "LateUpdate"}
 LITERAL = re.compile(r'^(?:-?\d+(?:\.\d+)?|true|false|null|".*")$', re.IGNORECASE)
 PREFS_READ = re.compile(r'PlayerPrefs\.Get\w+\(\s*"([^"]+)"')
 SENTINELS = {"(not a simple receiver)", "(not a simple target)", "(not a literal)", "_"}
+# Recorded so a reader can see the premise is not what the code says, but not a
+# defect: both mean the row became answerable, not that something is missing.
+# Left in `issues` and out of the grade, because those answer different
+# questions — what happened to this row, and whether it can be run.
+DERIVATION_NOTES = {
+    observable.ISSUE,
+    observable.SUBSTITUTED,
+}
+
 CANDIDATE_ISSUES = {
     "ambiguous_expected_value",
     "evidence_gap:callee-condition-not-composed",
@@ -324,7 +334,9 @@ def _resolve_value(
     scene: str | None,
 ) -> tuple[Any, str, list[ProofEdge]]:
     kind = effect.get("kind")
-    detail = effect.get("detail")
+    # The API's own second argument is not part of the value. Left in, a masked
+    # parameter reads as the value `_, true` and goes out as something to check.
+    detail = observable.value_of(effect.get("detail")) if effect.get("detail") is not None else None
     if kind == "scene":
         return effect.get("target"), "exact", []
     if kind in {"quit", "destroy"}:
@@ -493,6 +505,7 @@ def _active_scene_verdict(condition: dict[str, Any], scene: str | None) -> bool 
 
 
 def _quality(trigger: Trigger, assertions: list[Assertion], issues: list[str]) -> Quality:
+    issues = [issue for issue in issues if issue not in DERIVATION_NOTES]
     if any(issue.startswith("observation_unsupported") for issue in issues):
         return "unsupported"
     if trigger.scene is None or trigger.resolution in {"ambiguous", "unresolved"}:
@@ -708,7 +721,7 @@ def _condition_before_updates(
 def _coroutine_resume_contracts(
     graph: EvidenceGraph,
     contracts: list[Contract],
-) -> list[Contract]:
+) -> tuple[list[Contract], set[str]]:
     """Project WaitUntil-style delegate input onto resumed coroutine effects.
 
     The SDK keeps the input in a handed-over delegate and the observable effect
@@ -727,6 +740,7 @@ def _coroutine_resume_contracts(
         and len(path.call_path) >= 2
     ]
     resumed: list[Contract] = []
+    superseded: set[str] = set()
     for wait in waits:
         coroutine_signature = wait.call_path[-2]
         handoff = int(wait.handed_over_at)
@@ -886,6 +900,7 @@ def _coroutine_resume_contracts(
                     resumed_trigger.identity,
                     condition_signature(effective_condition),
                 )
+                superseded.add(contract.id)
                 resumed.append(
                     Contract(
                         contract_id,
@@ -906,7 +921,7 @@ def _coroutine_resume_contracts(
                     )
                 )
     unique: dict[str, Contract] = {contract.id: contract for contract in resumed}
-    return list(unique.values())
+    return list(unique.values()), superseded
 
 
 def _contracts(graph: EvidenceGraph, persisted_pins: dict[str, list[Pin]]) -> list[Contract]:
@@ -1227,6 +1242,9 @@ def _scenarios(graph: EvidenceGraph, contracts: list[Contract]) -> list[Scenario
         if not connected:
             continue
         issues = sorted({issue for item in group for issue in item.issues})
+        # A derivation note is not a reason to distrust the scenario; the
+        # contracts it came from already took it into account.
+        defects = [issue for issue in issues if issue not in DERIVATION_NOTES]
         quality: Quality
         if any(item.quality == "unsupported" for item in group):
             quality = "unsupported"
@@ -1234,7 +1252,7 @@ def _scenarios(graph: EvidenceGraph, contracts: list[Contract]) -> list[Scenario
             quality = "review"
         elif any(item.quality == "candidate" for item in group):
             quality = "candidate"
-        elif all(item.quality == "ready" for item in group) and not issues:
+        elif all(item.quality == "ready" for item in group) and not defects:
             quality = "ready"
         else:
             quality = "review"
@@ -1270,12 +1288,54 @@ def _scenarios(graph: EvidenceGraph, contracts: list[Contract]) -> list[Scenario
     return scenarios
 
 
+def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]) -> None:
+    """Say each premise as something the running game reports, where it can be.
+
+    A premise naming a local or a call cannot be checked while playing, so a row
+    carrying one either proves nothing or is confirmed by the very observation it
+    expects. Where the guarded branch assigns one readable field from another,
+    that assignment is the same fact in a form the reader publishes.
+    """
+    # No early return when the table is empty. Restating a premise and judging
+    # whether one is answerable are separate questions, and a report where
+    # nothing could be restated is exactly where the judging matters.
+    live = [path for path in graph.paths if not path.folded]
+    table = observable.proxies(live)
+    written = observable.written_fields(live)
+    for contract in contracts:
+        asserted = {item.target for item in contract.assertions if item.target}
+        # A call first: the field it wrote is the same answer, and saying the
+        # premise that way leaves nothing for the branch-equality rule to do.
+        condition, replaced = observable.substitute_calls(contract.condition, written)
+        if replaced:
+            contract.condition = condition
+            if observable.SUBSTITUTED not in contract.issues:
+                contract.issues.append(observable.SUBSTITUTED)
+        condition, swapped = observable.rewrite(contract.condition, table, asserted)
+        if swapped:
+            contract.condition = condition
+            if observable.ISSUE not in contract.issues:
+                contract.issues.append(observable.ISSUE)
+        # What no branch could restate stays unreadable, and a row resting on it
+        # cannot be set up or confirmed. Said rather than dropped: the behaviour
+        # is real and someone may still write the premise another way.
+        if observable.unreadable_atoms(contract.condition):
+            if observable.UNCHECKABLE not in contract.issues:
+                contract.issues.append(observable.UNCHECKABLE)
+            contract.quality = _quality(
+                contract.trigger, contract.assertions, contract.issues
+            )
+
+
 def discover(graph: EvidenceGraph) -> DiscoveryResult:
     persisted_pins = _persisted_pins(graph)
     code_contracts = _contracts(graph, persisted_pins)
-    code_contracts.extend(_coroutine_resume_contracts(graph, code_contracts))
+    resumed, superseded = _coroutine_resume_contracts(graph, code_contracts)
+    code_contracts = [item for item in code_contracts if item.id not in superseded]
+    code_contracts.extend(resumed)
     contracts = _drop_unavailable_control_contracts(code_contracts)
     contracts.extend(_inventory_contracts(graph, code_contracts))
+    _rewrite_unreadable_premises(graph, contracts)
     contracts.sort(key=lambda item: (item.scene or "", item.trigger.label, item.id))
     families = _branch_families(contracts)
     scenarios = _scenarios(graph, contracts)

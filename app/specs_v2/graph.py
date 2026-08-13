@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from . import observable
 from .model import ProofEdge, Resolution, SourceRef
 
 
@@ -401,7 +402,21 @@ def _load_records(graph: EvidenceGraph) -> None:
                 method_id,
                 source_signature,
                 call_path,
-                record.get("condition") or {"kind": "always"},
+                # Bare locals are named for the method that holds them before
+                # anything composes conditions together. `i` in the dialogue loop
+                # and `i` in the typing animation are different variables spelled
+                # the same, and joined they read as one.
+                observable.qualify(
+                    record.get("condition") or {"kind": "always"},
+                    # Type and method both: two coroutines compile to two state
+                    # machines that each spell their entry point `MoveNext`, so
+                    # the method name alone still joins the dialogue loop's
+                    # counter to the typing animation's.
+                    ".".join(
+                        part for part in member_from_signature(source_signature) if part
+                    )
+                    or "local",
+                ),
                 tuple(record.get("inputs") or ()),
                 tuple(record.get("effects") or ()),
                 tuple(record.get("calls") or ()),

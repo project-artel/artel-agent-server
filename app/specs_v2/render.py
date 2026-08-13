@@ -205,12 +205,18 @@ def trigger_text(trigger: Trigger, event_origin: str | None = None) -> str:
     return f"{trigger.scene or '미확정 화면'}에서 `{trigger.event}` 이벤트 이후 관찰한다"
 
 
+# What a value reads as when the evidence could not settle it. Printing `None`
+# put the word into test steps as if it were the thing to look for.
+UNSETTLED = "값 미확정"
+
+
 def assertion_text(
     assertion: Assertion,
     mode: str = "change",
     automatic: bool = False,
 ) -> str:
     target = ui_target_text(assertion.target)
+    shown = UNSETTLED if assertion.value is None else assertion.value
     if assertion.operation == "transition":
         if automatic:
             return f"별도 입력 없이 `{assertion.value}` 화면으로 자동 전환된다"
@@ -232,18 +238,18 @@ def assertion_text(
         match = re.fullmatch(r'SetTrigger\(\s*"([^"\\]*(?:\\.[^"\\]*)*)"\s*\)', str(assertion.value))
         if match:
             return f"{target}에서 `{match.group(1)}` 애니메이션 트리거가 실행된다"
-        return f"{target}의 애니메이션이 `{assertion.value}`가 된다"
+        return f"{target}의 애니메이션이 `{shown}`가 된다"
     if assertion.operation == "display":
         if mode == "state":
-            return f"{target}의 표시 값이 `{assertion.value}`로 출력되어 있다"
-        return f"{target}의 표시 값이 `{assertion.value}`로 갱신된다"
+            return f"{target}의 표시 값이 `{shown}`로 출력되어 있다"
+        return f"{target}의 표시 값이 `{shown}`로 갱신된다"
     if assertion.operation == "transform":
         if mode == "state":
-            return f"{target}가 `{assertion.value}` 위치/형태에 있다"
-        return f"{target}가 `{assertion.value}` 위치/형태로 바뀐다"
+            return f"{target}가 `{shown}` 위치/형태에 있다"
+        return f"{target}가 `{shown}` 위치/형태로 바뀐다"
     if assertion.operation == "play":
-        return f"{target}에서 `{assertion.value}` 오디오가 재생된다"
-    return f"{target}에 {assertion.operation} `{assertion.value}`가 적용된다"
+        return f"{target}에서 `{shown}` 오디오가 재생된다"
+    return f"{target}에 {assertion.operation} `{shown}`가 적용된다"
 
 
 def state_text(state: SupportingState) -> str:
