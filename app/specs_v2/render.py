@@ -10,6 +10,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from . import observable
 from .model import Assertion, Contract, DiscoveryResult, Scenario, SupportingState, Trigger
 from .projection import (
     absorb_active_scene_condition,
@@ -127,6 +128,22 @@ def _projected_supporting_states(
     return projected
 
 
+def _shown(node: dict[str, Any], side: str) -> str:
+    """조건 한 항을 사람이 읽을 모양으로.
+
+    프레임 이름(`Story/<Tell>d__1.MoveNext.i`)은 같은 이름의 두 지역 변수를
+    가르려고 붙인 기계용 이름이다. 계약을 구별하는 데는 필요하지만 사람이 읽는
+    열에 나가면 무엇을 보라는 말인지 알 수 없는 글자가 된다. 이름은 되돌리고,
+    **읽을 수 없는 값이라는 사실**을 대신 말한다 — 그것이 이 항에 대해 사람이
+    알아야 하는 전부다.
+    """
+    value = str(node.get(side) or "?")
+    frame = (node.get("localFrames") or {}).get(side)
+    if not frame:
+        return value
+    return f"{value[len(frame) + 1:]}(내부 값)" if value.startswith(f"{frame}.") else value
+
+
 def _condition_text(node: dict[str, Any]) -> str:
     kind = node.get("kind") or "unknown"
     if kind == "always":
@@ -136,9 +153,9 @@ def _condition_text(node: dict[str, Any]) -> str:
     if kind == "gesture":
         return human_input_label(node.get("input") or "입력 미확정")
     if kind == "test":
-        left = str(node.get("left") or "?")
+        left = _shown(node, "left")
         operator = str(node.get("operator") or "?")
-        right = str(node.get("right") or "?")
+        right = _shown(node, "right")
         compared_tag = re.fullmatch(r"(.+)\.CompareTag\((.+)\)", left)
         if compared_tag and right in {"0", "false"} and operator in {"==", "!="}:
             semantic_operator = "!=" if operator == "==" else "=="
@@ -206,6 +223,23 @@ def trigger_text(trigger: Trigger, event_origin: str | None = None) -> str:
 UNSETTLED = "값 미확정"
 
 
+# 코드 안에 그대로 적힌 값. 이것이 아니면 값 자리에 온 것은 다른 무언가의 이름이다.
+_WRITTEN_DOWN = re.compile(r'^(?:-?\d+(?:\.\d+)?|".*"|true|false|null)$', re.IGNORECASE)
+
+
+def _names_something(value: Any) -> bool:
+    """값 자리에 온 것이 값이 아니라 다른 것의 이름인가.
+
+    해석이 끝난 대상은 `Canvas/ChatWindow.streamingText` 처럼 경로와 멤버가
+    섞이므로 모양으로 알아보기 어렵다. 리터럴인지만 보면 충분하다 — 코드에 그대로
+    적힌 값이 아니면 무언가를 가리키는 이름이다.
+    """
+    text = str(value or "").strip()
+    if not text or text == UNSETTLED:
+        return False
+    return not _WRITTEN_DOWN.match(text)
+
+
 def assertion_text(
     assertion: Assertion,
     mode: str = "change",
@@ -236,10 +270,22 @@ def assertion_text(
             return f"{target}에서 `{match.group(1)}` 애니메이션 트리거가 실행된다"
         return f"{target}의 애니메이션이 `{shown}`가 된다"
     if assertion.operation == "display":
+        # 값 자리에 필드 이름이 온 경우가 있다. `chatText 의 표시 값이
+        # streamingText 로 갱신된다` 는 `streamingText` 라는 글자가 화면에
+        # 나온다는 말로 읽히지만, 뜻은 두 값이 같아진다는 것이다. 값이 아니라
+        # 관계이므로 관계로 쓴다.
+        if _names_something(shown):
+            if mode == "state":
+                return f"{target}의 표시 값이 `{shown}`와 같다"
+            return f"{target}의 표시 값이 `{shown}`와 같아진다"
         if mode == "state":
             return f"{target}의 표시 값이 `{shown}`로 출력되어 있다"
         return f"{target}의 표시 값이 `{shown}`로 갱신된다"
     if assertion.operation == "transform":
+        if _names_something(shown):
+            if mode == "state":
+                return f"{target}가 `{shown}`와 같은 위치/형태에 있다"
+            return f"{target}가 `{shown}`와 같은 위치/형태가 된다"
         if mode == "state":
             return f"{target}가 `{shown}` 위치/형태에 있다"
         return f"{target}가 `{shown}` 위치/형태로 바뀐다"
