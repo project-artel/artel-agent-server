@@ -22,6 +22,7 @@ from app.agents.qa.knowledge import (
     RESULT_LIMIT,
     SEARCH_KNOWLEDGE_DESCRIPTION,
     SIMILAR_LABEL,
+    UNCONFIRMED_WRITE,
     UNLINK_KNOWLEDGE_DESCRIPTION,
     UPDATE_KNOWLEDGE_DESCRIPTION,
     render_entry_label,
@@ -30,7 +31,7 @@ from app.agents.qa.knowledge import (
     render_results,
 )
 from app.qa.channel import (
-    KnowledgeSearchFailed,
+    KnowledgeRequestFailed,
     QaCancelled,
     QaRunChannel,
     bounded_operator_wait,
@@ -92,9 +93,11 @@ class QaRunState:
         # Attempts again, and for the same reason: a search Orchestration refuses
         # every time would otherwise be a loop with no bound on it.
         self.knowledge_searches_attempted = 0
-        # Attempts for the knowledge writes too, and here there is no alternative:
-        # nothing answers a write (see `QaRunChannel.write_knowledge`), so success
-        # is not something this side could count even if it wanted to.
+        # Attempts for the knowledge writes too. A write is answered since
+        # ARTEL-332, so successes COULD be counted now — the cap still counts
+        # attempts because silence is a third outcome (see
+        # `QaRunChannel.write_knowledge`) and a budget that only bound confirmed
+        # writes would be unbounded against an Orchestration that never answers.
         self.knowledge_records_attempted = 0
         self.knowledge_updates_attempted = 0
         self.knowledge_forgets_attempted = 0
@@ -472,7 +475,7 @@ def build_tools(
                 f"the scenario and what you can see. {remaining} search(es) left.",
                 messages,
             )
-        if isinstance(answer, KnowledgeSearchFailed):
+        if isinstance(answer, KnowledgeRequestFailed):
             # Said plainly, with what to do instead. A failed lookup is a side
             # errand that failed, not a failed step — an agent told only that
             # something went wrong has been known to fail the step over it.
@@ -558,7 +561,7 @@ def build_tools(
         await channel.note(thought, LogCategory.THOUGHT, step)
         state.knowledge_records_attempted += 1
         try:
-            await channel.write_knowledge(
+            answer = await channel.write_knowledge(
                 MessageType.KNOWLEDGE_CREATE,
                 KnowledgeCreatePayload(tag=topic, summary=fact, description=detail),
             )
@@ -573,12 +576,38 @@ def build_tools(
                 f"The knowledge write could not be sent — {error}. Nothing was recorded."
             ) + render_missing_knowledge_warning(outstanding)
 
+        if isinstance(answer, KnowledgeRequestFailed):
+            # A refusal reaches the model since ARTEL-331/332. It used to become an
+            # ERROR row on the operator's timeline and nothing else, which meant a
+            # frame this side should not have sent was reported here as a success.
+            # A deletion still owed is named too — this is the path that loses it.
+            return (
+                f"The knowledge base refused the entry — {answer.reason}. Nothing was recorded."
+            ) + render_missing_knowledge_warning(outstanding)
+
         replaced = bool(outstanding)
         state.knowledge_deleted_unreplaced = []
         messages = channel.drain_operator_messages()
         remaining = max(arch.max_records_per_run - state.knowledge_writes_attempted, 0)
 
-        lines = [f'Sent to the knowledge base, filed under {topic}: "{fact}".']
+        # "Recorded" only when Orchestration said so. Silence gets the older,
+        # weaker word — the frame left, and that is all this side can claim.
+        lines = [
+            f'Recorded under {topic}: "{fact}".'
+            if answer is not None
+            else f'Sent to the knowledge base, filed under {topic}: "{fact}".'
+        ]
+        if answer is not None and answer.knowledge_id:
+            # Into `knowledge_seen`, not `knowledge_glimpsed`. That map is the
+            # precondition `update_knowledge` and `forget_knowledge` rest on, and
+            # it means "read in full" — which the run wrote itself certainly is.
+            # Without this a run has to spend a search to correct its own entry.
+            state.knowledge_seen[answer.knowledge_id] = fact
+            lines.append(
+                f"Its id is {answer.knowledge_id}. Use `update_knowledge` with that "
+                "id if you learn this entry is wrong later in the run — you do not "
+                "need to search for it first."
+            )
         if replaced:
             lines.append(
                 "That completes the correction — the entry you deleted has been "
@@ -586,11 +615,9 @@ def build_tools(
                 "`update_knowledge`: it repairs an entry in one call, and the "
                 "replacement keeps the original's id."
             )
-        lines.append(
-            "Nothing answers a knowledge write, so treat this as done and do not "
-            f"send the same fact again in this run. {remaining} knowledge write(s) "
-            "left."
-        )
+        if answer is None:
+            lines.append(UNCONFIRMED_WRITE)
+        lines.append(f"{remaining} knowledge write(s) left.")
         return with_operator_messages("\n\n".join(lines), messages)
 
     @tool(
@@ -608,10 +635,10 @@ def build_tools(
     ) -> str:
         # What the agent reads is UPDATE_KNOWLEDGE_DESCRIPTION, not this.
         #
-        # No scene view, for the reason given on `record_knowledge` (ARTEL-180),
-        # and nothing awaited: like the other two writes this is one-way, and a
-        # tool that waited for `routeKnowledgeMutation` to answer would hang to its
-        # timeout on every call, including the ones that worked.
+        # No scene view, for the reason given on `record_knowledge` (ARTEL-180).
+        # The write itself is awaited since ARTEL-332 — briefly, and the wait is
+        # bounded by `KNOWLEDGE_WRITE_TIMEOUT_SECONDS` rather than the search's,
+        # because no answer is a normal outcome rather than a fault.
         #
         # The budget is `max_records_per_run`, shared with `record_knowledge`
         # rather than counted apart, because both fail the run the same way — see
@@ -695,7 +722,7 @@ def build_tools(
         await channel.note(thought, LogCategory.THOUGHT, step)
         state.knowledge_updates_attempted += 1
         try:
-            await channel.write_knowledge(
+            answer = await channel.write_knowledge(
                 MessageType.KNOWLEDGE_UPDATE,
                 KnowledgeUpdatePayload(
                     knowledge_id=target, tag=topic, summary=fact, description=detail
@@ -714,6 +741,12 @@ def build_tools(
                 "and the entry is still on file exactly as it was."
             )
 
+        if isinstance(answer, KnowledgeRequestFailed):
+            return refused(
+                f"The knowledge base refused the correction — {answer.reason}. Nothing "
+                "was changed and the entry is still on file exactly as it was."
+            )
+
         # Still an entry this run has read, so it stays correctable and deletable —
         # a correction is not a reason to forget having seen it. The stored summary
         # follows the correction because it is what every later label prints: left
@@ -730,6 +763,7 @@ def build_tools(
             for name, value in (("tag", topic), ("summary", fact), ("description", detail))
             if value is not None
         )
+        closing = UNCONFIRMED_WRITE if answer is None else "Do not send it again in this run."
         # Labelled with the summary the entry now has, not the one it had. Every
         # other write result echoes what was sent, and a sentence quoted right
         # after the word "Corrected" is read as the entry's current text — printing
@@ -738,10 +772,7 @@ def build_tools(
             f"Corrected {render_entry_label(target, state.knowledge_seen[target])}. "
             f"Sent: {changed}; the rest of the entry is left as it was. It keeps "
             "its id, so this stays readable as a repair rather than as a deletion "
-            "and a new entry.\n\n"
-            "Nothing answers a knowledge write, so treat this as done and do not "
-            f"send the same correction again in this run. {remaining} knowledge "
-            "write(s) left.",
+            f"and a new entry.\n\n{closing} {remaining} knowledge write(s) left.",
             messages,
         )
 
@@ -780,7 +811,7 @@ def build_tools(
         await channel.note(thought, LogCategory.THOUGHT, step)
         state.knowledge_forgets_attempted += 1
         try:
-            await channel.write_knowledge(
+            answer = await channel.write_knowledge(
                 MessageType.KNOWLEDGE_DELETE, KnowledgeDeletePayload(knowledge_id=target)
             )
         except QaCancelled:
@@ -793,6 +824,15 @@ def build_tools(
                 "the entry is still on file."
             )
 
+        if isinstance(answer, KnowledgeRequestFailed):
+            # Refused, so nothing was deleted — and crucially nothing is outstanding
+            # either. Returning before the bookkeeping below is what keeps this out
+            # of `knowledge_deleted_unreplaced`, which exists to chase a real loss.
+            return (
+                f"The knowledge base refused the deletion — {answer.reason}. Nothing "
+                "was deleted and the entry is still on file."
+            )
+
         # Taken out of what may be deleted and recorded as outstanding, in that
         # order, before the result is composed: from here on a `record_knowledge`
         # that fails is able to name exactly what is missing.
@@ -801,8 +841,14 @@ def build_tools(
         messages = channel.drain_operator_messages()
         remaining = max(arch.max_forgets_per_run - state.knowledge_forgets_attempted, 0)
 
+        # Silence is treated as a deletion that probably happened: the entry leaves
+        # `knowledge_seen` and joins the outstanding list above either way. The
+        # cautious reading is the safe one here — a deletion wrongly believed to
+        # have failed leaves the run thinking knowledge is still on file when it
+        # may not be, and that is the state this tool's warning exists to prevent.
+        unknown = "\n\n" + UNCONFIRMED_WRITE if answer is None else ""
         return with_operator_messages(
-            f"Deleted {label}. This cannot be undone from here.\n\n"
+            f"Deleted {label}. This cannot be undone from here.{unknown}\n\n"
             "If you deleted it in order to CORRECT it, that was `update_knowledge`, "
             "and what you have now is half a repair: call `record_knowledge` NOW "
             "with the corrected version, before anything else, or this run has "
@@ -829,11 +875,11 @@ def build_tools(
         # Not routed through `_run`, for the same reason the other knowledge tools
         # are not: nothing here touches the game.
         #
-        # EVERY check below happens before the frame goes out, and that is not
-        # defensiveness. A link is one-way — Orchestration's rejection becomes a
-        # row on the operator's timeline and never comes back down this socket — so
-        # a frame that should not have been sent is reported to the model as a
-        # success while nothing was written.
+        # EVERY check below happens before the frame goes out. Orchestration now
+        # answers a refusal (ARTEL-332), so this is no longer the only thing
+        # standing between a bad frame and a false success — but it still saves a
+        # round trip, and the run's clock is the reason to keep it. The two say the
+        # same thing now instead of one of them saying nothing.
         if state.knowledge_links_attempted >= arch.max_links_per_run:
             return (
                 f"You have used all {arch.max_links_per_run} knowledge links for this "
@@ -873,7 +919,7 @@ def build_tools(
         await channel.note(thought, LogCategory.THOUGHT, step)
         state.knowledge_links_attempted += 1
         try:
-            await channel.write_knowledge(
+            answer = await channel.write_knowledge(
                 MessageType.KNOWLEDGE_LINK,
                 KnowledgeLinkPayload(
                     from_knowledge_id=source,
@@ -886,11 +932,20 @@ def build_tools(
             raise
         except Exception as error:  # noqa: BLE001 - a dead socket must not end the run here
             return f"The link could not be sent — {error}. Nothing was linked."
+
+        if isinstance(answer, KnowledgeRequestFailed):
+            # This is the refusal the local checks above were standing in for. They
+            # stay: catching a bad relation here still saves a round trip, and the
+            # two now say the same thing rather than one of them saying nothing.
+            return f"The knowledge base refused the link — {answer.reason}. Nothing was linked."
+
         messages = channel.drain_operator_messages()
         remaining = arch.max_links_per_run - state.knowledge_links_attempted
+        opening = "Sent" if answer is None else "Linked"
+        closing = UNCONFIRMED_WRITE if answer is None else "Do not send it again."
         return with_operator_messages(
-            f"Sent: {source} {kind.lower()} {target}. Nothing answers a link, so do "
-            f"not send it again.\n\n{remaining} link(s) left in this run.",
+            f"{opening}: {source} {kind.lower()} {target}. {closing}\n\n"
+            f"{remaining} link(s) left in this run.",
             messages,
         )
 
@@ -904,8 +959,8 @@ def build_tools(
     ) -> str:
         # What the agent reads is UNLINK_KNOWLEDGE_DESCRIPTION, not this.
         #
-        # Validated locally for the same reason `link_knowledge` is: one-way frame,
-        # so a rejection would be invisible to the model.
+        # Validated locally for the same reason `link_knowledge` is: a round trip
+        # saved, on a run that has a clock.
         if state.knowledge_unlinks_attempted >= arch.max_unlinks_per_run:
             return (
                 f"You have used all {arch.max_unlinks_per_run} knowledge unlink(s) for "
@@ -933,7 +988,7 @@ def build_tools(
         await channel.note(thought, LogCategory.THOUGHT, step)
         state.knowledge_unlinks_attempted += 1
         try:
-            await channel.write_knowledge(
+            answer = await channel.write_knowledge(
                 MessageType.KNOWLEDGE_UNLINK,
                 KnowledgeUnlinkPayload(
                     from_knowledge_id=source, to_knowledge_id=target, relation=kind
@@ -943,11 +998,23 @@ def build_tools(
             raise
         except Exception as error:  # noqa: BLE001 - a dead socket must not end the run here
             return f"The unlink could not be sent — {error}. Nothing was removed."
+
+        if isinstance(answer, KnowledgeRequestFailed):
+            # "is not linked" arrives here, and it is worth telling the model: it
+            # means the relation it believed in was never there. The local checks
+            # above cannot see that — they only know the endpoints were shown.
+            return f"The knowledge base refused the unlink — {answer.reason}. Nothing was removed."
+
         messages = channel.drain_operator_messages()
         remaining = arch.max_unlinks_per_run - state.knowledge_unlinks_attempted
+        opening = (
+            f"Sent: removing {source} {kind.lower()} {target}."
+            if answer is None
+            else f"Removed: {source} {kind.lower()} {target}."
+        )
+        closing = UNCONFIRMED_WRITE if answer is None else "Do not send it again."
         return with_operator_messages(
-            f"Sent: removing {source} {kind.lower()} {target}. Nothing answers an "
-            f"unlink, so do not send it again.\n\n{remaining} unlink(s) left in this run.",
+            f"{opening} {closing}\n\n{remaining} unlink(s) left in this run.",
             messages,
         )
 
@@ -997,7 +1064,7 @@ def build_tools(
                 f"already have. {remaining} expansion(s) left.",
                 messages,
             )
-        if isinstance(answer, KnowledgeSearchFailed):
+        if isinstance(answer, KnowledgeRequestFailed):
             return with_operator_messages(
                 f"The expansion could not run — {answer.reason}. This says nothing "
                 f"about the game. {remaining} expansion(s) left.",

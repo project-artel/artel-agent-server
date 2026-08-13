@@ -22,6 +22,11 @@ class MessageType(StrEnum):
     KNOWLEDGE_SEARCH_RESULT = "KNOWLEDGE_SEARCH_RESULT"
     # The answer to a KNOWLEDGE_EXPAND, correlated the same way.
     KNOWLEDGE_EXPAND_RESULT = "KNOWLEDGE_EXPAND_RESULT"
+    # The answer to any one of the knowledge writes below (ARTEL-331). ONE type for
+    # all five, correlated the same way; which write it answers is in the payload's
+    # `type`. Orchestration chose a single type so that the next write inherits the
+    # contract instead of deciding again whether it has an answer at all.
+    KNOWLEDGE_WRITE_RESULT = "KNOWLEDGE_WRITE_RESULT"
     # Agent -> Orchestration
     LOG = "LOG"
     ACTION = "ACTION"
@@ -38,11 +43,17 @@ class MessageType(StrEnum):
     # soft delete. Spelled exactly as Orchestration's KNOWLEDGE_MUTATION_TYPES has
     # them, for the reason given on the search above.
     #
-    # Unlike the search, these are ONE-WAY. Orchestration's `routeKnowledgeMutation`
-    # answers a mutation with no frame at all — a success is silent, and a rejection
-    # becomes an ORCHE_INTERNAL row on the run's own timeline, published to the
-    # operator's stream rather than back down this socket. Nothing on this side may
-    # wait for a reply to one of these.
+    # Answered, since ARTEL-331: success comes back as KNOWLEDGE_WRITE_RESULT above,
+    # a rejection as a correlated ERROR — the same pair the search and the expansion
+    # already use. Before that these were one-way, which meant a rejection reached
+    # the model as a success; `record_knowledge` and friends validate locally partly
+    # for that reason, and they keep doing so because a round trip saved is still
+    # saved.
+    #
+    # An answer is not guaranteed. Orchestration performs the write and skips the
+    # reply when the run has no Agent session, and frames it drops before routing
+    # (unknown or finished run) are never answered at all. Silence therefore means
+    # "cannot confirm", NOT "did not happen" — see `QaRunChannel.write_knowledge`.
     #
     # KNOWLEDGE_UPDATE was deliberately absent until ARTEL-257. ARTEL-189 had the
     # agent correct an entry by deleting it and recording the corrected version, to
@@ -53,12 +64,11 @@ class MessageType(StrEnum):
     KNOWLEDGE_CREATE = "KNOWLEDGE_CREATE"
     KNOWLEDGE_UPDATE = "KNOWLEDGE_UPDATE"
     KNOWLEDGE_DELETE = "KNOWLEDGE_DELETE"
-    # Asserts or withdraws a relation between two entries (ARTEL-274). ONE-WAY like
-    # the writes above, and that is what makes local validation load-bearing rather
-    # than defensive: Orchestration's rejection becomes a row on the operator's
-    # timeline and never reaches the tool, so a frame this side should not have sent
-    # is reported to the model as a success. `link_knowledge` and `unlink_knowledge`
-    # check the relation, the note and the endpoints themselves for that reason.
+    # Asserts or withdraws a relation between two entries (ARTEL-274). Answered
+    # like the writes above, and by the same pair of frames. `link_knowledge` and
+    # `unlink_knowledge` still check the relation, the note and the endpoints
+    # themselves — that used to be the only thing standing between a bad frame and
+    # a false success, and it is now a round trip saved on a run that has a clock.
     KNOWLEDGE_LINK = "KNOWLEDGE_LINK"
     KNOWLEDGE_UNLINK = "KNOWLEDGE_UNLINK"
     # One defect the run found in the game, filed against this run.
@@ -326,6 +336,30 @@ class KnowledgeExpandResultPayload(BaseModel):
     summary: str = ""
     neighbors: list[KnowledgeNeighbour] = Field(default_factory=list)
     truncated: bool = False
+
+
+class KnowledgeWriteResultPayload(BaseModel):
+    """The answer to one knowledge write (ARTEL-331).
+
+    `type` echoes the write it answers, so a reader of the log can tell what
+    happened without matching correlation ids by hand. Only one of the two id
+    fields is filled: entry writes carry `knowledge_id`, relation writes carry
+    `edge_id`.
+
+    The id is the row that now holds the fact **in this run's knowledge scope**.
+    On a scoped run that corrected or deleted a baseline entry it is the shadow or
+    tombstone, not the baseline — the baseline id is one this run could not name
+    again.
+
+    Both default to empty rather than being required: an Orchestration that adds a
+    field must not make this side drop the frame that releases a waiting tool.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str = ""
+    knowledge_id: str = ""
+    edge_id: str = ""
 
 
 class KnowledgeSearchResultPayload(BaseModel):
