@@ -26,7 +26,7 @@ from app.agents.scenario import (
     ScenarioGenerationError,
     ScenarioPlan,
     ScenarioStep,
-    TestCaseCatalogEntry,
+    TestCaseListItem,
 )
 
 __all__ = [
@@ -52,5 +52,5 @@ __all__ = [
     "ScenarioGenerationError",
     "ScenarioPlan",
     "ScenarioStep",
-    "TestCaseCatalogEntry",
+    "TestCaseListItem",
 ]

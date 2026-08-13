@@ -13,8 +13,8 @@ from app.agents import (
     ScenarioGenerationError,
     ScenarioPlan,
 )
-from app.agents.scenario.cases import NO_CATALOG_NOTICE, render_catalog
-from app.agents.scenario.schemas import AuthoredStep, TestCaseCatalogEntry
+from app.agents.scenario.cases import NO_TEST_CASE_LIST_NOTICE, render_test_case_list
+from app.agents.scenario.schemas import AuthoredStep, TestCaseListItem
 from app.agents.scenario.prompt import (
     LANGUAGE_DIRECTIVES,
     build_first_message,
@@ -270,17 +270,17 @@ def test_select_structured_method_by_model() -> None:
     assert select_structured_method(LLMModel.gemma_4_free) == "json_mode"
 
 
-# ── The case catalog (ARTEL-319) ─────────────────────────────────────────────
+# ── The test case list (ARTEL-319) ─────────────────────────────────────────────
 #
-# Three promises, and none of them fails loudly when broken. A catalogued turn
+# Three promises, and none of them fails loudly when broken. A turn with the list
 # that still gets the search tool just spends turns re-finding what it holds; a
 # render that reorders costs the prompt cache and nothing else; a clipped body
 # produces a plausible wrong step. So each one is pinned here.
 
 
-def _catalog() -> list[TestCaseCatalogEntry]:
+def _catalog() -> list[TestCaseListItem]:
     return [
-        TestCaseCatalogEntry(
+        TestCaseListItem(
             id=11,
             scene="로그인",
             step="게스트 계정으로 로그인에 성공한다",
@@ -288,7 +288,7 @@ def _catalog() -> list[TestCaseCatalogEntry]:
             expected_value="임시 계정이 발급되고 로비로 진입한다",
             verification_status="VERIFIED",
         ),
-        TestCaseCatalogEntry(
+        TestCaseListItem(
             id=57,
             scene="스테이지",
             step="힌트를 쓰면 글자 하나가 공개된다",
@@ -311,13 +311,13 @@ def test_catalogued_turn_gets_no_tools_and_the_cases_in_its_prompt() -> None:
         )
 
     agent = ScenarioAgent(agent_factory=factory)
-    asyncio.run(agent.run(_request(case_catalog=_catalog()), _CTX, _channel()))
+    asyncio.run(agent.run(_request(test_case_list=_catalog()), _CTX, _channel()))
 
     assert seen["tools"] == []
     prompt = seen["system_prompt"]
     assert "id 11" in prompt and "id 57" in prompt
     assert "게스트 계정으로 로그인에 성공한다" in prompt
-    assert NO_CATALOG_NOTICE not in prompt
+    assert NO_TEST_CASE_LIST_NOTICE not in prompt
 
 
 def test_empty_catalog_keeps_the_search_path() -> None:
@@ -332,28 +332,28 @@ def test_empty_catalog_keeps_the_search_path() -> None:
         )
 
     agent = ScenarioAgent(agent_factory=factory)
-    asyncio.run(agent.run(_request(case_catalog=[]), _CTX, _channel()))
+    asyncio.run(agent.run(_request(test_case_list=[]), _CTX, _channel()))
 
     assert seen["tools"] == ["search_test_cases"]
     # Not a blank section: an empty block reads as "this project has no cases",
     # and the agent would stop rather than search.
-    assert NO_CATALOG_NOTICE in seen["system_prompt"]
+    assert NO_TEST_CASE_LIST_NOTICE in seen["system_prompt"]
 
 
-def test_render_catalog_preserves_arrival_order() -> None:
+def test_render_test_case_list_preserves_arrival_order() -> None:
     """Orchestration sorts by id; re-sorting here would move the cached prefix."""
     reversed_entries = list(reversed(_catalog()))
-    rendered = render_catalog(reversed_entries)
+    rendered = render_test_case_list(reversed_entries)
 
     assert rendered.index("id 57") < rendered.index("id 11")
 
 
-def test_render_catalog_prints_bodies_whole() -> None:
+def test_render_test_case_list_prints_bodies_whole() -> None:
     """Unlike a search hit, these are the material steps are written from."""
     long_expected = "가" * 900
-    rendered = render_catalog(
+    rendered = render_test_case_list(
         [
-            TestCaseCatalogEntry(
+            TestCaseListItem(
                 id=1,
                 scene="상점",
                 step="구매",
@@ -371,10 +371,10 @@ def test_render_catalog_prints_bodies_whole() -> None:
 
 def test_catalogued_system_prompt_is_byte_identical_across_turns() -> None:
     """The prompt cache only pays off while this block does not move."""
-    request = _request(case_catalog=_catalog())
+    request = _request(test_case_list=_catalog())
     first, _ = build_system_prompt(request)
     second, _ = build_system_prompt(request)
 
     assert first == second
-    # And a placeholder left unsubstituted would silently ship "{case_catalog}".
+    # And a placeholder left unsubstituted would silently ship "{test_case_list}".
     assert "{" not in first

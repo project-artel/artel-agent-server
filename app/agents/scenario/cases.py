@@ -1,4 +1,4 @@
-"""The run's existing TestCases: the catalog the agent holds, and the search behind it.
+"""The run's existing TestCases: the test case list the agent holds, and the search behind it.
 
 The run-scoped authoring agent decomposes a run goal into scenarios, and each
 scenario is built from EXISTING TestCases — which live only in the orchestration
@@ -17,9 +17,9 @@ anything had been missed; the per-turn budget below surfaced 30-40 cases out of 
 project that may hold a thousand. Coverage was bounded by recall. Reading the
 catalog removes that bound outright.
 
-**The search stays.** It is the path when the catalog is empty — an orchestration
+**The search stays.** It is the path when the test case list is empty — an orchestration
 that does not send one yet, or a non-member session — and that fallback is also
-the rollback, so nothing here is dead code even while a catalogued session never
+the rollback, so nothing here is dead code even while a session with the list never
 calls it. `build_tools` decides, per turn, which of the two the agent gets.
 
 These constants and the rendering live here rather than in
@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from app.agents.scenario.schemas import TestCaseCatalogEntry
+from app.agents.scenario.schemas import TestCaseListItem
 
 if TYPE_CHECKING:
     # Type-only: importing app.sessions at module load would form a cycle
@@ -91,16 +91,16 @@ write the action steps and leave their `case_id` null, and say in `message` what
 is still missing."""
 
 
-# What the agent reads in place of the catalog when none arrived. Written as
+# What the agent reads in place of the test case list when none arrived. Written as
 # prose the model can act on rather than left blank: an empty section reads as
 # "this project has no cases", which is the opposite of what an absent catalog
 # means, and the agent would stop instead of searching.
-NO_CATALOG_NOTICE = """The project's case list was not provided this session, so the cases are NOT in
+NO_TEST_CASE_LIST_NOTICE = """The project's case list was not provided this session, so the cases are NOT in
 your context. Use `search_test_cases` to find the ones each scenario needs. An
 empty search result means no case matches — not that something went wrong."""
 
 
-def render_catalog(entries: list[TestCaseCatalogEntry]) -> str:
+def render_test_case_list(entries: list[TestCaseListItem]) -> str:
     """Every case in the project, as the block the system prompt carries.
 
     Order is preserved exactly as it arrived. Orchestration sorts by id and this
@@ -114,7 +114,7 @@ def render_catalog(entries: list[TestCaseCatalogEntry]) -> str:
     detail whose absence produces a plausible wrong step.
     """
     if not entries:
-        return NO_CATALOG_NOTICE
+        return NO_TEST_CASE_LIST_NOTICE
 
     lines = [
         f"All {len(entries)} test cases in this project. "

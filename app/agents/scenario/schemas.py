@@ -45,7 +45,7 @@ class ScenarioDraft(BaseModel):
         return steps
 
 
-class TestCaseCatalogEntry(BaseModel):
+class TestCaseListItem(BaseModel):
     """One TestCase as the session receives it, in the project's whole catalog.
 
     Named after orchestration's DTO on the other end of the wire so the contract
@@ -82,7 +82,7 @@ class ScenarioAgentRequest(BaseModel):
     # `search_test_cases`, which is why that tool and the whole embedding path
     # behind it stay in place. That fallback is also the rollback: orchestration
     # can stop sending the field and this side needs no redeploy.
-    case_catalog: list[TestCaseCatalogEntry] = Field(default_factory=list)
+    test_case_list: list[TestCaseListItem] = Field(default_factory=list)
     # Recent conversation, text-only, already windowed by the session layer.
     history: list[BaseMessage] = Field(default_factory=list)
     # Authoritative current draft (may contain the user's manual edits). Legacy;
