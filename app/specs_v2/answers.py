@@ -32,6 +32,8 @@ from . import observable
 # answer depend on them, and the field a method writes is only the same answer
 # when the call is the same call.
 NILADIC = re.compile(r"^(?P<head>.*?)(?:^|\.)(?P<method>[A-Za-z_]\w*)\(\s*\)$")
+# 시그니처가 반환 타입을 앞에 적어 둔다. `get_` 이 붙으면 프로퍼티, 없으면 메서드다.
+BOOLEAN_CALL = re.compile(r"^System\.Boolean .+::(?:get_)?(?P<name>[A-Za-z_]\w*)\(")
 LITERAL_ARG = re.compile(r'^(?:true|false|-?\d+(?:\.\d+)?|"[^"]*")$', re.IGNORECASE)
 
 # How the SDK writes a value it could not read in place. Each is a parameter of
@@ -53,7 +55,8 @@ def method_of(signature: Any) -> str:
 class Answers:
     """One lookup, gathered once per report."""
 
-    # (caller, callee) → the literal that call site passes. Keyed by the pair
+    # (caller, callee) → what that call site passes, when it passes one thing a
+    # reader can be asked for: a literal, or a field. Keyed by the pair
     # because a callee is called both ways: `SetAnyKeyPromptVisible(true)` when
     # the typing finishes and `(false)` when the next line starts. There is no
     # answer for the method and there is one for each route to it.
@@ -72,6 +75,10 @@ class Answers:
     # show. Somewhere else in the same evidence the field is written `null`, and
     # that is what says it holds a reference.
     references: set[str] = field(default_factory=set)
+    # 참/거짓을 담는 이름. IL 은 `if (flag)` 를 정수 비교로 낮추므로 SDK 에는 `!= 0`
+    # 으로 도착한다. 참조의 null 검사도 같은 명령이라 **둘이 한 모양으로 온다** —
+    # 무엇이었는지는 시그니처의 반환 타입이 말한다.
+    booleans: set[str] = field(default_factory=set)
 
     @classmethod
     def of(cls, paths: Any) -> "Answers":
@@ -79,15 +86,30 @@ class Answers:
         wrote: dict[str, list[str]] = {}
         left: dict[str, list[tuple[str, str]]] = {}
         references: set[str] = set()
+        booleans: set[str] = set()
 
         for path in paths:
             here = method_of(path.source_signature)
 
             for call in path.calls:
+                found = BOOLEAN_CALL.match(str(call.get("target") or ""))
+                if found:
+                    booleans.add(found.group("name"))
                 argument = str(call.get("args") or "").strip()
                 callee = method_of(call.get("target"))
-                if here and callee and LITERAL_ARG.match(argument):
+                if not (here and callee) or "," in argument:
+                    # More than one argument and which parameter a premise names
+                    # is not something the evidence says. It gives the arguments
+                    # as one string and the parameter by the name the method
+                    # gave it, and nothing joins the two.
+                    continue
+                if LITERAL_ARG.match(argument):
                     passed.setdefault((here, callee), set()).add(argument.lower())
+                elif observable.FIELD_CHAIN.match(argument):
+                    # A field reaches the callee as a parameter, and inside the
+                    # callee the premise names the parameter — unreadable, while
+                    # the field it came from is not.
+                    passed.setdefault((here, callee), set()).add(argument)
 
             equalities = [pair for pair in map(_equality, path.effects) if pair]
             for effect in path.effects:
@@ -99,6 +121,8 @@ class Answers:
                         wrote[here].append(target)
                 if str(effect.get("detail") or "").strip() == "null":
                     references.add(target)
+                if str(effect.get("detail") or "").strip().lower() in {"true", "false"}:
+                    booleans.add(target.rsplit(".", 1)[-1])
 
             if equalities:
                 for leaf in observable._leaves(path.condition):
@@ -119,22 +143,83 @@ class Answers:
             wrote={name: found[0] for name, found in wrote.items() if len(found) == 1},
             left_behind=left,
             references=references,
+            booleans=booleans,
         )
 
-    def for_parameter(self, path: Any) -> str | None:
-        """The literal the route to this path passed, for a value it could not read.
+    def parameter_value(self, path: Any) -> str | None:
+        """이 경로로 왔을 때 매개변수가 받은 리터럴.
 
-        The caller is the hop before this one on the path the SDK drew. Nothing
-        is guessed about which route ran — the route is the record.
+        효과가 값을 `(not a literal)` 이라고 적어 두는 자리에 쓴다. 메서드 안에서는
+        리터럴이 아닌 것이 맞고, 그것을 그렇게 만든 호출부는 바로 앞 홉이다.
         """
         if len(path.call_path) < 2:
             return None
-        return self.passed.get(
+        answer = self.passed.get(
             (method_of(path.call_path[-2]), method_of(path.source_signature))
         )
+        return answer if answer and LITERAL_ARG.match(answer) else None
+
+    def _binding(
+        self, condition: dict[str, Any] | None, route: tuple[str, ...]
+    ) -> tuple[str, str] | None:
+        """(parameter name, what the call site passed), when both are unambiguous."""
+        if len(route) < 2:
+            return None
+        answer = self.passed.get((method_of(route[-2]), method_of(route[-1])))
+        if not answer or LITERAL_ARG.match(answer):
+            return None
+        name = self.sole_parameter(condition)
+        return (name, answer) if name else None
+
+    def sole_parameter(self, condition: dict[str, Any] | None) -> str | None:
+        """The one unreadable bare name a method's premises use, if there is one.
+
+        With a single argument and a single such name the binding is not a
+        guess: there is nothing else the argument could have become.
+        """
+        names = {
+            _bare_of(leaf.get(side))
+            for leaf in observable._leaves(condition)
+            for side in ("left", "right")
+            if side in (leaf.get("localFrames") or {})
+        }
+        return names.pop() if len(names) == 1 else None
+
+    def zero_as_written(self, node: dict[str, Any]) -> dict[str, Any]:
+        """IL 이 `0` 으로 낮춘 것을 원래 쓰여 있던 대로 되읽는다.
+
+        `if (flag)` 도 `if (handle != null)` 도 같은 명령이 되어, SDK 에는 둘 다
+        `!= 0` 으로 도착한다. 근거가 무엇이었는지는 따로 말해 준다 — 참조는 어딘가에서
+        `null` 을 대입받고, 참/거짓은 시그니처가 `System.Boolean` 을 앞에 적는다.
+
+        `0` 으로 두면 판독기가 내보내는 `null` 이나 `true`/`false` 와 글자가 맞지 않아,
+        사람이 무엇과 비교해야 하는지 알 수 없다. 조건에서 온 항이든 대입에서 세운
+        등식이든 같은 낮춤을 거쳤으므로 한 자리에서 읽는다.
+        """
+        if str(node.get("right") or "").strip() != "0":
+            return node
+        left = str(node.get("left") or "").strip()
+        # 같은 필드가 주인을 달리 적어 온다 — 자기 타입으로 한 번, 그것을 들고 있는
+        # 쪽에서 한 번. 한 조건 안에 `A.handle == null` 과 `B.thing.handle != 0` 이
+        # 나란히 서면 같은 것을 두 값으로 재는 문장이 된다. 마지막 마디로 맞춘다.
+        if left in self.references or _tail(left) in {
+            _tail(name) for name in self.references
+        }:
+            return {**node, "right": "null", "nullComparison": True}
+        if _tail(left) in self.booleans:
+            return {
+                **node,
+                "right": "true" if node.get("operator") == "!=" else "false",
+                "operator": "==",
+                "booleanComparison": True,
+            }
+        return node
 
     def resolve(
-        self, condition: dict[str, Any] | None, asserted: set[str]
+        self,
+        condition: dict[str, Any] | None,
+        asserted: set[str],
+        route: tuple[str, ...] = (),
     ) -> tuple[dict[str, Any] | None, list[str]]:
         """Say each premise through whatever the evidence can answer it with.
 
@@ -152,6 +237,11 @@ class Answers:
         subjects = {observable.subject(item) for item in asserted}
         notes: list[str] = []
 
+        # A parameter is unreadable inside the method and the call site says what
+        # became it. Done first and by name, because after `qualify` the premise
+        # spells the parameter with its frame in front and no longer looks bare.
+        bound = self._binding(condition, route)
+
         def walk(node: dict[str, Any]) -> dict[str, Any]:
             if node.get("kind") in {"every", "either"}:
                 return {**node, "parts": [walk(part) for part in node.get("parts") or ()]}
@@ -159,13 +249,23 @@ class Answers:
                 return node
 
             changed = dict(node)
-            # `!= 0` on a reference is `!= null`. Left as zero it reads as a
-            # number to compare against, and the reader never shows one.
-            if str(changed.get("right") or "").strip() == "0" and str(
-                changed.get("left") or ""
-            ).strip() in self.references:
-                changed["right"] = "null"
-                changed["nullComparison"] = True
+            if bound:
+                for side in ("left", "right"):
+                    frames = changed.get("localFrames") or {}
+                    if side in frames and str(changed[side]).endswith(f".{bound[0]}"):
+                        changed[side] = bound[1]
+                        changed.setdefault("boundArguments", {})[side] = bound[0]
+                        # The marks that said "this is a parameter" are spent
+                        # once the parameter has been replaced by what became it.
+                        # Left in place they keep the premise unreadable after it
+                        # has stopped being one.
+                        changed = {
+                            key: value
+                            for key, value in changed.items()
+                            if key not in {"localFrames", "context"}
+                        }
+                        notes.append(SUBSTITUTED)
+            changed = self.zero_as_written(changed)
             for side in ("left", "right"):
                 text = str(changed.get(side) or "").strip()
                 found = NILADIC.match(text)
@@ -187,7 +287,9 @@ class Answers:
                 if observable.subject(target) in subjects:
                     continue
                 notes.append(RESTATED)
-                return {
+                # 효과의 값도 같은 낮춤을 거쳐 온다. `SetLocked(false)` 는 `0` 으로
+                # 적히므로, 대입에서 세운 등식도 같은 자리에서 읽어야 한다.
+                return self.zero_as_written({
                     "kind": "test",
                     "left": target,
                     "operator": "==",
@@ -198,7 +300,7 @@ class Answers:
                     # The code says a counter reached a length; this says what
                     # that leaves behind.
                     "observableProxyFor": text,
-                }
+                })
             return changed
 
         if not condition:
@@ -237,6 +339,15 @@ def negates_own_guard(condition: dict[str, Any] | None, effects: Any) -> bool:
         if operator == "==" and after and after != right:
             return True
     return False
+
+
+def _tail(name: Any) -> str:
+    """이름의 마지막 마디. `A.b.Flag` 도 `A.Flag()` 도 `Flag` 로 읽는다."""
+    return str(name or "").strip().rstrip(")").rstrip("(").rsplit(".", 1)[-1]
+
+
+def _bare_of(name: Any) -> str:
+    return str(name or "").rsplit(".", 1)[-1]
 
 
 def _equality(effect: dict[str, Any]) -> tuple[str, str] | None:

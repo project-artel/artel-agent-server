@@ -261,10 +261,25 @@ def test_what_no_branch_could_restate_is_named() -> None:
 
 
 def test_a_row_resting_on_an_unanswerable_premise_is_not_ready() -> None:
+    """읽을 수 없는 전제가 스택 값이 아니면 남는다.
+
+    스택에 사는 값은 뺀다 — 사람이 어찌할 수 없는 한 줄이 나머지까지 묻기 때문이다.
+    부르면 안 되는 호출은 다르다. 지울 근거가 없고, 읽으려면 게임을 건드려야 한다.
+    그런 전제는 그대로 두고 행이 그 위에 서 있다는 사실을 표시한다.
+    """
     report = _report()
-    # Nothing in this branch assigns a readable field from another, so the
-    # counter has no observable form and the premise stays unanswerable.
-    report["types"]["Demo.ChatWindow"][0]["effects"] = [
+    record = report["types"]["Demo.ChatWindow"][0]
+    record["condition"] = {
+        "kind": "test",
+        "left": "ChatWindow.model.Peek()",
+        "operator": "!=",
+        "right": "0",
+        "context": "this",
+        "offset": 12,
+    }
+    # 이 가지에서 읽을 수 있는 필드를 다른 필드로 옮겨 적는 곳이 없으므로, 호출은
+    # 관찰할 수 있는 형태를 얻지 못한다.
+    record["effects"] = [
         {
             "kind": "ui-value",
             "category": "observable",
@@ -281,9 +296,8 @@ def test_a_row_resting_on_an_unanswerable_premise_is_not_ready() -> None:
         for contract in result.contracts
         if observable.UNCHECKABLE in contract.issues
     ]
-    assert resting, "the counter guard should still be unanswerable"
+    assert resting, "the call guard should still be unanswerable"
     for contract in resting:
-        assert observable.UNCHECKABLE in contract.issues
         assert contract.quality != "ready"
 
 
@@ -405,3 +419,33 @@ def test_some_of_it_answerable_is_not_the_same_as_none_of_it() -> None:
     )
     assert observable.unreadable_atoms(none)
     assert observable.readable_atoms(none) == []
+
+
+def test_dropping_a_stack_local_does_not_lower_the_grade() -> None:
+    """뺀 항은 결함이 아니라 **덜어낸 것**이다.
+
+    루프 살림은 테스터가 맞출 수 있는 상태가 아니라 루프가 자기 진행을 재는 값이다.
+    빼고 나면 남은 전제가 곧 사전 조건 전부이고, 행은 나빠진 게 아니라 좋아졌다.
+    표시를 결함으로 세면 온전한 행이 통째로 검토 대기로 내려간다.
+    """
+    from app.specs_v2.discovery import DERIVATION_NOTES, _quality
+    from app.specs_v2.model import Assertion, SourceRef, Trigger
+
+    assert observable.STACK_LOCAL in DERIVATION_NOTES
+
+    trigger = Trigger("input", "S", "any 입력", "any", "Update", "exact")
+    seen = Assertion(
+        "ui-value",
+        "Canvas/Chat.text",
+        "표시된다",
+        "안녕",
+        "observable",
+        "exact",
+        "screen",
+        SourceRef("path:1", "A|T|Run", "A|T|Run", 0),
+    )
+
+    assert _quality(trigger, [seen], [observable.STACK_LOCAL]) == "ready"
+    # 가지를 가르던 항을 뺀 것은 다르다. 행이 코드보다 넓은 말을 한다.
+    assert _quality(trigger, [seen], [observable.BRANCH_LOCAL]) == "review"
+    assert _quality(trigger, [seen], [observable.UNCHECKABLE]) == "review"

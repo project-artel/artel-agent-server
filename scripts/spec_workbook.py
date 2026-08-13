@@ -8,7 +8,7 @@
 API 를 띄우지 않고 본 것이 API 가 낼 것과 다를 수 없다.
 
 시트 순서는 읽는 사람이 무엇부터 보는가로 정한다: 실행할 수 있는 것, 검토할 것,
-상태가 이어지는 흐름, 그다음 화면별로 훑을 수 있게 한 장씩.
+그다음 화면별로 훑을 수 있게 한 장씩.
 """
 
 from __future__ import annotations
@@ -92,7 +92,6 @@ def sheet(book: Workbook, title: str, rows: list[dict], columns: list[str] | Non
 def workbook(payload: dict) -> Workbook:
     ready = payload["ready_specs"]
     review = payload["review_specs"]
-    flows = payload["connected_flows"]
     summary_rows = payload["summary"]
 
     book = Workbook()
@@ -111,7 +110,6 @@ def workbook(payload: dict) -> Workbook:
         ("Candidate", summary_rows["candidate_specs"]),
         ("Review", summary_rows["review_specs"]),
         ("Unsupported", summary_rows["unsupported_specs"]),
-        ("Connected flow rows", summary_rows["connected_flows"]),
         (None, None),
         ("이 문서는 다른 SDK 산출물을 참조하지 않습니다.", None),
     ]:
@@ -123,7 +121,6 @@ def workbook(payload: dict) -> Workbook:
 
     sheet(book, "Ready Specs", ready)
     sheet(book, "Review Queue", review)
-    sheet(book, "Connected Flows", flows)
     for scene in dict.fromkeys(row["scene"] for row in ready):
         sheet(book, scene, [row for row in ready if row["scene"] == scene], NARROW)
     return book

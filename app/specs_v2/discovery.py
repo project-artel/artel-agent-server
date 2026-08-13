@@ -54,7 +54,10 @@ SENTINELS = {"(not a simple receiver)", "(not a simple target)", "(not a literal
 # defect: both mean the row became answerable, not that something is missing.
 # Left in `issues` and out of the grade, because those answer different
 # questions — what happened to this row, and whether it can be run.
-DERIVATION_NOTES = set(answers.NOTES)
+# 행이 나빠서가 아니라 **좋아져서** 붙는 표시. 등급을 매길 때 결함으로 세지 않는다.
+# 지역 변수를 뺀 것도 여기 속한다: 뺀 항은 테스터가 맞출 수 있는 상태가 아니라
+# 스택에 사는 값이었고, 빼고 나면 남은 전제가 곧 세울 수 있는 것 전부다.
+DERIVATION_NOTES = set(answers.NOTES) | {observable.STACK_LOCAL}
 
 CANDIDATE_ISSUES = {
     observable.PARTLY,
@@ -190,37 +193,79 @@ def _settled_by_pins(condition: dict[str, Any], pins: list[Pin]) -> bool | None:
 
 
 def _gesture_inputs(condition: dict[str, Any]) -> list[str]:
+    """The inputs the condition tree actually gates on, kept apart from `inputs[]`.
+
+    `inputs[]` lists every input the analyser saw inside the method. The tree
+    says which of them a branch waits for, and the two differ whenever one is
+    there to be excluded: `anyKeyDown && !GetMouseButtonDown(2)` lists the mouse
+    button and gates on the key alone.
+
+    Reading the list instead of the tree is how a step came to say `any 또는 2`,
+    asking a tester to press the button the code refuses.
+    """
     values: list[str] = []
     for leaf in condition_leaves(condition):
         if leaf.get("kind") != "gesture":
             continue
         raw = leaf.get("input") or ""
-        found = re.search(r"(?:key|mouse):([^ ]+)", raw)
+        # `key:Space:down` and `key:any (down)` are the same shape said two ways.
+        # Only the control belongs here; the phase is added back once, so what
+        # comes out matches what `inputs[]` calls the same button.
+        found = re.search(r"(?:key|mouse):([^\s:]+)", raw)
         value = found.group(1) if found else raw
         if value and value not in values:
             values.append(value)
     return values
 
 
+def _alternatives(condition: dict[str, Any]) -> bool:
+    """Whether the tree offers the gated inputs as a choice.
+
+    `either(every(Right, …), every(Up, …))` is a choice and reads as `또는`.
+    `every(…, key:any)` is not, whatever else the method mentions. The word is
+    the tree's to give; inventing it puts a disjunction in the sheet the code
+    never wrote.
+    """
+    if condition.get("kind") == "either":
+        return True
+    return any(
+        _alternatives(part)
+        for part in condition.get("parts") or ()
+        if isinstance(part, dict)
+    )
+
+
 def _input_label(path: PathFact) -> tuple[str, str, str | None] | None:
-    inputs = []
-    kinds = []
-    for item in path.inputs:
-        control = item.get("control")
-        if not control:
-            continue
-        kind = item.get("kind")
-        if kind and kind not in kinds:
-            kinds.append(kind)
-        prefix = "not " if item.get("absent") else ""
-        value = f"{prefix}{control}:{item.get('phase') or 'unknown'}"
-        if value not in inputs:
-            inputs.append(value)
-    if not inputs:
-        inputs = _gesture_inputs(path.condition)
-    if not inputs:
+    """What a tester presses — and nothing the code presses back against.
+
+    Taken from the condition tree rather than from `inputs[]`. The list is read
+    only for the kind, which the tree does not carry, and only where every gated
+    input agrees on one.
+    """
+    gated = _gesture_inputs(path.condition)
+    if not gated:
+        # The tree names no input at all. Then it is not disagreeing with the
+        # list, it is silent, and the list is all there is. Only where the tree
+        # does speak is it the one to believe — that is where an input appears
+        # in the list to be excluded rather than waited for.
+        gated = [
+            str(item.get("control"))
+            for item in path.inputs
+            if item.get("control") and not item.get("absent")
+        ]
+        gated = list(dict.fromkeys(gated))
+    if not gated:
         return None
-    return "/".join(inputs), "input-expression", kinds[0] if len(kinds) == 1 else None
+    kinds = {
+        item.get("kind")
+        for item in path.inputs
+        if item.get("control") in gated and item.get("kind")
+    }
+    separator = "/" if _alternatives(path.condition) else " 그리고 "
+    joined = separator.join(
+        value if ":" in value else f"{value}:down" for value in gated
+    )
+    return joined, "input-expression", kinds.pop() if len(kinds) == 1 else None
 
 
 def _candidate_scenes(graph: EvidenceGraph, path: PathFact) -> list[str | None]:
@@ -336,6 +381,12 @@ def _resolve_value(
     # The API's own second argument is not part of the value. Left in, a masked
     # parameter reads as the value `_, true` and goes out as something to check.
     detail = observable.value_of(effect.get("detail")) if effect.get("detail") is not None else None
+    # 값이 매개변수라 못 읽힌 자리는 호출부가 답한다.
+    # `SetPromptVisible(true)` 를 부르는 경로에서는 그 효과의 값이 `true` 다.
+    if detail in answers.PARAMETER and graph.answers is not None:
+        passed = graph.answers.parameter_value(path)
+        if passed is not None:
+            detail = passed
     if kind == "scene":
         return effect.get("target"), "exact", []
     if kind in {"quit", "destroy"}:
@@ -358,11 +409,42 @@ def _resolve_value(
         return detail, "exact", []
     resolved, resolution, proof = _resolve_code_target(graph, path, str(detail), scene)
     if resolution in {"exact", "derived"}:
-        return resolved, resolution, proof
+        return _whole_value(str(detail), resolved, resolution, proof)
     if LITERAL.match(str(detail)):
         return detail, "exact", []
     # Keep the SDK expression verbatim, but do not pretend it is a concrete oracle.
     return detail, "ambiguous" if any(ch in str(detail) for ch in "().,") else "derived", []
+
+
+def _whole_value(
+    raw: str, resolved: Any, resolution: str, proof: list[ProofEdge]
+) -> tuple[Any, str, list[ProofEdge]]:
+    """해석된 앞부분에 남은 뒷부분을 되붙인다.
+
+    `target_parts` 는 `Owner.field` 까지만 보고 나머지를 버린다. **대상**을 찾을
+    때는 그것이 옳다 — 어느 오브젝트인지만 알면 되고, 덜 주장하는 쪽이 안전하다.
+
+    **값**은 다르다. `streamingText.Substring(0, i)` 에서 뒤를 버리면 남는 것은
+    `streamingText` 이고, 그러면 부분 문자열이 전문으로 둔갑한다. 한 글자씩 찍히는
+    중간 상태를 "본문이 다 나왔다" 로 읽게 되어, 스트리밍 중에 확인하면 반드시
+    실패하는 기대가 된다. 덜 주장한 것이 아니라 다른 것을 주장한 것이다.
+
+    되붙이되, 등급은 남은 조각이 무엇이냐로 정한다. `.transform.position` 처럼 필드가
+    더 이어지는 것은 판독기가 그대로 읽어 주므로 여전히 확인할 수 있는 값이다. 호출이나
+    색인이 붙으면 그렇지 않다 — 사람이 무엇과 비교해야 하는지 알아야 한다.
+    """
+    parsed = target_parts(raw)
+    if not parsed or resolved is None:
+        return resolved, resolution, proof
+    prefix = f"{parsed[0]}.{parsed[1]}"
+    if not raw.startswith(prefix) or raw == prefix:
+        return resolved, resolution, proof
+    rest = raw[len(prefix) :]
+    return (
+        f"{resolved}{rest}",
+        "ambiguous" if any(ch in rest for ch in "([") else resolution,
+        proof,
+    )
 
 
 def _operation(kind: str, value: Any) -> str:
@@ -503,6 +585,8 @@ def _active_scene_verdict(condition: dict[str, Any], scene: str | None) -> bool 
     return False if values and all(value is False for value in values) else None
 
 
+FLIP = {"==": "!=", "!=": "==", "<": ">=", ">=": "<", ">": "<=", "<=": ">"}
+
 # 가드와 효과가 동시에 참인 순간이 없는 레코드. 상태가 아니라 전이이므로, 상태로
 # 읽는 트리거(진입해 관찰)와 짝지으면 어느 순간에도 참이 아닌 행이 된다.
 MISTIMED = "trigger_reads_a_transition_as_a_state"
@@ -540,6 +624,7 @@ def _contradictory(condition: dict[str, Any]) -> bool:
             return True
         seen.add((left, operator, right))
     return False
+
 
 def _quality(trigger: Trigger, assertions: list[Assertion], issues: list[str]) -> Quality:
     issues = [issue for issue in issues if issue not in DERIVATION_NOTES]
@@ -1392,15 +1477,28 @@ def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]
     # No early return when the table is empty. Restating a premise and judging
     # whether one is answerable are separate questions, and a report where
     # nothing could be restated is exactly where the judging matters.
-    known = Answers.of([path for path in graph.paths if not path.folded])
+    known = graph.answers or Answers.of(
+        [path for path in graph.paths if not path.folded]
+    )
+    # 가지를 가르는 항은 리포트 전체를 보고 정한다. 한 계약만 보면 `i < 총개수` 가
+    # 살림인지 갈림길인지 알 수 없다 — 반대편 가지는 다른 계약에 있다.
+    selectors = observable.branch_selectors(path.condition for path in graph.paths)
+    # 되돌아가는 구간의 가드가 루프가 계속되는 조건이고, 그것을 뒤집은 자리가 다 돈
+    # 조건이다. 다 돈 자리는 값을 읽을 수 없어도 조작을 반복하면 반드시 닿는다.
+    exits = observable.loop_exits(
+        path.condition for path in graph.paths if path.loops_back_to is not None
+    )
     for contract in contracts:
         asserted = {item.target for item in contract.assertions if item.target}
-        condition, notes = known.resolve(contract.condition, asserted)
-        if notes:
-            contract.condition = condition
-            for note in notes:
-                if note not in contract.issues:
-                    contract.issues.append(note)
+        # 언제나 다시 담는다. `notes` 는 **유도**가 있었는지만 말하고, 같은 것을
+        # 바르게 읽는 고침(참조의 `!= 0` → `!= null`)은 유도가 아니라 남길 note 가
+        # 없다. note 가 있을 때만 담으면 그런 고침이 조용히 버려진다.
+        contract.condition, notes = known.resolve(
+            contract.condition, asserted, tuple(contract.call_path)
+        )
+        for note in notes:
+            if note not in contract.issues:
+                contract.issues.append(note)
         # 가드를 스스로 뒤집는 레코드를 상태로 읽고 있으면 그 행은 트리거가 틀렸다.
         if contract.trigger.kind in {"scene_entry", "continuous", "control_check"}:
             # `SourceRef.record_id` 는 경로 id 를 담는다. 이름과 내용이 어긋난
@@ -1423,6 +1521,24 @@ def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]
                     contract.trigger, contract.assertions, contract.issues
                 )
 
+        # 스택에 사는 값은 전제가 아니다.
+        trimmed, dropped, narrowing, exhaustible = observable.drop_locals(
+            contract.condition, selectors, exits
+        )
+        if dropped:
+            contract.condition = trimmed
+            # 반복하면 닿는 자리는 결함이 아니다. 사전 조건에서 뺀 것을 스텝으로 옮긴다 —
+            # 사람은 `i` 를 읽을 수 없지만 끝까지 눌러 그 자리를 만들 수는 있다.
+            if exhaustible and contract.trigger.kind == "input":
+                contract.trigger = replace(contract.trigger, repeat_until_done=True)
+                narrowing = False
+            note = observable.BRANCH_LOCAL if narrowing else observable.STACK_LOCAL
+            if note not in contract.issues:
+                contract.issues.append(note)
+            contract.quality = _quality(
+                contract.trigger, contract.assertions, contract.issues
+            )
+
         # What no branch could restate stays unreadable, and a row resting on it
         # cannot be set up or confirmed. Said rather than dropped: the behaviour
         # is real and someone may still write the premise another way.
@@ -1444,6 +1560,7 @@ def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]
 
 
 def discover(graph: EvidenceGraph) -> DiscoveryResult:
+    graph.answers = Answers.of([path for path in graph.paths if not path.folded])
     persisted_pins = _persisted_pins(graph)
     code_contracts = _contracts(graph, persisted_pins)
     resumed, superseded = _coroutine_resume_contracts(graph, code_contracts)
@@ -1452,6 +1569,7 @@ def discover(graph: EvidenceGraph) -> DiscoveryResult:
     contracts = _drop_unavailable_control_contracts(code_contracts)
     contracts.extend(_inventory_contracts(graph, code_contracts))
     _rewrite_unreadable_premises(graph, contracts)
+    contracts = [item for item in contracts if not _contradictory(item.condition)]
     contracts.sort(key=lambda item: (item.scene or "", item.trigger.label, item.id))
     families = _branch_families(contracts)
     scenarios = _scenarios(graph, contracts)

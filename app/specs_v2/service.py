@@ -22,7 +22,7 @@ def generate_spec_payload(report: dict[str, Any]) -> dict[str, Any]:
     """
 
     result = discover(graph_from_report(report, source="internal-request"))
-    ready_rows, review_rows, flow_rows = project_rows(result)
+    ready_rows, review_rows = project_rows(result)
     raw_evidence = result.build.get("evidence")
 
     return {
@@ -43,11 +43,9 @@ def generate_spec_payload(report: dict[str, Any]) -> dict[str, Any]:
             "unsupported_specs": sum(
                 row["status"] == "unsupported" for row in review_rows
             ),
-            "connected_flows": len(flow_rows),
         },
         "ready_specs": ready_rows,
         "review_specs": review_rows,
-        "connected_flows": flow_rows,
     }
 
 

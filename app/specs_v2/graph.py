@@ -112,6 +112,9 @@ class PathFact:
     folded: bool
     handed_over_at: int | None
     handed_over_to: str | None
+    # 이 구간이 되돌아가는 자리. 있으면 그 안의 카운터 비교는 사전 조건이 아니라
+    # 루프가 자기 진행을 재는 살림이다.
+    loops_back_to: int | None = None
 
     def source_ref(self, offset: int | None = None) -> SourceRef:
         return SourceRef(self.id, self.entry_id, self.method_id, offset)
@@ -136,6 +139,9 @@ class EvidenceGraph:
     refs_by_field: dict[tuple[str, str], list[RefFact]] = field(
         default_factory=lambda: defaultdict(list)
     )
+    # 근거가 스스로 답하는 것들. 경로가 다 모인 뒤에 한 번 만들어 여기 둔다 —
+    # 값을 푸는 자리마다 다시 훑으면 리포트 하나에 수백 번이다.
+    answers: Any = None
     object_visuals: dict[
         tuple[str | None, str], tuple[str | None, str | None]
     ] = field(default_factory=dict)
@@ -427,6 +433,7 @@ def _load_records(graph: EvidenceGraph) -> None:
                 folded,
                 record.get("handedOverAt"),
                 record.get("handedOverTo"),
+                record.get("loopsBackTo"),
             )
             graph.paths.append(path)
             graph.add_node(path_id, "path", entry_id=entry_id, folded=folded)
