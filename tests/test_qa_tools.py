@@ -21,7 +21,7 @@ def make(total_steps: int = 1, timeout: float = 0.05):
     async def send(frame: dict) -> None:
         sent.append(frame)
 
-    channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=timeout)
+    channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=timeout, write_timeout=timeout)
     state = QaRunState(total_steps=total_steps)
     tools = {tool.name: tool for tool in build_tools(channel, state)}
     return channel, state, tools, sent

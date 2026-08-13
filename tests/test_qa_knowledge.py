@@ -46,7 +46,7 @@ def make(timeout: float = 0.05):
     async def send(frame: dict) -> None:
         sent.append(frame)
 
-    channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=timeout)
+    channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=timeout, write_timeout=timeout)
     state = QaRunState(total_steps=1)
     tools = {tool.name: tool for tool in build_tools(channel, state)}
     return channel, state, tools, sent
@@ -74,7 +74,7 @@ def make_with_undeliverable(*types: MessageType):
             raise ConnectionResetError("the frame could not be delivered")
         sent.append(frame)
 
-    channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=0.05)
+    channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=0.05, write_timeout=0.05)
     state = QaRunState(total_steps=1)
     tools = {tool.name: tool for tool in build_tools(channel, state)}
     return channel, state, tools, sent
@@ -689,21 +689,186 @@ def test_a_refused_correction_still_names_what_the_run_has_not_put_back() -> Non
     asyncio.run(run())
 
 
-def test_a_write_does_not_wait_for_an_answer_that_never_comes() -> None:
-    """`routeKnowledgeMutation` replies with no frame at all — a success is silent
-    and a rejection becomes a row on the run's own timeline, not a frame back down
-    this socket. A tool that waited would hang to its timeout on every call,
-    including the ones that worked, so all three writes must return with nothing
-    inbound at all."""
+def answer_write(
+    channel: QaRunChannel,
+    sent: list[dict],
+    payload: dict,
+    type_: str | None = None,
+):
+    """Answer the write in flight the way Orchestration does (ARTEL-331).
+
+    The sibling of `answer` above, watching the write frames instead of the
+    searches. `type_` set to ERROR simulates a refusal, which travels as a
+    correlated ERROR rather than as a field on the result.
+    """
+    kinds = {
+        MessageType.KNOWLEDGE_CREATE.value,
+        MessageType.KNOWLEDGE_UPDATE.value,
+        MessageType.KNOWLEDGE_DELETE.value,
+    }
+
+    def written() -> list[dict]:
+        return [f for f in sent if f["type"] in kinds]
+
+    already = len(written())
+
+    async def reply() -> None:
+        for _ in range(50):
+            if len(written()) > already:
+                break
+            await asyncio.sleep(0)
+        frame = {
+            "type": type_ or MessageType.KNOWLEDGE_WRITE_RESULT.value,
+            "correlationId": written()[-1]["messageId"],
+            "payload": payload,
+        }
+        if frame["type"] == MessageType.ERROR.value:
+            channel.on_error(frame)
+        else:
+            channel.on_knowledge_write_result(frame)
+
+    return asyncio.create_task(reply())
+
+
+# --- what a write hears back (ARTEL-332) --------------------------------------
+
+
+def test_a_created_entry_can_be_corrected_without_spending_a_search() -> None:
+    """The id comes back on the write, so the run can name its own entry.
+
+    Before this the only way into `knowledge_seen` was a search hit, which meant
+    correcting a fact the run had just written cost one of a small number of
+    searches — and the search would not find it anyway until the embedding
+    backfill caught up (ARTEL-317).
+    """
+
+    async def run() -> None:
+        channel, state, tools, sent = make()
+
+        answer_write(channel, sent, {"type": "KNOWLEDGE_CREATE", "knowledge_id": "77"})
+        result = await record(tools)
+
+        assert "77" in result
+        assert state.knowledge_seen["77"] == "구매는 소지금이 가격 이상일 때만 가능하다"
+
+        # And the correction goes through on that id alone — no search in between.
+        answer_write(channel, sent, {"type": "KNOWLEDGE_UPDATE", "knowledge_id": "77"})
+        corrected = await update(tools, knowledge_id="77")
+        assert "not an entry" not in corrected
+        assert corrections(sent)[-1]["payload"]["knowledge_id"] == "77"
+
+    asyncio.run(run())
+
+
+def test_a_refused_write_reaches_the_model_as_a_refusal() -> None:
+    """The defect this pair of issues exists for: a rejection used to become a row
+    on the operator's timeline and nothing else, so a frame that should never have
+    been sent was reported to the model as a success."""
+
+    async def run() -> None:
+        channel, _, tools, sent = make()
+
+        answer_write(
+            channel,
+            sent,
+            {"message": "KNOWLEDGE_CREATE rejected: tag must be one of ..."},
+            type_=MessageType.ERROR.value,
+        )
+        result = await record(tools)
+
+        assert "refused" in result
+        assert "tag must be one of" in result
+        assert "Recorded under" not in result
+
+    asyncio.run(run())
+
+
+def test_a_refused_deletion_leaves_nothing_outstanding() -> None:
+    """A refusal means the entry is still there, so the run does not owe a
+    replacement. Counting it as outstanding would send `record_knowledge` chasing
+    a loss that never happened — and that path is exempt from the write cap."""
+
+    async def run() -> None:
+        channel, state, tools, sent = make()
+        state.knowledge_seen["41"] = "옛 규칙"
+
+        answer_write(
+            channel,
+            sent,
+            {"message": "KNOWLEDGE_DELETE rejected: 41 not found in project 1"},
+            type_=MessageType.ERROR.value,
+        )
+        result = await forget(tools, knowledge_id="41")
+
+        assert "refused" in result
+        assert state.knowledge_deleted_unreplaced == []
+        assert "41" in state.knowledge_seen
+
+    asyncio.run(run())
+
+
+def test_an_unanswered_write_is_unknown_rather_than_failed() -> None:
+    """Silence does not mean the write did not happen.
+
+    Orchestration performs the write and skips the reply when the run has no Agent
+    session, drops unroutable frames without answering, and an Orchestration older
+    than ARTEL-331 never answers at all. A tool that called that a failure would
+    make the model write the same fact again — the duplicate this contract exists
+    to prevent, arriving by a new route.
+    """
 
     async def run() -> None:
         _, state, tools, _ = make()
         state.knowledge_seen["41"] = "옛 규칙"
 
-        # Far below KNOWLEDGE_SEARCH_TIMEOUT_SECONDS: anything that waits fails here.
+        # Nothing inbound at all, and every write still returns.
+        result = await asyncio.wait_for(record(tools), timeout=1.0)
+        assert "no confirmation came back" in result
+        assert "Do not send it again" in result
+        assert "Recorded under" not in result
+
+        assert "no confirmation came back" in await asyncio.wait_for(update(tools), timeout=1.0)
+        assert "no confirmation came back" in await asyncio.wait_for(forget(tools), timeout=1.0)
+
+    asyncio.run(run())
+
+
+def test_a_late_write_answer_does_not_resolve_the_next_request() -> None:
+    """Answers are matched on the request's messageId, so one that arrives after
+    its own request gave up finds nothing to resolve.
+
+    This is what the pending map buys over a field per request kind: a stale reply
+    cannot land on whatever happens to be waiting now, and the guarantee holds
+    across kinds rather than within each one.
+    """
+
+    async def run() -> None:
+        channel, _, tools, sent = make()
+
         await asyncio.wait_for(record(tools), timeout=1.0)
-        await asyncio.wait_for(update(tools), timeout=1.0)
-        await asyncio.wait_for(forget(tools), timeout=1.0)
+        stale = creates(sent)[-1]["messageId"]
+
+        async def late() -> None:
+            # The abandoned write's answer arrives while a search is in flight.
+            for _ in range(50):
+                if searches(sent):
+                    break
+                await asyncio.sleep(0)
+            channel.on_knowledge_write_result(
+                {
+                    "type": MessageType.KNOWLEDGE_WRITE_RESULT.value,
+                    "correlationId": stale,
+                    "payload": {"type": "KNOWLEDGE_CREATE", "knowledge_id": "77"},
+                }
+            )
+
+        asyncio.create_task(late())
+        result = await tools["search_knowledge"].ainvoke(
+            {"step": 2, "thought": "확인한다", "query": "골드"}
+        )
+
+        # The search timed out on its own rather than being answered by the write.
+        assert "did not answer in time" in result
 
     asyncio.run(run())
 

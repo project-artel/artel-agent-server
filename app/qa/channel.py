@@ -21,6 +21,7 @@ from app.qa.envelope import (
     KnowledgeExpandResultPayload,
     KnowledgeSearchPayload,
     KnowledgeSearchResultPayload,
+    KnowledgeWriteResultPayload,
     LogCategory,
     LogPayload,
     MessageType,
@@ -53,18 +54,34 @@ MAX_OPERATOR_WAIT_SECONDS = 300.0
 # tight as a local call, but it must never be the reason a run misses its deadline.
 KNOWLEDGE_SEARCH_TIMEOUT_SECONDS = 20.0
 
+# How long a knowledge write waits for its answer.
+#
+# Much shorter than a search's, and the difference is the point: a search makes
+# Orchestration embed a query and hit pgvector, while a write is one database
+# statement it has already finished by the time it answers. The number that
+# matters is the one paid when NO answer comes — against an Orchestration that
+# predates ARTEL-331 every write waits this out, and that cost is per write, per
+# run. Silence is not a failure here (see `write_knowledge`), so waiting longer
+# would buy nothing but a slower run.
+KNOWLEDGE_WRITE_TIMEOUT_SECONDS = 5.0
+
 
 class QaCancelled(Exception):
     """Raised inside the agent loop when the operator ends the run."""
 
 
 @dataclass(frozen=True)
-class KnowledgeSearchFailed:
-    """Orchestration answered the search with an ERROR frame.
+class KnowledgeRequestFailed:
+    """Orchestration answered the request with an ERROR frame.
 
-    Distinct from an empty result, which is an ordinary answer, and from no answer
-    at all. Only this one means the search itself could not run — a bad filter, an
-    embedding model mismatch, a database that would not answer.
+    Distinct from an ordinary answer — a search's empty `results`, a write that
+    went through — and from no answer at all. Only this one means the request
+    itself was refused or could not run: a bad filter, an embedding model
+    mismatch, a database that would not answer, an entry that is not there.
+
+    Shared by the search, the expansion and the writes (ARTEL-332). Orchestration
+    reports all three failures the same way, so telling them apart here would be
+    this side inventing a distinction the wire does not carry.
     """
 
     reason: str
@@ -78,24 +95,32 @@ class QaRunChannel:
         qa_try_id: int,
         send: Callable[[dict], Awaitable[None]],
         action_timeout: float = ACTION_TIMEOUT_SECONDS,
+        write_timeout: float = KNOWLEDGE_WRITE_TIMEOUT_SECONDS,
     ) -> None:
         self._qa_try_id = qa_try_id
         self._send = send
         self._action_timeout = action_timeout
+        # Injectable for the same reason `action_timeout` is: a suite that waited
+        # out the real one would pay it on every write it exercises.
+        self._write_timeout = write_timeout
         self._sequence = 0
         self._action_waiter: asyncio.Future[ActionResultPayload] | None = None
         self._pending_action_id: str | None = None
-        # A second waiter rather than a shared one: a knowledge search and a game
-        # action are answered by different frames and must not be able to resolve
-        # each other's request.
-        self._knowledge_waiter: (
-            asyncio.Future[KnowledgeSearchResultPayload | KnowledgeSearchFailed] | None
-        ) = None
-        self._pending_knowledge_id: str | None = None
-        self._expand_waiter: (
-            asyncio.Future[KnowledgeExpandResultPayload | KnowledgeSearchFailed] | None
-        ) = None
-        self._pending_expand_id: str | None = None
+        # Knowledge requests waiting on an answer, keyed by the messageId
+        # Orchestration echoes back as `correlationId`.
+        #
+        # One map rather than a pair of fields per request kind (ARTEL-332). Those
+        # fields existed to stop two frames in flight from resolving each other's
+        # future — an expansion answering a search with the wrong content, which
+        # nothing about the payload would make obvious. Keying on the correlation
+        # rules that out by construction instead, and it scales: writes are the
+        # third kind to need it and would have been a third pair of fields.
+        #
+        # The ACTION waiter above stays separate on purpose. Its timeout, its
+        # cancellation and its late-answer rule are the game's, not the knowledge
+        # base's, and folding it in here would spread this change across a path
+        # this issue does not touch.
+        self._pending: dict[str, asyncio.Future[Any]] = {}
         self.scene = SceneMemory()
         self.cancelled = False
         # Operator messages that arrived since the agent last looked. Delivered
@@ -220,7 +245,7 @@ class QaRunChannel:
 
     async def search_knowledge(
         self, query: str, tag: str | None, limit: int, step: int | None = None
-    ) -> KnowledgeSearchResultPayload | KnowledgeSearchFailed | None:
+    ) -> KnowledgeSearchResultPayload | KnowledgeRequestFailed | None:
         """Ask the project's knowledge base a question. `None` means no answer came.
 
         Three outcomes, kept apart as three types, because the agent should act
@@ -233,50 +258,22 @@ class QaRunChannel:
         Nothing about the game is touched here: no action goes out, so no scene
         comes back, so no caller ends up with a scene view to append.
         """
-        self._raise_if_cancelled()
-        loop = asyncio.get_running_loop()
-        waiter: asyncio.Future[KnowledgeSearchResultPayload | KnowledgeSearchFailed] = (
-            loop.create_future()
-        )
-        self._knowledge_waiter = waiter
-
-        frame = self._frame(
+        return await self._request(
             MessageType.KNOWLEDGE_SEARCH,
             KnowledgeSearchPayload(query=query, tag=tag, limit=limit, step=step),
+            KNOWLEDGE_SEARCH_TIMEOUT_SECONDS,
         )
-        self._pending_knowledge_id = frame["messageId"]
-        await self._send(frame)
-        try:
-            return await asyncio.wait_for(waiter, timeout=KNOWLEDGE_SEARCH_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            return None
-        finally:
-            self._knowledge_waiter = None
-            self._pending_knowledge_id = None
 
     async def expand_knowledge(
         self, knowledge_id: str, depth: int, include_similar: bool, step: int | None = None
-    ) -> KnowledgeExpandResultPayload | KnowledgeSearchFailed | None:
+    ) -> KnowledgeExpandResultPayload | KnowledgeRequestFailed | None:
         """Walk the knowledge graph out from one entry. `None` means no answer came.
 
         Same three outcomes as `search_knowledge`, and the same argument for
-        returning rather than raising.
-
-        This gets its OWN waiter rather than sharing the search's, for the reason
-        the action waiter is separate from that one: two frames in flight whose
-        replies can resolve each other's futures is a bug that shows up as an
-        expansion answering a search with the wrong content, and nothing about
-        the payload would make it obvious. The timeout is the search's, because
-        the work on the far side is the same shape — a couple of indexed queries.
+        returning rather than raising. The timeout is the search's, because the
+        work on the far side is the same shape — a couple of indexed queries.
         """
-        self._raise_if_cancelled()
-        loop = asyncio.get_running_loop()
-        waiter: asyncio.Future[KnowledgeExpandResultPayload | KnowledgeSearchFailed] = (
-            loop.create_future()
-        )
-        self._expand_waiter = waiter
-
-        frame = self._frame(
+        return await self._request(
             MessageType.KNOWLEDGE_EXPAND,
             KnowledgeExpandPayload(
                 knowledge_id=knowledge_id,
@@ -284,35 +281,58 @@ class QaRunChannel:
                 include_similar=include_similar,
                 step=step,
             ),
+            KNOWLEDGE_SEARCH_TIMEOUT_SECONDS,
         )
-        self._pending_expand_id = frame["messageId"]
-        await self._send(frame)
+
+    async def write_knowledge(
+        self, message_type: MessageType, payload
+    ) -> KnowledgeWriteResultPayload | KnowledgeRequestFailed | None:
+        """Write to the project's knowledge base, and wait for the verdict.
+
+        Three outcomes, as with a search, but the third one means something
+        different here and getting it wrong is expensive:
+
+        - a payload — Orchestration stored it, and for a create the payload
+          carries the new entry's id
+        - `KnowledgeRequestFailed` — it refused. The write did NOT happen
+        - `None` — **no answer came, which is not the same as no write.**
+          Orchestration performs the write and skips the reply when the run has
+          no Agent session, drops frames it cannot route without answering them,
+          and an Orchestration older than ARTEL-331 never answers at all. Every
+          one of those looks identical from here.
+
+        A caller that reports `None` as a failure makes the model write the same
+        fact again, which is the duplicate this whole contract exists to stop.
+        `app/agents/qa/tools.py` says "sent, not confirmed, do not send it again"
+        for exactly that reason.
+        """
+        return await self._request(message_type, payload, self._write_timeout)
+
+    async def _request(self, message_type: MessageType, payload, timeout: float) -> Any:
+        """Send one frame and park until its answer arrives. `None` means none did.
+
+        The answer's type follows the request's — callers annotate what they
+        expect, because what lands in the future is whatever the matching
+        `on_*` handler validated. That handler is chosen by the inbound frame's
+        type, so a mismatch here would mean Orchestration answered one request
+        with another request's frame.
+
+        The entry is removed in `finally`, so a late answer to a request already
+        abandoned at its timeout finds nothing to resolve and is dropped.
+        """
+        self._raise_if_cancelled()
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[Any] = loop.create_future()
+        frame = self._frame(message_type, payload)
+        message_id = frame["messageId"]
+        self._pending[message_id] = waiter
         try:
-            return await asyncio.wait_for(waiter, timeout=KNOWLEDGE_SEARCH_TIMEOUT_SECONDS)
+            await self._send(frame)
+            return await asyncio.wait_for(waiter, timeout=timeout)
         except asyncio.TimeoutError:
             return None
         finally:
-            self._expand_waiter = None
-            self._pending_expand_id = None
-
-    async def write_knowledge(self, message_type: MessageType, payload) -> None:
-        """Write to the project's knowledge base. Nothing comes back, by design.
-
-        The deliberate asymmetry with `search_knowledge` above: that one parks on
-        a future until Orchestration answers, this one has no waiter and no
-        correlation to match, because Orchestration's `routeKnowledgeMutation`
-        answers a mutation with nothing at all. A success is silent and a
-        rejection becomes an ORCHE_INTERNAL error row on the run's timeline,
-        published to the operator's stream rather than sent back down this socket.
-        A tool that waited here would therefore wait out its whole timeout on
-        every call, including the ones that worked.
-
-        What that costs is honesty about the result, and the tools pay it rather
-        than hide it: this side can report that the frame went out, never that it
-        landed. See `app/agents/qa/knowledge.py`.
-        """
-        self._raise_if_cancelled()
-        await self._send(self._frame(message_type, payload))
+            self._pending.pop(message_id, None)
 
     # --- inbound --------------------------------------------------------------
 
@@ -338,27 +358,22 @@ class QaRunChannel:
             self._action_waiter.set_result(payload)
 
     def on_knowledge_search_result(self, raw: dict) -> None:
-        if not self._answers_pending_search(raw):
-            return
-        self._resolve_knowledge(
-            KnowledgeSearchResultPayload.model_validate(raw.get("payload") or {})
-        )
+        self._resolve(raw, KnowledgeSearchResultPayload.model_validate(raw.get("payload") or {}))
 
     def on_knowledge_expand_result(self, raw: dict) -> None:
-        if not self._answers_pending_expand(raw):
-            return
-        self._resolve_expand(
-            KnowledgeExpandResultPayload.model_validate(raw.get("payload") or {})
-        )
+        self._resolve(raw, KnowledgeExpandResultPayload.model_validate(raw.get("payload") or {}))
+
+    def on_knowledge_write_result(self, raw: dict) -> None:
+        self._resolve(raw, KnowledgeWriteResultPayload.model_validate(raw.get("payload") or {}))
 
     def on_error(self, raw: dict) -> bool:
         """An inbound ERROR. True when it was the answer to something we asked.
 
-        Orchestration replies to a failed search with an ERROR carrying the
-        request's correlation id, so this is how a search that could not run
-        reaches the tool waiting on it. An uncorrelated ERROR is somebody
-        reporting a problem rather than answering, and there is nothing to
-        release — the caller decides what to do with that.
+        Orchestration replies to a refused request with an ERROR carrying that
+        request's correlation id, so this is how a search, an expansion or a
+        write that could not run reaches the tool waiting on it. An uncorrelated
+        ERROR is somebody reporting a problem rather than answering, and there is
+        nothing to release — the caller decides what to do with that.
 
         The payload is read field by field rather than through `ErrorPayload`:
         Orchestration's failure frame carries only `message`, and that model
@@ -367,47 +382,22 @@ class QaRunChannel:
         """
         payload = raw.get("payload") or {}
         reason = payload.get("message") if isinstance(payload, dict) else None
-        failure = KnowledgeSearchFailed(reason=str(reason or "no reason given"))
-        if self._answers_pending_search(raw):
-            self._resolve_knowledge(failure)
-            return True
-        # An expansion that could not run is answered the same way, so its waiter
-        # has to be released here too — otherwise the tool sits out the full
-        # timeout on a failure Orchestration already reported.
-        if self._answers_pending_expand(raw):
-            self._resolve_expand(failure)
-            return True
-        return False
+        return self._resolve(raw, KnowledgeRequestFailed(reason=str(reason or "no reason given")))
 
-    def _answers_pending_search(self, raw: dict) -> bool:
-        """Whether this frame is the reply to the search currently in flight.
+    def _resolve(self, raw: dict, answer: Any) -> bool:
+        """Hand `answer` to whatever is waiting on this frame's correlation.
 
-        Orchestration echoes the request's messageId as the reply's correlation,
-        so a mismatch means the frame answers something we no longer wait on —
-        a search abandoned at its timeout, most likely, whose late answer must
-        not resolve the next one.
+        False when nothing was: an answer to a request already abandoned at its
+        timeout, or an unsolicited frame. Both are dropped rather than applied to
+        whatever happens to be waiting now — that mix-up is what the correlation
+        key exists to prevent.
         """
-        if self._pending_knowledge_id is None:
+        correlation = raw.get("correlationId")
+        waiter = self._pending.get(correlation) if isinstance(correlation, str) else None
+        if waiter is None or waiter.done():
             return False
-        return raw.get("correlationId") == self._pending_knowledge_id
-
-    def _answers_pending_expand(self, raw: dict) -> bool:
-        """Whether this frame is the reply to the expansion currently in flight."""
-        if self._pending_expand_id is None:
-            return False
-        return raw.get("correlationId") == self._pending_expand_id
-
-    def _resolve_knowledge(
-        self, answer: KnowledgeSearchResultPayload | KnowledgeSearchFailed
-    ) -> None:
-        if self._knowledge_waiter is not None and not self._knowledge_waiter.done():
-            self._knowledge_waiter.set_result(answer)
-
-    def _resolve_expand(
-        self, answer: KnowledgeExpandResultPayload | KnowledgeSearchFailed
-    ) -> None:
-        if self._expand_waiter is not None and not self._expand_waiter.done():
-            self._expand_waiter.set_result(answer)
+        waiter.set_result(answer)
+        return True
 
     def on_chat(self, raw: dict) -> None:
         payload = ChatPayload.model_validate(raw.get("payload") or {})
@@ -419,10 +409,16 @@ class QaRunChannel:
         self.cancelled = True
         if self._action_waiter is not None and not self._action_waiter.done():
             self._action_waiter.cancel()
-        # Same for a search in flight: left alone it would hold the run open for
-        # the rest of its timeout after the operator already ended it.
-        if self._knowledge_waiter is not None and not self._knowledge_waiter.done():
-            self._knowledge_waiter.cancel()
+        # Same for any knowledge request in flight: left alone it would hold the
+        # run open for the rest of its timeout after the operator already ended it.
+        #
+        # Sweeping the map covers all three kinds. Before ARTEL-332 this cancelled
+        # the search only, so an expansion the operator interrupted still sat out
+        # its full 20 seconds — a bug the per-kind fields made easy to miss and the
+        # map makes impossible to have.
+        for waiter in self._pending.values():
+            if not waiter.done():
+                waiter.cancel()
         # A tool parked on the operator has no action to cancel, so wake it and
         # let it find the cancellation itself.
         self._operator_arrived.set()

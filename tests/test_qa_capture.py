@@ -52,7 +52,7 @@ def make(total_steps: int = 1, timeout: float = 0.05, supports_vision: bool = Tr
     async def send(frame: dict) -> None:
         sent.append(frame)
 
-    channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=timeout)
+    channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=timeout, write_timeout=timeout)
     state = QaRunState(total_steps=total_steps)
     # Vision is a property of the resolved structure now, not of the model alone:
     # `arch.vision` is what `build_tools` reads, and what the arch fingerprint sees.

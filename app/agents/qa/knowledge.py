@@ -94,9 +94,9 @@ MAX_DESCRIPTION_CHARS = 500
 KNOWLEDGE_TAGS = ("CONTROL", "RULE", "OBJECTIVE", "UI", "MISC")
 
 # The relations one entry can carry to another, as Orchestration defines them.
-# Checked here so a bad one costs nothing: a link frame is ONE-WAY, so a rejection
-# on the far side never reaches the tool — it would be reported to the model as a
-# success while nothing was written.
+# Checked here so a bad one costs nothing but the check. Orchestration answers a
+# refusal since ARTEL-332, so this is no longer the only thing keeping a bad frame
+# from being reported as a success — it is now a round trip the run does not spend.
 #
 # There is deliberately no catch-all. An agent with one easy option and four hard
 # ones picks the easy one, and the graph degrades to untyped; the tool description
@@ -380,6 +380,27 @@ def render_entry_label(knowledge_id: str, summary: str) -> str:
     the warning below, where the whole point is naming what went missing.
     """
     return f'{knowledge_id} — "{summary}"' if summary else knowledge_id
+
+
+UNCONFIRMED_WRITE = (
+    "The frame went out but no confirmation came back, so this may or may not "
+    "have been applied. Do not send it again in this run — a second attempt is "
+    "how the same fact ends up stored twice."
+)
+"""What a write says when Orchestration did not answer (ARTEL-332).
+
+Kept in one place because this is the sentence that carries the weight. The
+three outcomes of a write are stored / refused / unknown, and only the last one
+is easy to get wrong: phrased as a failure, the model writes the fact again, and
+the duplicate this whole contract exists to prevent arrives by a new route.
+Orchestration performs the write and skips the reply when the run has no Agent
+session, and an Orchestration older than ARTEL-331 never replies at all, so
+silence is genuinely uninformative rather than bad news.
+
+The other two outcomes are worded by each tool. "Recorded", "changed", "deleted",
+"linked" and "removed" are different sentences, and a shared renderer that swapped
+the noun would read as a form letter.
+"""
 
 
 def render_missing_knowledge_warning(deleted: list[str]) -> str:

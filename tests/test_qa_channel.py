@@ -12,7 +12,7 @@ def make_channel(timeout: float = 30.0) -> tuple[QaRunChannel, list[dict]]:
     async def send(frame: dict) -> None:
         sent.append(frame)
 
-    channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=timeout)
+    channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=timeout, write_timeout=timeout)
     return channel, sent
 
 
