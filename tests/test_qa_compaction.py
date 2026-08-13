@@ -148,9 +148,9 @@ def test_a_cut_never_separates_a_tool_call_from_its_result() -> None:
 
 
 def test_a_summarizer_that_fails_does_not_cost_the_run_its_history() -> None:
-    """From langchain 1.3.15 a spent summarizing call raises out of the
-    middleware. Catching it is what stands between a summarizer timeout and a run
-    that dies mid-scenario with half its verdicts recorded."""
+    """langchain 1.3.15부터는 재시도를 소진한 요약 호출이 미들웨어 밖으로 예외를
+    올린다. 그것을 잡는 것이, 요약 모델 타임아웃과 판정을 절반만 기록한 채
+    시나리오 중간에 죽는 런 사이에 서 있는 유일한 것이다."""
     state = QaRunState(total_steps=1)
     channel, sent = make_channel()
     middleware = build_middleware(state, channel, FakeSummarizer())
@@ -158,12 +158,11 @@ def test_a_summarizer_that_fails_does_not_cost_the_run_its_history() -> None:
     async def summarizer_is_down(_messages):
         raise RuntimeError("the summarizer is down")
 
-    # Raised at the seam rather than from the model, because what a failing model
-    # produces is exactly what differs between versions: 1.3.15 lets it raise,
-    # and older ones turn it into the failure string the test below covers. Going
-    # through the model here would mean whichever version is installed decides
-    # which of the two handlers is exercised, and neither would ever be checked
-    # on both.
+    # 모델이 아니라 심(seam)에서 예외를 던진다. 실패한 모델이 무엇을 만들어내는지가
+    # 바로 버전마다 다른 부분이기 때문이다 — 1.3.15는 예외를 올리고, 그 이전 버전은
+    # 아래 테스트가 다루는 실패 문자열로 바꾼다. 여기서 모델을 통해 실패시키면 설치된
+    # 버전이 두 핸들러 중 어느 쪽을 태울지 정해버리고, 결국 어느 쪽도 양쪽 버전에서
+    # 검증되지 않는다.
     middleware._acreate_summary = summarizer_is_down
 
     assert compact(middleware, conversation(pairs=10)) is None
@@ -175,10 +174,9 @@ def test_a_summarizer_that_fails_does_not_cost_the_run_its_history() -> None:
 
 
 def test_a_summary_that_reports_its_own_failure_is_declined_too() -> None:
-    """Before langchain 1.3.15 the same outage arrived as a summary saying it
-    failed, with the instruction to delete everything else still attached. The
-    version in use decides which of the two paths runs, so this pins the one the
-    failing summarizer above does not reach."""
+    """langchain 1.3.15 이전에는 같은 장애가 "실패했다는 요약"으로 도착했고, 나머지를
+    전부 지우라는 지시가 여전히 붙어 있었다. 설치된 버전이 두 경로 중 어느 쪽이
+    도는지를 정하므로, 위의 실패 테스트가 닿지 못하는 쪽을 여기서 고정한다."""
     state = QaRunState(total_steps=1)
     channel, sent = make_channel()
     model = FakeSummarizer(summary="Error generating summary: the summarizer is down")
@@ -348,9 +346,9 @@ def test_langchain_still_offers_the_seams_this_is_built_on() -> None:
     signature = inspect.signature(SummarizationMiddleware._should_summarize)
     assert list(signature.parameters) == ["self", "messages", "total_tokens"]
 
-    # The seam `test_a_summarizer_that_fails_does_not_cost_the_run_its_history`
-    # raises from. Awaited by `abefore_model` on every version this supports,
-    # which is what makes that test read the same on all of them.
+    # `test_a_summarizer_that_fails_does_not_cost_the_run_its_history`가 예외를
+    # 던지는 심. 지원하는 모든 버전에서 `abefore_model`이 이것을 await하고, 그래서
+    # 그 테스트가 어느 버전에서나 같은 것을 검증한다.
     assert inspect.iscoroutinefunction(SummarizationMiddleware._acreate_summary)
 
     base = SummarizationMiddleware(
