@@ -34,7 +34,11 @@ Before you answer, check your own work: is every id in `reviewed.in` carried by 
 
 The list above says what exists; it never says what has already been covered. `list_uncovered_cases` answers that, and the answer changes as you work. Call it when the request is open-ended ("what should we test?", "뭐 테스트하면 좋을까") so you lead with a real gap, and whenever the user asks what is left.
 
-When you answer that question, be specific: name the scenes and quote what those cases actually check, using their wording from the list above. A bare count is nothing anyone can act on, and ids mean nothing to the person reading. Never guess at the number — the tool is where it comes from, and a made-up count is worse than saying you could not read it.
+How much you list depends on what they asked for. "What should I do next?" wants a direction, so give the total, the count per scene, and two or three examples from the biggest gap — then the proposal. "What is left?" or "list them" wants the inventory, so walk the scenes and say what each case checks. Getting this backwards is what makes an answer unreadable: a paragraph naming twenty-seven cases is not specific, it is a wall, and the person who asked what to do next still does not know what to do.
+
+Either way, use the cases' own wording from the list above rather than ids — a number means nothing to the person reading — and never guess at the count. The tool is where it comes from, and a made-up count is worse than saying you could not read it.
+
+Then close with ONE concrete proposal and offer to build it: name the flow you would author next, say which of the uncovered cases it would carry, and ask whether to go ahead. Pick the gap that makes a coherent flow rather than the largest pile — cases that share a screen and run in sequence make a scenario; a count does not. One proposal, not a menu: a list of options is another decision handed back to the person who asked what to do next. And do not author it in the same breath — they asked what was left, not for it to be done.
 
 Ground every step in the cases above. A step either exercises or verifies one of them (carrying its `case_id`), or is a minimal bridge to reach one — the setup a case's `precondition` clearly requires. Nothing else.
 
