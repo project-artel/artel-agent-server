@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -763,6 +763,60 @@ def _condition_before_updates(
     return projected
 
 
+def _gates(graph: EvidenceGraph) -> list[PathFact]:
+    """입력으로 열리는 대기 지점. 자기 입력을 들고 있지 않으면 한 홉 옆에서 빌린다.
+
+    코루틴의 대기는 대리자로 넘겨진 조각이고, 그 조각이 키를 직접 읽으면 `inputs` 가
+    채워진다. 직접 읽지 않고 **읽는 메서드를 부르면** 비어 있다 — 입력이 없는 것이
+    아니라 한 홉 옆에 있는 것이다. 근거는 그것을 `calls` 에 적어 두었다.
+
+    빈 것을 없는 것으로 세면 대기가 둘인데 하나만 보이고, **두 대기 사이에서 일어난
+    일이 뒤쪽 대기의 결과로 붙는다.** 첫 대기에서 눌러 일어난 변화가 두 번째 입력의
+    기대 결과가 되어, 어느 순간에도 참이 아닌 행이 된다.
+
+    빌릴 때 그 조각의 가드도 함께 산다. 키를 읽는 가지가 조건부면 그 조건이 곧 "이
+    상태에서 눌러야 열린다" 이고, 그것이 사전 조건이다.
+    """
+
+    reads_input: dict[str, list[PathFact]] = {}
+    for path in graph.paths:
+        if path.inputs:
+            reads_input.setdefault(path.source_signature, []).append(path)
+
+    gates: list[PathFact] = []
+    for path in graph.paths:
+        if (
+            path.handed_over_at is None
+            or not path.handed_over_to
+            or "reached-through-delegate" not in path.gaps
+            or len(path.call_path) < 2
+        ):
+            continue
+        if path.inputs:
+            gates.append(path)
+            continue
+        # 같은 진입점에서 온 것만 빌린다. 다른 진입점의 같은 메서드는 같은 키를 읽되
+        # 다른 조건 아래서 읽고, 그 조건은 이 대기의 것이 아니다.
+        borrowed = [
+            found
+            for call in path.calls
+            for found in reads_input.get(str(call.get("target")), ())
+            if found.entry_id == path.entry_id
+        ]
+        # 부르는 곳이 여럿이면 어느 입력이 이 대기를 여는지 근거가 말하지 않는다.
+        if len(borrowed) != 1:
+            continue
+        gates.append(
+            replace(
+                path,
+                id=f"{path.id}~gate",
+                inputs=borrowed[0].inputs,
+                condition=_combine_conditions(path.condition, borrowed[0].condition),
+            )
+        )
+    return gates
+
+
 def _coroutine_resume_contracts(
     graph: EvidenceGraph,
     contracts: list[Contract],
@@ -775,15 +829,7 @@ def _coroutine_resume_contracts(
     key, coroutine, or game type.
     """
 
-    waits = [
-        path
-        for path in graph.paths
-        if path.inputs
-        and path.handed_over_at is not None
-        and path.handed_over_to
-        and "reached-through-delegate" in path.gaps
-        and len(path.call_path) >= 2
-    ]
+    waits = _gates(graph)
     resumed: list[Contract] = []
     superseded: set[str] = set()
     for wait in waits:
