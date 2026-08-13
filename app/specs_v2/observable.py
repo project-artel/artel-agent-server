@@ -35,10 +35,23 @@ from typing import Any
 # reader can be asked for. A bare lowercase name is a local or a parameter.
 FIELD_CHAIN = re.compile(r"^[A-Z]\w*(?:\.[A-Za-z_]\w*)+$")
 
-# Names the compiler gave, not the game. Read on their own they are loop
-# counters and parameters, and no widening of the reader reaches a frame that
+# A name with no owner. Everything the reader can be asked for arrives owned —
+# the SDK writes a field as `Type.member` — so a bare identifier is something
+# that lives on the stack, and no widening of the reader reaches a frame that
 # has ended.
-BARE = re.compile(r"^(?:i|j|k|n|id|num|index|damage|collision|other|bigSide|distanceToPlayer)$")
+#
+# Matched on shape rather than on a list of names. A list is a list of *this*
+# game's identifiers: `bigSide` and `distanceToPlayer` say nothing about the
+# next project, and a rule built from them would find no locals there at all
+# while reporting that it found none because there were none.
+# 대소문자를 보지 않는다. "지역 변수는 소문자" 는 사람의 관례이지 구조가 아니고,
+# 관례를 어긴 이름 하나가 조용히 필드로 읽힌다. 주인이 있느냐만 본다.
+UNOWNED = re.compile(r"^\w+$")
+
+# How the SDK says a leaf reads a parameter. Carries the position, so it also
+# marks the ones that do not look bare: `collision.CompareTag("Enemy")` has an
+# owner and the owner is an argument.
+ARGUMENT = "arg:"
 
 # What a reference reads as when nothing was assigned.
 EMPTY = frozenset({"null", "0", "false", "true"})
@@ -97,8 +110,8 @@ def qualify(condition: dict[str, Any] | None, frame: str) -> dict[str, Any] | No
         return condition
     changed = dict(condition)
     for side in ("left", "right"):
-        value = str(changed.get(side) or "")
-        if BARE.match(value):
+        value = str(changed.get(side) or "").strip()
+        if UNOWNED.match(value) and not _literal(value):
             changed[side] = f"{frame}.{value}"
             changed.setdefault("localFrames", {})[side] = frame
     return changed
@@ -109,7 +122,7 @@ def readable(expression: Any) -> bool:
     text = str(expression or "").strip()
     if not text:
         return False
-    if BARE.match(text):
+    if UNOWNED.match(text) and not _literal(text):
         return False
     # A call is not made. Reading the game must not change it, and several of
     # these have side effects.
@@ -156,13 +169,21 @@ def _leaf_readable(leaf: dict[str, Any]) -> bool:
     # neither can be read.
     if leaf.get("localFrames"):
         return False
+    # The SDK names the frame for us when a leaf reads a parameter, and that is
+    # the only signal for the ones an owner hides — `collision.CompareTag(…)`
+    # looks like a field chain and is an argument.
+    if str(leaf.get("context") or "").startswith(ARGUMENT):
+        return False
     return readable(leaf.get("left")) and (
         readable(leaf.get("right")) or str(leaf.get("right") or "") in EMPTY or _literal(leaf.get("right"))
     )
 
 
 def _literal(value: Any) -> bool:
+    """스택이 아니라 코드 안에 그대로 적힌 값."""
     text = str(value or "").strip()
+    if text.lower() in {"null", "true", "false"}:
+        return True
     return bool(re.match(r'^-?\d+(\.\d+)?$|^".*"$', text))
 
 
