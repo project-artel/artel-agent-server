@@ -31,6 +31,7 @@ roll a system-prompt change back, silently rolling this back too — and failing
 outright on any version predating it.
 """
 
+import logging
 from collections.abc import Awaitable, Callable
 
 from langchain.agents.middleware import SummarizationMiddleware
@@ -44,11 +45,18 @@ from app.agents.qa.tools import QaRunState
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import LogCategory
 
-# What `SummarizationMiddleware` returns as a summary when it could not produce
-# one. It catches every exception out of the summarizing model and turns it into
-# one of these strings, then hands the result back through the same path a real
-# summary takes — so the conversation is wiped and replaced with the error. These
-# prefixes are how that case is told apart from a summary; see `abefore_model`.
+logger = logging.getLogger(__name__)
+
+# 요약을 만들지 못했을 때 `SummarizationMiddleware`가 요약이라며 돌려주는 문자열.
+# 예외를 올리는 대신 이렇게 보고하던 버전들의 이야기다. 요약 모델에서 나온 예외를
+# 전부 잡아 이 문자열로 바꾼 뒤, 진짜 요약과 똑같은 경로로 돌려준다 — 그래서 대화가
+# 통째로 지워지고 그 자리에 오류 문구가 남는다. 이 프리픽스가 그 경우를 요약과
+# 구별하는 유일한 단서다.
+#
+# langchain 1.3.15부터는 같은 실패가 예외로 온다. 요약 실패가 이력을 영구 삭제하던
+# 문제(langchain #38867)를 고치면서, 요약을 지어내지 않고 `with_retry()`가 재시도를
+# 소진한 뒤 예외를 그대로 올리도록 바뀌었다. `abefore_model`은 양쪽을 모두 받는다.
+# 두 버전이 다른 것은 실패가 도착하는 방식뿐이고, 런에게 무슨 뜻인지는 같기 때문이다.
 _SUMMARY_FAILURE_PREFIXES = (
     "Error generating summary:",
     "Previous conversation was too long",
@@ -272,6 +280,19 @@ class QaCompactionMiddleware(SummarizationMiddleware):
             return True
         return super()._should_summarize(messages, total_tokens)
 
+    async def _decline_compaction(self) -> None:
+        """런이 계속 커지고 있음을 오퍼레이터에게 알리고, 그대로 둔다.
+
+        업데이트 전체를 거절하는 것만이 요약 모델 장애가 런의 이력을 앗아가는 것을
+        막는다. 런은 압축되지 않은 채 계속되고 provider의 한계에 닿을 수 있지만,
+        그쪽이 덜 나쁜 실패이고 오퍼레이터가 다가오는 것을 볼 수 있는 실패다.
+        """
+        await self._channel.note(
+            "Context compaction was skipped: the summary could not be "
+            "generated. The run continues with its history intact.",
+            LogCategory.SYSTEM,
+        )
+
     async def abefore_model(self, state, runtime):  # type: ignore[override]
         # Consumed before anything is awaited: the request is answered by this
         # pass whether or not it results in a compaction, and a second pass must
@@ -279,17 +300,29 @@ class QaCompactionMiddleware(SummarizationMiddleware):
         self._forced = self._state.compaction_requested
         self._state.compaction_requested = False
 
+        # 폴딩해서 넘긴다. 그래야 이후의 모든 것 — 토큰 수, 자르는 지점, 요약 모델에
+        # 건네는 텍스트, 그래프에 되돌려 쓰는 꼬리 — 이 모델이 실제로 보는 대화를
+        # 기준으로 움직인다. 폴딩은 멱등하고 오래된 장면 뷰를 자리표시자로 바꾸는 일만
+        # 하며, 타임라인과 콘솔은 그래프 상태가 아니라 채널과 로거를 읽는다. 그래서
+        # 폴딩된 사본이 그대로 남아도 읽을 수 있는 것은 아무것도 잃지 않는다.
+        #
+        # `try` 앞에서 하는 것은 의도다. 이 폴딩의 버그가 요약 모델 장애로 둔갑해
+        # 오퍼레이터에게 보고되지 않고 그 자체로 터지게 하려는 것이다. 다만 이 한 번의
+        # 폴딩만 밖에 있다. `_folded_token_counter`가 base class 안에서 다시 폴딩하고,
+        # 그 호출은 아래 핸들러 아래에 있다.
+        folded = fold_stale_scenes(state["messages"])
+
         try:
-            # Folded, so that everything downstream — the count, the cut point,
-            # the text handed to the summarizer, and the tail written back to the
-            # graph — works on the conversation as the model actually sees it.
-            # Folding is idempotent and only ever replaces a stale scene view with
-            # a placeholder, and the timeline and console read the channel and the
-            # logger rather than graph state, so nothing readable is lost by
-            # letting the folded copies persist.
-            update = await super().abefore_model(
-                {**state, "messages": fold_stale_scenes(state["messages"])}, runtime
-            )
+            update = await super().abefore_model({**state, "messages": folded}, runtime)
+        except Exception:
+            # 넓게 잡는 것은 의도다. 여기까지 오는 것은 `with_retry()`가 포기한 뒤 요약
+            # provider가 올린 무엇이든이고, 그 예외 타입은 provider마다 다르다. 좁히면
+            # 구멍이 남고 그 대가는 런의 이력 전체다. 삼키지 않고 남기는 이유는,
+            # 오퍼레이터에게 가는 노트가 요약이 실패했다고만 말하고 이유는 말하지 않기
+            # 때문이다.
+            logger.exception("[QA] context compaction failed; run continues uncompacted")
+            await self._decline_compaction()
+            return None
         finally:
             self._forced = False
 
@@ -299,17 +332,9 @@ class QaCompactionMiddleware(SummarizationMiddleware):
         messages = update["messages"]
         summary = _summary_text_of(messages)
         if not summary or summary.startswith(_SUMMARY_FAILURE_PREFIXES):
-            # The base class turns a failed summarizing call into a summary that
-            # says it failed, and would still return the instruction to delete
-            # everything else. Declining the whole update is the only thing that
-            # keeps a summarizer outage from costing the run its history; the run
-            # continues uncompacted and may reach the provider's limit, which is
-            # the lesser failure and one the operator can see coming.
-            await self._channel.note(
-                "Context compaction was skipped: the summary could not be "
-                "generated. The run continues with its history intact.",
-                LogCategory.SYSTEM,
-            )
+            # 실패한 요약 호출을 "실패했다는 요약"으로 보고하는 버전들은, 그러면서도
+            # 나머지를 전부 지우라는 지시를 함께 돌려준다.
+            await self._decline_compaction()
             return None
 
         update["messages"] = _insert_after_summary(

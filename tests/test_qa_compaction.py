@@ -30,7 +30,6 @@ class FakeSummarizer(BaseChatModel):
     """Stands in for the summarizing model, and counts how often it was asked."""
 
     summary: str = SUMMARY_TEXT
-    fail: bool = False
     calls: int = 0
 
     @property
@@ -39,8 +38,6 @@ class FakeSummarizer(BaseChatModel):
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs: Any) -> ChatResult:
         self.calls += 1
-        if self.fail:
-            raise RuntimeError("the summarizer is down")
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.summary))])
 
 
@@ -151,16 +148,42 @@ def test_a_cut_never_separates_a_tool_call_from_its_result() -> None:
 
 
 def test_a_summarizer_that_fails_does_not_cost_the_run_its_history() -> None:
-    """LangChain turns a failed summary into a summary that says it failed, and
-    still returns the instruction to delete everything else. Declining the whole
-    update is the only thing standing between a summarizer timeout and a run that
-    has forgotten what it was doing."""
+    """langchain 1.3.15부터는 재시도를 소진한 요약 호출이 미들웨어 밖으로 예외를
+    올린다. 그것을 잡는 것이, 요약 모델 타임아웃과 판정을 절반만 기록한 채
+    시나리오 중간에 죽는 런 사이에 서 있는 유일한 것이다."""
     state = QaRunState(total_steps=1)
     channel, sent = make_channel()
-    model = FakeSummarizer(fail=True)
-    middleware = build_middleware(state, channel, model)
+    middleware = build_middleware(state, channel, FakeSummarizer())
+
+    async def summarizer_is_down(_messages):
+        raise RuntimeError("the summarizer is down")
+
+    # 모델이 아니라 심(seam)에서 예외를 던진다. 실패한 모델이 무엇을 만들어내는지가
+    # 바로 버전마다 다른 부분이기 때문이다 — 1.3.15는 예외를 올리고, 그 이전 버전은
+    # 아래 테스트가 다루는 실패 문자열로 바꾼다. 여기서 모델을 통해 실패시키면 설치된
+    # 버전이 두 핸들러 중 어느 쪽을 태울지 정해버리고, 결국 어느 쪽도 양쪽 버전에서
+    # 검증되지 않는다.
+    middleware._acreate_summary = summarizer_is_down
 
     assert compact(middleware, conversation(pairs=10)) is None
+    assert state.compactions == 0
+
+    notes = [frame for frame in sent if frame["type"] == MessageType.LOG.value]
+    assert notes, "the operator has to be told the run is still growing"
+    assert notes[-1]["payload"]["category"] == LogCategory.SYSTEM.value
+
+
+def test_a_summary_that_reports_its_own_failure_is_declined_too() -> None:
+    """langchain 1.3.15 이전에는 같은 장애가 "실패했다는 요약"으로 도착했고, 나머지를
+    전부 지우라는 지시가 여전히 붙어 있었다. 설치된 버전이 두 경로 중 어느 쪽이
+    도는지를 정하므로, 위의 실패 테스트가 닿지 못하는 쪽을 여기서 고정한다."""
+    state = QaRunState(total_steps=1)
+    channel, sent = make_channel()
+    model = FakeSummarizer(summary="Error generating summary: the summarizer is down")
+    middleware = build_middleware(state, channel, model)
+
+    messages = conversation(pairs=10)
+    assert compact(middleware, messages) is None
     assert state.compactions == 0
 
     notes = [frame for frame in sent if frame["type"] == MessageType.LOG.value]
@@ -308,10 +331,11 @@ def test_compaction_cannot_lose_a_verdict() -> None:
 def test_langchain_still_offers_the_seams_this_is_built_on() -> None:
     """This test exists to fail on a LangChain upgrade, not to test our code.
 
-    Compaction hangs off two things the library does not document as API: the
-    decision point `_should_summarize`, and the shape `abefore_model` returns. If
-    either moves, compaction stops happening — silently, which is the dangerous
-    way for it to break, since the symptom is a provider 400 much later in a run.
+    Compaction hangs off three things the library does not document as API: the
+    decision point `_should_summarize`, the summarizing call `_acreate_summary`,
+    and the shape `abefore_model` returns. If any of them moves, compaction stops
+    happening — silently, which is the dangerous way for it to break, since the
+    symptom is a provider 400 much later in a run.
     """
     import inspect
 
@@ -321,6 +345,11 @@ def test_langchain_still_offers_the_seams_this_is_built_on() -> None:
 
     signature = inspect.signature(SummarizationMiddleware._should_summarize)
     assert list(signature.parameters) == ["self", "messages", "total_tokens"]
+
+    # `test_a_summarizer_that_fails_does_not_cost_the_run_its_history`가 예외를
+    # 던지는 심. 지원하는 모든 버전에서 `abefore_model`이 이것을 await하고, 그래서
+    # 그 테스트가 어느 버전에서나 같은 것을 검증한다.
+    assert inspect.iscoroutinefunction(SummarizationMiddleware._acreate_summary)
 
     base = SummarizationMiddleware(
         FakeSummarizer(), trigger=("tokens", 1), keep=("messages", 4)

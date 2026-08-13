@@ -143,10 +143,22 @@ class SilentAgent:
         return updates()
 
 
+class StubChatModel:
+    """러너가 만드는 모델 자리에 서지만, 모델은 아니다.
+
+    `create_agent`도 스텁이라 이것을 호출하는 곳은 없다. 생성만 통과하면 된다.
+    `SummarizationMiddleware.__init__`이 아무것도 호출하기 전에 요약 모델을
+    `with_retry()`로 감싸기 때문이다.
+    """
+
+    def with_retry(self, *_args, **_kwargs):
+        return self
+
+
 @pytest.fixture
 def stubbed_agent(monkeypatch):
     monkeypatch.setattr(
-        runner_module, "build_chat_model", lambda model, reasoning=None, **_: object()
+        runner_module, "build_chat_model", lambda model, reasoning=None, **_: StubChatModel()
     )
     monkeypatch.setattr(
         runner_module, "create_agent", lambda **_kwargs: SilentAgent()
