@@ -209,8 +209,9 @@ and a later run gets them both back and cannot tell which one to believe.
 A run gets {limit} knowledge writes in total, shared with `update_knowledge`, so
 spend them on what was worth learning.
 
-Nothing answers a knowledge write, so send each fact once — a repeat files it
-twice, and no one will tell you."""
+Send each fact once. The result tells you whether it was stored and gives the
+entry's id, but a repeat is not caught — it files the same fact twice and both
+say they worked."""
 
 UPDATE_KNOWLEDGE_DESCRIPTION = """Correct a knowledge entry that is wrong or out of date.
 
@@ -232,7 +233,7 @@ knowledge, and a bug belongs in `report_step` — rewriting the rule to match a
 broken build teaches every later run that the break is correct.
 
 A run gets {limit} knowledge writes in total, shared with `record_knowledge`.
-Nothing answers a knowledge write, so send each correction once."""
+Send each correction once; a repeat spends another write and changes nothing."""
 
 FORGET_KNOWLEDGE_DESCRIPTION = """Delete a knowledge entry that is no longer true.
 
@@ -298,7 +299,7 @@ belongs there too: "the Continue button, only after a save exists".
 Both ids must be ones this run has been shown, either as a search hit or as a
 neighbour line under one.
 
-A run gets {limit} links. Nothing answers a link, so send each one once."""
+A run gets {limit} links. Send each one once — a repeat comes back refused."""
 
 UNLINK_KNOWLEDGE_DESCRIPTION = """Remove a relation between two knowledge entries.
 
