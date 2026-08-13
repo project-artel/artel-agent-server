@@ -2,7 +2,7 @@ import json
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
-from app.agents.scenario.cases import render_test_case_list
+from app.agents.scenario.cases import render_test_case_list, render_uncovered_ids
 from app.agents.scenario.schemas import OutputLanguage, ScenarioAgentRequest
 from app.prompts import PromptFile, load_prompt
 
@@ -44,6 +44,7 @@ def build_system_prompt(request: ScenarioAgentRequest) -> tuple[str, str]:
     system: PromptFile = load_prompt(PROMPT_AGENT, "system")
     body = system.body.format(
         test_case_list=render_test_case_list(request.test_case_list),
+        uncovered_case_ids=render_uncovered_ids(request.uncovered_case_ids),
         language_directive=LANGUAGE_DIRECTIVES[request.locale],
     )
     return body, system.version

@@ -130,6 +130,31 @@ def render_test_case_list(entries: list[TestCaseListItem]) -> str:
     return "\n".join(lines)
 
 
+NO_UNCOVERED_NOTICE = (
+    "Every case in this project is already carried by some scenario. "
+    "Nothing is uncovered, so there is no gap to lead with."
+)
+
+
+def render_uncovered_ids(ids: list[int]) -> str:
+    """The ids no scenario has reached yet, as the block the system prompt carries.
+
+    Ids only — the bodies are in the list above this block, and repeating them here
+    would double the prompt to say nothing new. This block's job is to point.
+
+    Orchestration sorts these and this does not re-sort, for the same reason the
+    whole-list block does not: both sit in the cached prefix, and a sort key that
+    moves throws the cache away for a cosmetic win.
+    """
+    if not ids:
+        return NO_UNCOVERED_NOTICE
+    return (
+        f"{len(ids)} cases have never been used by any scenario in this project. "
+        "When the request is open-ended, start here.\n"
+        + ", ".join(str(i) for i in ids)
+    )
+
+
 class TestCaseSearchState:
     """What the case-search tool has done so far in one turn.
 
