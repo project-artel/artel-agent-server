@@ -44,6 +44,52 @@ BARE = re.compile(r"^(?:i|j|k|n|id|num|index|damage|collision|other|bigSide|dist
 EMPTY = frozenset({"null", "0", "false", "true"})
 
 ISSUE = "precondition_rewritten_to_observable"
+UNCHECKABLE = "precondition_not_observable"
+
+
+def unreadable_atoms(condition: dict[str, Any] | None) -> list[str]:
+    """The premises left that nothing reading the running game can answer.
+
+    Called after the rewrite, so what remains is what no branch could restate: a
+    counter that lives on the stack, a call the reader must not make. A row
+    carrying one is not runnable as written — the tester has no way to establish
+    it and no way to confirm it was established.
+    """
+    return [
+        text
+        for leaf in _leaves(condition)
+        if (text := _leaf_text(leaf)) is not None and not _leaf_readable(leaf)
+    ]
+
+
+def qualify(condition: dict[str, Any] | None, frame: str) -> dict[str, Any] | None:
+    """Name each bare local for the method it lives in.
+
+    `i` is the dialogue loop's line index in one method and the typing
+    animation's character index in another, and both arrive spelled `i` with
+    `context: this`. Composed into one condition they read as one variable, and
+    `i < lineCount 그리고 i >= textLength` is a sentence about nothing.
+
+    Qualifying before composition keeps them apart. It does not make either
+    readable — see `unreadable_atoms` — but a premise nobody can check is a
+    smaller problem than a premise that was never in the code.
+    """
+    if not condition:
+        return condition
+    if condition.get("kind") in {"every", "either"}:
+        return {
+            **condition,
+            "parts": [qualify(part, frame) for part in condition.get("parts") or ()],
+        }
+    if condition.get("kind") != "test":
+        return condition
+    changed = dict(condition)
+    for side in ("left", "right"):
+        value = str(changed.get(side) or "")
+        if BARE.match(value):
+            changed[side] = f"{frame}.{value}"
+            changed.setdefault("localFrames", {})[side] = frame
+    return changed
 
 
 def readable(expression: Any) -> bool:
@@ -119,6 +165,12 @@ def _leaf_text(leaf: dict[str, Any]) -> str | None:
 
 
 def _leaf_readable(leaf: dict[str, Any]) -> bool:
+    # A qualified local reads as a field chain — `Story/<Tell>d__1.MoveNext.i`
+    # has the shape of one — so the mark `qualify` left is what says otherwise.
+    # Without it the naming that keeps two counters apart would also hide that
+    # neither can be read.
+    if leaf.get("localFrames"):
+        return False
     return readable(leaf.get("left")) and (
         readable(leaf.get("right")) or str(leaf.get("right") or "") in EMPTY or _literal(leaf.get("right"))
     )

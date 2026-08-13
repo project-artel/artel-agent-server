@@ -1281,17 +1281,26 @@ def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]
     expects. Where the guarded branch assigns one readable field from another,
     that assignment is the same fact in a form the reader publishes.
     """
+    # No early return when the table is empty. Restating a premise and judging
+    # whether one is answerable are separate questions, and a report where
+    # nothing could be restated is exactly where the judging matters.
     table = observable.proxies([path for path in graph.paths if not path.folded])
-    if not table:
-        return
     for contract in contracts:
         asserted = {item.target for item in contract.assertions if item.target}
         condition, swapped = observable.rewrite(contract.condition, table, asserted)
-        if not swapped:
-            continue
-        contract.condition = condition
-        if observable.ISSUE not in contract.issues:
-            contract.issues.append(observable.ISSUE)
+        if swapped:
+            contract.condition = condition
+            if observable.ISSUE not in contract.issues:
+                contract.issues.append(observable.ISSUE)
+        # What no branch could restate stays unreadable, and a row resting on it
+        # cannot be set up or confirmed. Said rather than dropped: the behaviour
+        # is real and someone may still write the premise another way.
+        if observable.unreadable_atoms(contract.condition):
+            if observable.UNCHECKABLE not in contract.issues:
+                contract.issues.append(observable.UNCHECKABLE)
+            contract.quality = _quality(
+                contract.trigger, contract.assertions, contract.issues
+            )
 
 
 def discover(graph: EvidenceGraph) -> DiscoveryResult:

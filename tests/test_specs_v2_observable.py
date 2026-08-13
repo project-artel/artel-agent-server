@@ -212,3 +212,71 @@ def test_discovery_rewrites_the_premise_and_records_that_it_did() -> None:
     for contract in rewritten:
         assert contract.condition["left"] == "ChatWindow.streamingCoroutine"
         assert observable.ISSUE in contract.issues
+
+
+def test_two_coroutines_spell_their_counter_the_same_and_must_not_be_joined() -> None:
+    """Both compile to a state machine whose entry point is `MoveNext`."""
+    lines = observable.qualify(
+        {"kind": "test", "left": "i", "operator": "<", "right": "Script.lineCount"},
+        "Story/<Tell>d__1.MoveNext",
+    )
+    letters = observable.qualify(
+        {"kind": "test", "left": "i", "operator": ">=", "right": "Chat.streamingText.Length"},
+        "Chat/<Type>d__2.MoveNext",
+    )
+
+    assert lines["left"] == "Story/<Tell>d__1.MoveNext.i"
+    assert letters["left"] == "Chat/<Type>d__2.MoveNext.i"
+    assert lines["left"] != letters["left"]
+
+
+def test_a_field_keeps_the_name_the_evidence_gave_it() -> None:
+    """Only bare names are qualified; a field already says where it lives."""
+    condition = {
+        "kind": "test",
+        "left": "MapMove.StagePosition",
+        "operator": "==",
+        "right": "1",
+    }
+
+    assert observable.qualify(condition, "MapMove.Start") == condition
+
+
+def test_what_no_branch_could_restate_is_named() -> None:
+    counter = observable.qualify(
+        {"kind": "test", "left": "i", "operator": "<", "right": "3"}, "Story.MoveNext"
+    )
+    assert observable.unreadable_atoms(counter) == ["Story.MoveNext.i < 3"]
+    assert (
+        observable.unreadable_atoms(
+            {"kind": "test", "left": "MapMove.StagePosition", "operator": "==", "right": "1"}
+        )
+        == []
+    )
+
+
+def test_a_row_resting_on_an_unanswerable_premise_is_not_ready() -> None:
+    report = _report()
+    # Nothing in this branch assigns a readable field from another, so the
+    # counter has no observable form and the premise stays unanswerable.
+    report["types"]["Demo.ChatWindow"][0]["effects"] = [
+        {
+            "kind": "ui-value",
+            "category": "observable",
+            "target": "ChatWindow.label.text",
+            "detail": 'String.Concat(_, " ")',
+            "source": "System.Boolean Demo.ChatWindow::MoveNext()",
+            "offset": 20,
+        }
+    ]
+    result = discover(graph_from_report(report, source="test"))
+
+    resting = [
+        contract
+        for contract in result.contracts
+        if observable.UNCHECKABLE in contract.issues
+    ]
+    assert resting, "the counter guard should still be unanswerable"
+    for contract in resting:
+        assert observable.UNCHECKABLE in contract.issues
+        assert contract.quality != "ready"
