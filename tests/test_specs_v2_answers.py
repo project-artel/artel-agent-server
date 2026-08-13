@@ -109,3 +109,30 @@ def test_a_field_the_evidence_never_nulls_keeps_its_zero() -> None:
 
     assert resolved["right"] == "0"
     assert "nullComparison" not in resolved
+
+
+def test_a_record_that_undoes_its_own_guard_is_a_transition() -> None:
+    """가드와 효과가 동시에 참인 순간이 없으면 그것은 상태가 아니다."""
+    from app.specs_v2.answers import negates_own_guard
+
+    # 참조의 `!= 0` 이 `!= null` 로 고쳐진 뒤에 이 검사가 돈다. 파이프라인의
+    # 순서가 그렇고, 여기서도 같은 모양을 준다.
+    running = {"kind": "test", "left": "Chat.handle", "operator": "!=", "right": "null"}
+    stops_it = [
+        {"kind": "write", "target": "Chat.handle", "detail": "null"},
+        {"kind": "ui-value", "target": "Chat.label.text", "detail": "Chat.full, true"},
+    ]
+    assert negates_own_guard(running, stops_it)
+
+    # 가드를 건드리지 않는 효과는 전이가 아니라 그 상태에서 보이는 것이다.
+    leaves_it = [{"kind": "ui-value", "target": "Chat.label.text", "detail": "Chat.full"}]
+    assert not negates_own_guard(running, leaves_it)
+
+
+def test_the_same_check_the_other_way_round() -> None:
+    from app.specs_v2.answers import negates_own_guard
+
+    idle = {"kind": "test", "left": "Chat.handle", "operator": "==", "right": "null"}
+    starts_it = [{"kind": "write", "target": "Chat.handle", "detail": "Chat.started"}]
+
+    assert negates_own_guard(idle, starts_it)

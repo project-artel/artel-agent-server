@@ -206,6 +206,39 @@ class Answers:
         return walk(condition), sorted(set(notes))
 
 
+def negates_own_guard(condition: dict[str, Any] | None, effects: Any) -> bool:
+    """효과가 자기 가드를 거짓으로 만드는가.
+
+    `CompleteStream` 은 `streamingCoroutine != null` 일 때 돌고, 도는 동안 그것을
+    `null` 로 만든다. 그러면 가드와 효과가 **동시에 참인 순간이 없다** — 하나는
+    이전이고 하나는 이후다.
+
+    그런 레코드는 상태가 아니라 **전이**다. "이 상태로 진입해 관찰하면 저것이
+    보인다" 로 쓰면 어느 순간에도 참이 아닌 문장이 되고, 실제로 스트리밍 중에
+    판독하면 본문은 아직 부분이다.
+    """
+    if not condition:
+        return False
+    written = {
+        str(effect.get("target") or "").strip(): observable.value_of(effect.get("detail"))
+        for effect in effects
+    }
+    for leaf in observable._leaves(condition):
+        if leaf.get("kind") != "test":
+            continue
+        left = str(leaf.get("left") or "").strip()
+        if left not in written:
+            continue
+        right = str(leaf.get("right") or "").strip()
+        after = written[left]
+        operator = str(leaf.get("operator") or "")
+        if operator == "!=" and after == right:
+            return True
+        if operator == "==" and after and after != right:
+            return True
+    return False
+
+
 def _equality(effect: dict[str, Any]) -> tuple[str, str] | None:
     """The equality an assignment leaves behind, when both sides are readable.
 

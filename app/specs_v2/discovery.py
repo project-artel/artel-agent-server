@@ -503,6 +503,44 @@ def _active_scene_verdict(condition: dict[str, Any], scene: str | None) -> bool 
     return False if values and all(value is False for value in values) else None
 
 
+# 가드와 효과가 동시에 참인 순간이 없는 레코드. 상태가 아니라 전이이므로, 상태로
+# 읽는 트리거(진입해 관찰)와 짝지으면 어느 순간에도 참이 아닌 행이 된다.
+MISTIMED = "trigger_reads_a_transition_as_a_state"
+
+
+def _contradictory(condition: dict[str, Any]) -> bool:
+    """한 조건 안에 서로 반대인 항이 함께 있는가.
+
+    코루틴의 루프 조건과 탈출 조건이 한 경로에 합성되면
+    `i < 총개수 그리고 i >= 총개수` 가 된다. 둘 다 참인 순간은 없으므로 그 행은
+    일어나지 않는다. 읽는 사람이 만들 수 없는 전제를 주는 것보다 안 내는 것이 낫다.
+
+    `every` 안에서만 본다. `either` 는 서로 반대인 갈래를 담는 것이 정상이다.
+    """
+    if condition.get("kind") != "every":
+        return any(
+            _contradictory(part)
+            for part in condition.get("parts") or ()
+            if isinstance(part, dict)
+        )
+    seen: set[tuple[str, str, str]] = set()
+    for part in condition.get("parts") or ():
+        if not isinstance(part, dict):
+            continue
+        if _contradictory(part):
+            return True
+        if part.get("kind") != "test":
+            continue
+        left, operator, right = (
+            str(part.get("left")),
+            str(part.get("operator")),
+            str(part.get("right")),
+        )
+        if (left, FLIP.get(operator, operator), right) in seen:
+            return True
+        seen.add((left, operator, right))
+    return False
+
 def _quality(trigger: Trigger, assertions: list[Assertion], issues: list[str]) -> Quality:
     issues = [issue for issue in issues if issue not in DERIVATION_NOTES]
     if any(issue.startswith("observation_unsupported") for issue in issues):
@@ -1315,6 +1353,28 @@ def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]
             for note in notes:
                 if note not in contract.issues:
                     contract.issues.append(note)
+        # 가드를 스스로 뒤집는 레코드를 상태로 읽고 있으면 그 행은 트리거가 틀렸다.
+        if contract.trigger.kind in {"scene_entry", "continuous", "control_check"}:
+            # `SourceRef.record_id` 는 경로 id 를 담는다. 이름과 내용이 어긋난
+            # 자리라 둘 다로 찾는다.
+            wanted = {ref.record_id for ref in contract.source_refs}
+            source = next(
+                (
+                    path
+                    for path in graph.paths
+                    if path.id in wanted or path.record_id in wanted
+                ),
+                None,
+            )
+            if source is not None and answers.negates_own_guard(
+                contract.condition, source.effects
+            ):
+                if MISTIMED not in contract.issues:
+                    contract.issues.append(MISTIMED)
+                contract.quality = _quality(
+                    contract.trigger, contract.assertions, contract.issues
+                )
+
         # What no branch could restate stays unreadable, and a row resting on it
         # cannot be set up or confirmed. Said rather than dropped: the behaviour
         # is real and someone may still write the premise another way.
