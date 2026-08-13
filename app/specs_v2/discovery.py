@@ -410,11 +410,42 @@ def _resolve_value(
         return detail, "exact", []
     resolved, resolution, proof = _resolve_code_target(graph, path, str(detail), scene)
     if resolution in {"exact", "derived"}:
-        return resolved, resolution, proof
+        return _whole_value(str(detail), resolved, resolution, proof)
     if LITERAL.match(str(detail)):
         return detail, "exact", []
     # Keep the SDK expression verbatim, but do not pretend it is a concrete oracle.
     return detail, "ambiguous" if any(ch in str(detail) for ch in "().,") else "derived", []
+
+
+def _whole_value(
+    raw: str, resolved: Any, resolution: str, proof: list[ProofEdge]
+) -> tuple[Any, str, list[ProofEdge]]:
+    """해석된 앞부분에 남은 뒷부분을 되붙인다.
+
+    `target_parts` 는 `Owner.field` 까지만 보고 나머지를 버린다. **대상**을 찾을
+    때는 그것이 옳다 — 어느 오브젝트인지만 알면 되고, 덜 주장하는 쪽이 안전하다.
+
+    **값**은 다르다. `streamingText.Substring(0, i)` 에서 뒤를 버리면 남는 것은
+    `streamingText` 이고, 그러면 부분 문자열이 전문으로 둔갑한다. 한 글자씩 찍히는
+    중간 상태를 "본문이 다 나왔다" 로 읽게 되어, 스트리밍 중에 확인하면 반드시
+    실패하는 기대가 된다. 덜 주장한 것이 아니라 다른 것을 주장한 것이다.
+
+    되붙이되, 등급은 남은 조각이 무엇이냐로 정한다. `.transform.position` 처럼 필드가
+    더 이어지는 것은 판독기가 그대로 읽어 주므로 여전히 확인할 수 있는 값이다. 호출이나
+    색인이 붙으면 그렇지 않다 — 사람이 무엇과 비교해야 하는지 알아야 한다.
+    """
+    parsed = target_parts(raw)
+    if not parsed or resolved is None:
+        return resolved, resolution, proof
+    prefix = f"{parsed[0]}.{parsed[1]}"
+    if not raw.startswith(prefix) or raw == prefix:
+        return resolved, resolution, proof
+    rest = raw[len(prefix) :]
+    return (
+        f"{resolved}{rest}",
+        "ambiguous" if any(ch in rest for ch in "([") else resolution,
+        proof,
+    )
 
 
 def _operation(kind: str, value: Any) -> str:
