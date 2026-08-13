@@ -1,6 +1,6 @@
 """The tools the scenario authoring agent drives its search with.
 
-One tool: `search_test_cases`. It mirrors the QA agent's `search_knowledge`
+Two tools, handed over on different conditions. `search_test_cases` It mirrors the QA agent's `search_knowledge`
 wrapper (`app/agents/qa/tools.py`) — a per-turn budget, and the three search
 outcomes formatted for the model to act on — over the scenario session's own
 channel rather than the QA envelope.
@@ -12,6 +12,14 @@ over only when the test case list is empty — an orchestration that does not se
 a non-member session — which is also the rollback path if the test case list is turned
 off upstream. Neither this wrapper nor the embedding search behind it is dead
 code; it is the branch that carries those sessions.
+
+`list_uncovered_cases` is handed over always, and it is not a search. It answers
+which cases no scenario has reached yet — a fact about the project's state, not
+about the cases themselves, so holding the whole case list does not answer it.
+It is fetched rather than pushed because the answer shrinks as authoring covers
+cases: a value sent at session open is wrong by the second turn, and re-sending it
+every turn either bloats the turn message or, in the system prompt, throws the
+cached case list away. A tool call pays only when someone asks.
 """
 
 from __future__ import annotations
@@ -21,6 +29,7 @@ from typing import TYPE_CHECKING
 from langchain_core.tools import BaseTool, tool
 
 from app.agents.scenario.cases import (
+    LIST_UNCOVERED_DESCRIPTION,
     MAX_SEARCHES_PER_RUN,
     RESULT_LIMIT,
     SEARCH_TEST_CASES_DESCRIPTION,
@@ -40,18 +49,41 @@ def build_tools(
     *,
     has_test_case_list: bool = False,
 ) -> list[BaseTool]:
-    """The turn's tools. Empty when the agent already holds the test case list.
+    """The turn's tools.
 
-    Taking the tool away rather than telling the prompt not to use it is
-    deliberate: a tool in reach gets called, and every call it makes here would
-    spend a turn re-finding cases already in its context.
+    `search_test_cases` is withheld when the agent already holds the test case list.
+    Taking it away rather than telling the prompt not to use it is deliberate: a tool
+    in reach gets called, and every call it makes there would spend a turn re-finding
+    cases already in its context.
+
+    `list_uncovered_cases` is always present. It answers a question the list cannot —
+    what has been covered so far — and that answer changes while the session runs.
     """
-    if has_test_case_list:
-        return []
-
     # Imported here, not at module load, to keep the agent layer free of an
     # app.sessions import at import time (that would cycle through the service).
     from app.sessions.channel import TestCaseSearchFailed
+
+    @tool(description=LIST_UNCOVERED_DESCRIPTION)
+    async def list_uncovered_cases() -> str:
+        # What the agent reads is LIST_UNCOVERED_DESCRIPTION, not this.
+        answer = await channel.fetch_uncovered()
+        if answer is None:
+            return (
+                "Coverage could not be read just now. Say so rather than guessing a "
+                "number — a made-up count is worse than no count."
+            )
+        if not answer.ids:
+            return "Every case in this project is already carried by some scenario."
+        by_scene = ", ".join(f"{s.scene} {s.count}" for s in answer.scenes)
+        return (
+            f"{len(answer.ids)} cases are not carried by any scenario yet "
+            f"({by_scene}). Ids: {', '.join(str(i) for i in answer.ids)}. "
+            "Their wording is in the case list you already hold — quote it rather "
+            "than describing the ids."
+        )
+
+    if has_test_case_list:
+        return [list_uncovered_cases]
 
     @tool(description=SEARCH_TEST_CASES_DESCRIPTION.format(limit=MAX_SEARCHES_PER_RUN))
     async def search_test_cases(query: str, category: str | None = None) -> str:
@@ -83,4 +115,4 @@ def build_tools(
             )
         return render_results(answer, remaining)
 
-    return [search_test_cases]
+    return [list_uncovered_cases, search_test_cases]
