@@ -38,6 +38,9 @@ class Trigger:
     target_label: str | None = None
     target_sprite: str | None = None
     input_kind: str | None = None
+    # 이 조작을 한 번이 아니라 **반복해야** 그 자리에 닿는다는 표시. 읽을 수 없지만
+    # 도달할 수는 있는 전제를 사전 조건에서 스텝으로 옮긴 자리다.
+    repeat_until_done: bool = False
 
     @property
     def identity(self) -> tuple[str, str | None, str | None, str | None]:

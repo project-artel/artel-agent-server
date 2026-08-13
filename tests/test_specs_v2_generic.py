@@ -220,9 +220,9 @@ def test_a_value_that_lives_on_the_stack_is_not_a_premise() -> None:
         },
         "Any/<Walk>d__1.MoveNext",
     )
-    trimmed, dropped, narrowing = observable.drop_locals(premise)
+    trimmed, dropped, narrowing, exhaustible = observable.drop_locals(premise)
 
-    assert dropped and not narrowing
+    assert dropped and not narrowing and not exhaustible
     # 나머지 항은 그대로 남는다.
     assert trimmed["left"] == "Some.flag"
 
@@ -239,9 +239,9 @@ def test_a_local_the_call_site_answered_is_not_dropped() -> None:
     answered = {**answered, "left": "Holder.value"}
     answered.pop("localFrames")
 
-    trimmed, dropped, narrowing = observable.drop_locals(answered)
+    trimmed, dropped, narrowing, exhaustible = observable.drop_locals(answered)
 
-    assert not dropped and not narrowing
+    assert not (dropped or narrowing or exhaustible)
     assert trimmed["left"] == "Holder.value"
 
 
@@ -271,5 +271,14 @@ def test_a_counter_read_both_ways_is_a_fork_not_bookkeeping() -> None:
     selectors = observable.branch_selectors([going_on, done, housekeeping])
 
     assert selectors == {("Any/<Walk>d__1.MoveNext.i", "Some.total")}
-    assert observable.drop_locals(done, selectors)[1:] == (True, True)
-    assert observable.drop_locals(housekeeping, selectors)[1:] == (True, False)
+    # 갈림길이되 반복하면 닿는지는 아직 모른다. 루프가 어느 쪽으로 도는지 봐야 안다.
+    assert observable.drop_locals(done, selectors)[1:] == (True, True, False)
+    assert observable.drop_locals(housekeeping, selectors)[1:] == (True, False, False)
+
+    # 되돌아가는 구간의 가드가 `i < 총개수` 이므로 루프를 다 돈 자리는 `i >= 총개수` 다.
+    # 그 자리는 값을 읽을 수 없어도 조작을 반복하면 반드시 닿는다.
+    exits = observable.loop_exits([going_on])
+
+    assert observable.drop_locals(done, selectors, exits)[1:] == (True, False, True)
+    # 계속되는 쪽은 그 구간 안에 있기만 하면 참이다. 따로 만들 것이 없으니 결함도 아니다.
+    assert observable.drop_locals(going_on, selectors, exits)[1:] == (True, False, False)

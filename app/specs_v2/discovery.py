@@ -1483,6 +1483,11 @@ def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]
     # 가지를 가르는 항은 리포트 전체를 보고 정한다. 한 계약만 보면 `i < 총개수` 가
     # 살림인지 갈림길인지 알 수 없다 — 반대편 가지는 다른 계약에 있다.
     selectors = observable.branch_selectors(path.condition for path in graph.paths)
+    # 되돌아가는 구간의 가드가 루프가 계속되는 조건이고, 그것을 뒤집은 자리가 다 돈
+    # 조건이다. 다 돈 자리는 값을 읽을 수 없어도 조작을 반복하면 반드시 닿는다.
+    exits = observable.loop_exits(
+        path.condition for path in graph.paths if path.loops_back_to is not None
+    )
     for contract in contracts:
         asserted = {item.target for item in contract.assertions if item.target}
         # 언제나 다시 담는다. `notes` 는 **유도**가 있었는지만 말하고, 같은 것을
@@ -1517,11 +1522,16 @@ def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]
                 )
 
         # 스택에 사는 값은 전제가 아니다.
-        trimmed, dropped, narrowing = observable.drop_locals(
-            contract.condition, selectors
+        trimmed, dropped, narrowing, exhaustible = observable.drop_locals(
+            contract.condition, selectors, exits
         )
         if dropped:
             contract.condition = trimmed
+            # 반복하면 닿는 자리는 결함이 아니다. 사전 조건에서 뺀 것을 스텝으로 옮긴다 —
+            # 사람은 `i` 를 읽을 수 없지만 끝까지 눌러 그 자리를 만들 수는 있다.
+            if exhaustible and contract.trigger.kind == "input":
+                contract.trigger = replace(contract.trigger, repeat_until_done=True)
+                narrowing = False
             note = observable.BRANCH_LOCAL if narrowing else observable.STACK_LOCAL
             if note not in contract.issues:
                 contract.issues.append(note)

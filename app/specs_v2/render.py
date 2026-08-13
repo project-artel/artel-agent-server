@@ -193,6 +193,15 @@ def _call_path_entry_type(call_paths: list[tuple[str, ...]]) -> str | None:
     return " 또는 ".join(labels)
 
 
+def _how_often(trigger: Trigger) -> str:
+    """한 번인지 끝까지인지. 사전 조건에서 뺀 카운터가 여기로 온다.
+
+    `i >= 총개수` 는 읽을 수 없지만 만들 수는 있다 — 같은 조작을 반복하면 반드시 그
+    자리에 닿는다. 전제로 두면 세울 수 없는 조건이고, 스텝으로 옮기면 할 수 있는 일이다.
+    """
+    return "더 진행되지 않을 때까지 반복한다" if trigger.repeat_until_done else "한다"
+
+
 def trigger_text(trigger: Trigger, event_origin: str | None = None) -> str:
     if trigger.kind == "control":
         target = ui_target_text(trigger.target)
@@ -203,7 +212,7 @@ def trigger_text(trigger: Trigger, event_origin: str | None = None) -> str:
         target = ui_target_text(trigger.target)
         return f"{trigger.scene}에서 {target}의 표시 상태를 확인한다"
     if trigger.kind == "input":
-        return f"{trigger.scene}에서 {human_input_label(trigger.target or '', trigger.input_kind)} 입력을 한다"
+        return f"{trigger.scene}에서 {human_input_label(trigger.target or '', trigger.input_kind)} 입력을 {_how_often(trigger)}"
     if trigger.kind == "scene_entry":
         if trigger.event == "OnEnable":
             return f"{trigger.scene}에서 대상이 활성화될 때 관찰한다"
@@ -364,7 +373,7 @@ def test_step_text(
         )
         return f"{targets} 표시 상태를 확인한다"
     if trigger.kind == "input" and input_target is not None:
-        return f"{trigger.scene}에서 {human_input_label(input_target, trigger.input_kind)} 입력을 한다"
+        return f"{trigger.scene}에서 {human_input_label(input_target, trigger.input_kind)} 입력을 {_how_often(trigger)}"
     return trigger_text(trigger, event_origin)
 
 
