@@ -59,7 +59,6 @@ SENTINELS = {"(not a simple receiver)", "(not a simple target)", "(not a literal
 # 스택에 사는 값이었고, 빼고 나면 남은 전제가 곧 세울 수 있는 것 전부다.
 DERIVATION_NOTES = set(answers.NOTES) | {observable.STACK_LOCAL}
 
-
 CANDIDATE_ISSUES = {
     observable.PARTLY,
     "ambiguous_expected_value",
@@ -625,6 +624,7 @@ def _contradictory(condition: dict[str, Any]) -> bool:
             return True
         seen.add((left, operator, right))
     return False
+
 
 def _quality(trigger: Trigger, assertions: list[Assertion], issues: list[str]) -> Quality:
     issues = [issue for issue in issues if issue not in DERIVATION_NOTES]
@@ -1538,7 +1538,6 @@ def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]
             contract.quality = _quality(
                 contract.trigger, contract.assertions, contract.issues
             )
-
 
         # What no branch could restate stays unreadable, and a row resting on it
         # cannot be set up or confirmed. Said rather than dropped: the behaviour

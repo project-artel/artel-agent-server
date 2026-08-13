@@ -16,3 +16,6 @@ build/
 
 # Notion ntn CLI credentials
 .notion.env
+
+# macOS
+.DS_Store

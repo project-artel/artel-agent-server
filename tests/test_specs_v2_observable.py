@@ -419,6 +419,8 @@ def test_some_of_it_answerable_is_not_the_same_as_none_of_it() -> None:
     )
     assert observable.unreadable_atoms(none)
     assert observable.readable_atoms(none) == []
+
+
 def test_dropping_a_stack_local_does_not_lower_the_grade() -> None:
     """뺀 항은 결함이 아니라 **덜어낸 것**이다.
 
@@ -447,4 +449,3 @@ def test_dropping_a_stack_local_does_not_lower_the_grade() -> None:
     # 가지를 가르던 항을 뺀 것은 다르다. 행이 코드보다 넓은 말을 한다.
     assert _quality(trigger, [seen], [observable.BRANCH_LOCAL]) == "review"
     assert _quality(trigger, [seen], [observable.UNCHECKABLE]) == "review"
-
