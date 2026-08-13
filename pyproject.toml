@@ -32,6 +32,12 @@ dev = [
 
 # Prompt bodies are data, not code, so the wheel drops them unless they are
 # named here. Without them the app refuses to start (validate_prompts).
+# 배포되는 것은 애플리케이션뿐이다. 명시하지 않으면 setuptools 가 최상위를
+# 훑어 `output/` 같은 산출물 디렉터리를 패키지 후보로 세고, 둘 이상이면
+# flat-layout 이라며 빌드를 거부한다 — 로컬에 산출물이 있는 사람만 깨진다.
+[tool.setuptools]
+packages = ["app"]
+
 [tool.setuptools.package-data]
 "app.prompts" = ["**/*.md"]
 

@@ -1,6 +1,7 @@
 """Premises a tester cannot check, restated as what the running game reports."""
 
 from app.specs_v2 import observable
+from app.specs_v2.answers import Answers, NOTES, RESTATED, SUBSTITUTED
 from app.specs_v2.discovery import discover
 from app.specs_v2.graph import graph_from_report
 from app.specs_v2.model import Assertion, SourceRef
@@ -22,13 +23,16 @@ def test_the_same_object_written_two_ways_is_one_subject() -> None:
     assert observable.subject("Player.hp") == "hp"
 
 
-def _path(condition: dict, effects: list[dict]):
+def _path(condition: dict, effects: list[dict], calls: list[dict] | None = None):
     class Path:
         pass
 
     item = Path()
     item.condition = condition
     item.effects = effects
+    item.calls = calls or []
+    item.call_path = ("System.Void Demo::Owner()",)
+    item.source_signature = "System.Void Demo::Owner()"
     return item
 
 
@@ -41,7 +45,7 @@ GUARD = {
 
 
 def test_an_assignment_under_an_unreadable_guard_becomes_that_guard_observable_form() -> None:
-    table = observable.proxies(
+    table = Answers.of(
         [
             _path(
                 GUARD,
@@ -59,7 +63,7 @@ def test_an_assignment_under_an_unreadable_guard_becomes_that_guard_observable_f
                 ],
             )
         ]
-    )
+    ).left_behind
 
     text = "i >= ChatWindow.streamingText.Length"
     assert table[text] == [
@@ -70,7 +74,7 @@ def test_an_assignment_under_an_unreadable_guard_becomes_that_guard_observable_f
 
 def test_an_assignment_from_a_masked_parameter_proves_nothing() -> None:
     """`streamingText = String.Concat(_, " ")` says nothing anyone can check."""
-    table = observable.proxies(
+    table = Answers.of(
         [
             _path(
                 GUARD,
@@ -83,7 +87,7 @@ def test_an_assignment_from_a_masked_parameter_proves_nothing() -> None:
                 ],
             )
         ]
-    )
+    ).left_behind
 
     assert table == {}
 
@@ -95,7 +99,7 @@ def test_a_readable_guard_is_left_alone() -> None:
         "operator": "==",
         "right": "1",
     }
-    rewritten, swapped = observable.rewrite(condition, {"whatever": []}, set())
+    rewritten, swapped = Answers(left_behind={"whatever": []}).resolve(condition, set())
 
     assert rewritten == condition
     assert swapped == []
@@ -103,12 +107,12 @@ def test_a_readable_guard_is_left_alone() -> None:
 
 def test_the_proxy_replaces_the_leaf_and_says_what_it_replaced() -> None:
     table = {"i >= ChatWindow.streamingText.Length": [("ChatWindow.streamingCoroutine", "null")]}
-    rewritten, swapped = observable.rewrite({**GUARD}, table, set())
+    rewritten, swapped = Answers(left_behind=table).resolve({**GUARD}, set())
 
     assert rewritten["left"] == "ChatWindow.streamingCoroutine"
     assert rewritten["right"] == "null"
     assert rewritten["observableProxyFor"] == "i >= ChatWindow.streamingText.Length"
-    assert swapped == ["i >= ChatWindow.streamingText.Length"]
+    assert swapped == [RESTATED]
 
 
 def test_a_proxy_that_restates_the_expectation_is_refused() -> None:
@@ -118,7 +122,7 @@ def test_a_proxy_that_restates_the_expectation_is_refused() -> None:
             ("ChatWindow.label.text", "ChatWindow.streamingText"),
         ]
     }
-    rewritten, swapped = observable.rewrite({**GUARD}, table, {"Canvas/ChatWindow.label"})
+    rewritten, swapped = Answers(left_behind=table).resolve({**GUARD}, {"Canvas/ChatWindow.label"})
 
     assert swapped == []
     assert rewritten["left"] == "i"
@@ -133,9 +137,9 @@ def test_nested_conditions_are_walked() -> None:
             {"kind": "test", "left": "MapMove.StagePosition", "operator": "==", "right": "1"},
         ],
     }
-    rewritten, swapped = observable.rewrite(condition, table, set())
+    rewritten, swapped = Answers(left_behind=table).resolve(condition, set())
 
-    assert len(swapped) == 1
+    assert swapped == [RESTATED]
     assert rewritten["parts"][0]["left"] == "ChatWindow.streamingCoroutine"
     assert rewritten["parts"][1]["left"] == "MapMove.StagePosition"
 
@@ -212,7 +216,7 @@ def test_discovery_rewrites_the_premise_and_records_that_it_did() -> None:
     assert rewritten, "the counter guard should have been restated"
     for contract in rewritten:
         assert contract.condition["left"] == "ChatWindow.streamingCoroutine"
-        assert observable.ISSUE in contract.issues
+        assert RESTATED in contract.issues
 
 
 def test_two_coroutines_spell_their_counter_the_same_and_must_not_be_joined() -> None:
@@ -290,6 +294,9 @@ def _wrote(source: str, effects: list[dict]):
     item = Path()
     item.source_signature = source
     item.effects = effects
+    item.calls = []
+    item.call_path = (source,)
+    item.condition = {"kind": "always"}
     return item
 
 
@@ -298,7 +305,7 @@ LOAD = "System.Int32 Core.SaveLoadController::LoadPlayData()"
 
 def test_a_call_is_answered_by_the_one_field_it_writes() -> None:
     """It saves on the way out, so nothing may call it — but the field holds it."""
-    written = observable.written_fields(
+    written = Answers.of(
         [
             _wrote(
                 LOAD,
@@ -311,13 +318,13 @@ def test_a_call_is_answered_by_the_one_field_it_writes() -> None:
                 ],
             )
         ]
-    )
+    ).wrote
 
     assert written == {"LoadPlayData": "MapMove.StagePosition"}
 
 
 def test_two_writes_leave_the_question_of_which_one_answers_unanswered() -> None:
-    written = observable.written_fields(
+    written = Answers.of(
         [
             _wrote(
                 LOAD,
@@ -327,7 +334,7 @@ def test_two_writes_leave_the_question_of_which_one_answers_unanswered() -> None
                 ],
             )
         ]
-    )
+    ).wrote
 
     assert written == {}
 
@@ -339,13 +346,13 @@ def test_the_premise_is_said_through_the_field_and_keeps_the_call_it_replaced() 
         "operator": "==",
         "right": "-1",
     }
-    rewritten, swapped = observable.substitute_calls(
-        condition, {"LoadPlayData": "MapMove.StagePosition"}
+    rewritten, swapped = Answers(wrote={"LoadPlayData": "MapMove.StagePosition"}).resolve(
+        condition, set()
     )
 
     assert rewritten["left"] == "MapMove.StagePosition"
     assert rewritten["substitutedCalls"]["left"].endswith("LoadPlayData()")
-    assert swapped == ["TitleSceneManager.saveLoadController.LoadPlayData()"]
+    assert swapped == [SUBSTITUTED]
 
 
 def test_a_call_taking_arguments_is_not_substituted() -> None:
@@ -356,8 +363,8 @@ def test_a_call_taking_arguments_is_not_substituted() -> None:
         "operator": "==",
         "right": "0",
     }
-    rewritten, swapped = observable.substitute_calls(
-        condition, {"GetScriptData": "Story.current"}
+    rewritten, swapped = Answers(wrote={"GetScriptData": "Story.current"}).resolve(
+        condition, set()
     )
 
     assert swapped == []
@@ -374,6 +381,27 @@ def test_a_derivation_note_does_not_lower_the_grade() -> None:
         "scene", "PlayScene", "transition", "PlayScene", "observable", "exact", "scene",
         SourceRef("r", "e", "m", 0),
     )
-    assert observable.ISSUE in DERIVATION_NOTES
-    assert observable.SUBSTITUTED in DERIVATION_NOTES
+    assert NOTES <= DERIVATION_NOTES
     assert _quality(trigger, [assertion], list(DERIVATION_NOTES)) == "ready"
+
+
+def test_some_of_it_answerable_is_not_the_same_as_none_of_it() -> None:
+    """A field to start from, and the rest gauged from the screen."""
+    partly = {
+        "kind": "every",
+        "parts": [
+            observable.qualify(
+                {"kind": "test", "left": "i", "operator": "<", "right": "3"},
+                "Story.MoveNext",
+            ),
+            {"kind": "test", "left": "Chat.streamingCoroutine", "operator": "==", "right": "null"},
+        ],
+    }
+    assert observable.unreadable_atoms(partly)
+    assert observable.readable_atoms(partly) == ["Chat.streamingCoroutine == null"]
+
+    none = observable.qualify(
+        {"kind": "test", "left": "i", "operator": "<", "right": "3"}, "Story.MoveNext"
+    )
+    assert observable.unreadable_atoms(none)
+    assert observable.readable_atoms(none) == []
