@@ -709,7 +709,7 @@ def _condition_before_updates(
 def _coroutine_resume_contracts(
     graph: EvidenceGraph,
     contracts: list[Contract],
-) -> list[Contract]:
+) -> tuple[list[Contract], set[str]]:
     """Project WaitUntil-style delegate input onto resumed coroutine effects.
 
     The SDK keeps the input in a handed-over delegate and the observable effect
@@ -728,6 +728,7 @@ def _coroutine_resume_contracts(
         and len(path.call_path) >= 2
     ]
     resumed: list[Contract] = []
+    superseded: set[str] = set()
     for wait in waits:
         coroutine_signature = wait.call_path[-2]
         handoff = int(wait.handed_over_at)
@@ -887,6 +888,7 @@ def _coroutine_resume_contracts(
                     resumed_trigger.identity,
                     condition_signature(effective_condition),
                 )
+                superseded.add(contract.id)
                 resumed.append(
                     Contract(
                         contract_id,
@@ -907,7 +909,7 @@ def _coroutine_resume_contracts(
                     )
                 )
     unique: dict[str, Contract] = {contract.id: contract for contract in resumed}
-    return list(unique.values())
+    return list(unique.values()), superseded
 
 
 def _contracts(graph: EvidenceGraph, persisted_pins: dict[str, list[Pin]]) -> list[Contract]:
@@ -1295,7 +1297,9 @@ def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]
 def discover(graph: EvidenceGraph) -> DiscoveryResult:
     persisted_pins = _persisted_pins(graph)
     code_contracts = _contracts(graph, persisted_pins)
-    code_contracts.extend(_coroutine_resume_contracts(graph, code_contracts))
+    resumed, superseded = _coroutine_resume_contracts(graph, code_contracts)
+    code_contracts = [item for item in code_contracts if item.id not in superseded]
+    code_contracts.extend(resumed)
     contracts = _drop_unavailable_control_contracts(code_contracts)
     contracts.extend(_inventory_contracts(graph, code_contracts))
     _rewrite_unreadable_premises(graph, contracts)
