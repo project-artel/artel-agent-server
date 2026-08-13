@@ -49,6 +49,15 @@ CONTINUOUS_METHODS = {"Update", "FixedUpdate", "LateUpdate"}
 LITERAL = re.compile(r'^(?:-?\d+(?:\.\d+)?|true|false|null|".*")$', re.IGNORECASE)
 PREFS_READ = re.compile(r'PlayerPrefs\.Get\w+\(\s*"([^"]+)"')
 SENTINELS = {"(not a simple receiver)", "(not a simple target)", "(not a literal)", "_"}
+# Recorded so a reader can see the premise is not what the code says, but not a
+# defect: both mean the row became answerable, not that something is missing.
+# Left in `issues` and out of the grade, because those answer different
+# questions — what happened to this row, and whether it can be run.
+DERIVATION_NOTES = {
+    observable.ISSUE,
+    observable.SUBSTITUTED,
+}
+
 CANDIDATE_ISSUES = {
     "ambiguous_expected_value",
     "evidence_gap:callee-condition-not-composed",
@@ -496,6 +505,7 @@ def _active_scene_verdict(condition: dict[str, Any], scene: str | None) -> bool 
 
 
 def _quality(trigger: Trigger, assertions: list[Assertion], issues: list[str]) -> Quality:
+    issues = [issue for issue in issues if issue not in DERIVATION_NOTES]
     if any(issue.startswith("observation_unsupported") for issue in issues):
         return "unsupported"
     if trigger.scene is None or trigger.resolution in {"ambiguous", "unresolved"}:
@@ -1232,6 +1242,9 @@ def _scenarios(graph: EvidenceGraph, contracts: list[Contract]) -> list[Scenario
         if not connected:
             continue
         issues = sorted({issue for item in group for issue in item.issues})
+        # A derivation note is not a reason to distrust the scenario; the
+        # contracts it came from already took it into account.
+        defects = [issue for issue in issues if issue not in DERIVATION_NOTES]
         quality: Quality
         if any(item.quality == "unsupported" for item in group):
             quality = "unsupported"
@@ -1239,7 +1252,7 @@ def _scenarios(graph: EvidenceGraph, contracts: list[Contract]) -> list[Scenario
             quality = "review"
         elif any(item.quality == "candidate" for item in group):
             quality = "candidate"
-        elif all(item.quality == "ready" for item in group) and not issues:
+        elif all(item.quality == "ready" for item in group) and not defects:
             quality = "ready"
         else:
             quality = "review"
@@ -1286,9 +1299,18 @@ def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]
     # No early return when the table is empty. Restating a premise and judging
     # whether one is answerable are separate questions, and a report where
     # nothing could be restated is exactly where the judging matters.
-    table = observable.proxies([path for path in graph.paths if not path.folded])
+    live = [path for path in graph.paths if not path.folded]
+    table = observable.proxies(live)
+    written = observable.written_fields(live)
     for contract in contracts:
         asserted = {item.target for item in contract.assertions if item.target}
+        # A call first: the field it wrote is the same answer, and saying the
+        # premise that way leaves nothing for the branch-equality rule to do.
+        condition, replaced = observable.substitute_calls(contract.condition, written)
+        if replaced:
+            contract.condition = condition
+            if observable.SUBSTITUTED not in contract.issues:
+                contract.issues.append(observable.SUBSTITUTED)
         condition, swapped = observable.rewrite(contract.condition, table, asserted)
         if swapped:
             contract.condition = condition

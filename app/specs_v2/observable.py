@@ -45,6 +45,7 @@ EMPTY = frozenset({"null", "0", "false", "true"})
 
 ISSUE = "precondition_rewritten_to_observable"
 UNCHECKABLE = "precondition_not_observable"
+SUBSTITUTED = "precondition_read_from_written_field"
 
 
 def unreadable_atoms(condition: dict[str, Any] | None) -> list[str]:
@@ -132,6 +133,68 @@ def _equality(effect: dict[str, Any]) -> tuple[str, str] | None:
     if not (FIELD_CHAIN.match(value) or value in EMPTY):
         return None
     return target, value
+
+
+# `Owner.field.Method()` — a call with no arguments, at the end of a chain.
+# Arguments would make the answer depend on them, and the field a method writes
+# is only the same answer when the call is the same call.
+NILADIC = re.compile(r"^(?P<head>.*?)(?:^|\.)(?P<method>[A-Za-z_]\w*)\(\s*\)$")
+
+
+def written_fields(paths: Any) -> dict[str, str]:
+    """Method name → the one field it writes, when it writes exactly one.
+
+    `SaveLoadController.LoadPlayData()` returns the saved progress and writes the
+    same value into `MapMove.StagePosition` on the way out. Nothing may call it —
+    reading the game must not change it, and this one saves — but after it has
+    run, the field holds what it answered.
+
+    Only when there is exactly one write. Two and the question of which one
+    answers the call has no structural answer, and guessing it would put a
+    premise in the sheet that the evidence does not support.
+    """
+    writes: dict[str, list[str]] = {}
+    for path in paths:
+        method = str(path.source_signature or "").split("::")[-1].split("(")[0]
+        if not method:
+            continue
+        for effect in path.effects:
+            if effect.get("kind") not in {"write", "saved"}:
+                continue
+            target = str(effect.get("target") or "").strip()
+            if FIELD_CHAIN.match(target) and target not in writes.setdefault(method, []):
+                writes[method].append(target)
+    return {method: found[0] for method, found in writes.items() if len(found) == 1}
+
+
+def substitute_calls(
+    condition: dict[str, Any] | None, written: dict[str, str]
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Say a premise through the field its call left behind."""
+    swapped: list[str] = []
+
+    def walk(node: dict[str, Any]) -> dict[str, Any]:
+        if node.get("kind") in {"every", "either"}:
+            return {**node, "parts": [walk(part) for part in node.get("parts") or ()]}
+        if node.get("kind") != "test":
+            return node
+        changed = dict(node)
+        for side in ("left", "right"):
+            text = str(changed.get(side) or "").strip()
+            found = NILADIC.match(text)
+            if not found:
+                continue
+            field = written.get(found.group("method"))
+            if not field:
+                continue
+            swapped.append(text)
+            changed[side] = field
+            changed.setdefault("substitutedCalls", {})[side] = text
+        return changed
+
+    if not condition:
+        return condition, swapped
+    return walk(condition), swapped
 
 
 def proxies(paths: Any) -> dict[str, list[tuple[str, str]]]:

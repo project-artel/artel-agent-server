@@ -3,6 +3,7 @@
 from app.specs_v2 import observable
 from app.specs_v2.discovery import discover
 from app.specs_v2.graph import graph_from_report
+from app.specs_v2.model import Assertion, SourceRef
 
 
 def test_a_loop_counter_is_not_something_the_reader_can_be_asked_for() -> None:
@@ -280,3 +281,99 @@ def test_a_row_resting_on_an_unanswerable_premise_is_not_ready() -> None:
     for contract in resting:
         assert observable.UNCHECKABLE in contract.issues
         assert contract.quality != "ready"
+
+
+def _wrote(source: str, effects: list[dict]):
+    class Path:
+        pass
+
+    item = Path()
+    item.source_signature = source
+    item.effects = effects
+    return item
+
+
+LOAD = "System.Int32 Core.SaveLoadController::LoadPlayData()"
+
+
+def test_a_call_is_answered_by_the_one_field_it_writes() -> None:
+    """It saves on the way out, so nothing may call it — but the field holds it."""
+    written = observable.written_fields(
+        [
+            _wrote(
+                LOAD,
+                [
+                    {
+                        "kind": "write",
+                        "target": "MapMove.StagePosition",
+                        "detail": 'PlayerPrefs.GetInt("StagePosition", -1)',
+                    }
+                ],
+            )
+        ]
+    )
+
+    assert written == {"LoadPlayData": "MapMove.StagePosition"}
+
+
+def test_two_writes_leave_the_question_of_which_one_answers_unanswered() -> None:
+    written = observable.written_fields(
+        [
+            _wrote(
+                LOAD,
+                [
+                    {"kind": "write", "target": "MapMove.StagePosition", "detail": "1"},
+                    {"kind": "write", "target": "MapMove.other", "detail": "2"},
+                ],
+            )
+        ]
+    )
+
+    assert written == {}
+
+
+def test_the_premise_is_said_through_the_field_and_keeps_the_call_it_replaced() -> None:
+    condition = {
+        "kind": "test",
+        "left": "TitleSceneManager.saveLoadController.LoadPlayData()",
+        "operator": "==",
+        "right": "-1",
+    }
+    rewritten, swapped = observable.substitute_calls(
+        condition, {"LoadPlayData": "MapMove.StagePosition"}
+    )
+
+    assert rewritten["left"] == "MapMove.StagePosition"
+    assert rewritten["substitutedCalls"]["left"].endswith("LoadPlayData()")
+    assert swapped == ["TitleSceneManager.saveLoadController.LoadPlayData()"]
+
+
+def test_a_call_taking_arguments_is_not_substituted() -> None:
+    """The field is the same answer only when the call is the same call."""
+    condition = {
+        "kind": "test",
+        "left": "Container.GetScriptData(i)",
+        "operator": "==",
+        "right": "0",
+    }
+    rewritten, swapped = observable.substitute_calls(
+        condition, {"GetScriptData": "Story.current"}
+    )
+
+    assert swapped == []
+    assert rewritten["left"] == "Container.GetScriptData(i)"
+
+
+def test_a_derivation_note_does_not_lower_the_grade() -> None:
+    """Both notes mean the row became answerable, not that something is missing."""
+    from app.specs_v2.discovery import DERIVATION_NOTES, _quality
+    from app.specs_v2.model import Trigger
+
+    trigger = Trigger("control", "MenuScene", "Play 조작", "Canvas/Play", "m_OnClick", "exact")
+    assertion = Assertion(
+        "scene", "PlayScene", "transition", "PlayScene", "observable", "exact", "scene",
+        SourceRef("r", "e", "m", 0),
+    )
+    assert observable.ISSUE in DERIVATION_NOTES
+    assert observable.SUBSTITUTED in DERIVATION_NOTES
+    assert _quality(trigger, [assertion], list(DERIVATION_NOTES)) == "ready"
