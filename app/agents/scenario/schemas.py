@@ -53,11 +53,17 @@ class TestCaseListItem(BaseModel):
 
     Two confidence axes ride along, and they answer different questions.
     ``verification_status`` (DRAFT/VERIFIED/BROKEN) is what OUR run concluded —
-    whether the case has been seen to pass. ``status`` (``ready``/``candidate``) is
-    what the spec's author graded it — whether the text itself is settled. A
-    ``candidate`` case may carry an expected value nobody has pinned down yet, and
-    a step written from that reads plausible and fails on execution. Neither axis
-    substitutes for the other, so both are printed.
+    whether the case has been seen to pass. ``status`` is what the spec's author
+    graded it, on four levels the generator deliberately did not collapse
+    (ARTEL-327): ``ready`` (wording settled), ``candidate`` (not settled yet),
+    ``review`` (waiting on a person), ``unsupported`` (could not be grounded in the
+    build at all).
+
+    The last one is the reason the axis matters most. A ``candidate`` may carry an
+    expected value nobody has pinned down, and a step written from it reads
+    plausible and fails on execution; an ``unsupported`` case cannot run at all.
+    Neither axis substitutes for the other, so both are printed and the prompt
+    grades what to do with each.
 
     The bodies (``precondition``, ``expected_value``) travel with the entry rather
     than being fetched afterwards. The agent has to read them to write the steps that
