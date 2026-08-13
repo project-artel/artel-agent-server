@@ -378,6 +378,12 @@ def _resolve_value(
     # The API's own second argument is not part of the value. Left in, a masked
     # parameter reads as the value `_, true` and goes out as something to check.
     detail = observable.value_of(effect.get("detail")) if effect.get("detail") is not None else None
+    # 값이 매개변수라 못 읽힌 자리는 호출부가 답한다.
+    # `SetPromptVisible(true)` 를 부르는 경로에서는 그 효과의 값이 `true` 다.
+    if detail in answers.PARAMETER and graph.answers is not None:
+        passed = graph.answers.parameter_value(path)
+        if passed is not None:
+            detail = passed
     if kind == "scene":
         return effect.get("target"), "exact", []
     if kind in {"quit", "destroy"}:
@@ -544,6 +550,8 @@ def _active_scene_verdict(condition: dict[str, Any], scene: str | None) -> bool 
         return True
     return False if values and all(value is False for value in values) else None
 
+
+FLIP = {"==": "!=", "!=": "==", "<": ">=", ">=": "<", ">": "<=", "<=": ">"}
 
 # 가드와 효과가 동시에 참인 순간이 없는 레코드. 상태가 아니라 전이이므로, 상태로
 # 읽는 트리거(진입해 관찰)와 짝지으면 어느 순간에도 참이 아닌 행이 된다.
@@ -1434,17 +1442,20 @@ def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]
     # No early return when the table is empty. Restating a premise and judging
     # whether one is answerable are separate questions, and a report where
     # nothing could be restated is exactly where the judging matters.
-    known = Answers.of([path for path in graph.paths if not path.folded])
+    known = graph.answers or Answers.of(
+        [path for path in graph.paths if not path.folded]
+    )
     for contract in contracts:
         asserted = {item.target for item in contract.assertions if item.target}
-        condition, notes = known.resolve(
+        # 언제나 다시 담는다. `notes` 는 **유도**가 있었는지만 말하고, 같은 것을
+        # 바르게 읽는 고침(참조의 `!= 0` → `!= null`)은 유도가 아니라 남길 note 가
+        # 없다. note 가 있을 때만 담으면 그런 고침이 조용히 버려진다.
+        contract.condition, notes = known.resolve(
             contract.condition, asserted, tuple(contract.call_path)
         )
-        if notes:
-            contract.condition = condition
-            for note in notes:
-                if note not in contract.issues:
-                    contract.issues.append(note)
+        for note in notes:
+            if note not in contract.issues:
+                contract.issues.append(note)
         # 가드를 스스로 뒤집는 레코드를 상태로 읽고 있으면 그 행은 트리거가 틀렸다.
         if contract.trigger.kind in {"scene_entry", "continuous", "control_check"}:
             # `SourceRef.record_id` 는 경로 id 를 담는다. 이름과 내용이 어긋난
@@ -1488,6 +1499,7 @@ def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]
 
 
 def discover(graph: EvidenceGraph) -> DiscoveryResult:
+    graph.answers = Answers.of([path for path in graph.paths if not path.folded])
     persisted_pins = _persisted_pins(graph)
     code_contracts = _contracts(graph, persisted_pins)
     resumed, superseded = _coroutine_resume_contracts(graph, code_contracts)
@@ -1496,6 +1508,7 @@ def discover(graph: EvidenceGraph) -> DiscoveryResult:
     contracts = _drop_unavailable_control_contracts(code_contracts)
     contracts.extend(_inventory_contracts(graph, code_contracts))
     _rewrite_unreadable_premises(graph, contracts)
+    contracts = [item for item in contracts if not _contradictory(item.condition)]
     contracts.sort(key=lambda item: (item.scene or "", item.trigger.label, item.id))
     families = _branch_families(contracts)
     scenarios = _scenarios(graph, contracts)

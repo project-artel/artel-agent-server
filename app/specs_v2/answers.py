@@ -133,6 +133,19 @@ class Answers:
             references=references,
         )
 
+    def parameter_value(self, path: Any) -> str | None:
+        """이 경로로 왔을 때 매개변수가 받은 리터럴.
+
+        효과가 값을 `(not a literal)` 이라고 적어 두는 자리에 쓴다. 메서드 안에서는
+        리터럴이 아닌 것이 맞고, 그것을 그렇게 만든 호출부는 바로 앞 홉이다.
+        """
+        if len(path.call_path) < 2:
+            return None
+        answer = self.passed.get(
+            (method_of(path.call_path[-2]), method_of(path.source_signature))
+        )
+        return answer if answer and LITERAL_ARG.match(answer) else None
+
     def _binding(
         self, condition: dict[str, Any] | None, route: tuple[str, ...]
     ) -> tuple[str, str] | None:
@@ -158,18 +171,6 @@ class Answers:
             if side in (leaf.get("localFrames") or {})
         }
         return names.pop() if len(names) == 1 else None
-
-    def for_parameter(self, path: Any) -> str | None:
-        """The literal the route to this path passed, for a value it could not read.
-
-        The caller is the hop before this one on the path the SDK drew. Nothing
-        is guessed about which route ran — the route is the record.
-        """
-        if len(path.call_path) < 2:
-            return None
-        return self.passed.get(
-            (method_of(path.call_path[-2]), method_of(path.source_signature))
-        )
 
     def resolve(
         self,

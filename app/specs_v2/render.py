@@ -133,15 +133,18 @@ def _shown(node: dict[str, Any], side: str) -> str:
 
     프레임 이름(`Story/<Tell>d__1.MoveNext.i`)은 같은 이름의 두 지역 변수를
     가르려고 붙인 기계용 이름이다. 계약을 구별하는 데는 필요하지만 사람이 읽는
-    열에 나가면 무엇을 보라는 말인지 알 수 없는 글자가 된다. 이름은 되돌리고,
-    **읽을 수 없는 값이라는 사실**을 대신 말한다 — 그것이 이 항에 대해 사람이
-    알아야 하는 전부다.
+    열에 나가면 무엇을 보라는 말인지 알 수 없는 글자가 된다. 되돌려서 코드에 적힌
+    이름 그대로 보인다.
+
+    읽을 수 없다는 사실은 여기서 말하지 않는다. `review_reason` 이 이미
+    `precondition_not_observable` 로 말하고 있고, 항마다 덧붙이면 조건이 길어지기만
+    한다.
     """
     value = str(node.get(side) or "?")
     frame = (node.get("localFrames") or {}).get(side)
-    if not frame:
-        return value
-    return f"{value[len(frame) + 1:]}(내부 값)" if value.startswith(f"{frame}.") else value
+    if frame and value.startswith(f"{frame}."):
+        return value[len(frame) + 1 :]
+    return value
 
 
 def _condition_text(node: dict[str, Any]) -> str:

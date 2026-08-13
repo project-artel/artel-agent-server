@@ -136,6 +136,9 @@ class EvidenceGraph:
     refs_by_field: dict[tuple[str, str], list[RefFact]] = field(
         default_factory=lambda: defaultdict(list)
     )
+    # 근거가 스스로 답하는 것들. 경로가 다 모인 뒤에 한 번 만들어 여기 둔다 —
+    # 값을 푸는 자리마다 다시 훑으면 리포트 하나에 수백 번이다.
+    answers: Any = None
     object_visuals: dict[
         tuple[str | None, str], tuple[str | None, str | None]
     ] = field(default_factory=dict)

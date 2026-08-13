@@ -33,7 +33,7 @@ def test_a_frame_name_does_not_reach_the_sheet() -> None:
 
     said = condition_text(premise)
     assert "d__1" not in said
-    assert "i(내부 값) < 3" == said
+    assert said == "i < 3"
 
 
 def test_a_field_kept_its_name_in_the_sheet() -> None:

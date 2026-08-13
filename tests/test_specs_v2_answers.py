@@ -47,8 +47,8 @@ def test_a_method_called_both_ways_has_no_answer_and_each_route_has_one() -> Non
     assert known.passed[("MoveNext", "SetPromptVisible")] == "false"
 
     finished, started = _report_paths()[2], _report_paths()[3]
-    assert known.for_parameter(finished) == "true"
-    assert known.for_parameter(started) == "false"
+    assert known.parameter_value(finished) == "true"
+    assert known.parameter_value(started) == "false"
 
 
 def test_one_caller_passing_two_literals_is_left_unanswered() -> None:
@@ -136,3 +136,89 @@ def test_the_same_check_the_other_way_round() -> None:
     starts_it = [{"kind": "write", "target": "Chat.handle", "detail": "Chat.started"}]
 
     assert negates_own_guard(idle, starts_it)
+
+
+def test_the_call_site_literal_reaches_the_expected_result() -> None:
+    """모으기만 하고 안 쓰면 `값 미확정` 이 그대로 나간다."""
+    from app.specs_v2.discovery import discover
+    from app.specs_v2.graph import graph_from_report
+
+    shown = "System.Void Demo.Chat::SetPromptVisible(System.Boolean)"
+    done = "System.Void Demo.Chat::Finish()"
+    report = {
+        "schema": 6,
+        "capture": "editor",
+        "build": {"evidence": "fixture", "platform": "WindowsEditor"},
+        "scenes": ["ChatScene"],
+        "objects": [
+            {
+                "scene": "ChatScene",
+                "path": "Chat",
+                "selector": "ChatScene/Chat",
+                "active": True,
+                "components": [{"type": "Demo.Chat"}],
+            }
+        ],
+        "persistentObjects": [],
+        "types": {
+            "Demo.Chat": [
+                {
+                    "schema": 6,
+                    "entry": done,
+                    "entryId": "Assembly-CSharp|Demo.Chat|Finish|System.Void()",
+                    "source": done,
+                    "methodId": "Assembly-CSharp|Demo.Chat|Finish|System.Void()",
+                    "recordKind": "candidate",
+                    "triggerKind": "lifecycle",
+                    "confidence": "exact",
+                    "callPath": [done],
+                    "condition": {"kind": "always"},
+                    "inputs": [],
+                    "effects": [],
+                    "calls": [{"target": shown, "args": "true", "offset": 2}],
+                    "handles": [],
+                    "alsoReachedBy": [],
+                    "gaps": [],
+                },
+                {
+                    "schema": 6,
+                    "entry": done,
+                    "entryId": "Assembly-CSharp|Demo.Chat|Finish|System.Void()",
+                    "source": shown,
+                    "methodId": "Assembly-CSharp|Demo.Chat|SetPromptVisible|System.Void(System.Boolean)",
+                    "recordKind": "candidate",
+                    "triggerKind": "lifecycle",
+                    "confidence": "exact",
+                    "callPath": [done, shown],
+                    "condition": {"kind": "always"},
+                    "inputs": [],
+                    "effects": [
+                        {
+                            "kind": "active-state",
+                            "category": "availability",
+                            "target": "Chat.prompt",
+                            "detail": "(not a literal)",
+                            "source": shown,
+                            "offset": 22,
+                        }
+                    ],
+                    "calls": [],
+                    "handles": [],
+                    "alsoReachedBy": [],
+                    "gaps": [],
+                },
+            ]
+        },
+        "unplaced": {},
+        "gaps": [],
+    }
+
+    result = discover(graph_from_report(report, source="test"))
+    values = [
+        item.value
+        for contract in result.contracts
+        for item in contract.assertions
+        if item.target and "prompt" in item.target
+    ]
+    assert values, "표시 상태를 바꾸는 계약이 나와야 한다"
+    assert all(value is True for value in values)
