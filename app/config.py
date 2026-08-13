@@ -102,6 +102,14 @@ class Settings(BaseSettings):
     game_context_prompt_version: str | None = None
     knowledge_query_prompt_version: str | None = None
 
+    # Stamped onto every `test-case.v1` record. Spec discovery is deterministic
+    # today — no prompt is loaded and no model is called — so both are `None`
+    # unless an operator sets them. They are configuration rather than constants
+    # because a stored test case has to say what produced it, and the day a
+    # wording pass is added the records already have somewhere to say so.
+    spec_prompt_version: str | None = None
+    spec_model: str | None = None
+
     # Embeddings. The slug is configuration rather than a constant because
     # swapping the model must not be a code change — but it is not a free swap
     # either: embedding_dimensions is pinned into Orchestration's vector(N)
