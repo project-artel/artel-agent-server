@@ -28,6 +28,7 @@ class SessionRecord(BaseModel):
     # the record rather than re-fetched per turn so the prompt's cached prefix
     # stays byte-identical for the life of the session.
     test_case_list: list[TestCaseListItem] = Field(default_factory=list)
+    uncovered_case_ids: list[int] = Field(default_factory=list)
     # Full conversation turns; windowed for prompt reconstruction by the service.
     history: list[HistoryTurn] = Field(default_factory=list)
     # First user input, consumed when the WS connects to run the first turn.

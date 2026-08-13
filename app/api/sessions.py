@@ -30,6 +30,7 @@ class OpenSessionRequest(BaseModel):
     # above. Optional so an Orchestration that does not send one keeps working —
     # those sessions fall back to `search_test_cases`.
     test_case_list: list[TestCaseListItem] = Field(default_factory=list)
+    uncovered_case_ids: list[int] = Field(default_factory=list)
     user_input: str
     model: LLMModel = DEFAULT_MODEL
     # Applies to the whole session, including the first turn (run from the stored
@@ -74,11 +75,17 @@ def _service(app) -> SessionService:
 
 
 def _result_event(result: ScenarioAgentResult) -> dict:
-    return {
+    event = {
         "type": "result",
         "message": result.message,
         "scenarios": [scenario.model_dump() for scenario in result.scenarios],
     }
+    # Omitted entirely when there was nothing to judge against. Orchestration reads
+    # an absent `reviewed` as "skip the check", so leaving the key out is the
+    # rollback path — not an empty object, which would read as "reviewed nothing".
+    if result.reviewed is not None:
+        event["reviewed"] = result.reviewed.model_dump(by_alias=True)
+    return event
 
 
 def _error_event(code: str, detail: str) -> dict:
@@ -94,6 +101,7 @@ async def open_session(
         unity_context=payload.unity_context,
         game_context=payload.game_context,
         test_case_list=payload.test_case_list,
+        uncovered_case_ids=payload.uncovered_case_ids,
         user_input=payload.user_input,
         model=payload.model,
         locale=payload.locale,

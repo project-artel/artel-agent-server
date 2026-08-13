@@ -13,8 +13,18 @@ from app.agents import (
     ScenarioGenerationError,
     ScenarioPlan,
 )
-from app.agents.scenario.cases import NO_TEST_CASE_LIST_NOTICE, render_test_case_list
-from app.agents.scenario.schemas import AuthoredStep, TestCaseListItem
+from app.agents.scenario.cases import (
+    NO_TEST_CASE_LIST_NOTICE,
+    NO_UNCOVERED_NOTICE,
+    render_test_case_list,
+    render_uncovered_ids,
+)
+from app.agents.scenario.schemas import (
+    AuthoredStep,
+    ReviewedCases,
+    ScenarioAgentResult,
+    TestCaseListItem,
+)
 from app.agents.scenario.prompt import (
     LANGUAGE_DIRECTIVES,
     build_first_message,
@@ -250,8 +260,8 @@ def test_system_prompt_uses_requested_language_directive() -> None:
     assert LANGUAGE_DIRECTIVES[OutputLanguage.en] in en_body
     assert "한국어" in ko_body
     assert "English" in en_body
-    # v4 is the newest scenario prompt version and the default.
-    assert version == "v4"
+    # v5 is the newest scenario prompt version and the default.
+    assert version == "v5"
 
 
 def test_first_message_carries_the_run_goal_and_context() -> None:
@@ -378,3 +388,49 @@ def test_system_prompt_with_the_list_is_byte_identical_across_turns() -> None:
     assert first == second
     # And a placeholder left unsubstituted would silently ship "{test_case_list}".
     assert "{" not in first
+
+
+# --- 전 건 판정 (ARTEL-404) ---------------------------------------------------
+
+
+def test_reviewed_uses_in_and_out_on_the_wire() -> None:
+    """와이어 키는 `in`/`out`이다.
+
+    `in`이 파이썬 예약어라 필드명은 `included`/`excluded`이고 별칭으로 내보낸다. 이 별칭이
+    빠지면 orche가 판정을 못 읽고, 못 읽으면 **검사가 조용히 꺼진다** — 실패가 아니라 무동작으로
+    나타나므로 눈에 띄지 않는다.
+    """
+    reviewed = ReviewedCases(included=[1, 2], excluded=[3])
+
+    assert reviewed.model_dump(by_alias=True) == {"in": [1, 2], "out": [3]}
+
+
+def test_reviewed_parses_from_wire_names() -> None:
+    assert ReviewedCases(**{"in": [7], "out": [8]}).included == [7]
+
+
+def test_result_without_reviewed_is_none_not_empty() -> None:
+    """판정이 없을 때 빈 객체가 아니라 None이어야 한다.
+
+    orche는 None을 "검사 건너뜀"으로 읽는다. 빈 객체를 보내면 "전량을 판정했는데 하나도 안
+    골랐다"가 되어, 케이스가 있는 프로젝트에서는 전량이 검토 누락으로 잡힌다.
+    """
+    assert ScenarioAgentResult(message="…").reviewed is None
+
+
+def test_uncovered_block_lists_ids_and_says_how_many() -> None:
+    body = render_uncovered_ids([12, 34, 56])
+
+    assert "3 cases" in body
+    assert "12, 34, 56" in body
+
+
+def test_uncovered_block_says_so_when_nothing_is_uncovered() -> None:
+    # 빈 목록을 그냥 비워 두면 "미커버 없음"과 "그 신호를 못 받음"이 프롬프트에서 같아 보인다.
+    assert render_uncovered_ids([]) == NO_UNCOVERED_NOTICE
+
+
+def test_system_prompt_carries_the_uncovered_block() -> None:
+    body, _ = build_system_prompt(_request(uncovered_case_ids=[41, 42]))
+
+    assert "41, 42" in body
