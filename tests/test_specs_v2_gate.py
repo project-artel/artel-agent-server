@@ -136,3 +136,32 @@ def test_the_scene_entry_reading_of_the_same_effect_is_not_kept_beside_it() -> N
     kinds = {contract.trigger.kind for contract in _leaving(result)}
     assert "input" in kinds
     assert "scene_entry" not in kinds
+
+
+def test_a_step_named_after_a_method_is_not_the_top_grade() -> None:
+    """`CompleteStream` is a method. Nobody can be asked to carry it out."""
+    from app.specs_v2.discovery import _quality
+    from app.specs_v2.model import Assertion, SourceRef, Trigger
+
+    named_after_code = Trigger(
+        "runtime_event", "StoryScene", "CompleteStream", "Demo.Chat", "CompleteStream", "derived"
+    )
+    exact = Assertion(
+        "scene", "MapScene", "transition", "MapScene", "observable", "exact", "scene",
+        SourceRef("r", "e", "m", 0),
+    )
+
+    assert _quality(named_after_code, [exact], []) == "review"
+
+
+def test_a_wired_control_with_the_same_certainty_is_ready() -> None:
+    from app.specs_v2.discovery import _quality
+    from app.specs_v2.model import Assertion, SourceRef, Trigger
+
+    clicked = Trigger("control", "StoryScene", "Play 조작", "Canvas/Play", "m_OnClick", "exact")
+    exact = Assertion(
+        "scene", "MapScene", "transition", "MapScene", "observable", "exact", "scene",
+        SourceRef("r", "e", "m", 0),
+    )
+
+    assert _quality(clicked, [exact], []) == "ready"

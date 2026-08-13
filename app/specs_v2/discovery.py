@@ -59,6 +59,7 @@ DERIVATION_NOTES = {
 }
 
 CANDIDATE_ISSUES = {
+    observable.PARTLY,
     "ambiguous_expected_value",
     "evidence_gap:callee-condition-not-composed",
     "folded_path_condition_not_recomputed",
@@ -508,6 +509,11 @@ def _quality(trigger: Trigger, assertions: list[Assertion], issues: list[str]) -
     issues = [issue for issue in issues if issue not in DERIVATION_NOTES]
     if any(issue.startswith("observation_unsupported") for issue in issues):
         return "unsupported"
+    # A trigger named after the method that carries it — `CompleteStream` — says
+    # the evidence did not find a way to cause this. A step nobody can carry out
+    # is not the top grade, whatever else is exact about the row.
+    if trigger.kind in {"runtime_event", "unreached"}:
+        return "review"
     if trigger.scene is None or trigger.resolution in {"ambiguous", "unresolved"}:
         return "review"
     if any(item.resolution == "unresolved" or not item.target for item in assertions):
@@ -545,6 +551,9 @@ def _folded_condition_unproven(graph: EvidenceGraph, path: PathFact) -> bool:
         if not prefixes or any(item.condition.get("kind") != "always" for item in prefixes):
             return True
     return False
+
+
+TRIGGER_NOT_ACTIONABLE = "trigger_not_actionable"
 
 
 def _execution_axes(path: PathFact, trigger: Trigger, assertions: list[Assertion]) -> tuple[str, str, str]:
@@ -1320,8 +1329,17 @@ def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]
         # cannot be set up or confirmed. Said rather than dropped: the behaviour
         # is real and someone may still write the premise another way.
         if observable.unreadable_atoms(contract.condition):
-            if observable.UNCHECKABLE not in contract.issues:
-                contract.issues.append(observable.UNCHECKABLE)
+            # Some of it answerable is not the same as none of it. A row whose
+            # other premise is a field can be set up from that field and the rest
+            # gauged from the screen; a row where nothing is readable leaves the
+            # tester without a place to start.
+            issue = (
+                observable.PARTLY
+                if observable.readable_atoms(contract.condition)
+                else observable.UNCHECKABLE
+            )
+            if issue not in contract.issues:
+                contract.issues.append(issue)
             contract.quality = _quality(
                 contract.trigger, contract.assertions, contract.issues
             )

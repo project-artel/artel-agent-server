@@ -44,7 +44,11 @@ BARE = re.compile(r"^(?:i|j|k|n|id|num|index|damage|collision|other|bigSide|dist
 EMPTY = frozenset({"null", "0", "false", "true"})
 
 ISSUE = "precondition_rewritten_to_observable"
+# 전제가 통째로 답할 수 없는 것과, 일부만 답할 수 없는 것은 다르다. 앞엣것은
+# 테스터가 어디서 시작할지조차 모르고, 뒤엣것은 읽을 수 있는 상태로 자리를 잡은
+# 뒤 나머지를 화면으로 가늠할 수 있다.
 UNCHECKABLE = "precondition_not_observable"
+PARTLY = "precondition_partly_observable"
 SUBSTITUTED = "precondition_read_from_written_field"
 
 
@@ -60,6 +64,15 @@ def unreadable_atoms(condition: dict[str, Any] | None) -> list[str]:
         text
         for leaf in _leaves(condition)
         if (text := _leaf_text(leaf)) is not None and not _leaf_readable(leaf)
+    ]
+
+
+def readable_atoms(condition: dict[str, Any] | None) -> list[str]:
+    """The premises the running game does answer."""
+    return [
+        text
+        for leaf in _leaves(condition)
+        if (text := _leaf_text(leaf)) is not None and _leaf_readable(leaf)
     ]
 
 

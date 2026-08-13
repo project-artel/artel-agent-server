@@ -377,3 +377,25 @@ def test_a_derivation_note_does_not_lower_the_grade() -> None:
     assert observable.ISSUE in DERIVATION_NOTES
     assert observable.SUBSTITUTED in DERIVATION_NOTES
     assert _quality(trigger, [assertion], list(DERIVATION_NOTES)) == "ready"
+
+
+def test_some_of_it_answerable_is_not_the_same_as_none_of_it() -> None:
+    """A field to start from, and the rest gauged from the screen."""
+    partly = {
+        "kind": "every",
+        "parts": [
+            observable.qualify(
+                {"kind": "test", "left": "i", "operator": "<", "right": "3"},
+                "Story.MoveNext",
+            ),
+            {"kind": "test", "left": "Chat.streamingCoroutine", "operator": "==", "right": "null"},
+        ],
+    }
+    assert observable.unreadable_atoms(partly)
+    assert observable.readable_atoms(partly) == ["Chat.streamingCoroutine == null"]
+
+    none = observable.qualify(
+        {"kind": "test", "left": "i", "operator": "<", "right": "3"}, "Story.MoveNext"
+    )
+    assert observable.unreadable_atoms(none)
+    assert observable.readable_atoms(none) == []
