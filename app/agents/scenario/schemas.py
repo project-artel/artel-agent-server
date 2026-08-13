@@ -83,16 +83,6 @@ class ScenarioAgentRequest(BaseModel):
     # behind it stay in place. That fallback is also the rollback: orchestration
     # can stop sending the field and this side needs no redeploy.
     test_case_list: list[TestCaseListItem] = Field(default_factory=list)
-    # Ids of cases no scenario has touched yet (ARTEL-403).
-    #
-    # Ids only: the bodies are already in `test_case_list`, and sending the same
-    # text twice would double the block for nothing. What this list does is point
-    # — "pick from those" — when the user asks what is worth testing next.
-    #
-    # Read at the same moment as `test_case_list` upstream. If the two drift, an id
-    # here can be absent there, which is how an agent ends up naming a case that
-    # does not exist.
-    uncovered_case_ids: list[int] = Field(default_factory=list)
     # Recent conversation, text-only, already windowed by the session layer.
     history: list[BaseMessage] = Field(default_factory=list)
     # Authoritative current draft (may contain the user's manual edits). Legacy;

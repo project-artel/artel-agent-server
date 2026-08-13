@@ -130,29 +130,18 @@ def render_test_case_list(entries: list[TestCaseListItem]) -> str:
     return "\n".join(lines)
 
 
-NO_UNCOVERED_NOTICE = (
-    "Every case in this project is already carried by some scenario. "
-    "Nothing is uncovered, so there is no gap to lead with."
-)
+LIST_UNCOVERED_DESCRIPTION = """Which test cases no scenario has covered yet.
 
+Coverage is a fact about the project's scenarios, not about the cases — the case
+list you hold says what exists, never what has already been reached. It also
+changes while you work: cases you cover in this turn stop being uncovered.
 
-def render_uncovered_ids(ids: list[int]) -> str:
-    """The ids no scenario has reached yet, as the block the system prompt carries.
+Call this when the user asks what is left or what to test next, and when you want
+to lead an open-ended request toward a real gap. Do not guess at a count; this is
+where the number comes from.
 
-    Ids only — the bodies are in the list above this block, and repeating them here
-    would double the prompt to say nothing new. This block's job is to point.
-
-    Orchestration sorts these and this does not re-sort, for the same reason the
-    whole-list block does not: both sit in the cached prefix, and a sort key that
-    moves throws the cache away for a cosmetic win.
-    """
-    if not ids:
-        return NO_UNCOVERED_NOTICE
-    return (
-        f"{len(ids)} cases have never been used by any scenario in this project. "
-        "When the request is open-ended, start here.\n"
-        + ", ".join(str(i) for i in ids)
-    )
+The answer gives ids. Their wording is in the case list you already hold — quote
+that rather than reciting numbers, which mean nothing to the person reading."""
 
 
 class TestCaseSearchState:

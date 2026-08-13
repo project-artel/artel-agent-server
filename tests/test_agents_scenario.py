@@ -13,12 +13,7 @@ from app.agents import (
     ScenarioGenerationError,
     ScenarioPlan,
 )
-from app.agents.scenario.cases import (
-    NO_TEST_CASE_LIST_NOTICE,
-    NO_UNCOVERED_NOTICE,
-    render_test_case_list,
-    render_uncovered_ids,
-)
+from app.agents.scenario.cases import NO_TEST_CASE_LIST_NOTICE, render_test_case_list
 from app.agents.scenario.schemas import (
     AuthoredStep,
     ReviewedCases,
@@ -161,8 +156,9 @@ def test_scenario_agent_binds_the_search_tool() -> None:
     agent = ScenarioAgent(agent_factory=factory)
     asyncio.run(agent.run(_request(), _CTX, _channel()))
 
-    # No test case list on this request, so the turn falls back to the search tool.
-    assert seen["tools"] == ["search_test_cases"]
+    # 목록이 없으면 검색으로 폴백한다. 미커버 도구는 목록 유무와 무관하게 늘 붙는다 —
+    # 커버 상태는 목록이 답할 수 없는 질문이고 대화 중에 바뀐다.
+    assert seen["tools"] == ["list_uncovered_cases", "search_test_cases"]
     # The system prompt is the resolved v4 text, every placeholder substituted.
     assert "search_test_cases" in seen["system_prompt"]
     assert "{" not in seen["system_prompt"]
@@ -323,7 +319,8 @@ def test_turn_with_the_list_gets_no_tools_and_the_cases_in_its_prompt() -> None:
     agent = ScenarioAgent(agent_factory=factory)
     asyncio.run(agent.run(_request(test_case_list=_test_case_list()), _CTX, _channel()))
 
-    assert seen["tools"] == []
+    # 검색은 회수한다(목록을 이미 쥐고 있으므로). 미커버 도구는 남는다.
+    assert seen["tools"] == ["list_uncovered_cases"]
     prompt = seen["system_prompt"]
     assert "id 11" in prompt and "id 57" in prompt
     assert "게스트 계정으로 로그인에 성공한다" in prompt
@@ -344,7 +341,7 @@ def test_empty_test_case_list_keeps_the_search_path() -> None:
     agent = ScenarioAgent(agent_factory=factory)
     asyncio.run(agent.run(_request(test_case_list=[]), _CTX, _channel()))
 
-    assert seen["tools"] == ["search_test_cases"]
+    assert seen["tools"] == ["list_uncovered_cases", "search_test_cases"]
     # Not a blank section: an empty block reads as "this project has no cases",
     # and the agent would stop rather than search.
     assert NO_TEST_CASE_LIST_NOTICE in seen["system_prompt"]
@@ -418,19 +415,14 @@ def test_result_without_reviewed_is_none_not_empty() -> None:
     assert ScenarioAgentResult(message="…").reviewed is None
 
 
-def test_uncovered_block_lists_ids_and_says_how_many() -> None:
-    body = render_uncovered_ids([12, 34, 56])
+def test_uncovered_is_a_tool_not_a_prompt_block() -> None:
+    """미커버는 프롬프트에 싣지 않는다.
 
-    assert "3 cases" in body
-    assert "12, 34, 56" in body
+    저작할수록 줄어드는 값이라 세션 오픈 스냅샷은 둘째 턴부터 틀리고, 매 턴 다시 실으면 턴
+    메시지가 붓거나(더 나쁘게는 system에 있으면) 전량 목록 캐시를 통째로 버린다. 물어볼 때만
+    내는 도구가 맞다.
+    """
+    body, _ = build_system_prompt(_request())
 
-
-def test_uncovered_block_says_so_when_nothing_is_uncovered() -> None:
-    # 빈 목록을 그냥 비워 두면 "미커버 없음"과 "그 신호를 못 받음"이 프롬프트에서 같아 보인다.
-    assert render_uncovered_ids([]) == NO_UNCOVERED_NOTICE
-
-
-def test_system_prompt_carries_the_uncovered_block() -> None:
-    body, _ = build_system_prompt(_request(uncovered_case_ids=[41, 42]))
-
-    assert "41, 42" in body
+    assert "list_uncovered_cases" in body
+    assert "{uncovered_case_ids}" not in body

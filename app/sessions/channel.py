@@ -61,6 +61,26 @@ class TestCaseSearchResult(BaseModel):
     results: list[TestCaseHit] = Field(default_factory=list)
 
 
+class UncoveredScene(BaseModel):
+    """미커버가 남은 씬 하나와 건수. 사람이 아는 말로 답하기 위한 축이다."""
+
+    scene: str = ""
+    count: int = 0
+
+
+class UncoveredCases(BaseModel):
+    """The `uncovered_cases_result` frame: which cases no scenario has reached yet.
+
+    Fetched rather than pushed. This shrinks as authoring covers cases, so a value
+    sent at session open is wrong by the second turn, and a value re-sent every turn
+    either bloats the turn message or (worse, if it sat in the system prompt) throws
+    the whole cached case list away. A tool call pays only when someone asks.
+    """
+
+    ids: list[int] = Field(default_factory=list)
+    scenes: list[UncoveredScene] = Field(default_factory=list)
+
+
 @dataclass(frozen=True)
 class TestCaseSearchFailed:
     """Orchestration answered the search with an `error` frame.
@@ -92,8 +112,30 @@ class ScenarioChannel:
             asyncio.Future[TestCaseSearchResult | TestCaseSearchFailed] | None
         ) = None
         self._pending_search_id: str | None = None
+        self._uncovered_waiter: asyncio.Future[UncoveredCases] | None = None
+        self._pending_uncovered_id: str | None = None
 
     # --- outbound -------------------------------------------------------------
+
+    async def fetch_uncovered(self) -> UncoveredCases | None:
+        """Ask which cases nothing has covered yet. `None` when nobody answered.
+
+        Scope comes from the session binding on the far side, like the case search —
+        the frame carries no project or run id.
+        """
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[UncoveredCases] = loop.create_future()
+        self._uncovered_waiter = waiter
+        message_id = str(uuid4())
+        self._pending_uncovered_id = message_id
+        await self._send({"type": "uncovered_cases", "messageId": message_id})
+        try:
+            return await asyncio.wait_for(waiter, timeout=self._search_timeout)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            self._uncovered_waiter = None
+            self._pending_uncovered_id = None
 
     async def search_test_cases(
         self, query: str, category: str | None, limit: int
@@ -147,6 +189,15 @@ class ScenarioChannel:
         """
         message_type = raw.get("type")
         try:
+            if message_type == "uncovered_cases_result":
+                waiter = self._uncovered_waiter
+                if (
+                    waiter is not None
+                    and not waiter.done()
+                    and raw.get("correlationId") == self._pending_uncovered_id
+                ):
+                    waiter.set_result(UncoveredCases.model_validate(raw))
+                return True
             if message_type == "test_case_search_result":
                 if self._answers_pending(raw):
                     self._resolve(TestCaseSearchResult.model_validate(raw))
