@@ -9,13 +9,13 @@ through `search_test_cases`, because injecting them all was assumed to blow the
 context (ARTEL-206). Measured, that assumption does not hold: a Korean case in
 the stored schema is ~74 tokens with its bodies, so a thousand of them is ~74k
 and sits in the cached prefix of the system prompt. So orchestration now sends
-the whole catalog when the session opens and the agent reads it from context.
+the whole list when the session opens and the agent reads it from context.
 
 That matters beyond convenience. A vector search returns a ranking and never the
 size of what it ranked, so the old path could not tell the agent — or us — that
 anything had been missed; the per-turn budget below surfaced 30-40 cases out of a
 project that may hold a thousand. Coverage was bounded by recall. Reading the
-catalog removes that bound outright.
+whole list removes that bound outright.
 
 **The search stays.** It is the path when the test case list is empty — an orchestration
 that does not send one yet, or a non-member session — and that fallback is also
@@ -93,7 +93,7 @@ is still missing."""
 
 # What the agent reads in place of the test case list when none arrived. Written as
 # prose the model can act on rather than left blank: an empty section reads as
-# "this project has no cases", which is the opposite of what an absent catalog
+# "this project has no cases", which is the opposite of what an absent list
 # means, and the agent would stop instead of searching.
 NO_TEST_CASE_LIST_NOTICE = """The project's case list was not provided this session, so the cases are NOT in
 your context. Use `search_test_cases` to find the ones each scenario needs. An

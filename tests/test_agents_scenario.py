@@ -151,7 +151,7 @@ def test_scenario_agent_binds_the_search_tool() -> None:
     agent = ScenarioAgent(agent_factory=factory)
     asyncio.run(agent.run(_request(), _CTX, _channel()))
 
-    # No catalog on this request, so the turn falls back to the search tool.
+    # No test case list on this request, so the turn falls back to the search tool.
     assert seen["tools"] == ["search_test_cases"]
     # The system prompt is the resolved v4 text, every placeholder substituted.
     assert "search_test_cases" in seen["system_prompt"]
@@ -278,7 +278,7 @@ def test_select_structured_method_by_model() -> None:
 # produces a plausible wrong step. So each one is pinned here.
 
 
-def _catalog() -> list[TestCaseListItem]:
+def _test_case_list() -> list[TestCaseListItem]:
     return [
         TestCaseListItem(
             id=11,
@@ -299,7 +299,7 @@ def _catalog() -> list[TestCaseListItem]:
     ]
 
 
-def test_catalogued_turn_gets_no_tools_and_the_cases_in_its_prompt() -> None:
+def test_turn_with_the_list_gets_no_tools_and_the_cases_in_its_prompt() -> None:
     """With the cases in context, a search could only return what it already has."""
     seen: dict[str, object] = {}
 
@@ -311,7 +311,7 @@ def test_catalogued_turn_gets_no_tools_and_the_cases_in_its_prompt() -> None:
         )
 
     agent = ScenarioAgent(agent_factory=factory)
-    asyncio.run(agent.run(_request(test_case_list=_catalog()), _CTX, _channel()))
+    asyncio.run(agent.run(_request(test_case_list=_test_case_list()), _CTX, _channel()))
 
     assert seen["tools"] == []
     prompt = seen["system_prompt"]
@@ -320,7 +320,7 @@ def test_catalogued_turn_gets_no_tools_and_the_cases_in_its_prompt() -> None:
     assert NO_TEST_CASE_LIST_NOTICE not in prompt
 
 
-def test_empty_catalog_keeps_the_search_path() -> None:
+def test_empty_test_case_list_keeps_the_search_path() -> None:
     """The fallback is also the rollback: orchestration can stop sending one."""
     seen: dict[str, object] = {}
 
@@ -342,7 +342,7 @@ def test_empty_catalog_keeps_the_search_path() -> None:
 
 def test_render_test_case_list_preserves_arrival_order() -> None:
     """Orchestration sorts by id; re-sorting here would move the cached prefix."""
-    reversed_entries = list(reversed(_catalog()))
+    reversed_entries = list(reversed(_test_case_list()))
     rendered = render_test_case_list(reversed_entries)
 
     assert rendered.index("id 57") < rendered.index("id 11")
@@ -369,9 +369,9 @@ def test_render_test_case_list_prints_bodies_whole() -> None:
     assert "precondition: 보석 100개 이상" in rendered
 
 
-def test_catalogued_system_prompt_is_byte_identical_across_turns() -> None:
+def test_system_prompt_with_the_list_is_byte_identical_across_turns() -> None:
     """The prompt cache only pays off while this block does not move."""
-    request = _request(test_case_list=_catalog())
+    request = _request(test_case_list=_test_case_list())
     first, _ = build_system_prompt(request)
     second, _ = build_system_prompt(request)
 

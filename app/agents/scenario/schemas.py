@@ -46,7 +46,7 @@ class ScenarioDraft(BaseModel):
 
 
 class TestCaseListItem(BaseModel):
-    """One TestCase as the session receives it, in the project's whole catalog.
+    """One TestCase as the session receives it, in the project's whole list.
 
     Named after orchestration's DTO on the other end of the wire so the contract
     is greppable from either side. ``verification_status`` is DRAFT/VERIFIED/
