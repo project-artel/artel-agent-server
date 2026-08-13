@@ -833,6 +833,33 @@ def test_an_unanswered_write_is_unknown_rather_than_failed() -> None:
     asyncio.run(run())
 
 
+def test_an_answer_for_a_different_write_is_not_believed() -> None:
+    """Orchestration echoes the request type in a write's result, and it is checked.
+
+    Correlation alone cannot catch this: the id in a mismatched answer is a real id,
+    so believing it files the wrong entry under `knowledge_seen` and every correction
+    after that lands on the wrong row — silently. Nothing produces a mismatch today;
+    the point is that if something started to, no one would find out.
+
+    Dropped rather than reported as a failure. A mismatch is a fault on the far side,
+    not something the run can act on, and calling it a failure would make the model
+    rewrite a fact that may well have been stored.
+    """
+
+    async def run() -> None:
+        channel, state, tools, sent = make()
+
+        # The answer claims to be a DELETE while a CREATE is in flight.
+        answer_write(channel, sent, {"type": "KNOWLEDGE_DELETE", "knowledge_id": "77"})
+        result = await asyncio.wait_for(record(tools), timeout=1.0)
+
+        assert "no confirmation came back" in result
+        assert "77" not in result
+        assert "77" not in state.knowledge_seen
+
+    asyncio.run(run())
+
+
 def test_a_late_write_answer_does_not_resolve_the_next_request() -> None:
     """Answers are matched on the request's messageId, so one that arrives after
     its own request gave up finds nothing to resolve.
