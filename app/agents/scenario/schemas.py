@@ -53,17 +53,17 @@ class TestCaseCatalogEntry(BaseModel):
     BROKEN — it rides along so the agent can prefer a verified case and steer
     around a broken one, which a similarity score never told it.
 
-    The bodies (``precondition``, ``expected``) travel with the entry rather than
-    being fetched afterwards. The agent has to read them to write the steps that
+    The bodies (``precondition``, ``expected_value``) travel with the entry rather
+    than being fetched afterwards. The agent has to read them to write the steps that
     exercise a case, and a fetch-later path would only move the old ceiling — how
     many searches a turn may make — onto a new one.
     """
 
     id: int
-    category: str
-    title: str
+    scene: str
+    step: str
     precondition: str | None = None
-    expected: str
+    expected_value: str
     verification_status: str
 
 

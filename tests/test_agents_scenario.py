@@ -282,18 +282,18 @@ def _catalog() -> list[TestCaseCatalogEntry]:
     return [
         TestCaseCatalogEntry(
             id=11,
-            category="로그인",
-            title="게스트 계정으로 로그인에 성공한다",
+            scene="로그인",
+            step="게스트 계정으로 로그인에 성공한다",
             precondition="앱을 최초 실행한 상태",
-            expected="임시 계정이 발급되고 로비로 진입한다",
+            expected_value="임시 계정이 발급되고 로비로 진입한다",
             verification_status="VERIFIED",
         ),
         TestCaseCatalogEntry(
             id=57,
-            category="스테이지",
-            title="힌트를 쓰면 글자 하나가 공개된다",
+            scene="스테이지",
+            step="힌트를 쓰면 글자 하나가 공개된다",
             precondition=None,
-            expected="보유 수량이 1 줄고 글자가 표시된다",
+            expected_value="보유 수량이 1 줄고 글자가 표시된다",
             verification_status="DRAFT",
         ),
     ]
@@ -355,10 +355,10 @@ def test_render_catalog_prints_bodies_whole() -> None:
         [
             TestCaseCatalogEntry(
                 id=1,
-                category="상점",
-                title="구매",
+                scene="상점",
+                step="구매",
                 precondition="보석 100개 이상",
-                expected=long_expected,
+                expected_value=long_expected,
                 verification_status="VERIFIED",
             )
         ]

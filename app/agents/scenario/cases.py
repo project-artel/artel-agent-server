@@ -122,11 +122,11 @@ def render_catalog(entries: list[TestCaseCatalogEntry]) -> str:
     ]
     for entry in entries:
         lines.append(
-            f"\n[id {entry.id} · {entry.category} · {entry.verification_status}] {entry.title}"
+            f"\n[id {entry.id} · {entry.scene} · {entry.verification_status}] {entry.step}"
         )
         if entry.precondition:
             lines.append(f"    precondition: {entry.precondition}")
-        lines.append(f"    expected: {entry.expected}")
+        lines.append(f"    expected: {entry.expected_value}")
     return "\n".join(lines)
 
 
