@@ -1,11 +1,16 @@
 """The scenario authoring turn as a tool loop.
 
 Where v1 was a single structured LLM call, this drives a `create_agent` tool
-loop: the agent searches existing TestCases with `search_test_cases` (over the
-session channel) as many times as it needs, then returns a structured
-multi-scenario plan. It mirrors `app/agents/qa/runner.py`'s `create_agent`
-usage; the structured final answer is produced by a `ToolStrategy` response
-format rather than by a `finish_run`-style tool.
+loop, and the structured final answer is produced by a `ToolStrategy` response
+format rather than by a `finish_run`-style tool (mirroring
+`app/agents/qa/runner.py`).
+
+How many turns the loop actually takes depends on what the session was given.
+With the project's test case list in the prompt (ARTEL-319) there are no tools at
+all and the loop is one model turn straight to the structured answer; without it
+the agent searches existing TestCases with `search_test_cases` over the session
+channel as many times as its budget allows first. The step budget below is sized
+for the second, longer shape.
 """
 
 from __future__ import annotations
@@ -82,16 +87,19 @@ class ScenarioAgent:
         channel: ScenarioChannel,
     ) -> ScenarioAgentResult:
         state = TestCaseSearchState()
-        tools = build_tools(channel, state)
+        # A session with the list gets no tools — the cases are in the prompt, so the
+        # loop is a single model turn straight to the structured answer.
+        tools = build_tools(channel, state, has_test_case_list=bool(request.test_case_list))
         system_prompt, version = build_system_prompt(request)
         messages = build_messages(request)
 
         logger.info(
             "[scenario] turn starting\n"
-            "  model=%s locale=%s prompt_version=%s tools=%s",
+            "  model=%s locale=%s prompt_version=%s test_case_list=%d tools=%s",
             request.model,
             request.locale,
             version,
+            len(request.test_case_list),
             [tool.name for tool in tools],
         )
 

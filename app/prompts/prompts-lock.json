@@ -32,7 +32,9 @@
     "scenario/v2/human": "61d0c1733f83b6d84f315ca99aff4099281a63d6150be1dff43790f4e8faa2d7",
     "scenario/v2/system": "f01ed4a32e15ef81d0f3ed9a2f5e01eaaf0d62c6b5d9a54cbfaa2f651cc92023",
     "scenario/v3/human": "fe150effe00619beeb3e08319744b4392ead2e2393e8761febc8bcef0dc739ff",
-    "scenario/v3/system": "91411963dc58ff1dcd4f47e0ed3dd0d78e9e6e940bb027b2b52dec0854fe04e1"
+    "scenario/v3/system": "91411963dc58ff1dcd4f47e0ed3dd0d78e9e6e940bb027b2b52dec0854fe04e1",
+    "scenario/v4/human": "b090e85162db03d65dfcc8231d940b70f0e3def6d27401c68b9e3a4b5d0f2a99",
+    "scenario/v4/system": "861418a61257dc2510a7a70b1e91c23de20c80bc6f76e2fa6ab727ee3d567397"
   },
   "version": 1
 }

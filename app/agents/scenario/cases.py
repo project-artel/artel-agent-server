@@ -1,11 +1,26 @@
-"""Searching the run's existing TestCases, and formatting the answer.
+"""The run's existing TestCases: the test case list the agent holds, and the search behind it.
 
 The run-scoped authoring agent decomposes a run goal into scenarios, and each
 scenario is built from EXISTING TestCases — which live only in the orchestration
-server. So the agent cannot see the cases up front (they accumulate, and a first
-import is already large: injecting them all would blow the context, ARTEL-206).
-It searches for the ones it needs instead, the same shape the QA agent searches
-the knowledge base, and references the hits by id.
+server.
+
+**How the agent sees them changed in ARTEL-319.** It used to see them only
+through `search_test_cases`, because injecting them all was assumed to blow the
+context (ARTEL-206). Measured, that assumption does not hold: a Korean case in
+the stored schema is ~74 tokens with its bodies, so a thousand of them is ~74k
+and sits in the cached prefix of the system prompt. So orchestration now sends
+the whole list when the session opens and the agent reads it from context.
+
+That matters beyond convenience. A vector search returns a ranking and never the
+size of what it ranked, so the old path could not tell the agent — or us — that
+anything had been missed; the per-turn budget below surfaced 30-40 cases out of a
+project that may hold a thousand. Coverage was bounded by recall. Reading the
+whole list removes that bound outright.
+
+**The search stays.** It is the path when the test case list is empty — an orchestration
+that does not send one yet, or a non-member session — and that fallback is also
+the rollback, so nothing here is dead code even while a session with the list never
+calls it. `build_tools` decides, per turn, which of the two the agent gets.
 
 These constants and the rendering live here rather than in
 `app/agents/scenario/tools.py` for the reason `app/agents/qa/knowledge.py` keeps
@@ -14,12 +29,14 @@ and the number, the wording, and the format that teaches the agent to ration and
 read a search all move together.
 
 Nothing here creates a TestCase. Case *creation* is a separate concern
-(ARTEL-177); this agent only searches and maps.
+(ARTEL-177); this agent only reads and maps.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
+from app.agents.scenario.schemas import TestCaseListItem
 
 if TYPE_CHECKING:
     # Type-only: importing app.sessions at module load would form a cycle
@@ -72,6 +89,45 @@ rather than re-asking the same thing. An empty result is an answer: it means no
 case matches, NOT that something went wrong. Do not invent a case — you may still
 write the action steps and leave their `case_id` null, and say in `message` what
 is still missing."""
+
+
+# What the agent reads in place of the test case list when none arrived. Written as
+# prose the model can act on rather than left blank: an empty section reads as
+# "this project has no cases", which is the opposite of what an absent list
+# means, and the agent would stop instead of searching.
+NO_TEST_CASE_LIST_NOTICE = """The project's case list was not provided this session, so the cases are NOT in
+your context. Use `search_test_cases` to find the ones each scenario needs. An
+empty search result means no case matches — not that something went wrong."""
+
+
+def render_test_case_list(entries: list[TestCaseListItem]) -> str:
+    """Every case in the project, as the block the system prompt carries.
+
+    Order is preserved exactly as it arrived. Orchestration sorts by id and this
+    block sits in the cached prefix of the prompt, so re-sorting here — even into
+    something more readable, like grouping by category — would change the prefix
+    whenever the sort key did and throw the cache away for a cosmetic win.
+
+    Bodies are printed in full, unlike a search hit (`render_hit` clips at
+    MAX_TEXT_CHARS). A search returns candidates to skim; this is the material the
+    agent writes steps from, and a clipped precondition is exactly the kind of
+    detail whose absence produces a plausible wrong step.
+    """
+    if not entries:
+        return NO_TEST_CASE_LIST_NOTICE
+
+    lines = [
+        f"All {len(entries)} test cases in this project. "
+        "These are ALL of them — there is nothing else to find."
+    ]
+    for entry in entries:
+        lines.append(
+            f"\n[id {entry.id} · {entry.scene} · {entry.verification_status}] {entry.step}"
+        )
+        if entry.precondition:
+            lines.append(f"    precondition: {entry.precondition}")
+        lines.append(f"    expected: {entry.expected_value}")
+    return "\n".join(lines)
 
 
 class TestCaseSearchState:

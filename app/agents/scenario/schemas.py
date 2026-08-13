@@ -45,6 +45,28 @@ class ScenarioDraft(BaseModel):
         return steps
 
 
+class TestCaseListItem(BaseModel):
+    """One TestCase as the session receives it, in the project's whole list.
+
+    Named after orchestration's DTO on the other end of the wire so the contract
+    is greppable from either side. ``verification_status`` is DRAFT/VERIFIED/
+    BROKEN — it rides along so the agent can prefer a verified case and steer
+    around a broken one, which a similarity score never told it.
+
+    The bodies (``precondition``, ``expected_value``) travel with the entry rather
+    than being fetched afterwards. The agent has to read them to write the steps that
+    exercise a case, and a fetch-later path would only move the old ceiling — how
+    many searches a turn may make — onto a new one.
+    """
+
+    id: int
+    scene: str
+    step: str
+    precondition: str | None = None
+    expected_value: str
+    verification_status: str
+
+
 class ScenarioAgentRequest(BaseModel):
     # LangChain messages are passed through as-is (not re-validated).
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -53,6 +75,14 @@ class ScenarioAgentRequest(BaseModel):
     # Opaque, game-specific context merged upstream (Unity SDK + user-provided).
     unity_context: dict = Field(default_factory=dict)
     game_context: dict = Field(default_factory=dict)
+    # Every TestCase in the project, sent once when the session opens (ARTEL-319).
+    #
+    # Empty means orchestration sent none — an older deployment, or a session
+    # whose user is not a project member. The turn then falls back to
+    # `search_test_cases`, which is why that tool and the whole embedding path
+    # behind it stay in place. That fallback is also the rollback: orchestration
+    # can stop sending the field and this side needs no redeploy.
+    test_case_list: list[TestCaseListItem] = Field(default_factory=list)
     # Recent conversation, text-only, already windowed by the session layer.
     history: list[BaseMessage] = Field(default_factory=list)
     # Authoritative current draft (may contain the user's manual edits). Legacy;

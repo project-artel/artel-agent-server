@@ -11,6 +11,7 @@ from app.agents import (
     ScenarioAgentResult,
     ScenarioDraft,
     ScenarioPlan,
+    TestCaseListItem,
 )
 from app.llm.models import DEFAULT_MODEL, LLMModel
 from app.llm.usage import set_usage_scope
@@ -36,6 +37,7 @@ class SessionService:
         unity_context: dict,
         game_context: dict,
         user_input: str,
+        test_case_list: list[TestCaseListItem] | None = None,
         model: LLMModel = DEFAULT_MODEL,
         locale: OutputLanguage = DEFAULT_LANGUAGE,
         test_scenario_id: int | None = None,
@@ -47,6 +49,7 @@ class SessionService:
         record = SessionRecord(
             unity_context=unity_context,
             game_context=game_context,
+            test_case_list=test_case_list or [],
             pending_user_input=user_input,
             model=model,
             locale=locale,
@@ -131,6 +134,7 @@ class SessionService:
             user_input=user_input,
             unity_context=record.unity_context,
             game_context=record.game_context,
+            test_case_list=record.test_case_list,
             history=self._replay_messages(record),
             draft=draft,
             current_scenarios=record.current_scenarios,
