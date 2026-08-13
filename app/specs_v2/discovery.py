@@ -891,12 +891,14 @@ def _coroutine_resume_contracts(
             upstream_paths = [
                 path
                 for path in coroutine_paths
+                # 호출 자체가 대기보다 뒤여야 한다. 같은 구간의 가드가 뒤에서
+                # 평가된다는 것은 **가드**가 뒤라는 말이지 호출이 뒤라는 말이 아니다.
+                # 앞의 호출까지 받아 주면 루프를 한 바퀴 돌아 닿는 결과가 이번 입력의
+                # 기대가 되어, 같은 기대를 정반대 전제로 두 번 내게 된다.
                 if any(
                     _call_matches_signature(call, next_signature)
-                    and (
-                        (isinstance(call.get("offset"), int) and call["offset"] > handoff)
-                        or any(offset > handoff for offset in _condition_offsets(path.condition))
-                    )
+                    and isinstance(call.get("offset"), int)
+                    and call["offset"] > handoff
                     for call in path.calls
                 )
             ]

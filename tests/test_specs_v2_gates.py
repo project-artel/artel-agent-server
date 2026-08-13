@@ -157,3 +157,74 @@ def test_two_readers_leave_it_unanswered() -> None:
     )
 
     assert _gates(graph) == []
+
+
+def test_a_call_from_before_the_gate_is_not_what_the_input_did() -> None:
+    """대기 앞에서 부른 것은 이번 입력의 결과가 아니다.
+
+    코루틴이 돌고 → 멈추고 → 눌러서 열리고 → 한 바퀴 돌아 다시 부른다. 그 호출이
+    닿는 결과를 이번 입력의 기대로 적으면, 같은 기대가 정반대 전제로 두 번 나온다.
+
+    같은 구간의 가드가 대기 뒤에서 평가된다는 사실에 기대면 안 된다. 그것은 **가드**가
+    뒤라는 말이지 호출이 뒤라는 말이 아니다.
+    """
+    from app.specs_v2.discovery import discover
+
+    machine = "System.Boolean T/<Run>d__1::MoveNext()"
+    before = "System.Void T::Early()"
+    after = "System.Void T::Late()"
+
+    graph = graph_from_report(
+        _report(
+            [
+                _record(
+                    source=HELD,
+                    methodId="A|T|Pressed|System.Boolean()",
+                    callPath=["System.Void T::Run()", machine, HELD],
+                    condition={"kind": "gesture", "input": "key:any (down)", "offset": 0},
+                    inputs=[PRESS],
+                    handedOverAt=100,
+                    handedOverTo="System.Void T::.ctor()",
+                    gaps=["reached-through-delegate"],
+                ),
+                # 대기 앞에서 부르고, 가드는 루프 끝(@300)에서 평가된다.
+                _record(
+                    source=machine,
+                    methodId="A|T/d__1|MoveNext|System.Boolean()",
+                    callPath=["System.Void T::Run()", machine],
+                    condition={"kind": "test", "left": "T.n", "operator": "<", "right": "3", "offset": 300},
+                    calls=[{"target": before, "targetId": "A|T|Early|System.Void()", "offset": 40}],
+                ),
+                # 대기 뒤에서 부른다.
+                _record(
+                    source=machine,
+                    methodId="A|T/d__1|MoveNext|System.Boolean()",
+                    callPath=["System.Void T::Run()", machine],
+                    calls=[{"target": after, "targetId": "A|T|Late|System.Void()", "offset": 140}],
+                ),
+                _record(
+                    source=before,
+                    methodId="A|T|Early|System.Void()",
+                    callPath=["System.Void T::Run()", machine, before],
+                    effects=[{"kind": "ui-value", "category": "observable", "target": "Panel.label.text", "detail": "\"early\"", "offset": 4}],
+                ),
+                _record(
+                    source=after,
+                    methodId="A|T|Late|System.Void()",
+                    callPath=["System.Void T::Run()", machine, after],
+                    effects=[{"kind": "ui-value", "category": "observable", "target": "Panel.label.text", "detail": "\"late\"", "offset": 4}],
+                ),
+            ]
+        ),
+        source="t",
+    )
+
+    resumed = [
+        contract
+        for contract in discover(graph).contracts
+        if contract.trigger.kind == "input"
+    ]
+    reached = {str(item.value) for contract in resumed for item in contract.assertions}
+
+    assert '"late"' in reached
+    assert '"early"' not in reached
