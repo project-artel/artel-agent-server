@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from . import observable
 from .graph import (
     EvidenceGraph,
     PathFact,
@@ -1270,12 +1271,34 @@ def _scenarios(graph: EvidenceGraph, contracts: list[Contract]) -> list[Scenario
     return scenarios
 
 
+def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]) -> None:
+    """Say each premise as something the running game reports, where it can be.
+
+    A premise naming a local or a call cannot be checked while playing, so a row
+    carrying one either proves nothing or is confirmed by the very observation it
+    expects. Where the guarded branch assigns one readable field from another,
+    that assignment is the same fact in a form the reader publishes.
+    """
+    table = observable.proxies([path for path in graph.paths if not path.folded])
+    if not table:
+        return
+    for contract in contracts:
+        asserted = {item.target for item in contract.assertions if item.target}
+        condition, swapped = observable.rewrite(contract.condition, table, asserted)
+        if not swapped:
+            continue
+        contract.condition = condition
+        if observable.ISSUE not in contract.issues:
+            contract.issues.append(observable.ISSUE)
+
+
 def discover(graph: EvidenceGraph) -> DiscoveryResult:
     persisted_pins = _persisted_pins(graph)
     code_contracts = _contracts(graph, persisted_pins)
     code_contracts.extend(_coroutine_resume_contracts(graph, code_contracts))
     contracts = _drop_unavailable_control_contracts(code_contracts)
     contracts.extend(_inventory_contracts(graph, code_contracts))
+    _rewrite_unreadable_premises(graph, contracts)
     contracts.sort(key=lambda item: (item.scene or "", item.trigger.label, item.id))
     families = _branch_families(contracts)
     scenarios = _scenarios(graph, contracts)

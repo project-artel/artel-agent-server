@@ -1,0 +1,186 @@
+"""Rewriting a premise nobody can read into one the running game reports.
+
+A premise a tester cannot check is not a premise. `i >= streamingText.Length`
+names a loop counter that exists only while its method runs, so the only way to
+confirm it is to look at what it caused — and if that is the same thing the row
+already expects, the row can never fail.
+
+The rewrite needs no understanding of what the code means. An assignment is an
+equality once it has run: after `chatText.text = streamingText`, the statement
+`chatText.text == streamingText` is true, and both sides are fields the runtime
+reader publishes. So a branch guarded by something unreadable, whose body
+assigns one readable field from another, has an observable form — and it is
+written in the evidence already, as `effects[].target` and `effects[].detail`.
+
+Two limits keep this honest.
+
+The equality has to be *field to field*. `streamingText = String.Concat(_, " ")`
+assigns from a masked parameter and says nothing anyone can check, so it is not
+a proxy for anything.
+
+And the proxy must not restate what the row expects. Substituting
+`chatText.text == streamingText` into the premise of the very row asserting that
+assignment produces a test whose premise and expectation are the same
+observation — the failure this module exists to prevent, reintroduced by its own
+mechanism.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+
+# `Type.member` or a longer chain of them. The runtime reader walks fields by
+# reflection and publishes each one, so a chain of field names is a thing a
+# reader can be asked for. A bare lowercase name is a local or a parameter.
+FIELD_CHAIN = re.compile(r"^[A-Z]\w*(?:\.[A-Za-z_]\w*)+$")
+
+# Names the compiler gave, not the game. Read on their own they are loop
+# counters and parameters, and no widening of the reader reaches a frame that
+# has ended.
+BARE = re.compile(r"^(?:i|j|k|n|id|num|index|damage|collision|other|bigSide|distanceToPlayer)$")
+
+# What a reference reads as when nothing was assigned.
+EMPTY = frozenset({"null", "0", "false", "true"})
+
+ISSUE = "precondition_rewritten_to_observable"
+
+
+def readable(expression: Any) -> bool:
+    """Whether the runtime reader can be asked for this."""
+    text = str(expression or "").strip()
+    if not text:
+        return False
+    if BARE.match(text):
+        return False
+    # A call is not made. Reading the game must not change it, and several of
+    # these have side effects.
+    if "(" in text:
+        return False
+    return True
+
+
+def _equality(effect: dict[str, Any]) -> tuple[str, str] | None:
+    """The equality an assignment leaves behind, when both sides are readable."""
+    if effect.get("kind") not in {"ui-value", "write", "active-state"}:
+        return None
+    target = str(effect.get("target") or "").strip()
+    # `render` appends the assignment's second operand for UI writes; the value
+    # is the first. Splitting here rather than in the caller keeps the shape of
+    # `detail` in one place.
+    value = str(effect.get("detail") or "").strip()
+    if value.endswith(", true") or value.endswith(", false"):
+        value = value.rsplit(",", 1)[0].strip()
+    if not FIELD_CHAIN.match(target):
+        return None
+    if not (FIELD_CHAIN.match(value) or value in EMPTY):
+        return None
+    return target, value
+
+
+def proxies(paths: Any) -> dict[str, list[tuple[str, str]]]:
+    """Unreadable guard text → the equalities its own branch establishes.
+
+    Built over every path rather than per contract because a guard travels: the
+    condition that stops the typing animation is composed into rows written
+    about what happens after it, and by then the assignment that answers it is
+    several hops away.
+    """
+    found: dict[str, list[tuple[str, str]]] = {}
+    for path in paths:
+        equalities = [pair for pair in map(_equality, path.effects) if pair]
+        if not equalities:
+            continue
+        for leaf in _leaves(path.condition):
+            text = _leaf_text(leaf)
+            if text is None or _leaf_readable(leaf):
+                continue
+            kept = found.setdefault(text, [])
+            for pair in equalities:
+                if pair not in kept:
+                    kept.append(pair)
+    return found
+
+
+def _leaves(condition: dict[str, Any] | None):
+    if not condition:
+        return
+    if condition.get("kind") in {"every", "either"}:
+        for part in condition.get("parts") or ():
+            yield from _leaves(part)
+        return
+    yield condition
+
+
+def _leaf_text(leaf: dict[str, Any]) -> str | None:
+    if leaf.get("kind") != "test":
+        return None
+    return f"{leaf.get('left')} {leaf.get('operator')} {leaf.get('right')}"
+
+
+def _leaf_readable(leaf: dict[str, Any]) -> bool:
+    return readable(leaf.get("left")) and (
+        readable(leaf.get("right")) or str(leaf.get("right") or "") in EMPTY or _literal(leaf.get("right"))
+    )
+
+
+def _literal(value: Any) -> bool:
+    text = str(value or "").strip()
+    return bool(re.match(r'^-?\d+(\.\d+)?$|^".*"$', text))
+
+
+# Value accessors: naming one of these still names the object in front of it.
+# `ChatWindowController.chatText.text` and the resolved `Canvas/ChatWindow.chatText`
+# are the same subject written two ways, and the row's own expectation is stored
+# in the resolved form.
+ACCESSOR = frozenset({"text", "sprite", "value", "activeSelf", "gameObject", "transform", "name"})
+
+
+def subject(target: str) -> str:
+    """The object a target names, with the value accessor and the owner dropped."""
+    parts = [part for part in str(target or "").split(".") if part]
+    while len(parts) > 1 and parts[-1] in ACCESSOR:
+        parts.pop()
+    return parts[-1] if parts else ""
+
+
+def rewrite(
+    condition: dict[str, Any],
+    table: dict[str, list[tuple[str, str]]],
+    asserted: set[str],
+) -> tuple[dict[str, Any], list[str]]:
+    """Replace unreadable leaves with the equality their branch establishes.
+
+    `asserted` is what this row already expects. A proxy naming one of those is
+    dropped rather than substituted — see the module docstring. Compared by
+    subject rather than by text: the expectation holds a resolved scene path and
+    the proxy holds the code's own chain, and those never match as strings.
+    """
+    subjects = {subject(item) for item in asserted}
+    swapped: list[str] = []
+
+    def walk(node: dict[str, Any]) -> dict[str, Any]:
+        if node.get("kind") in {"every", "either"}:
+            return {**node, "parts": [walk(part) for part in node.get("parts") or ()]}
+        text = _leaf_text(node)
+        if text is None or _leaf_readable(node):
+            return node
+        for target, value in table.get(text, ()):
+            if subject(target) in subjects:
+                continue
+            swapped.append(text)
+            return {
+                "kind": "test",
+                "left": target,
+                "operator": "==",
+                "right": value,
+                "context": node.get("context"),
+                "offset": node.get("offset"),
+                # Kept so a reader can see this is not what the code says. The
+                # code says a counter reached a length; this says what that
+                # leaves behind.
+                "observableProxyFor": text,
+            }
+        return node
+
+    return walk(condition), swapped
