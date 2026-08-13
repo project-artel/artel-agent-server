@@ -87,6 +87,48 @@ def readable_atoms(condition: dict[str, Any] | None) -> list[str]:
     ]
 
 
+LOOP_COUNTER = "loop_bookkeeping"
+
+
+def drop_loop_bookkeeping(
+    condition: dict[str, Any] | None, looping_frames: set[str]
+) -> tuple[dict[str, Any] | None, bool]:
+    """루프가 자기 진행을 재는 항을 사전 조건에서 뺀다.
+
+    `i < 총개수` 는 "아직 남았다" 는 루프의 살림이지 테스터가 만들 상태가 아니다.
+    같은 카운터를 되돌아가며 세는 자리라 값을 정해 줄 수도 없고, 정해 준다 해도
+    그 순간에만 참이다.
+
+    항에 붙은 프레임으로 가른다. 루프는 부르는 쪽에 있고 조건은 불리는 쪽 계약까지
+    따라가므로, 계약이 어느 레코드에서 왔는지로는 못 잡는다. 같은 조건의 다른 항 —
+    어느 화면인지, 어떤 필드가 무엇인지 — 은 그대로 남는다.
+    """
+    dropped = False
+
+    def walk(node: dict[str, Any]) -> dict[str, Any] | None:
+        nonlocal dropped
+        if node.get("kind") in {"every", "either"}:
+            kept = [
+                part
+                for part in (walk(item) for item in node.get("parts") or ())
+                if part is not None
+            ]
+            if not kept:
+                return None
+            return kept[0] if len(kept) == 1 else {**node, "parts": kept}
+        frames = node.get("localFrames") or {}
+        if node.get("kind") == "test" and any(
+            frame in looping_frames for frame in frames.values()
+        ):
+            dropped = True
+            return None
+        return node
+
+    if not condition:
+        return condition, False
+    return (walk(condition) or {"kind": "always"}), dropped
+
+
 def qualify(condition: dict[str, Any] | None, frame: str) -> dict[str, Any] | None:
     """Name each bare local for the method it lives in.
 

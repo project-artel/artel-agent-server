@@ -1445,6 +1445,13 @@ def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]
     known = graph.answers or Answers.of(
         [path for path in graph.paths if not path.folded]
     )
+    # 되돌아가는 구간이 이름 붙인 프레임. 계약이 아니라 **항**을 이것으로 가른다 —
+    # 루프는 부르는 쪽에 있고 조건은 불리는 쪽 계약까지 따라간다.
+    looping_frames = {
+        ".".join(part for part in member_from_signature(path.source_signature) if part)
+        for path in graph.paths
+        if path.loops_back_to is not None
+    }
     for contract in contracts:
         asserted = {item.target for item in contract.assertions if item.target}
         # 언제나 다시 담는다. `notes` 는 **유도**가 있었는지만 말하고, 같은 것을
@@ -1477,6 +1484,16 @@ def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]
                 contract.quality = _quality(
                     contract.trigger, contract.assertions, contract.issues
                 )
+
+        # 루프의 살림은 전제가 아니다.
+        trimmed, dropped = observable.drop_loop_bookkeeping(
+            contract.condition, looping_frames
+        )
+        if dropped:
+            contract.condition = trimmed
+            if observable.LOOP_COUNTER not in contract.issues:
+                contract.issues.append(observable.LOOP_COUNTER)
+
 
         # What no branch could restate stays unreadable, and a row resting on it
         # cannot be set up or confirmed. Said rather than dropped: the behaviour

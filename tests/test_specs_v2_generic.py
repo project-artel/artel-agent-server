@@ -202,3 +202,35 @@ def test_a_parameter_is_read_as_what_the_call_site_passed() -> None:
     # The marks that said "this is a parameter" are spent once it stopped being one.
     assert "localFrames" not in resolved
     assert observable.unreadable_atoms(resolved) == []
+
+
+def test_a_loops_own_counter_is_not_a_premise() -> None:
+    """`i < 총개수` 는 "아직 남았다" 는 루프의 살림이지 테스터가 만들 상태가 아니다."""
+    premise = observable.qualify(
+        {
+            "kind": "every",
+            "parts": [
+                {"kind": "test", "left": "i", "operator": "<", "right": "Some.total"},
+                {"kind": "test", "left": "Some.flag", "operator": "==", "right": "1"},
+            ],
+        },
+        "Any/<Walk>d__1.MoveNext",
+    )
+    trimmed, dropped = observable.drop_loop_bookkeeping(
+        premise, {"Any/<Walk>d__1.MoveNext"}
+    )
+
+    assert dropped
+    # 나머지 항은 그대로 남는다.
+    assert trimmed["left"] == "Some.flag"
+
+
+def test_a_counter_from_a_frame_that_does_not_loop_stays() -> None:
+    premise = observable.qualify(
+        {"kind": "test", "left": "i", "operator": "<", "right": "Some.total"},
+        "Any.Type.Once",
+    )
+    trimmed, dropped = observable.drop_loop_bookkeeping(premise, {"Other.Loops"})
+
+    assert not dropped
+    assert trimmed["left"] == "Any.Type.Once.i"
