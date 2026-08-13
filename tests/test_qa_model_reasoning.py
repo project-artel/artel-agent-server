@@ -25,7 +25,7 @@ from app.qa.run_config import resolve_run_config
 from app.qa.schemas import QaRunScenario
 from app.qa.service import QaExecutionService
 from app.qa.store import InMemoryQaSessionStore
-from tests.test_qa_prompt_version import make_scenario, open_request
+from tests.test_qa_prompt_version import StubChatModel, make_scenario, open_request
 
 
 def test_models_api_exposes_reasoning_selection_capabilities() -> None:
@@ -304,7 +304,7 @@ def test_run_start_log_names_reasoning(monkeypatch, caplog) -> None:
             return updates()
 
     monkeypatch.setattr(
-        runner_module, "build_chat_model", lambda model, reasoning=None, **_: object()
+        runner_module, "build_chat_model", lambda model, reasoning=None, **_: StubChatModel()
     )
     monkeypatch.setattr(
         runner_module, "create_agent", lambda **_kwargs: SilentAgent()

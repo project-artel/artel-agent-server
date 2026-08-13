@@ -143,10 +143,22 @@ class SilentAgent:
         return updates()
 
 
+class StubChatModel:
+    """Stands in for the model the runner builds, without being one.
+
+    `create_agent` is stubbed too, so nothing ever calls it. It only has to
+    survive construction: `SummarizationMiddleware.__init__` wraps the
+    summarizing model in `with_retry()` before anything is invoked.
+    """
+
+    def with_retry(self, *_args, **_kwargs):
+        return self
+
+
 @pytest.fixture
 def stubbed_agent(monkeypatch):
     monkeypatch.setattr(
-        runner_module, "build_chat_model", lambda model, reasoning=None, **_: object()
+        runner_module, "build_chat_model", lambda model, reasoning=None, **_: StubChatModel()
     )
     monkeypatch.setattr(
         runner_module, "create_agent", lambda **_kwargs: SilentAgent()

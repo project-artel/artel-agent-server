@@ -31,6 +31,7 @@ roll a system-prompt change back, silently rolling this back too — and failing
 outright on any version predating it.
 """
 
+import logging
 from collections.abc import Awaitable, Callable
 
 from langchain.agents.middleware import SummarizationMiddleware
@@ -44,11 +45,19 @@ from app.agents.qa.tools import QaRunState
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import LogCategory
 
+logger = logging.getLogger(__name__)
+
 # What `SummarizationMiddleware` returns as a summary when it could not produce
-# one. It catches every exception out of the summarizing model and turns it into
-# one of these strings, then hands the result back through the same path a real
-# summary takes — so the conversation is wiped and replaced with the error. These
-# prefixes are how that case is told apart from a summary; see `abefore_model`.
+# one, on the versions that report failure that way rather than raising. It
+# catches every exception out of the summarizing model and turns it into one of
+# these strings, then hands the result back through the same path a real summary
+# takes — so the conversation is wiped and replaced with the error. These
+# prefixes are how that case is told apart from a summary.
+#
+# From langchain 1.3.15 the same failure raises instead: the summarizing call is
+# wrapped in `with_retry()` and the error propagates once the retries are spent.
+# `abefore_model` handles both, because the two versions differ only in how the
+# failure arrives and not at all in what it means for the run.
 _SUMMARY_FAILURE_PREFIXES = (
     "Error generating summary:",
     "Previous conversation was too long",
@@ -272,6 +281,20 @@ class QaCompactionMiddleware(SummarizationMiddleware):
             return True
         return super()._should_summarize(messages, total_tokens)
 
+    async def _decline_compaction(self) -> None:
+        """Tell the operator the run is still growing, and leave it that way.
+
+        Declining the whole update is the only thing that keeps a summarizer
+        outage from costing the run its history; the run continues uncompacted
+        and may reach the provider's limit, which is the lesser failure and one
+        the operator can see coming.
+        """
+        await self._channel.note(
+            "Context compaction was skipped: the summary could not be "
+            "generated. The run continues with its history intact.",
+            LogCategory.SYSTEM,
+        )
+
     async def abefore_model(self, state, runtime):  # type: ignore[override]
         # Consumed before anything is awaited: the request is answered by this
         # pass whether or not it results in a compaction, and a second pass must
@@ -279,17 +302,31 @@ class QaCompactionMiddleware(SummarizationMiddleware):
         self._forced = self._state.compaction_requested
         self._state.compaction_requested = False
 
+        # Folded, so that everything downstream — the count, the cut point, the
+        # text handed to the summarizer, and the tail written back to the graph —
+        # works on the conversation as the model actually sees it. Folding is
+        # idempotent and only ever replaces a stale scene view with a placeholder,
+        # and the timeline and console read the channel and the logger rather than
+        # graph state, so nothing readable is lost by letting the folded copies
+        # persist.
+        #
+        # Done before the `try` on purpose, so that a bug in this fold is raised
+        # as itself rather than reported to the operator as a summarizer outage.
+        # It only covers this one fold: `_folded_token_counter` folds again from
+        # inside the base class, and that call is under the handler below.
+        folded = fold_stale_scenes(state["messages"])
+
         try:
-            # Folded, so that everything downstream — the count, the cut point,
-            # the text handed to the summarizer, and the tail written back to the
-            # graph — works on the conversation as the model actually sees it.
-            # Folding is idempotent and only ever replaces a stale scene view with
-            # a placeholder, and the timeline and console read the channel and the
-            # logger rather than graph state, so nothing readable is lost by
-            # letting the folded copies persist.
-            update = await super().abefore_model(
-                {**state, "messages": fold_stale_scenes(state["messages"])}, runtime
-            )
+            update = await super().abefore_model({**state, "messages": folded}, runtime)
+        except Exception:
+            # Broad on purpose. What reaches here is whatever the summarizing
+            # provider raises once `with_retry()` has given up, and that is a
+            # different exception type per provider — narrowing it would leave
+            # a hole whose cost is the run's entire history. Logged rather than
+            # swallowed: the operator's note says a summary failed but not why.
+            logger.exception("[QA] context compaction failed; run continues uncompacted")
+            await self._decline_compaction()
+            return None
         finally:
             self._forced = False
 
@@ -299,17 +336,10 @@ class QaCompactionMiddleware(SummarizationMiddleware):
         messages = update["messages"]
         summary = _summary_text_of(messages)
         if not summary or summary.startswith(_SUMMARY_FAILURE_PREFIXES):
-            # The base class turns a failed summarizing call into a summary that
-            # says it failed, and would still return the instruction to delete
-            # everything else. Declining the whole update is the only thing that
-            # keeps a summarizer outage from costing the run its history; the run
-            # continues uncompacted and may reach the provider's limit, which is
-            # the lesser failure and one the operator can see coming.
-            await self._channel.note(
-                "Context compaction was skipped: the summary could not be "
-                "generated. The run continues with its history intact.",
-                LogCategory.SYSTEM,
-            )
+            # Versions that report a failed summarizing call as a summary saying
+            # it failed would still return the instruction to delete everything
+            # else.
+            await self._decline_compaction()
             return None
 
         update["messages"] = _insert_after_summary(
