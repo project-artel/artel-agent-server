@@ -32,6 +32,8 @@ from . import observable
 # answer depend on them, and the field a method writes is only the same answer
 # when the call is the same call.
 NILADIC = re.compile(r"^(?P<head>.*?)(?:^|\.)(?P<method>[A-Za-z_]\w*)\(\s*\)$")
+# 시그니처가 반환 타입을 앞에 적어 둔다. `get_` 이 붙으면 프로퍼티, 없으면 메서드다.
+BOOLEAN_CALL = re.compile(r"^System\.Boolean .+::(?:get_)?(?P<name>[A-Za-z_]\w*)\(")
 LITERAL_ARG = re.compile(r'^(?:true|false|-?\d+(?:\.\d+)?|"[^"]*")$', re.IGNORECASE)
 
 # How the SDK writes a value it could not read in place. Each is a parameter of
@@ -73,6 +75,10 @@ class Answers:
     # show. Somewhere else in the same evidence the field is written `null`, and
     # that is what says it holds a reference.
     references: set[str] = field(default_factory=set)
+    # 참/거짓을 담는 이름. IL 은 `if (flag)` 를 정수 비교로 낮추므로 SDK 에는 `!= 0`
+    # 으로 도착한다. 참조의 null 검사도 같은 명령이라 **둘이 한 모양으로 온다** —
+    # 무엇이었는지는 시그니처의 반환 타입이 말한다.
+    booleans: set[str] = field(default_factory=set)
 
     @classmethod
     def of(cls, paths: Any) -> "Answers":
@@ -80,11 +86,15 @@ class Answers:
         wrote: dict[str, list[str]] = {}
         left: dict[str, list[tuple[str, str]]] = {}
         references: set[str] = set()
+        booleans: set[str] = set()
 
         for path in paths:
             here = method_of(path.source_signature)
 
             for call in path.calls:
+                found = BOOLEAN_CALL.match(str(call.get("target") or ""))
+                if found:
+                    booleans.add(found.group("name"))
                 argument = str(call.get("args") or "").strip()
                 callee = method_of(call.get("target"))
                 if not (here and callee) or "," in argument:
@@ -111,6 +121,8 @@ class Answers:
                         wrote[here].append(target)
                 if str(effect.get("detail") or "").strip() == "null":
                     references.add(target)
+                if str(effect.get("detail") or "").strip().lower() in {"true", "false"}:
+                    booleans.add(target.rsplit(".", 1)[-1])
 
             if equalities:
                 for leaf in observable._leaves(path.condition):
@@ -131,6 +143,7 @@ class Answers:
             wrote={name: found[0] for name, found in wrote.items() if len(found) == 1},
             left_behind=left,
             references=references,
+            booleans=booleans,
         )
 
     def parameter_value(self, path: Any) -> str | None:
@@ -171,6 +184,36 @@ class Answers:
             if side in (leaf.get("localFrames") or {})
         }
         return names.pop() if len(names) == 1 else None
+
+    def zero_as_written(self, node: dict[str, Any]) -> dict[str, Any]:
+        """IL 이 `0` 으로 낮춘 것을 원래 쓰여 있던 대로 되읽는다.
+
+        `if (flag)` 도 `if (handle != null)` 도 같은 명령이 되어, SDK 에는 둘 다
+        `!= 0` 으로 도착한다. 근거가 무엇이었는지는 따로 말해 준다 — 참조는 어딘가에서
+        `null` 을 대입받고, 참/거짓은 시그니처가 `System.Boolean` 을 앞에 적는다.
+
+        `0` 으로 두면 판독기가 내보내는 `null` 이나 `true`/`false` 와 글자가 맞지 않아,
+        사람이 무엇과 비교해야 하는지 알 수 없다. 조건에서 온 항이든 대입에서 세운
+        등식이든 같은 낮춤을 거쳤으므로 한 자리에서 읽는다.
+        """
+        if str(node.get("right") or "").strip() != "0":
+            return node
+        left = str(node.get("left") or "").strip()
+        # 같은 필드가 주인을 달리 적어 온다 — 자기 타입으로 한 번, 그것을 들고 있는
+        # 쪽에서 한 번. 한 조건 안에 `A.handle == null` 과 `B.thing.handle != 0` 이
+        # 나란히 서면 같은 것을 두 값으로 재는 문장이 된다. 마지막 마디로 맞춘다.
+        if left in self.references or _tail(left) in {
+            _tail(name) for name in self.references
+        }:
+            return {**node, "right": "null", "nullComparison": True}
+        if _tail(left) in self.booleans:
+            return {
+                **node,
+                "right": "true" if node.get("operator") == "!=" else "false",
+                "operator": "==",
+                "booleanComparison": True,
+            }
+        return node
 
     def resolve(
         self,
@@ -222,13 +265,7 @@ class Answers:
                             if key not in {"localFrames", "context"}
                         }
                         notes.append(SUBSTITUTED)
-            # `!= 0` on a reference is `!= null`. Left as zero it reads as a
-            # number to compare against, and the reader never shows one.
-            if str(changed.get("right") or "").strip() == "0" and str(
-                changed.get("left") or ""
-            ).strip() in self.references:
-                changed["right"] = "null"
-                changed["nullComparison"] = True
+            changed = self.zero_as_written(changed)
             for side in ("left", "right"):
                 text = str(changed.get(side) or "").strip()
                 found = NILADIC.match(text)
@@ -250,7 +287,9 @@ class Answers:
                 if observable.subject(target) in subjects:
                     continue
                 notes.append(RESTATED)
-                return {
+                # 효과의 값도 같은 낮춤을 거쳐 온다. `SetLocked(false)` 는 `0` 으로
+                # 적히므로, 대입에서 세운 등식도 같은 자리에서 읽어야 한다.
+                return self.zero_as_written({
                     "kind": "test",
                     "left": target,
                     "operator": "==",
@@ -261,7 +300,7 @@ class Answers:
                     # The code says a counter reached a length; this says what
                     # that leaves behind.
                     "observableProxyFor": text,
-                }
+                })
             return changed
 
         if not condition:
@@ -300,6 +339,11 @@ def negates_own_guard(condition: dict[str, Any] | None, effects: Any) -> bool:
         if operator == "==" and after and after != right:
             return True
     return False
+
+
+def _tail(name: Any) -> str:
+    """이름의 마지막 마디. `A.b.Flag` 도 `A.Flag()` 도 `Flag` 로 읽는다."""
+    return str(name or "").strip().rstrip(")").rstrip("(").rsplit(".", 1)[-1]
 
 
 def _bare_of(name: Any) -> str:
