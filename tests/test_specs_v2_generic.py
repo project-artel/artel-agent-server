@@ -204,8 +204,12 @@ def test_a_parameter_is_read_as_what_the_call_site_passed() -> None:
     assert observable.unreadable_atoms(resolved) == []
 
 
-def test_a_loops_own_counter_is_not_a_premise() -> None:
-    """`i < 총개수` 는 "아직 남았다" 는 루프의 살림이지 테스터가 만들 상태가 아니다."""
+def test_a_value_that_lives_on_the_stack_is_not_a_premise() -> None:
+    """지역 변수는 테스터가 만들 수 있는 상태가 아니다.
+
+    값을 정해 줄 자리가 없고 실행 중인 게임에 물어볼 수도 없다 — 판독기는 필드를
+    읽지 스택 프레임을 읽지 않는다.
+    """
     premise = observable.qualify(
         {
             "kind": "every",
@@ -216,21 +220,56 @@ def test_a_loops_own_counter_is_not_a_premise() -> None:
         },
         "Any/<Walk>d__1.MoveNext",
     )
-    trimmed, dropped = observable.drop_loop_bookkeeping(
-        premise, {"Any/<Walk>d__1.MoveNext"}
-    )
+    trimmed, dropped, narrowing = observable.drop_locals(premise)
 
-    assert dropped
+    assert dropped and not narrowing
     # 나머지 항은 그대로 남는다.
     assert trimmed["left"] == "Some.flag"
 
 
-def test_a_counter_from_a_frame_that_does_not_loop_stays() -> None:
-    premise = observable.qualify(
-        {"kind": "test", "left": "i", "operator": "<", "right": "Some.total"},
-        "Any.Type.Once",
-    )
-    trimmed, dropped = observable.drop_loop_bookkeeping(premise, {"Other.Loops"})
+def test_a_local_the_call_site_answered_is_not_dropped() -> None:
+    """호출부가 넘긴 값으로 치환되면 더 이상 스택에 있지 않다.
 
-    assert not dropped
-    assert trimmed["left"] == "Any.Type.Once.i"
+    치환은 매개변수라는 표시를 함께 지우므로, 답이 있는 항은 여기까지 오지 않는다.
+    """
+    answered = observable.qualify(
+        {"kind": "test", "left": "amount", "operator": ">", "right": "0"},
+        "Any.Type.Take",
+    )
+    answered = {**answered, "left": "Holder.value"}
+    answered.pop("localFrames")
+
+    trimmed, dropped, narrowing = observable.drop_locals(answered)
+
+    assert not dropped and not narrowing
+    assert trimmed["left"] == "Holder.value"
+
+
+def test_a_counter_read_both_ways_is_a_fork_not_bookkeeping() -> None:
+    """`i < 총개수` 만 있으면 살림이고, `i >= 총개수` 도 있으면 갈림길이다.
+
+    한쪽은 다음 대사를 내고 다른 쪽은 화면을 넘긴다. 두 행이 다른 일을 말하게 만드는
+    것이 바로 그 항이므로, 말없이 빼면 좁은 참이 넓은 거짓이 된다.
+
+    그렇다고 남길 수도 없다. 같은 카운터를 루프 진입 시점과 `i + 1` 이후 시점에서 읽은
+    두 항은 동시에 참일 수 없어, 한 조건에 들어가면 모순으로 판정되어 행이 사라진다.
+    빼되 뺐다는 사실을 남긴다.
+    """
+    going_on = observable.qualify(
+        {"kind": "test", "left": "i", "operator": "<", "right": "Some.total"},
+        "Any/<Walk>d__1.MoveNext",
+    )
+    done = observable.qualify(
+        {"kind": "test", "left": "i", "operator": ">=", "right": "Some.total"},
+        "Any/<Walk>d__1.MoveNext",
+    )
+    housekeeping = observable.qualify(
+        {"kind": "test", "left": "i", "operator": "<", "right": "Other.count"},
+        "Any.Type.Sweep",
+    )
+
+    selectors = observable.branch_selectors([going_on, done, housekeeping])
+
+    assert selectors == {("Any/<Walk>d__1.MoveNext.i", "Some.total")}
+    assert observable.drop_locals(done, selectors)[1:] == (True, True)
+    assert observable.drop_locals(housekeeping, selectors)[1:] == (True, False)

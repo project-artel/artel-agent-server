@@ -28,7 +28,7 @@ mechanism.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Iterable
 
 # `Type.member` or a longer chain of them. The runtime reader walks fields by
 # reflection and publishes each one, so a chain of field names is a thing a
@@ -87,26 +87,66 @@ def readable_atoms(condition: dict[str, Any] | None) -> list[str]:
     ]
 
 
-LOOP_COUNTER = "loop_bookkeeping"
+# 뺐다는 표시. 살림을 뺀 것은 결함이 아니라 **덜어낸 것**이다.
+STACK_LOCAL = "premise_on_a_local_dropped"
+# 가지를 가르던 항을 뺐다는 표시. 이쪽은 결함이다 — 행이 코드보다 넓은 말을 한다.
+BRANCH_LOCAL = "branch_premise_not_observable"
+
+# 서로를 부정하는 비교. 같은 두 항을 놓고 이것이 둘 다 나타나면 그 항은 가지를 가른다.
+NEGATION = {"<": ">=", ">=": "<", ">": "<=", "<=": ">", "==": "!=", "!=": "=="}
 
 
-def drop_loop_bookkeeping(
-    condition: dict[str, Any] | None, looping_frames: set[str]
-) -> tuple[dict[str, Any] | None, bool]:
-    """루프가 자기 진행을 재는 항을 사전 조건에서 뺀다.
+def branch_selectors(
+    conditions: Iterable[dict[str, Any] | None],
+) -> set[tuple[str, str]]:
+    """가지를 가르는 지역 항. 같은 두 항을 서로 부정하는 비교로 재는 자리다.
 
-    `i < 총개수` 는 "아직 남았다" 는 루프의 살림이지 테스터가 만들 상태가 아니다.
-    같은 카운터를 되돌아가며 세는 자리라 값을 정해 줄 수도 없고, 정해 준다 해도
-    그 순간에만 참이다.
+    `i < 총개수` 만 있으면 루프가 자기 진행을 재는 살림이다. 같은 자리에 `i >= 총개수`
+    도 있으면 그것은 살림이 아니라 **갈림길**이다 — 한쪽은 다음 대사를 내고 다른 쪽은
+    화면을 넘긴다. 두 행이 다른 일을 말하게 만드는 것이 바로 그 항이므로, 빼면 두 행이
+    같은 전제 아래 다른 결과를 주장하게 된다.
 
-    항에 붙은 프레임으로 가른다. 루프는 부르는 쪽에 있고 조건은 불리는 쪽 계약까지
-    따라가므로, 계약이 어느 레코드에서 왔는지로는 못 잡는다. 같은 조건의 다른 항 —
-    어느 화면인지, 어떤 필드가 무엇인지 — 은 그대로 남는다.
+    "마지막 대사에서 누르면 맵으로 간다" 가 "아무 때나 누르면 맵으로 간다" 가 되는 것을
+    막는 자리다. 읽을 수 없다는 사실은 그대로 남고, 읽을 수 없다고 지우지는 않는다.
+    """
+    ways: dict[tuple[str, str], set[str]] = {}
+    for condition in conditions:
+        for leaf in _leaves(condition):
+            if leaf.get("kind") != "test" or not leaf.get("localFrames"):
+                continue
+            pair = (str(leaf.get("left")), str(leaf.get("right")))
+            ways.setdefault(pair, set()).add(str(leaf.get("operator")))
+    return {
+        pair
+        for pair, operators in ways.items()
+        if any(NEGATION.get(operator) in operators for operator in operators)
+    }
+
+
+def drop_locals(
+    condition: dict[str, Any] | None, selectors: set[tuple[str, str]] = frozenset()
+) -> tuple[dict[str, Any] | None, bool, bool]:
+    """스택에 사는 값을 사전 조건에서 뺀다. 가지를 가르던 것은 뺀 사실을 남긴다.
+
+    지역 변수는 테스터가 만들 수 있는 상태가 아니다. 값을 정해 줄 자리가 없고, 실행
+    중인 게임에 물어볼 수도 없다 — 판독기는 필드를 읽지 스택 프레임을 읽지 않는다.
+    남겨 두면 사람이 지울 수도 고칠 수도 없는 한 줄 때문에, 같은 조건의 읽을 수 있는
+    나머지 — 어느 화면인지, 어떤 필드가 무엇인지 — 까지 함께 묻힌다.
+
+    그렇다고 뺀 자리가 다 같지는 않다. `branch_selectors` 가 짚는 항은 두 행이 서로
+    다른 일을 말하게 만드는 것이고, 그것 없이는 "마지막 대사에서 누르면 맵으로 간다"
+    가 "아무 때나 누르면 맵으로 간다" 가 된다. 좁은 참이 넓은 거짓이 되는 자리다.
+
+    남겨 두는 것으로는 풀리지 않는다. 같은 카운터를 루프 진입 시점과 `i + 1` 이후
+    시점에서 읽은 두 항이 한 조건에 들어가면 동시에 참일 수 없고, 모순으로 판정되어
+    행이 통째로 사라진다. 그래서 빼되 **뺐다는 사실을 등급에 남긴다** — 행은 남고,
+    사람이 조건 하나가 빠진 채로 읽고 있다는 것을 안다.
     """
     dropped = False
+    narrowing = False
 
     def walk(node: dict[str, Any]) -> dict[str, Any] | None:
-        nonlocal dropped
+        nonlocal dropped, narrowing
         if node.get("kind") in {"every", "either"}:
             kept = [
                 part
@@ -116,17 +156,16 @@ def drop_loop_bookkeeping(
             if not kept:
                 return None
             return kept[0] if len(kept) == 1 else {**node, "parts": kept}
-        frames = node.get("localFrames") or {}
-        if node.get("kind") == "test" and any(
-            frame in looping_frames for frame in frames.values()
-        ):
+        if node.get("kind") == "test" and node.get("localFrames"):
+            if (str(node.get("left")), str(node.get("right"))) in selectors:
+                narrowing = True
             dropped = True
             return None
         return node
 
     if not condition:
-        return condition, False
-    return (walk(condition) or {"kind": "always"}), dropped
+        return condition, False, False
+    return (walk(condition) or {"kind": "always"}), dropped, narrowing
 
 
 def qualify(condition: dict[str, Any] | None, frame: str) -> dict[str, Any] | None:

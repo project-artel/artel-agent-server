@@ -54,7 +54,11 @@ SENTINELS = {"(not a simple receiver)", "(not a simple target)", "(not a literal
 # defect: both mean the row became answerable, not that something is missing.
 # Left in `issues` and out of the grade, because those answer different
 # questions — what happened to this row, and whether it can be run.
-DERIVATION_NOTES = set(answers.NOTES)
+# 행이 나빠서가 아니라 **좋아져서** 붙는 표시. 등급을 매길 때 결함으로 세지 않는다.
+# 지역 변수를 뺀 것도 여기 속한다: 뺀 항은 테스터가 맞출 수 있는 상태가 아니라
+# 스택에 사는 값이었고, 빼고 나면 남은 전제가 곧 세울 수 있는 것 전부다.
+DERIVATION_NOTES = set(answers.NOTES) | {observable.STACK_LOCAL}
+
 
 CANDIDATE_ISSUES = {
     observable.PARTLY,
@@ -1445,13 +1449,9 @@ def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]
     known = graph.answers or Answers.of(
         [path for path in graph.paths if not path.folded]
     )
-    # 되돌아가는 구간이 이름 붙인 프레임. 계약이 아니라 **항**을 이것으로 가른다 —
-    # 루프는 부르는 쪽에 있고 조건은 불리는 쪽 계약까지 따라간다.
-    looping_frames = {
-        ".".join(part for part in member_from_signature(path.source_signature) if part)
-        for path in graph.paths
-        if path.loops_back_to is not None
-    }
+    # 가지를 가르는 항은 리포트 전체를 보고 정한다. 한 계약만 보면 `i < 총개수` 가
+    # 살림인지 갈림길인지 알 수 없다 — 반대편 가지는 다른 계약에 있다.
+    selectors = observable.branch_selectors(path.condition for path in graph.paths)
     for contract in contracts:
         asserted = {item.target for item in contract.assertions if item.target}
         # 언제나 다시 담는다. `notes` 는 **유도**가 있었는지만 말하고, 같은 것을
@@ -1485,14 +1485,18 @@ def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]
                     contract.trigger, contract.assertions, contract.issues
                 )
 
-        # 루프의 살림은 전제가 아니다.
-        trimmed, dropped = observable.drop_loop_bookkeeping(
-            contract.condition, looping_frames
+        # 스택에 사는 값은 전제가 아니다.
+        trimmed, dropped, narrowing = observable.drop_locals(
+            contract.condition, selectors
         )
         if dropped:
             contract.condition = trimmed
-            if observable.LOOP_COUNTER not in contract.issues:
-                contract.issues.append(observable.LOOP_COUNTER)
+            note = observable.BRANCH_LOCAL if narrowing else observable.STACK_LOCAL
+            if note not in contract.issues:
+                contract.issues.append(note)
+            contract.quality = _quality(
+                contract.trigger, contract.assertions, contract.issues
+            )
 
 
         # What no branch could restate stays unreadable, and a row resting on it
