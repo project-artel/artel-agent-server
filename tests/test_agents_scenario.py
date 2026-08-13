@@ -287,6 +287,7 @@ def _test_case_list() -> list[TestCaseListItem]:
             precondition="앱을 최초 실행한 상태",
             expected_value="임시 계정이 발급되고 로비로 진입한다",
             verification_status="VERIFIED",
+            status="ready",
         ),
         TestCaseListItem(
             id=57,
@@ -295,6 +296,7 @@ def _test_case_list() -> list[TestCaseListItem]:
             precondition=None,
             expected_value="보유 수량이 1 줄고 글자가 표시된다",
             verification_status="DRAFT",
+            status="candidate",
         ),
     ]
 
@@ -378,3 +380,30 @@ def test_system_prompt_with_the_list_is_byte_identical_across_turns() -> None:
     assert first == second
     # And a placeholder left unsubstituted would silently ship "{test_case_list}".
     assert "{" not in first
+
+
+def test_rendered_list_carries_both_confidence_marks() -> None:
+    """Our verdict and the spec's grade answer different questions; both must show."""
+    rendered = render_test_case_list(_test_case_list())
+
+    assert "· VERIFIED · ready]" in rendered
+    assert "· DRAFT · candidate]" in rendered
+
+
+def test_missing_spec_grade_prints_nothing() -> None:
+    """An empty slot would read as a third grade rather than "not graded"."""
+    rendered = render_test_case_list(
+        [
+            TestCaseListItem(
+                id=1,
+                scene="상점",
+                step="구매",
+                precondition=None,
+                expected_value="차감된다",
+                verification_status="DRAFT",
+            )
+        ]
+    )
+
+    assert "[id 1 · 상점 · DRAFT]" in rendered
+    assert "None" not in rendered

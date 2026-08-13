@@ -121,8 +121,11 @@ def render_test_case_list(entries: list[TestCaseListItem]) -> str:
         "These are ALL of them — there is nothing else to find."
     ]
     for entry in entries:
+        # The spec grade only prints when it exists: an empty slot costs tokens and
+        # reads like a third grade ("no status") rather than "not graded".
+        grade = f" · {entry.status}" if entry.status else ""
         lines.append(
-            f"\n[id {entry.id} · {entry.scene} · {entry.verification_status}] {entry.step}"
+            f"\n[id {entry.id} · {entry.scene} · {entry.verification_status}{grade}] {entry.step}"
         )
         if entry.precondition:
             lines.append(f"    precondition: {entry.precondition}")

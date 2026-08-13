@@ -49,9 +49,15 @@ class TestCaseListItem(BaseModel):
     """One TestCase as the session receives it, in the project's whole list.
 
     Named after orchestration's DTO on the other end of the wire so the contract
-    is greppable from either side. ``verification_status`` is DRAFT/VERIFIED/
-    BROKEN — it rides along so the agent can prefer a verified case and steer
-    around a broken one, which a similarity score never told it.
+    is greppable from either side.
+
+    Two confidence axes ride along, and they answer different questions.
+    ``verification_status`` (DRAFT/VERIFIED/BROKEN) is what OUR run concluded —
+    whether the case has been seen to pass. ``status`` (``ready``/``candidate``) is
+    what the spec's author graded it — whether the text itself is settled. A
+    ``candidate`` case may carry an expected value nobody has pinned down yet, and
+    a step written from that reads plausible and fails on execution. Neither axis
+    substitutes for the other, so both are printed.
 
     The bodies (``precondition``, ``expected_value``) travel with the entry rather
     than being fetched afterwards. The agent has to read them to write the steps that
@@ -65,6 +71,8 @@ class TestCaseListItem(BaseModel):
     precondition: str | None = None
     expected_value: str
     verification_status: str
+    # None for cases that predate the field or were written by hand in the UI.
+    status: str | None = None
 
 
 class ScenarioAgentRequest(BaseModel):
