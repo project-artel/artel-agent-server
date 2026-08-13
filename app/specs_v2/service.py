@@ -62,7 +62,7 @@ def generate_test_cases(report: dict[str, Any]) -> dict[str, Any]:
     """
 
     result = discover(graph_from_report(report, source="internal-request"))
-    ready_rows, review_rows, _ = project_rows(result)
+    ready_rows, review_rows = project_rows(result)
     settings = get_settings()
     cases = test_cases(
         result,
