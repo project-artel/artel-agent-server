@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from . import observable
+from . import answers, observable
+from .answers import Answers
 from .graph import (
     EvidenceGraph,
     PathFact,
@@ -53,10 +54,7 @@ SENTINELS = {"(not a simple receiver)", "(not a simple target)", "(not a literal
 # defect: both mean the row became answerable, not that something is missing.
 # Left in `issues` and out of the grade, because those answer different
 # questions — what happened to this row, and whether it can be run.
-DERIVATION_NOTES = {
-    observable.ISSUE,
-    observable.SUBSTITUTED,
-}
+DERIVATION_NOTES = set(answers.NOTES)
 
 CANDIDATE_ISSUES = {
     observable.PARTLY,
@@ -1308,23 +1306,15 @@ def _rewrite_unreadable_premises(graph: EvidenceGraph, contracts: list[Contract]
     # No early return when the table is empty. Restating a premise and judging
     # whether one is answerable are separate questions, and a report where
     # nothing could be restated is exactly where the judging matters.
-    live = [path for path in graph.paths if not path.folded]
-    table = observable.proxies(live)
-    written = observable.written_fields(live)
+    known = Answers.of([path for path in graph.paths if not path.folded])
     for contract in contracts:
         asserted = {item.target for item in contract.assertions if item.target}
-        # A call first: the field it wrote is the same answer, and saying the
-        # premise that way leaves nothing for the branch-equality rule to do.
-        condition, replaced = observable.substitute_calls(contract.condition, written)
-        if replaced:
+        condition, notes = known.resolve(contract.condition, asserted)
+        if notes:
             contract.condition = condition
-            if observable.SUBSTITUTED not in contract.issues:
-                contract.issues.append(observable.SUBSTITUTED)
-        condition, swapped = observable.rewrite(contract.condition, table, asserted)
-        if swapped:
-            contract.condition = condition
-            if observable.ISSUE not in contract.issues:
-                contract.issues.append(observable.ISSUE)
+            for note in notes:
+                if note not in contract.issues:
+                    contract.issues.append(note)
         # What no branch could restate stays unreadable, and a row resting on it
         # cannot be set up or confirmed. Said rather than dropped: the behaviour
         # is real and someone may still write the premise another way.

@@ -1,0 +1,111 @@
+"""The evidence keeps its own answers; this is where they are looked up."""
+
+from app.specs_v2.answers import Answers
+
+
+def _path(source: str, *, route=(), calls=(), effects=(), condition=None):
+    class Path:
+        pass
+
+    item = Path()
+    item.source_signature = source
+    item.call_path = tuple(route) or (source,)
+    item.calls = list(calls)
+    item.effects = list(effects)
+    item.condition = condition or {"kind": "always"}
+    return item
+
+
+PROMPT = "System.Void Demo.Chat::SetPromptVisible(System.Boolean)"
+DONE = "System.Void Demo.Chat::OnStreamComplete()"
+NEXT = "System.Boolean Demo.Chat::MoveNext()"
+
+
+def _report_paths():
+    """One method called `true` from one place and `false` from another."""
+    shown = {
+        "kind": "active-state",
+        "category": "availability",
+        "target": "Chat.prompt",
+        # A parameter: inside `SetPromptVisible` it is not a literal, and the
+        # SDK says so rather than guessing.
+        "detail": "(not a literal)",
+        "offset": 22,
+    }
+    return [
+        _path(DONE, calls=[{"target": PROMPT, "args": "true", "offset": 2}]),
+        _path(NEXT, calls=[{"target": PROMPT, "args": "false", "offset": 96}]),
+        _path(PROMPT, route=(DONE, PROMPT), effects=[shown]),
+        _path(PROMPT, route=(NEXT, PROMPT), effects=[shown]),
+    ]
+
+
+def test_a_method_called_both_ways_has_no_answer_and_each_route_has_one() -> None:
+    known = Answers.of(_report_paths())
+
+    assert known.passed[("OnStreamComplete", "SetPromptVisible")] == "true"
+    assert known.passed[("MoveNext", "SetPromptVisible")] == "false"
+
+    finished, started = _report_paths()[2], _report_paths()[3]
+    assert known.for_parameter(finished) == "true"
+    assert known.for_parameter(started) == "false"
+
+
+def test_one_caller_passing_two_literals_is_left_unanswered() -> None:
+    """That happens in a branch, and which branch this row took is not said."""
+    known = Answers.of(
+        [
+            _path(
+                DONE,
+                calls=[
+                    {"target": PROMPT, "args": "true", "offset": 2},
+                    {"target": PROMPT, "args": "false", "offset": 9},
+                ],
+            )
+        ]
+    )
+
+    assert known.passed == {}
+
+
+def test_a_null_check_is_not_a_comparison_against_zero() -> None:
+    """IL spells it that way; the runtime reader never shows a zero there."""
+    known = Answers.of(
+        [
+            _path(
+                NEXT,
+                effects=[
+                    {
+                        "kind": "write",
+                        "category": "state",
+                        "target": "Chat.streamingCoroutine",
+                        "detail": "null",
+                        "offset": 20,
+                    }
+                ],
+            )
+        ]
+    )
+    assert "Chat.streamingCoroutine" in known.references
+
+    resolved, _ = known.resolve(
+        {
+            "kind": "test",
+            "left": "Chat.streamingCoroutine",
+            "operator": "!=",
+            "right": "0",
+        },
+        set(),
+    )
+    assert resolved["right"] == "null"
+    assert resolved["nullComparison"] is True
+
+
+def test_a_field_the_evidence_never_nulls_keeps_its_zero() -> None:
+    """`hp != 0` is a number, and turning it into `null` would be a lie."""
+    resolved, _ = Answers().resolve(
+        {"kind": "test", "left": "Player.hp", "operator": "!=", "right": "0"}, set()
+    )
+
+    assert resolved["right"] == "0"
+    assert "nullComparison" not in resolved

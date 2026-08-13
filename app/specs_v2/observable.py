@@ -43,13 +43,11 @@ BARE = re.compile(r"^(?:i|j|k|n|id|num|index|damage|collision|other|bigSide|dist
 # What a reference reads as when nothing was assigned.
 EMPTY = frozenset({"null", "0", "false", "true"})
 
-ISSUE = "precondition_rewritten_to_observable"
 # 전제가 통째로 답할 수 없는 것과, 일부만 답할 수 없는 것은 다르다. 앞엣것은
 # 테스터가 어디서 시작할지조차 모르고, 뒤엣것은 읽을 수 있는 상태로 자리를 잡은
 # 뒤 나머지를 화면으로 가늠할 수 있다.
 UNCHECKABLE = "precondition_not_observable"
 PARTLY = "precondition_partly_observable"
-SUBSTITUTED = "precondition_read_from_written_field"
 
 
 def unreadable_atoms(condition: dict[str, Any] | None) -> list[str]:
@@ -135,105 +133,6 @@ def value_of(detail: Any) -> str:
     return value
 
 
-def _equality(effect: dict[str, Any]) -> tuple[str, str] | None:
-    """The equality an assignment leaves behind, when both sides are readable."""
-    if effect.get("kind") not in {"ui-value", "write", "active-state"}:
-        return None
-    target = str(effect.get("target") or "").strip()
-    value = value_of(effect.get("detail"))
-    if not FIELD_CHAIN.match(target):
-        return None
-    if not (FIELD_CHAIN.match(value) or value in EMPTY):
-        return None
-    return target, value
-
-
-# `Owner.field.Method()` — a call with no arguments, at the end of a chain.
-# Arguments would make the answer depend on them, and the field a method writes
-# is only the same answer when the call is the same call.
-NILADIC = re.compile(r"^(?P<head>.*?)(?:^|\.)(?P<method>[A-Za-z_]\w*)\(\s*\)$")
-
-
-def written_fields(paths: Any) -> dict[str, str]:
-    """Method name → the one field it writes, when it writes exactly one.
-
-    `SaveLoadController.LoadPlayData()` returns the saved progress and writes the
-    same value into `MapMove.StagePosition` on the way out. Nothing may call it —
-    reading the game must not change it, and this one saves — but after it has
-    run, the field holds what it answered.
-
-    Only when there is exactly one write. Two and the question of which one
-    answers the call has no structural answer, and guessing it would put a
-    premise in the sheet that the evidence does not support.
-    """
-    writes: dict[str, list[str]] = {}
-    for path in paths:
-        method = str(path.source_signature or "").split("::")[-1].split("(")[0]
-        if not method:
-            continue
-        for effect in path.effects:
-            if effect.get("kind") not in {"write", "saved"}:
-                continue
-            target = str(effect.get("target") or "").strip()
-            if FIELD_CHAIN.match(target) and target not in writes.setdefault(method, []):
-                writes[method].append(target)
-    return {method: found[0] for method, found in writes.items() if len(found) == 1}
-
-
-def substitute_calls(
-    condition: dict[str, Any] | None, written: dict[str, str]
-) -> tuple[dict[str, Any] | None, list[str]]:
-    """Say a premise through the field its call left behind."""
-    swapped: list[str] = []
-
-    def walk(node: dict[str, Any]) -> dict[str, Any]:
-        if node.get("kind") in {"every", "either"}:
-            return {**node, "parts": [walk(part) for part in node.get("parts") or ()]}
-        if node.get("kind") != "test":
-            return node
-        changed = dict(node)
-        for side in ("left", "right"):
-            text = str(changed.get(side) or "").strip()
-            found = NILADIC.match(text)
-            if not found:
-                continue
-            field = written.get(found.group("method"))
-            if not field:
-                continue
-            swapped.append(text)
-            changed[side] = field
-            changed.setdefault("substitutedCalls", {})[side] = text
-        return changed
-
-    if not condition:
-        return condition, swapped
-    return walk(condition), swapped
-
-
-def proxies(paths: Any) -> dict[str, list[tuple[str, str]]]:
-    """Unreadable guard text → the equalities its own branch establishes.
-
-    Built over every path rather than per contract because a guard travels: the
-    condition that stops the typing animation is composed into rows written
-    about what happens after it, and by then the assignment that answers it is
-    several hops away.
-    """
-    found: dict[str, list[tuple[str, str]]] = {}
-    for path in paths:
-        equalities = [pair for pair in map(_equality, path.effects) if pair]
-        if not equalities:
-            continue
-        for leaf in _leaves(path.condition):
-            text = _leaf_text(leaf)
-            if text is None or _leaf_readable(leaf):
-                continue
-            kept = found.setdefault(text, [])
-            for pair in equalities:
-                if pair not in kept:
-                    kept.append(pair)
-    return found
-
-
 def _leaves(condition: dict[str, Any] | None):
     if not condition:
         return
@@ -282,43 +181,3 @@ def subject(target: str) -> str:
     return parts[-1] if parts else ""
 
 
-def rewrite(
-    condition: dict[str, Any],
-    table: dict[str, list[tuple[str, str]]],
-    asserted: set[str],
-) -> tuple[dict[str, Any], list[str]]:
-    """Replace unreadable leaves with the equality their branch establishes.
-
-    `asserted` is what this row already expects. A proxy naming one of those is
-    dropped rather than substituted — see the module docstring. Compared by
-    subject rather than by text: the expectation holds a resolved scene path and
-    the proxy holds the code's own chain, and those never match as strings.
-    """
-    subjects = {subject(item) for item in asserted}
-    swapped: list[str] = []
-
-    def walk(node: dict[str, Any]) -> dict[str, Any]:
-        if node.get("kind") in {"every", "either"}:
-            return {**node, "parts": [walk(part) for part in node.get("parts") or ()]}
-        text = _leaf_text(node)
-        if text is None or _leaf_readable(node):
-            return node
-        for target, value in table.get(text, ()):
-            if subject(target) in subjects:
-                continue
-            swapped.append(text)
-            return {
-                "kind": "test",
-                "left": target,
-                "operator": "==",
-                "right": value,
-                "context": node.get("context"),
-                "offset": node.get("offset"),
-                # Kept so a reader can see this is not what the code says. The
-                # code says a counter reached a length; this says what that
-                # leaves behind.
-                "observableProxyFor": text,
-            }
-        return node
-
-    return walk(condition), swapped
