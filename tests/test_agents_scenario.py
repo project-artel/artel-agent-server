@@ -26,6 +26,7 @@ from app.agents.scenario.prompt import (
     build_system_prompt,
 )
 from app.llm.chat_model import select_structured_method
+from app.prompts import load_prompt
 from app.llm.models import LLMModel
 from app.sessions.channel import ScenarioChannel
 
@@ -256,8 +257,8 @@ def test_system_prompt_uses_requested_language_directive() -> None:
     assert LANGUAGE_DIRECTIVES[OutputLanguage.en] in en_body
     assert "한국어" in ko_body
     assert "English" in en_body
-    # v5 is the newest scenario prompt version and the default.
-    assert version == "v5"
+    # v6 is the newest scenario prompt version and the default.
+    assert version == "v6"
 
 
 def test_first_message_carries_the_run_goal_and_context() -> None:
@@ -374,6 +375,55 @@ def test_render_test_case_list_prints_bodies_whole() -> None:
     assert long_expected in rendered
     assert "truncated" not in rendered
     assert "precondition: 보석 100개 이상" in rendered
+
+
+# ── Authoring without cases on explicit request (v6) ──────────────────────────
+#
+# The unlock is prompt-only, so what is pinned here is the prompt text and the
+# shape it asks for. Whether a given model honours it is not testable offline;
+# what is testable is that the default rule survived beside it, that the unlock
+# names the null `case_id`, and that a result made entirely of ungrounded steps
+# is a valid one to hand downstream.
+
+
+def test_v6_unlocks_caseless_authoring_and_keeps_the_default_rule() -> None:
+    v6 = load_prompt("scenario", "system", "v6").body
+    v5 = load_prompt("scenario", "system", "v5").body
+
+    # The defaults are unchanged — the unlock is an exception, not a replacement.
+    assert "**Do NOT invent.**" in v6
+    assert "Ground every step in the cases above." in v6
+    # v5's exhaustive in/out verdict survives too, and the unlock says which side
+    # an uncovered case lands on: `in` is a promise some step carries the id.
+    assert "judge EVERY case in the list above" in v6
+    assert "no id may go to `reviewed.in` on its account" in v6
+    # An ungrounded step carries no id: guessing one would file a verdict against
+    # a case the step never exercises.
+    assert "Leave `case_id` null on EVERY step" in v6
+    # v5 has no such section, which is the whole reason v6 exists.
+    assert "WITHOUT TEST CASES" not in v5
+
+
+def test_a_scenario_of_ungrounded_steps_is_a_valid_result() -> None:
+    """All-null `case_id` survives the contract: orchestration stores steps whole
+    and resolves a `case` only where an id is present."""
+    plan = ScenarioPlan(
+        title="튜토리얼 첫 진입",
+        description="케이스 없이 작성한 흐름 초안.",
+        steps=[
+            AuthoredStep(action="게임을 처음 실행한다"),
+            AuthoredStep(action="시작 버튼을 누른다"),
+            AuthoredStep(action="튜토리얼 첫 대사가 뜨는지 확인한다"),
+        ],
+    )
+    result = ScenarioAgentResult(
+        message="기존 테스트 케이스와 연결되지 않은 초안이에요.", scenarios=[plan]
+    )
+
+    agent = ScenarioAgent(agent_factory=_canned_factory(result))
+    returned = asyncio.run(agent.run(_request(), _CTX, _channel()))
+
+    assert [step.case_id for step in returned.scenarios[0].steps] == [None, None, None]
 
 
 def test_system_prompt_with_the_list_is_byte_identical_across_turns() -> None:
