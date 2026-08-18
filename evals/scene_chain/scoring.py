@@ -203,6 +203,8 @@ class RunScore:
     out_of_map_total: int = 0
     chains_emitted: int = 0
     chains_fabricated: int = 0
+    #: 인용은 다 통과했는데 한 체인이 두 상태를 뒤섞은 것. 지어냄과 다른 실패다.
+    chains_mixed_state: int = 0
     citations_in_map: int = 0
     citations_in_capture: int = 0
     citations_unverified: int = 0
@@ -266,6 +268,7 @@ def score_run(
         out_of_map_total=len(out_of_map),
         chains_emitted=len(checks),
         chains_fabricated=sum(1 for check in checks if check.fabricated),
+        chains_mixed_state=sum(1 for check in checks if check.mixed_state),
         citations_in_map=sum(1 for verdict in verdicts if verdict == "in-map"),
         citations_in_capture=sum(1 for verdict in verdicts if verdict == "in-capture"),
         citations_unverified=sum(1 for verdict in verdicts if verdict == "unverified"),
@@ -292,6 +295,7 @@ def summarize(scores: list[RunScore]) -> dict:
             # 반복분을 합쳐서 낸다. 체인 두 개를 낸 run 과 스무 개를 낸 run 의 비율을
             # 단순 평균하면 적게 낸 쪽이 과대 대표된다.
             "fabricationRatePooled": round(fabricated / emitted, 4) if emitted else 0.0,
+            "chainsMixedState": sum(run.chains_mixed_state for run in runs),
             "underConnection": _spread([float(run.under_connection) for run in runs]),
             "joinLinks": runs[0].join_links,
             "citationsInCapture": sum(run.citations_in_capture for run in runs),

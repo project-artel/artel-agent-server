@@ -28,7 +28,13 @@ from pathlib import Path
 from evals.scene_chain.arms import Arm, ArmInput, build_arm_input, read_pseudo_cs
 from evals.scene_chain.citations import MalformedOutput, check_chain, parse_chains
 from evals.scene_chain.evidence import Capture, ContentMap
-from evals.scene_chain.scoring import RunScore, load_golden_chains, score_run, summarize
+from evals.scene_chain.scoring import (
+    RunScore,
+    join_baseline_checks,
+    load_golden_chains,
+    score_run,
+    summarize,
+)
 
 HERE = Path(__file__).parent
 GOLDEN_CHAINS = HERE / "data" / "golden-chains.json"
@@ -47,18 +53,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="씬 명세만으로 기능을 잇는 능력 측정")
     parser.add_argument("--content-map", type=Path, required=True)
     parser.add_argument("--pseudo-cs", type=Path, required=True, help="wv2cs.py 가 낸 디렉터리")
-    parser.add_argument(
-        "--capture",
-        type=Path,
-        default=None,
-        help="근거 캡처 JSON. 있으면 맵 밖 인용을 in-capture 로 가려낸다",
-    )
+    # 없으면 in-capture 단이 죽고, content_map 밖에서만 근거가 나오는 골든(SC-6·SC-7)이
+    # 어느 arm 에서도 성립하지 않는다. 그러면 arm 이 귀무가설을 넘을 길이 사라지는데
+    # 실행은 조용히 성공한다 — 재지 못한 것이 잰 것처럼 보이는 제일 나쁜 실패다.
+    parser.add_argument("--capture", type=Path, required=True, help="근거 캡처 JSON")
     parser.add_argument("--golden", type=Path, default=GOLDEN_CHAINS)
     parser.add_argument("--arm", default="all", choices=[*(arm.value for arm in Arm), "all"])
     parser.add_argument("--model", default="anthropic/claude-sonnet-5")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--replay", type=Path, default=None, help="모델을 부르지 않고 이 결과 파일로 재채점")
+    parser.add_argument(
+        "--replay",
+        type=Path,
+        nargs="+",
+        default=None,
+        help="모델을 부르지 않고 이 결과 파일들로 재채점. 채점 규칙이 바뀌면 지난 실행 전부를 같은 자로 다시 잰다",
+    )
     parser.add_argument("--dry-run", action="store_true", help="프롬프트만 조립하고 크기를 찍는다")
     return parser.parse_args(argv)
 
@@ -67,7 +77,8 @@ def require_readable(*paths: Path) -> None:
     """입력이 하나라도 없으면 즉시 죽는다. 절반만 채워진 측정이 제일 나쁘다."""
     missing = [str(path) for path in paths if path is not None and not path.exists()]
     if missing:
-        raise SystemExit(f"[scene-chain] 입력을 읽을 수 없다: {', '.join(missing)}")
+        print(f"[scene-chain] 입력을 읽을 수 없다: {', '.join(missing)}", file=sys.stderr)
+        raise SystemExit(2)
 
 
 async def call_model(model_name: str, arm_input: ArmInput) -> dict:
@@ -141,19 +152,38 @@ def main(argv: list[str] | None = None) -> int:
     require_readable(args.content_map, args.pseudo_cs, args.golden, args.capture)
 
     content_map = ContentMap.load(args.content_map)
-    capture = Capture.load(args.capture) if args.capture else None
+    capture = Capture.load(args.capture)
     golden = load_golden_chains(args.golden)
     content_map_text = args.content_map.read_text(encoding="utf-8")
     pseudo_cs_text = read_pseudo_cs(args.pseudo_cs)
     arms = list(Arm) if args.arm == "all" else [Arm(args.arm)]
 
     if args.replay:
-        require_readable(args.replay)
-        saved = json.loads(args.replay.read_text(encoding="utf-8"))
-        score, detail = grade(
-            Arm(saved["arm"]), saved["repeat"], saved["response"]["text"], content_map, capture, golden
+        require_readable(*args.replay)
+        replayed: list[RunScore] = []
+        details = {}
+        for path in args.replay:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            score, detail = grade(
+                Arm(saved["arm"]),
+                saved["repeat"],
+                saved["response"]["text"],
+                content_map,
+                capture,
+                golden,
+            )
+            score.duration_seconds = saved["response"].get("durationSeconds", 0.0)
+            score.cost_usd = saved["response"].get("costUsd")
+            score.input_tokens = saved["response"].get("inputTokens", 0)
+            score.output_tokens = saved["response"].get("outputTokens", 0)
+            replayed.append(score)
+            details[path.name] = {"score": score.as_dict(), "chains": detail}
+        replayed.append(_baseline(content_map, golden))
+        print(
+            json.dumps(
+                {"runs": details, "summary": summarize(replayed)}, ensure_ascii=False, indent=2
+            )
         )
-        print(json.dumps({"score": score.as_dict(), "chains": detail}, ensure_ascii=False, indent=2))
         return 0
 
     if args.dry_run:
@@ -204,8 +234,15 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"[scene-chain] -> {path}", file=sys.stderr)
 
+    # 귀무가설을 같은 표에 싣는다. 모델 없이 조인만 돌린 답보다 못한 arm 이 있는지가
+    # 이 실험이 답해야 할 첫 질문이고, 옆에 없으면 아무도 그것을 묻지 않는다.
+    scores.append(_baseline(content_map, golden))
     print(json.dumps(summarize(scores), ensure_ascii=False, indent=2))
     return 0
+
+
+def _baseline(content_map: ContentMap, golden) -> RunScore:
+    return score_run("join-baseline", 0, join_baseline_checks(content_map), golden, content_map)
 
 
 if __name__ == "__main__":

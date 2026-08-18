@@ -75,16 +75,22 @@ class ChainCheck:
         return all(names_a_state(via, head) for via in vias)
 
     @property
+    def citations_hold(self) -> bool:
+        """인용이 전부 대조를 통과했는가. 지어냄 비율은 이것만 센다."""
+        return bool(self.checks) and all(check.passed for check in self.checks)
+
+    @property
     def passed(self) -> bool:
-        return (
-            bool(self.checks)
-            and all(check.passed for check in self.checks)
-            and self.names_one_state
-        )
+        return self.citations_hold and self.names_one_state
 
     @property
     def fabricated(self) -> bool:
-        return not self.passed
+        """인용을 못 댄 것. 상태를 섞은 것은 여기 들어가지 않는다 — 다른 실패다."""
+        return not self.citations_hold
+
+    @property
+    def mixed_state(self) -> bool:
+        return self.citations_hold and not self.names_one_state
 
     def resolved(self, role: Role, state: str) -> frozenset[int]:
         """`state` 를 그 역할로 인용한 기능 행 전부. 골든 적중 판정이 쓴다."""
@@ -160,7 +166,11 @@ def verify(citation: Citation, content_map: ContentMap, capture: Capture | None)
         if any(names_a_state(term, citation.via) for term in terms):
             return CitationCheck(citation, Verdict.in_map, capability_ids, "content_map 의 그 행에 있다")
 
-    if capture is not None:
+    # 없는 id 를 댄 인용은 캡처 단으로 넘기지 않는다. `unit` 이 우연히 진짜 메서드를
+    # 가리켜도 실재하지 않는 행을 댄 것은 그 자체로 지어냄이고, arm (c) 는 두 칸을 모두
+    # 채우라고 지시받으므로 여기서 새면 지어냄이 통째로 안 세어진다.
+    invented_id = citation.capability_id is not None and not capability_ids
+    if capture is not None and not invented_id:
         unit = citation.unit or _unit_of(capability_ids, content_map)
         record = capture.matching_unit(unit) if unit else None
         if record is not None:

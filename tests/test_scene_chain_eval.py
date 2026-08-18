@@ -398,3 +398,42 @@ def test_the_three_arms_share_one_prompt_and_differ_only_in_evidence():
     assert "capabilityId` 는 null" in inputs[Arm.pseudo_cs].human
     assert content_map_text in inputs[Arm.both].human
     assert pseudo in inputs[Arm.both].human
+
+
+def test_an_invented_capability_id_is_not_rescued_by_a_real_unit(content_map):
+    """arm (c) 는 두 칸을 모두 채우라고 지시받는다. 없는 id 가 `unit` 으로 살아나면
+    거기서 지어냄이 통째로 안 세어진다."""
+    check = verify(
+        Citation(771, "Scenes.GameClearController.ShowGettedCard", Role.reads, "MapMove.StagePosition"),
+        content_map,
+        _capture(),
+    )
+    assert check.verdict is Verdict.unverified
+    assert check.capability_ids == frozenset()
+
+
+def test_mixing_two_states_is_counted_apart_from_fabrication(content_map, golden):
+    """지어냄 비율은 '근거를 못 댄 것'이다. 상태를 뒤섞은 것은 다른 실패이므로 따로 센다."""
+    checks = [
+        check_chain(chain, content_map, None)
+        for chain in parse_chains(
+            chain_payload(
+                cite(capabilityId=24, role="writes", via="MapMove.StagePosition"),
+                cite(capabilityId=12, role="reads", via="MapMove.position"),
+            )
+        )
+    ]
+    score = score_run("a", 1, checks, golden, content_map)
+    assert score.chains_mixed_state == 1
+    assert score.chains_fabricated == 0
+    assert score.fabrication_rate == 0.0
+
+
+def test_the_runner_puts_the_baseline_next_to_every_arm(tmp_path, content_map, golden):
+    """귀무가설이 표에 없으면 아무도 arm 을 그것과 비교하지 않는다."""
+    arm_score = score_run("a", 1, _answer(content_map, [g for g in golden if g.supported]), golden, content_map)
+    baseline = score_run("join-baseline", 0, join_baseline_checks(content_map), golden, content_map)
+    rolled = summarize([arm_score, baseline])
+    assert set(rolled) == {"a", "join-baseline"}
+    assert rolled["join-baseline"]["accuracy"]["mean"] == pytest.approx(0.8)
+    assert rolled["join-baseline"]["outOfMapCorrect"]["mean"] == 0.0
