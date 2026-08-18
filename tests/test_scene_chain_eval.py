@@ -5,6 +5,7 @@
 """
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -437,3 +438,38 @@ def test_the_runner_puts_the_baseline_next_to_every_arm(tmp_path, content_map, g
     assert set(rolled) == {"a", "join-baseline"}
     assert rolled["join-baseline"]["accuracy"]["mean"] == pytest.approx(0.8)
     assert rolled["join-baseline"]["outOfMapCorrect"]["mean"] == 0.0
+
+
+REAL_CAPTURE = os.environ.get("SCENE_CHAIN_CAPTURE")
+
+
+@pytest.mark.skipif(not REAL_CAPTURE or not Path(REAL_CAPTURE).exists(),
+                    reason="SCENE_CHAIN_CAPTURE 가 실제 캡처를 가리킬 때만 돈다")
+def test_the_answer_key_holds_against_the_real_capture(content_map, golden):
+    """합성 픽스처가 아니라 진짜 근거로 답안지를 건다.
+
+    함정 셋이 떨어지는 자리는 in-capture 단이다. 그 단을 합성 레코드로만 시험하면,
+    실제 캡처가 함정 중 하나를 받쳐 주게 바뀌어도 아무도 모른다.
+    """
+    capture = Capture.load(Path(REAL_CAPTURE))
+    for item in golden:
+        chain = parse_chains(
+            chain_payload(
+                cite(capabilityId=item.writer.capability_id, unit=item.writer.unit,
+                     role="writes", via=item.via),
+                cite(capabilityId=item.reader.capability_id, unit=item.reader.unit,
+                     role="reads", via=item.via),
+            )
+        )[0]
+        check = check_chain(chain, content_map, capture)
+        assert check.passed is item.supported, f"{item.id}: {[c.reason for c in check.checks]}"
+
+    # 맵 밖 골든 둘은 in-capture 단에서만 성립한다 — 캡처를 빼면 아무 arm 도 못 딴다.
+    for item in (item for item in golden if item.supported and not item.reachable_by_join):
+        chain = parse_chains(
+            chain_payload(
+                cite(capabilityId=item.writer.capability_id, role="writes", via=item.via),
+                cite(unit=item.reader.unit, role="reads", via=item.via),
+            )
+        )[0]
+        assert not check_chain(chain, content_map, None).passed

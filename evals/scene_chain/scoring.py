@@ -15,7 +15,6 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from evals.scene_chain.citations import (
-    AgentChain,
     ChainCheck,
     CitationCheck,
     Role,
@@ -25,6 +24,8 @@ from evals.scene_chain.citations import (
 from evals.scene_chain.evidence import (
     ContentMap,
     JoinedLink,
+    JoinedPair,
+    capability_ids_for_link,
     join_links,
     mechanical_join,
     names_a_state,
@@ -125,29 +126,21 @@ def _names_loosely(check: ChainCheck, role: Role, endpoint: Endpoint, state: str
     )
 
 
-def reached_links(links: list[JoinedLink], checks: list[ChainCheck], content_map: ContentMap) -> list[JoinedLink]:
-    pairs = mechanical_join(content_map)
+def reached_links(
+    links: list[JoinedLink],
+    checks: list[ChainCheck],
+    content_map: ContentMap,
+    pairs: list[JoinedPair],
+) -> list[JoinedLink]:
+    """에이전트가 닿은 링크. 링크를 낳은 기능 행 중 어느 것을 인용해도 닿은 것으로 센다."""
     reached = []
     for link in links:
-        writers = {
-            pair.writer
-            for pair in pairs
-            if _pair_in_link(pair, link, content_map)
-        }
-        readers = {
-            pair.reader
-            for pair in pairs
-            if _pair_in_link(pair, link, content_map)
-        }
-        writer_end = [Endpoint(key, link.writer_unit) for key in writers] or [
-            Endpoint(None, link.writer_unit)
-        ]
-        reader_end = [Endpoint(key, link.reader_unit) for key in readers] or [
-            Endpoint(None, link.reader_unit)
-        ]
+        writers, readers = capability_ids_for_link(content_map, link, pairs)
+        writer_ends = [Endpoint(key, link.writer_unit) for key in sorted(writers)]
+        reader_ends = [Endpoint(key, link.reader_unit) for key in sorted(readers)]
         if any(
-            any(_names(check, Role.writes, end, link.state) for end in writer_end)
-            and any(_names(check, Role.reads, end, link.state) for end in reader_end)
+            any(_names(check, Role.writes, end, link.state) for end in writer_ends)
+            and any(_names(check, Role.reads, end, link.state) for end in reader_ends)
             for check in checks
             if check.passed
         ):
@@ -155,20 +148,11 @@ def reached_links(links: list[JoinedLink], checks: list[ChainCheck], content_map
     return reached
 
 
-def _pair_in_link(pair, link: JoinedLink, content_map: ContentMap) -> bool:
-    return (
-        content_map.by_id[pair.writer].unit == link.writer_unit
-        and content_map.by_id[pair.reader].unit == link.reader_unit
-        and pair.state == link.state
-    )
-
-
 def join_baseline_checks(content_map: ContentMap) -> list[ChainCheck]:
     """모델 없이 기계 조인만으로 낼 수 있는 답. 세 arm 이 넘어야 할 바닥이다."""
     pairs = mechanical_join(content_map)
     seen: set[tuple[int, int, str]] = set()
-    chains: list[AgentChain] = []
-    payload = {"chains": []}
+    payload: dict[str, list] = {"chains": []}
     for pair in pairs:
         key = (pair.writer, pair.reader, pair.state)
         if key in seen:
@@ -183,8 +167,7 @@ def join_baseline_checks(content_map: ContentMap) -> list[ChainCheck]:
                 ],
             }
         )
-    chains = parse_chains(payload)
-    return [check_chain(chain, content_map, None) for chain in chains]
+    return [check_chain(chain, content_map, None) for chain in parse_chains(payload)]
 
 
 @dataclass
@@ -228,6 +211,11 @@ class RunScore:
     def under_connection(self) -> int:
         return self.join_links - self.join_links_reached
 
+    @property
+    def scored(self) -> bool:
+        """스키마를 어긴 응답은 0점이 아니라 측정 불가다. 평균에 섞지 않는다."""
+        return self.malformed_output is None
+
     def as_dict(self) -> dict:
         data = asdict(self)
         data["accuracy"] = round(self.accuracy, 4)
@@ -243,7 +231,8 @@ def score_run(
     golden: list[GoldenChain],
     content_map: ContentMap,
 ) -> RunScore:
-    links = join_links(content_map)
+    pairs = mechanical_join(content_map)
+    links = join_links(content_map, pairs)
 
     correct, missed, wrongly_emitted = [], [], []
     for item in golden:
@@ -273,7 +262,7 @@ def score_run(
         citations_in_capture=sum(1 for verdict in verdicts if verdict == "in-capture"),
         citations_unverified=sum(1 for verdict in verdicts if verdict == "unverified"),
         join_links=len(links),
-        join_links_reached=len(reached_links(links, checks, content_map)),
+        join_links_reached=len(reached_links(links, checks, content_map, pairs)),
     )
 
 
@@ -285,21 +274,27 @@ def summarize(scores: list[RunScore]) -> dict:
 
     summary = {}
     for arm, runs in sorted(by_arm.items()):
-        emitted = sum(run.chains_emitted for run in runs)
-        fabricated = sum(run.chains_fabricated for run in runs)
+        # 측정 불가한 run 은 평균에서 뺀다. 0점으로 섞으면 arm 이 나빠 보이고, 그대로 두면
+        # 과소연결이 0(=만점)으로 들어가 arm 이 좋아 보인다. 어느 쪽도 사실이 아니다.
+        scored = [run for run in runs if run.scored]
+        emitted = sum(run.chains_emitted for run in scored)
+        fabricated = sum(run.chains_fabricated for run in scored)
         costs = [run.cost_usd for run in runs if run.cost_usd is not None]
         summary[arm] = {
             "runs": len(runs),
-            "accuracy": _spread([run.accuracy for run in runs]),
-            "outOfMapCorrect": _spread([float(run.out_of_map_correct) for run in runs]),
+            "malformedRuns": len(runs) - len(scored),
+            "accuracy": _spread([run.accuracy for run in scored]),
+            "outOfMapCorrect": _spread([float(run.out_of_map_correct) for run in scored]),
             # 반복분을 합쳐서 낸다. 체인 두 개를 낸 run 과 스무 개를 낸 run 의 비율을
             # 단순 평균하면 적게 낸 쪽이 과대 대표된다.
-            "fabricationRatePooled": round(fabricated / emitted, 4) if emitted else 0.0,
-            "chainsMixedState": sum(run.chains_mixed_state for run in runs),
-            "underConnection": _spread([float(run.under_connection) for run in runs]),
-            "joinLinks": runs[0].join_links,
-            "citationsInCapture": sum(run.citations_in_capture for run in runs),
-            "citationsUnverified": sum(run.citations_unverified for run in runs),
+            "fabricationRatePooled": round(fabricated / emitted, 4) if emitted else None,
+            "chainsMixedState": sum(run.chains_mixed_state for run in scored),
+            "underConnection": _spread([float(run.under_connection) for run in scored]),
+            # 측정된 run 에서 가져온다. 실패한 run 의 0 을 분모로 실으면 지표가 없었다는
+            # 사실이 "링크가 0개였다"로 읽힌다.
+            "joinLinks": max((run.join_links for run in scored), default=0),
+            "citationsInCapture": sum(run.citations_in_capture for run in scored),
+            "citationsUnverified": sum(run.citations_unverified for run in scored),
             "durationSeconds": _spread([run.duration_seconds for run in runs]),
             "costUsd": round(sum(costs), 6) if costs else None,
             "inputTokens": sum(run.input_tokens for run in runs),

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -59,13 +59,10 @@ class Capability:
 
     capability_id: int
     scene: str
-    summary: str
-    status: str
     owner_type: str
     method: str
     writes: frozenset[str]
     reads: frozenset[str]
-    raw: dict[str, Any] = field(repr=False)
 
     @property
     def unit(self) -> str:
@@ -76,14 +73,14 @@ class ContentMap:
     """기능 행을 id 로도 `Owner.Method` 로도 찾을 수 있게 색인한 content_map."""
 
     def __init__(self, document: dict[str, Any]) -> None:
-        self.document = document
         self.by_id: dict[int, Capability] = {}
         self._by_unit: dict[str, list[Capability]] = {}
         for scene in document.get("scenes", []):
             for row in scene.get("capabilities", []):
                 capability = _read_capability(row, scene.get("name", ""))
                 self.by_id[capability.capability_id] = capability
-                for key in _unit_keys(capability.owner_type, capability.method):
+                key = unit_key(capability.owner_type, capability.method)
+                if key:
                     self._by_unit.setdefault(key, []).append(capability)
 
     @classmethod
@@ -110,15 +107,12 @@ def _read_capability(row: dict[str, Any], scene: str) -> Capability:
     return Capability(
         capability_id=int(row["capabilityId"]),
         scene=scene,
-        summary=row.get("summary") or "",
-        status=row.get("status") or "",
         owner_type=evidence.get("ownerType") or "",
         method=_plain_method(evidence.get("method") or ""),
         writes=frozenset(
             effect["target"] for effect in row.get("then", []) if effect.get("target")
         ),
         reads=frozenset(dotted_identifiers(row.get("given"))),
-        raw=row,
     )
 
 
@@ -134,10 +128,10 @@ def normalize_unit(unit: str) -> str:
     return ".".join(parts[-2:]) if len(parts) >= 2 else unit
 
 
-def _unit_keys(owner_type: str, method: str) -> Iterable[str]:
+def unit_key(owner_type: str, method: str) -> str | None:
     if not owner_type or not method:
-        return ()
-    return {normalize_unit(f"{owner_type}.{method}")}
+        return None
+    return normalize_unit(f"{owner_type}.{method}")
 
 
 @dataclass(frozen=True)
@@ -157,7 +151,6 @@ class Capture:
     """
 
     def __init__(self, document: dict[str, Any]) -> None:
-        self.document = document
         writes: dict[str, set[str]] = {}
         reads: dict[str, set[str]] = {}
         for record in _capture_records(document):
@@ -257,20 +250,20 @@ def join_links(content_map: ContentMap, pairs: list[JoinedPair] | None = None) -
     return sorted(links, key=lambda link: (link.writer_unit, link.reader_unit, link.state))
 
 
-def capability_ids_for_link(content_map: ContentMap, link: JoinedLink, pairs: list[JoinedPair]) -> tuple[frozenset[int], frozenset[int]]:
+def capability_ids_for_link(
+    content_map: ContentMap, link: JoinedLink, pairs: list[JoinedPair]
+) -> tuple[frozenset[int], frozenset[int]]:
     """그 링크를 낳은 기능 행들. 어느 행을 인용해도 그 링크를 덮은 것으로 센다."""
-    writers = {
-        pair.writer
-        for pair in pairs
-        if content_map.by_id[pair.writer].unit == link.writer_unit
-        and content_map.by_id[pair.reader].unit == link.reader_unit
-        and pair.state == link.state
-    }
-    readers = {
-        pair.reader
-        for pair in pairs
-        if content_map.by_id[pair.writer].unit == link.writer_unit
-        and content_map.by_id[pair.reader].unit == link.reader_unit
-        and pair.state == link.state
-    }
-    return frozenset(writers), frozenset(readers)
+
+    def belongs(pair: JoinedPair) -> bool:
+        return (
+            content_map.by_id[pair.writer].unit == link.writer_unit
+            and content_map.by_id[pair.reader].unit == link.reader_unit
+            and pair.state == link.state
+        )
+
+    members = [pair for pair in pairs if belongs(pair)]
+    return (
+        frozenset(pair.writer for pair in members),
+        frozenset(pair.reader for pair in members),
+    )

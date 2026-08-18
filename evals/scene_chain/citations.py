@@ -70,7 +70,9 @@ class ChainCheck:
         묶은 것이 바로 이름 기반 오분류인데, 인용별 대조로는 잡히지 않는다.
         체인 하나는 상태 하나라는 규칙을 프롬프트에도 적고 여기서도 지킨다.
         """
-        vias = [check.citation.via for check in self.checks]
+        # 제일 짧은 것에 맞춘다. `names_a_state` 는 이행적이지 않아서 첫 인용에 맞추면
+        # 같은 주장이 인용 순서에 따라 통과하기도 하고 떨어지기도 한다.
+        vias = sorted((check.citation.via for check in self.checks), key=len)
         head = vias[0] if vias else ""
         return all(names_a_state(via, head) for via in vias)
 
@@ -160,6 +162,13 @@ def resolve(citation: Citation, content_map: ContentMap) -> frozenset[int]:
 
 def verify(citation: Citation, content_map: ContentMap, capture: Capture | None) -> CitationCheck:
     capability_ids = resolve(citation, content_map)
+    if "." not in citation.via:
+        # 씬 이름 같은 맨 이름은 어느 타입의 것인지 정해지지 않아 상태가 아니다. 읽는 쪽은
+        # 점 찍힌 식별자만 모으므로 애초에 안 걸리는데, 쓰는 쪽은 `then[].target` 에 씬 이름이
+        # 그대로 있어 통과해 버린다. 양쪽을 같은 자로 잰다.
+        return CitationCheck(
+            citation, Verdict.unverified, capability_ids, "점 없는 이름은 상태가 아니다"
+        )
     for capability_id in sorted(capability_ids):
         row = content_map.by_id[capability_id]
         terms = row.writes if citation.role is Role.writes else row.reads
@@ -193,7 +202,7 @@ def verify(citation: Citation, content_map: ContentMap, capture: Capture | None)
 
 def _unit_of(capability_ids: frozenset[int], content_map: ContentMap) -> str | None:
     units = {content_map.by_id[key].unit for key in capability_ids}
-    return units.pop() if len(units) == 1 else None
+    return next(iter(units), None) if len(units) == 1 else None
 
 
 def check_chain(

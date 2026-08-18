@@ -27,7 +27,7 @@ from pathlib import Path
 
 from evals.scene_chain.arms import Arm, ArmInput, build_arm_input, read_pseudo_cs
 from evals.scene_chain.citations import MalformedOutput, check_chain, parse_chains
-from evals.scene_chain.evidence import Capture, ContentMap
+from evals.scene_chain.evidence import Capture, ContentMap, join_links
 from evals.scene_chain.scoring import (
     RunScore,
     join_baseline_checks,
@@ -52,7 +52,8 @@ def strip_fence(text: str) -> str:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="씬 명세만으로 기능을 잇는 능력 측정")
     parser.add_argument("--content-map", type=Path, required=True)
-    parser.add_argument("--pseudo-cs", type=Path, required=True, help="wv2cs.py 가 낸 디렉터리")
+    # `--replay` 는 이것을 쓰지 않는다. 재채점이 레포 밖 렌더 산출물에 매이면 안 된다.
+    parser.add_argument("--pseudo-cs", type=Path, default=None, help="wv2cs.py 가 낸 디렉터리")
     # 없으면 in-capture 단이 죽고, content_map 밖에서만 근거가 나오는 골든(SC-6·SC-7)이
     # 어느 arm 에서도 성립하지 않는다. 그러면 arm 이 귀무가설을 넘을 길이 사라지는데
     # 실행은 조용히 성공한다 — 재지 못한 것이 잰 것처럼 보이는 제일 나쁜 실패다.
@@ -119,8 +120,15 @@ def grade(
     try:
         chains = parse_chains(strip_fence(raw_text))
     except (MalformedOutput, json.JSONDecodeError) as error:
-        score = RunScore(arm=arm.value, repeat=repeat, golden_total=len(golden), golden_correct=0)
-        # 스키마를 어긴 응답은 0점이 아니라 "측정 불가"다. 수치와 나란히 남긴다.
+        # 스키마를 어긴 응답은 0점이 아니라 "측정 불가"다. 분모는 그대로 채워 둔다 —
+        # 비워 두면 과소연결이 0(=만점)으로 읽힌다.
+        score = RunScore(
+            arm=arm.value,
+            repeat=repeat,
+            golden_total=len(golden),
+            golden_correct=0,
+            join_links=len(join_links(content_map)),
+        )
         score.malformed_output = str(error)
         return score, []
 
@@ -149,14 +157,11 @@ def grade(
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    require_readable(args.content_map, args.pseudo_cs, args.golden, args.capture)
+    require_readable(args.content_map, args.golden, args.capture)
 
     content_map = ContentMap.load(args.content_map)
     capture = Capture.load(args.capture)
     golden = load_golden_chains(args.golden)
-    content_map_text = args.content_map.read_text(encoding="utf-8")
-    pseudo_cs_text = read_pseudo_cs(args.pseudo_cs)
-    arms = list(Arm) if args.arm == "all" else [Arm(args.arm)]
 
     if args.replay:
         require_readable(*args.replay)
@@ -185,6 +190,14 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
+
+    if args.pseudo_cs is None:
+        print("[scene-chain] --pseudo-cs 가 필요하다 (--replay 가 아니면)", file=sys.stderr)
+        raise SystemExit(2)
+    require_readable(args.pseudo_cs)
+    content_map_text = args.content_map.read_text(encoding="utf-8")
+    pseudo_cs_text = read_pseudo_cs(args.pseudo_cs)
+    arms = list(Arm) if args.arm == "all" else [Arm(args.arm)]
 
     if args.dry_run:
         for arm in arms:
