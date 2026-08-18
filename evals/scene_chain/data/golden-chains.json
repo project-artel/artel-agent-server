@@ -1,0 +1,82 @@
+{
+  "_note": "손으로 쓴 골든 체인 10개. ARTEL-457. capabilityId 는 data/golden-content-map.json 의 것이고, unit 은 근거 캡처의 Owner.Method 다.",
+  "_design": [
+    "SC-1..SC-5 는 content_map 안에서 기계 조인만으로도 닿는다. 이것만으로는 모델을 재지 못한다 — grep 도 만점이다.",
+    "SC-6·SC-7 은 읽는 쪽이 content_map 에 없다. 캡처(=의사 C# 렌더)에만 있으므로 arm (a) 는 원리적으로 낼 수 없다. arm (b)/(c) 의 이득이 여기서만 보인다.",
+    "SC-8..SC-10 은 지어내기 쉬운데 맵에도 캡처에도 근거가 없다."
+  ],
+  "chains": [
+    {"id": "SC-1", "supported": true, "reachableByJoin": true,
+     "writer": {"capabilityId": 23, "unit": "Combat.Enemies.BattleWaveController.WaveEndSensor"},
+     "reader": {"capabilityId": 24, "unit": "Combat.Enemies.BattleWaveController.WaveEndSensor"},
+     "via": "BattleWaveController.wave",
+     "observable": "SceneManager.LoadScene(\"GameClearScene\")",
+     "why": "웨이브가 하나 끝날 때마다 wave 가 +1 되고, 마지막 웨이브를 넘기면 같은 코루틴의 다른 갈래가 GameClearScene 을 연다"},
+
+    {"id": "SC-2", "supported": true, "reachableByJoin": true,
+     "writer": {"capabilityId": 24, "unit": "Combat.Enemies.BattleWaveController.WaveEndSensor"},
+     "reader": {"capabilityId": 10, "unit": "Map.MapMove.CharacterMove"},
+     "via": "MapMove.StagePosition",
+     "observable": "MapMove.character.transform.position = MapMove.battle1.transform.position",
+     "why": "전투를 깨면 StagePosition 이 +1 되고, 맵에서 오른쪽 이동이 StagePosition >= 1 을 요구한다"},
+
+    {"id": "SC-3", "supported": true, "reachableByJoin": true,
+     "writer": {"capabilityId": 10, "unit": "Map.MapMove.CharacterMove"},
+     "reader": {"capabilityId": 12, "unit": "Map.MapMove.CharacterMove"},
+     "via": "MapMove.position",
+     "observable": "MapMove.character.transform.position = MapMove.village.transform.position",
+     "why": "오른쪽 이동이 레인 인덱스 position 을 +1 하고, 왼쪽 이동이 그 값을 읽어 village 로 되돌린다. StagePosition 이 아니다"},
+
+    {"id": "SC-4", "supported": true, "reachableByJoin": true,
+     "writer": {"capabilityId": 30, "unit": "Scenes.GameClearController.Update"},
+     "reader": {"capabilityId": 31, "unit": "Scenes.GameClearController.Update"},
+     "via": "GameClearController.flag",
+     "observable": "SceneManager.LoadScene(\"Map_scene\")",
+     "why": "첫 키 입력이 flag 에 1 을 쓰고, 두 번째 키 입력이 flag != 0 을 읽어 맵으로 돌아간다"},
+
+    {"id": "SC-5", "supported": true, "reachableByJoin": true,
+     "writer": {"capabilityId": 21, "unit": "Combat.UI.CombineButton.OnButtonClick"},
+     "reader": {"capabilityId": 22, "unit": "Combat.UI.CombineButton.OnButtonClick"},
+     "via": "CombineButton.combineZone",
+     "observable": "CombineButton.combineZone.SetActive(false)",
+     "why": "켠 뒤 다시 누르면 activeSelf 를 읽어 끈다"},
+
+    {"id": "SC-6", "supported": true, "reachableByJoin": false,
+     "writer": {"capabilityId": 24, "unit": "Combat.Enemies.BattleWaveController.WaveEndSensor"},
+     "reader": {"capabilityId": null, "unit": "Scenes.GameClearController.ShowGettedCard"},
+     "via": "MapMove.StagePosition",
+     "observable": "Instantiate(GameClearController.magicCard) / spellCard — 어느 카드를 주는지가 갈린다",
+     "why": "전투를 깨서 오른 StagePosition 을 클리어 화면이 (MapMove.StagePosition - 1) == StageDataSingleton.stagePosition 으로 되읽어 보상 카드를 고른다. content_map 의 어느 기능 행에도 이 읽기가 없다 — 캡처에만 있다"},
+
+    {"id": "SC-7", "supported": true, "reachableByJoin": false,
+     "writer": {"capabilityId": 13, "unit": "Map.MapMove.SelectStage"},
+     "reader": {"capabilityId": null, "unit": "Scenes.GameClearController.Start"},
+     "via": "StageDataSingleton.stagePosition",
+     "observable": "SceneManager.LoadScene(\"EndingScene\")",
+     "why": "맵에서 고른 스테이지가 StageDataSingleton.stagePosition 에 실리고, 클리어 화면의 Start 가 그 값이 4 면 EndingScene 을 연다. content_map 은 이 읽기를 싣지 않았다"},
+
+    {"id": "SC-8", "supported": false, "reachableByJoin": false,
+     "writer": {"capabilityId": 13, "unit": "Map.MapMove.SelectStage"},
+     "reader": {"capabilityId": 20, "unit": "Battle.Turns.TurnBattleSystem.TurnEndButton"},
+     "via": "StageDataSingleton.stagePosition",
+     "trap": "genre-common-sense",
+     "why_tempting": "고른 스테이지가 턴 전투에 실린다는 것은 어느 게임에서나 그럴듯하고, 이슈 본문 예시와 모양이 같다. stagePosition 을 읽는 쪽이 실제로 있기까지 하다 — 다만 그것은 GameClearController 이지 TurnBattleSystem 이 아니다",
+     "why_unsupported": "TurnBattleSystem 은 currentTurn 과 PlayerTurn 만 읽는다. content_map 에도 캡처에도 없다"},
+
+    {"id": "SC-9", "supported": false, "reachableByJoin": false,
+     "writer": {"capabilityId": 24, "unit": "Combat.Enemies.BattleWaveController.WaveEndSensor"},
+     "reader": {"capabilityId": 12, "unit": "Map.MapMove.CharacterMove"},
+     "via": "MapMove.position",
+     "trap": "name-collision",
+     "why_tempting": "MapMove.StagePosition 과 MapMove.position 을 같은 것으로 본다. 캡처의 MapMove.WordPosition 이 MapMove.position = stagePosition 을 쓰기까지 해서 더 헷갈린다",
+     "why_unsupported": "24 는 StagePosition 만 쓴다. position 은 레인 인덱스이고 24 는 건드리지 않는다"},
+
+    {"id": "SC-10", "supported": false, "reachableByJoin": false,
+     "writer": {"capabilityId": 31, "unit": "Scenes.GameClearController.Update"},
+     "reader": {"capabilityId": 10, "unit": "Map.MapMove.CharacterMove"},
+     "via": "MapMove.StagePosition",
+     "trap": "genre-common-sense",
+     "why_tempting": "맵으로 돌아가면 클리어 표시가 켜진다는 서사는 어느 게임에서나 그럴듯하다",
+     "why_unsupported": "31 은 Map_scene 을 열 뿐 StagePosition 을 쓰지 않는다. 올리는 것은 24 다. GameClearController 는 StagePosition 을 읽기만 한다"}
+  ]
+}
