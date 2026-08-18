@@ -15,6 +15,10 @@ For non-trivial work, follow:
 - `.agents/docs/workflow.md`
 - `.agents/docs/testing.md`
 
+Coding conventions:
+
+- `.agents/docs/coding-style.md`
+
 For tracked Git work, follow:
 
 - `.agents/docs/issue.md`
