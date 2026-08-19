@@ -130,6 +130,20 @@ def render_test_case_list(entries: list[TestCaseListItem]) -> str:
     return "\n".join(lines)
 
 
+LIST_UNCOVERED_DESCRIPTION = """Which test cases no scenario has covered yet.
+
+Coverage is a fact about the project's scenarios, not about the cases — the case
+list you hold says what exists, never what has already been reached. It also
+changes while you work: cases you cover in this turn stop being uncovered.
+
+Call this when the user asks what is left or what to test next, and when you want
+to lead an open-ended request toward a real gap. Do not guess at a count; this is
+where the number comes from.
+
+The answer gives ids. Their wording is in the case list you already hold — quote
+that rather than reciting numbers, which mean nothing to the person reading."""
+
+
 class TestCaseSearchState:
     """What the case-search tool has done so far in one turn.
 

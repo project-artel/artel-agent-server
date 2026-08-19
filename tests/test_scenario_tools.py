@@ -30,7 +30,8 @@ class FakeChannel:
 def _tool(answer):
     state = TestCaseSearchState()
     channel = FakeChannel(answer)
-    (search,) = build_tools(channel, state)
+    # 미커버 도구가 늘 함께 붙는다(커버 상태는 목록이 답할 수 없는 질문이라). 검색만 꺼내 쓴다.
+    search = next(t for t in build_tools(channel, state) if t.name == "search_test_cases")
     return search, state, channel
 
 
