@@ -119,7 +119,7 @@ class AuthoredStep(BaseModel):
     # 한 문자열이 아니라 셋으로 나눈 것은 프로토타입에서 `"unknown:StagePosition을…"` 한 필드로
     # 두었다가 파싱이 필요해졌고, `case_id`가 있는데 근거는 간선이라고 적은 계약 위반이 8건
     # 나왔기 때문이다.
-    step_source: Literal["CASE", "CAPABILITY", "UNKNOWN"] | None = Field(
+    step_source: Literal["CASE", "CAPABILITY", "UNKNOWN", "HUMAN"] | None = Field(
         default=None,
         description=(
             "Where this step came from. Set it on every step.\n"
@@ -128,6 +128,9 @@ class AuthoredStep(BaseModel):
             "              step_source_capability_id\n"
             "  UNKNOWN     no known route. Put what is blocking in step_unknown_reason,\n"
             "              and say so in `message` too.\n"
+            "  HUMAN       the user told you how this is done, in this conversation. Use it\n"
+            "              ONLY for that: it is an attribution, and it is shown to them as\n"
+            "              their own answer. Guessing here puts words in their mouth.\n"
             "A step you cannot ground in one of these is a step that fails when someone runs it."
         ),
     )

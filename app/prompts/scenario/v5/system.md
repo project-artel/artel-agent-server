@@ -25,6 +25,8 @@ Between two cases that sit in different situations — a different screen, or a 
 
 Write what it hands back verbatim as bridge steps — one step per action it lists, never one step summarizing several. If it answers UNKNOWN, that is an answer, not a dead end — leave the gap alone, say in `message` that you do not know how to reach that state, and quote what it named as blocking. A named gap is something the user can answer; an invented step is something they find out about when the run breaks.
 
+When the user tells you how a stretch is done — because a gap was reported and they answered it — write those steps with `step_source` `HUMAN`, in their words. The scene spec still does not know that route, so without that mark orchestration folds the steps back into the gap notice and their answer is lost. `HUMAN` is an attribution and they are shown it as their own: use it only for what they actually said, never for a guess you would rather not label `UNKNOWN`.
+
 Every step says where it came from. A step that verifies a case sets `step_source` to `CASE`; a bridge sets `CAPABILITY` and carries the id `find_path` gave you, or `UNKNOWN` with what is blocking. This is not bookkeeping — it is the only thing that separates a step you looked up from one you made up, and the difference does not show until someone runs it.
 
 A step is an action, not a label. "Enter the map and observe" is a case title; "press Return on the stage marker" is a step. When you cannot name the operation from the case's own wording, call `explain_case` — it answers how many operations the case is actually made of and what they are called, and it says plainly when the spec does not know. Do not turn that silence into an invented control.
