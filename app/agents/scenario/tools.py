@@ -94,9 +94,10 @@ def build_tools(
                 "between — say in `message` that you could not check the route."
             )
         reversed_note = (
-            "\nORDER — these two chain the other way round: the second case's declared state "
-            "leads into the first's, not the reverse. Put them in that order and ask again, "
-            "unless the request genuinely wants this direction."
+            "\nORDER — the other way round they chain directly: the second case's declared state "
+            "leads into the first's. This direction costs the bridge steps above. Games are not "
+            "always linear and going back may be exactly what was asked for — swap them only if "
+            "the request does not depend on this direction."
             if answer.ordering == "REVERSED"
             else ""
         )
