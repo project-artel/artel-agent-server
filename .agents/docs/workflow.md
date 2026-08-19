@@ -56,6 +56,9 @@ end-to-end development. Jira access is described in `project.md`.
    - `labels`: add one only when the work belongs to a theme the two fields
      above do not already express. Reuse an existing label instead of
      inventing a near-duplicate.
+   - `customfield_10015` (시작 날짜) and `duedate` (기한): leave them empty at
+     creation and stamp them from the commit and PR dates as the work moves —
+     see `## Issue Dates`.
 
    When the deliverable changes more than one repository, this issue is the
    umbrella and each repository gets its own issue — read
@@ -105,6 +108,23 @@ end-to-end development. Jira access is described in `project.md`.
 
 Move the issue to 검토 중 when the PR opens, and to 완료 only after merge and
 required validation pass.
+
+## Issue Dates
+
+Every issue carries 시작 날짜 (`customfield_10015`) and 기한 (`duedate`). Both
+record what actually happened in Git rather than an estimate, so the two fields
+read as the work's real span:
+
+- **시작 날짜** — the date of the first commit carrying the issue key, or the PR
+  open date when that is earlier. Stamp it when the issue moves to 진행 중; if
+  the branch has no commit yet, use the date the branch was created.
+- **기한** — the date the PR merged. Stamp it when the issue moves to 완료. When
+  several PRs carry the key, use the last merge.
+
+Write both as `YYYY-MM-DD` in `Asia/Seoul`, so a late-night commit lands on the
+day it was made locally. An umbrella issue takes the earliest 시작 날짜 and the
+latest 기한 among its children. Do not overwrite a date that is already set
+unless the Git history contradicts it.
 
 ## Multi-Repository Work
 
