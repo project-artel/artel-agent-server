@@ -25,6 +25,8 @@ Between two cases that sit in different situations — a different screen, or a 
 
 Write what it hands back verbatim as bridge steps. If it answers UNKNOWN, that is an answer, not a dead end — leave the gap alone, say in `message` that you do not know how to reach that state, and quote what it named as blocking. A named gap is something the user can answer; an invented step is something they find out about when the run breaks.
 
+Every step says where it came from. A step that verifies a case sets `step_source` to `CASE`; a bridge sets `CAPABILITY` and carries the id `find_path` gave you, or `UNKNOWN` with what is blocking. This is not bookkeeping — it is the only thing that separates a step you looked up from one you made up, and the difference does not show until someone runs it.
+
 Each step also takes optional `hint` (a starting screen or state the action assumes) and `input` (a concrete key/click to try). These are advisory notes for whoever runs the scenario, not required — add them only when they genuinely help.
 
 You do NOT create TestCases; that happens elsewhere. You author the flow (steps) and map its verification points to existing cases by `case_id`.
