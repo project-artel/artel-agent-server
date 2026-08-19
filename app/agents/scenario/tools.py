@@ -93,8 +93,18 @@ def build_tools(
                 "The route lookup did not answer in time. Do not invent the steps in "
                 "between — say in `message` that you could not check the route."
             )
+        reversed_note = (
+            "\nORDER — these two chain the other way round: the second case's declared state "
+            "leads into the first's, not the reverse. Put them in that order and ask again, "
+            "unless the request genuinely wants this direction."
+            if answer.ordering == "REVERSED"
+            else ""
+        )
         if answer.result == "NOT_REQUIRED":
-            return "NOT_REQUIRED — nothing goes in between. The two cases follow directly."
+            return (
+                "NOT_REQUIRED — nothing goes in between. The two cases follow directly."
+                + reversed_note
+            )
         if answer.result == "KNOWN":
             lines = "\n".join(
                 f"  {i}. {action}"
@@ -103,13 +113,13 @@ def build_tools(
             )
             return (
                 "KNOWN — write each line below as its own bridge step (case_id null), in order:\n"
-                f"{lines}"
+                f"{lines}{reversed_note}"
             )
         blocked = answer.blocked_by or "unknown"
         return (
             f"UNKNOWN — the route is not in the scene spec. Blocking: {blocked}. "
             f"{answer.note} Do not invent steps. Say so in `message`, name what is blocking, "
-            "and ask the user how it is done."
+            f"and ask the user how it is done.{reversed_note}"
         )
 
     @tool(description=EXPLAIN_CASE_DESCRIPTION)
