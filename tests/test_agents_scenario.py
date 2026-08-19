@@ -158,7 +158,7 @@ def test_scenario_agent_binds_the_search_tool() -> None:
 
     # 목록이 없으면 검색으로 폴백한다. 미커버 도구는 목록 유무와 무관하게 늘 붙는다 —
     # 커버 상태는 목록이 답할 수 없는 질문이고 대화 중에 바뀐다.
-    assert seen["tools"] == ["list_uncovered_cases", "search_test_cases"]
+    assert seen["tools"] == ["list_uncovered_cases", "search_test_cases", "find_path"]
     # The system prompt is the resolved v4 text, every placeholder substituted.
     assert "search_test_cases" in seen["system_prompt"]
     assert "{" not in seen["system_prompt"]
@@ -320,7 +320,7 @@ def test_turn_with_the_list_gets_no_tools_and_the_cases_in_its_prompt() -> None:
     asyncio.run(agent.run(_request(test_case_list=_test_case_list()), _CTX, _channel()))
 
     # 검색은 회수한다(목록을 이미 쥐고 있으므로). 미커버 도구는 남는다.
-    assert seen["tools"] == ["list_uncovered_cases"]
+    assert seen["tools"] == ["list_uncovered_cases", "find_path"]
     prompt = seen["system_prompt"]
     assert "id 11" in prompt and "id 57" in prompt
     assert "게스트 계정으로 로그인에 성공한다" in prompt
@@ -341,7 +341,7 @@ def test_empty_test_case_list_keeps_the_search_path() -> None:
     agent = ScenarioAgent(agent_factory=factory)
     asyncio.run(agent.run(_request(test_case_list=[]), _CTX, _channel()))
 
-    assert seen["tools"] == ["list_uncovered_cases", "search_test_cases"]
+    assert seen["tools"] == ["list_uncovered_cases", "search_test_cases", "find_path"]
     # Not a blank section: an empty block reads as "this project has no cases",
     # and the agent would stop rather than search.
     assert NO_TEST_CASE_LIST_NOTICE in seen["system_prompt"]
