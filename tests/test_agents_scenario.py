@@ -257,8 +257,8 @@ def test_system_prompt_uses_requested_language_directive() -> None:
     assert LANGUAGE_DIRECTIVES[OutputLanguage.en] in en_body
     assert "한국어" in ko_body
     assert "English" in en_body
-    # v6 is the newest scenario prompt version and the default.
-    assert version == "v6"
+    # v7 is the newest scenario prompt version and the default.
+    assert version == "v7"
 
 
 def test_first_message_carries_the_run_goal_and_context() -> None:
@@ -424,6 +424,30 @@ def test_a_scenario_of_ungrounded_steps_is_a_valid_result() -> None:
     returned = asyncio.run(agent.run(_request(), _CTX, _channel()))
 
     assert [step.case_id for step in returned.scenarios[0].steps] == [None, None, None]
+
+
+# ── 흐름 단위 분할과 브리지 (ARTEL-420, v7) ───────────────────────────────────
+#
+# 분할 품질은 오프라인에서 셀 수 없다. 셀 수 있는 것은 기준이 프롬프트에 하나로
+# 적혀 있는지, 그리고 v6이 들고 있던 규칙이 그 옆에서 살아남았는지다.
+
+
+def test_v7_pins_splitting_to_reachability_and_keeps_v6_intact() -> None:
+    v7 = load_prompt("scenario", "system", "v7").body
+    v6 = load_prompt("scenario", "system", "v6").body
+
+    # 나누느냐 잇느냐를 도달 가능성 하나로 환원한다.
+    assert "it is the NEXT STEP, not the next scenario" in v7
+    assert "two that exclude each other do not" in v7
+    # 이미 덮인 구간은 지나가되 다시 세지 않는다 — 앞부분 통째 복사를 막는 규칙.
+    assert "Leave their `case_id` null" in v7
+    assert "Coverage counts a case once it is carried anywhere" in v7
+    # v6의 케이스 없는 저작 예외와 근거 규칙은 그대로 남는다.
+    assert "WHEN THE USER ASKS FOR A SCENARIO WITHOUT TEST CASES" in v7
+    assert "**Do NOT invent.**" in v7
+    assert "judge EVERY case in the list above" in v7
+    # v6에는 기준이 "흐름이 여럿이면 나눠라" 한 줄뿐이라 요청 하나가 흐름 하나로 읽혔다.
+    assert "it is the NEXT STEP, not the next scenario" not in v6
 
 
 def test_system_prompt_with_the_list_is_byte_identical_across_turns() -> None:
