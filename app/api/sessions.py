@@ -74,11 +74,17 @@ def _service(app) -> SessionService:
 
 
 def _result_event(result: ScenarioAgentResult) -> dict:
-    return {
+    event = {
         "type": "result",
         "message": result.message,
         "scenarios": [scenario.model_dump() for scenario in result.scenarios],
     }
+    # Omitted entirely when there was nothing to judge against. Orchestration reads
+    # an absent `reviewed` as "skip the check", so leaving the key out is the
+    # rollback path — not an empty object, which would read as "reviewed nothing".
+    if result.reviewed is not None:
+        event["reviewed"] = result.reviewed.model_dump(by_alias=True)
+    return event
 
 
 def _error_event(code: str, detail: str) -> dict:

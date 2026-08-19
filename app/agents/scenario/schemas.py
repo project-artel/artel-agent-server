@@ -132,11 +132,44 @@ class ScenarioPlan(BaseModel):
     steps: list[AuthoredStep] = Field(default_factory=list)
 
 
+class ReviewedCases(BaseModel):
+    """Every case in the project, judged in or out for this request (ARTEL-404).
+
+    Not a list of the ones picked. A picked-only list cannot distinguish a case
+    that was considered and dropped from one that was never looked at, so there is
+    nothing for orchestration to check. With a verdict on every id, "not reviewed"
+    becomes "has no verdict" and a set subtraction finds it.
+
+    Asking the agent whether it read everything would be circular — it answers yes.
+    This is not that question. The agent is made to emit the verdicts and the
+    counting happens elsewhere, on the other side of the wire.
+
+    Two arrays rather than a map: measured at 3,005 tokens for a thousand cases
+    against 5,001 for `{"82": 1, ...}`, and the check is simpler — `in | out` has
+    to equal the project.
+
+    No reasons per exclusion. They would double the output at a thousand cases and
+    would be the agent describing itself again, which is exactly what cannot be
+    checked. The case for an inclusion is the steps that exercise it.
+    """
+
+    included: list[int] = Field(default_factory=list, alias="in")
+    excluded: list[int] = Field(default_factory=list, alias="out")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class ScenarioAgentResult(BaseModel):
     message: str
     # The run goal, decomposed. Empty when no matching cases were found: the agent
     # must not fabricate scenarios, and says so in `message` instead.
     scenarios: list[ScenarioPlan] = Field(default_factory=list)
+    # Every project case judged in or out for this request (ARTEL-404).
+    #
+    # None means the turn had nothing to judge against — no `test_case_list`, so no
+    # population to be exhaustive over. Orchestration reads None as "skip the check",
+    # which is also the rollback path: stop emitting this and the checking stops.
+    reviewed: ReviewedCases | None = None
 
 
 # ScenarioAgentRequest references ScenarioPlan (defined after it) via a forward
