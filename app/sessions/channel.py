@@ -81,6 +81,31 @@ class UncoveredCases(BaseModel):
     scenes: list[UncoveredScene] = Field(default_factory=list)
 
 
+class ScenarioPath(BaseModel):
+    """The `find_path_result` frame: what is needed between two cases.
+
+    Three answers to one question — is a step needed in between?
+
+        KNOWN         yes, and these capabilities are it
+        NOT_REQUIRED  no, they follow directly
+        UNKNOWN       yes, but the route is not known
+
+    The third is half of why this exists. The scene spec comes from evidence and
+    observation, neither of which is exhaustive, so a missing edge does not mean
+    the route is absent — it means nobody has recorded it. `blocked_by` names what
+    stands in the way (a scene pair or a variable), and that name is what the user
+    can be asked about.
+    """
+
+    result: str = "UNKNOWN"
+    capability_ids: list[int] = Field(default_factory=list, alias="capabilityIds")
+    actions: list[str] = Field(default_factory=list)
+    blocked_by: str | None = Field(default=None, alias="blockedBy")
+    note: str = ""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 @dataclass(frozen=True)
 class TestCaseSearchFailed:
     """Orchestration answered the search with an `error` frame.
@@ -114,6 +139,8 @@ class ScenarioChannel:
         self._pending_search_id: str | None = None
         self._uncovered_waiter: asyncio.Future[UncoveredCases] | None = None
         self._pending_uncovered_id: str | None = None
+        self._path_waiter: asyncio.Future[ScenarioPath] | None = None
+        self._pending_path_id: str | None = None
 
     # --- outbound -------------------------------------------------------------
 
@@ -136,6 +163,36 @@ class ScenarioChannel:
         finally:
             self._uncovered_waiter = None
             self._pending_uncovered_id = None
+
+    async def fetch_path(self, from_case_id: int, to_case_id: int) -> ScenarioPath | None:
+        """Ask what is needed between two cases. `None` when nobody answered.
+
+        The route is computed on the far side, not here. Reading a graph and
+        walking it are the kind of work a model does badly — measured: handing the
+        same scene spec to the model as prompt text left it *worse* than having
+        none at all, and moving the walk behind this call took it to zero.
+
+        Scope comes from the session binding, like the case search — the frame
+        carries no project or run id.
+        """
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[ScenarioPath] = loop.create_future()
+        self._path_waiter = waiter
+        message_id = str(uuid4())
+        self._pending_path_id = message_id
+        await self._send({
+            "type": "find_path",
+            "messageId": message_id,
+            "from_case_id": from_case_id,
+            "to_case_id": to_case_id,
+        })
+        try:
+            return await asyncio.wait_for(waiter, timeout=self._search_timeout)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            self._path_waiter = None
+            self._pending_path_id = None
 
     async def search_test_cases(
         self, query: str, category: str | None, limit: int
@@ -197,6 +254,15 @@ class ScenarioChannel:
                     and raw.get("correlationId") == self._pending_uncovered_id
                 ):
                     waiter.set_result(UncoveredCases.model_validate(raw))
+                return True
+            if message_type == "find_path_result":
+                waiter = self._path_waiter
+                if (
+                    waiter is not None
+                    and not waiter.done()
+                    and raw.get("correlationId") == self._pending_path_id
+                ):
+                    waiter.set_result(ScenarioPath.model_validate(raw))
                 return True
             if message_type == "test_case_search_result":
                 if self._answers_pending(raw):

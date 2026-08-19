@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 from langchain_core.tools import BaseTool, tool
 
 from app.agents.scenario.cases import (
+    FIND_PATH_DESCRIPTION,
     LIST_UNCOVERED_DESCRIPTION,
     MAX_SEARCHES_PER_RUN,
     RESULT_LIMIT,
@@ -82,8 +83,34 @@ def build_tools(
             "than describing the ids."
         )
 
+    @tool(description=FIND_PATH_DESCRIPTION)
+    async def find_path(from_case_id: int, to_case_id: int) -> str:
+        # What the agent reads is FIND_PATH_DESCRIPTION, not this.
+        answer = await channel.fetch_path(from_case_id, to_case_id)
+        if answer is None:
+            return (
+                "The route lookup did not answer in time. Do not invent the steps in "
+                "between — say in `message` that you could not check the route."
+            )
+        if answer.result == "NOT_REQUIRED":
+            return "NOT_REQUIRED — nothing goes in between. The two cases follow directly."
+        if answer.result == "KNOWN":
+            lines = "\n".join(
+                f"  {i}. {action}" for i, action in enumerate(answer.actions, 1)
+            )
+            return (
+                "KNOWN — write each line below as its own bridge step (case_id null), in order:\n"
+                f"{lines}"
+            )
+        blocked = answer.blocked_by or "unknown"
+        return (
+            f"UNKNOWN — the route is not in the scene spec. Blocking: {blocked}. "
+            f"{answer.note} Do not invent steps. Say so in `message`, name what is blocking, "
+            "and ask the user how it is done."
+        )
+
     if has_test_case_list:
-        return [list_uncovered_cases]
+        return [list_uncovered_cases, find_path]
 
     @tool(description=SEARCH_TEST_CASES_DESCRIPTION.format(limit=MAX_SEARCHES_PER_RUN))
     async def search_test_cases(query: str, category: str | None = None) -> str:
@@ -115,4 +142,4 @@ def build_tools(
             )
         return render_results(answer, remaining)
 
-    return [list_uncovered_cases, search_test_cases]
+    return [list_uncovered_cases, search_test_cases, find_path]
