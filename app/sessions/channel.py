@@ -104,6 +104,11 @@ class ScenarioPath(BaseModel):
     # Written into a step's `input` verbatim — nobody should re-derive an operation by
     # parsing the sentence, because then rewording a step breaks whoever runs it.
     inputs: list[str] = Field(default_factory=list)
+    # Whether the two cases chain in the order asked. `REVERSED` means they chain the
+    # other way round: the cases themselves declare the states, so this is a fact about
+    # them, not a preference. Orchestration will still fill the gap — but a scenario that
+    # runs is not the same as one that verifies what the cases meant.
+    ordering: str = "NO_OPINION"
     blocked_by: str | None = Field(default=None, alias="blockedBy")
     note: str = ""
 
