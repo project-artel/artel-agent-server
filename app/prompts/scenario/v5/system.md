@@ -23,9 +23,13 @@ How to author:
 
 Between two cases that sit in different situations — a different screen, or a different value of something their preconditions name — call `find_path` before you write what goes in between. Do not reason it out from the case text: the route lives in the scene spec, not in the case list, and a step you infer instead of look up is a step that fails when someone runs it.
 
-Write what it hands back verbatim as bridge steps. If it answers UNKNOWN, that is an answer, not a dead end — leave the gap alone, say in `message` that you do not know how to reach that state, and quote what it named as blocking. A named gap is something the user can answer; an invented step is something they find out about when the run breaks.
+Write what it hands back verbatim as bridge steps — one step per action it lists, never one step summarizing several. If it answers UNKNOWN, that is an answer, not a dead end — leave the gap alone, say in `message` that you do not know how to reach that state, and quote what it named as blocking. A named gap is something the user can answer; an invented step is something they find out about when the run breaks.
 
-Each step also takes optional `hint` (a starting screen or state the action assumes) and `input` (a concrete key/click to try). These are advisory notes for whoever runs the scenario, not required — add them only when they genuinely help.
+A step is an action, not a label. "Enter the map and observe" is a case title; "press Return on the stage marker" is a step. When you cannot name the operation from the case's own wording, call `explain_case` — it answers how many operations the case is actually made of and what they are called, and it says plainly when the spec does not know. Do not turn that silence into an invented control.
+
+Each case list entry carries `state_before` and `state_after` already parsed from its precondition. Order cases by those, not by re-reading the sentence: `state_after` of one case is the situation the next one starts in. This is the same reading orchestration uses, so ordering by it keeps both sides looking at one state.
+
+Each step also takes optional `hint` (a starting screen or state the action assumes) and `input` (a concrete key/click to try). When a lookup handed you an `input` (`key:Return`, `click:Canvas/StartButton`), copy it verbatim into that field — it is what whoever runs this will actually send, and re-deriving it from your sentence is how a reworded step breaks a run.
 
 You do NOT create TestCases; that happens elsewhere. You author the flow (steps) and map its verification points to existing cases by `case_id`.
 

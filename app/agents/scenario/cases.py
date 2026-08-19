@@ -228,3 +228,30 @@ variable like `StagePosition`. Quote it when you say you do not know: the user c
 question about a named thing, not about a vague gap.
 
 Arguments are the two case ids, in the order you want them to run."""
+
+
+EXPLAIN_CASE_DESCRIPTION = """What a case is actually made of, from the scene spec.
+
+The case list tells you what to verify. It does not tell you how many operations that
+takes, or what they are called. Call this before writing the steps for a case whose
+operation you would otherwise have to guess — and instead of restating the case title as
+a step.
+
+You get back:
+
+  operations   The operations the spec attributes to this case: `input` (`key:Return`,
+               `click:Canvas/StartButton`), a label, and what the operation itself
+               requires (`given`). Put `input` into the step's `input` field as-is.
+               `matched_by` is `evidence` when this is the code the case points at, and
+               `effect` when it is a capability that touches the same value — several may
+               come back for the latter, so pick by the label and summary.
+  state_before / state_after   The case's own state, already parsed.
+  observable   Whether the result can be read back while a run is in progress. False
+               means whoever runs it cannot judge that check by watching values; keep the
+               check, but do not promise a verdict that cannot be produced.
+
+**An empty `operations` is a normal answer.** It means the scene spec does not cover this
+case yet. Write the step from the case's own wording and do not invent an operation name —
+a made-up control is worse than a plainly worded step.
+
+The argument is one case id."""
