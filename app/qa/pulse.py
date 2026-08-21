@@ -31,6 +31,16 @@ from pydantic import BaseModel, ConfigDict, Field
 # never dropped, because a value that stops moving is still the value.
 MAX_TRACKED_KEYS = 4096
 
+# 판독을 도착한 순서대로 몇 개나 들고 있는지.
+#
+# `scene.py` 의 `MAX_VALUES_PER_OBSERVABLE` 과 같은 값이고 같은 이유다: 접힌 상태는 지금 무엇이
+# 참인지만 말하고, 어떻게 거기 이르렀는지는 말하지 않는다. 스텝의 `expected` 는 거의가 변화에
+# 대한 진술이라 순서가 근거의 절반이다.
+#
+# 문서 전체가 아니라 한 줄씩 남긴다. 전량 판독이 실측 약 18 KB 라 열 개를 통째로 실으면 그것만
+# 으로 프롬프트가 채워지고, 순서를 읽는 데 필요한 것은 몇 번째 판독이 무엇을 움직였나뿐이다.
+MAX_READING_LOG = 10
+
 PULSE_VIEW_START = "<<pulse>>"
 PULSE_VIEW_END = "<<end pulse>>"
 
@@ -126,6 +136,19 @@ class PulseReading(BaseModel):
     gaps: list[str] = Field(default_factory=list)
 
 
+class ReadingLog(BaseModel):
+    """도착한 판독 하나에 대해 남기는 한 줄."""
+
+    model_config = ConfigDict(extra="allow")
+
+    reading: int | None = None
+    frame: int | None = None
+    whole: bool = False
+    # 이 판독이 움직였다고 말한 키들. 값이 아니라 이름만 — 값은 접힌 상태가 들고 있고,
+    # 여기서 또 들면 같은 사실이 어긋날 자리가 둘이 된다.
+    changed: list[str] = Field(default_factory=list)
+
+
 class _HeldObject(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -163,6 +186,10 @@ class PulseMemory(BaseModel):
     # signal: a step that expects one change reads differently when the value
     # bounced five times and landed back.
     moves: dict[str, int] = Field(default_factory=dict)
+    # 도착한 순서대로, 오래된 것이 앞. 상한을 넘으면 앞에서 버린다(FIFO).
+    log: list[ReadingLog] = Field(default_factory=list)
+    # 상한에 걸려 버린 판독이 있었나. 읽는 쪽이 "이것이 전부"라고 잘못 읽지 않도록.
+    trimmed: bool = False
 
     @property
     def seen(self) -> bool:
@@ -193,6 +220,19 @@ class PulseMemory(BaseModel):
             # that moved once is the least informative thing to keep.
             for key in sorted(self.moves, key=self.moves.get)[: len(self.moves) - MAX_TRACKED_KEYS]:
                 del self.moves[key]
+
+        self.log.append(
+            ReadingLog(
+                reading=reading.reading,
+                frame=reading.frame,
+                whole=reading.whole,
+                changed=list(reading.changed),
+            )
+        )
+        if len(self.log) > MAX_READING_LOG:
+            # 앞에서 버린다. 최신이 가장 쓸모 있고, 오래된 판독은 이미 접혀 상태에 들어갔다.
+            del self.log[: len(self.log) - MAX_READING_LOG]
+            self.trimmed = True
 
         for entry in reading.statics:
             self.statics[entry.key] = entry
@@ -234,6 +274,19 @@ class PulseMemory(BaseModel):
         if self.unwatchable:
             # Said out loud so "nothing moved" is not read as "nothing is there".
             lines.append(f"could not read: {self.unwatchable}")
+
+        if self.log:
+            lines.append("")
+            head = f"readings, oldest first (last {MAX_READING_LOG})"
+            if self.trimmed:
+                # 열 개가 전부라고 읽으면 그 앞을 없었던 일로 세게 된다.
+                head += " — earlier readings dropped"
+            lines.append(head + ":")
+            for entry in self.log:
+                mark = "whole" if entry.whole else "delta"
+                moved = ", ".join(entry.changed) if entry.changed else "nothing moved"
+                lines.append(f"  {entry.reading} ({mark}): {moved}")
+            lines.append("")
 
         if self.statics:
             lines.append("statics:")

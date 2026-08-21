@@ -5,7 +5,7 @@
 """
 
 from app.qa.envelope import MessageType
-from app.qa.pulse import PulseMemory, PulseReading
+from app.qa.pulse import MAX_READING_LOG, PulseMemory, PulseReading
 from app.qa.scene import SceneMemory
 from app.qa.service import QaExecutionService
 from app.qa.store import InMemoryQaSessionStore
@@ -124,6 +124,41 @@ def test_창_안_변화_횟수가_쌓인다():
 
     assert memory.moves["StageManager.turn"] == 3
     assert memory.moves["CardManager.hand"] == 1
+
+
+def test_판독이_들어온_순서대로_남는다():
+    memory = fold(
+        reading(reading=1, changed=["a"]),
+        reading(reading=2, whole=False, changed=["b"]),
+        reading(reading=3, whole=False, changed=[]),
+    )
+
+    assert [entry.reading for entry in memory.log] == [1, 2, 3]
+    assert [entry.whole for entry in memory.log] == [True, False, False]
+    assert memory.log[2].changed == []
+    assert memory.trimmed is False
+
+
+def test_열_개를_넘으면_앞에서_버린다():
+    """FIFO. 접힌 상태가 아니라 순서만 버린다 — 값은 이미 상태에 들어가 있다."""
+    memory = fold(*[reading(reading=n, whole=(n == 1)) for n in range(1, 15)])
+
+    assert len(memory.log) == MAX_READING_LOG
+    # 최신 열 개가 순서대로 남는다.
+    assert [entry.reading for entry in memory.log] == list(range(5, 15))
+    assert memory.trimmed is True
+    # 버린 것이 있다는 사실이 화면에 남아야 한다.
+    assert "earlier readings dropped" in memory.render()
+
+
+def test_로그가_값을_두_번_들지_않는다():
+    """같은 사실이 어긋날 자리를 둘 두지 않는다 — 값은 접힌 상태에만 있다."""
+    memory = fold(reading(active=[obj()], changed=["TurnBattleSystem.turn"]))
+
+    entry = memory.log[0]
+    assert entry.changed == ["TurnBattleSystem.turn"]
+    assert not hasattr(entry, "value")
+    assert not hasattr(entry, "active")
 
 
 def test_statics_는_객체_아래로_섞이지_않는다():
