@@ -41,6 +41,15 @@ MAX_TRACKED_KEYS = 4096
 # 으로 프롬프트가 채워지고, 순서를 읽는 데 필요한 것은 몇 번째 판독이 무엇을 움직였나뿐이다.
 MAX_READING_LOG = 10
 
+# 한 판독의 로그 줄이 이름 대는 키의 상한.
+#
+# 전량 판독은 `changed` 에 **감시 중인 키를 전부** 담는다 — SDK 의 장부가 직전 값과 다른 것을
+# 넣는데 전량 판독에는 직전이 없기 때문이다(`LiveState.Ledger.Say`). 샘플 게임 실측이
+# `watching 111` 이라 그것을 한 줄에 다 쓰면 로그 한 줄이 화면을 덮고, 더 큰 게임에서는 더하다.
+#
+# 세는 것과 이름 대는 것을 가른다. 몇 개가 움직였나는 언제나 정확하고, 어느 것인지는 여기까지다.
+MAX_CHANGED_NAMED = 8
+
 PULSE_VIEW_START = "<<pulse>>"
 PULSE_VIEW_END = "<<end pulse>>"
 
@@ -146,7 +155,12 @@ class ReadingLog(BaseModel):
     whole: bool = False
     # 이 판독이 움직였다고 말한 키들. 값이 아니라 이름만 — 값은 접힌 상태가 들고 있고,
     # 여기서 또 들면 같은 사실이 어긋날 자리가 둘이 된다.
+    #
+    # `MAX_CHANGED_NAMED` 까지만 든다. 몇 개였는지는 [moved] 가 따로 들고 있으므로 잘라도
+    # "몇 개가 움직였나" 는 잃지 않는다.
     changed: list[str] = Field(default_factory=list)
+    # 이 판독이 움직였다고 말한 키의 총 개수. `changed` 가 잘렸는지는 이 값과 길이로 안다.
+    moved: int = 0
 
 
 class _HeldObject(BaseModel):
@@ -226,7 +240,8 @@ class PulseMemory(BaseModel):
                 reading=reading.reading,
                 frame=reading.frame,
                 whole=reading.whole,
-                changed=list(reading.changed),
+                changed=list(reading.changed[:MAX_CHANGED_NAMED]),
+                moved=len(reading.changed),
             )
         )
         if len(self.log) > MAX_READING_LOG:
@@ -283,9 +298,7 @@ class PulseMemory(BaseModel):
                 head += " — earlier readings dropped"
             lines.append(head + ":")
             for entry in self.log:
-                mark = "whole" if entry.whole else "delta"
-                moved = ", ".join(entry.changed) if entry.changed else "nothing moved"
-                lines.append(f"  {entry.reading} ({mark}): {moved}")
+                lines.append(f"  {entry.reading} ({self._log_line(entry)})")
             lines.append("")
 
         if self.statics:
@@ -310,6 +323,22 @@ class PulseMemory(BaseModel):
 
         lines.append(PULSE_VIEW_END)
         return "\n".join(lines)
+
+    @staticmethod
+    def _log_line(entry: ReadingLog) -> str:
+        """로그 한 줄의 본문.
+
+        전량 판독은 키를 이름 대지 않는다. 직전이 없어 **감시 중인 전부**가 움직인 것으로
+        들어오므로, 그 목록은 "무엇이 움직였나"에 답하지 않고 "무엇을 보고 있나"에 답한다 —
+        그것은 이 줄이 묻는 것이 아니다.
+        """
+        if entry.whole:
+            return f"whole — {entry.moved} values reported"
+        if not entry.moved:
+            return "delta — nothing moved"
+        named = ", ".join(entry.changed)
+        rest = entry.moved - len(entry.changed)
+        return f"delta — {named}" + (f", +{rest} more" if rest > 0 else "")
 
     def _moved(self, *keys: str) -> str:
         """How many readings this key moved in, when that is more than one.

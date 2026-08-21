@@ -5,7 +5,7 @@
 """
 
 from app.qa.envelope import MessageType
-from app.qa.pulse import MAX_READING_LOG, PulseMemory, PulseReading
+from app.qa.pulse import MAX_CHANGED_NAMED, MAX_READING_LOG, PulseMemory, PulseReading
 from app.qa.scene import SceneMemory
 from app.qa.service import QaExecutionService
 from app.qa.store import InMemoryQaSessionStore
@@ -135,7 +135,9 @@ def test_판독이_들어온_순서대로_남는다():
 
     assert [entry.reading for entry in memory.log] == [1, 2, 3]
     assert [entry.whole for entry in memory.log] == [True, False, False]
+    assert memory.log[1].changed == ["b"]
     assert memory.log[2].changed == []
+    assert memory.log[2].moved == 0
     assert memory.trimmed is False
 
 
@@ -149,6 +151,38 @@ def test_열_개를_넘으면_앞에서_버린다():
     assert memory.trimmed is True
     # 버린 것이 있다는 사실이 화면에 남아야 한다.
     assert "earlier readings dropped" in memory.render()
+
+
+def test_한_판독은_변화가_몇_개든_항목_하나다():
+    """상한은 판독 수에 걸린다. 한 문서가 여러 칸을 먹지 않는다."""
+    memory = fold(reading(changed=[f"K{i}" for i in range(50)]))
+
+    assert len(memory.log) == 1
+    assert memory.log[0].moved == 50
+
+
+def test_줄이_이름_대는_키에_상한이_있다():
+    """전량 판독은 감시 중인 전부를 changed 에 담는다(실측 watching 111).
+
+    상한이 없으면 로그 한 줄이 화면을 덮는다.
+    """
+    memory = fold(reading(reading=9, whole=False, changed=[f"Enemy{i}.hp" for i in range(23)]))
+
+    entry = memory.log[0]
+    assert entry.moved == 23
+    assert len(entry.changed) == MAX_CHANGED_NAMED
+    line = memory.render()
+    assert "+15 more" in line
+    assert "Enemy22.hp" not in line
+
+
+def test_전량_판독은_키를_이름_대지_않는다():
+    """직전이 없어 전부가 움직인 것으로 오므로, 그 목록은 '무엇을 보고 있나'에 답한다."""
+    memory = fold(reading(reading=1, whole=True, changed=[f"K{i}" for i in range(111)]))
+
+    line = memory.render()
+    assert "whole — 111 values reported" in line
+    assert "K0" not in line
 
 
 def test_로그가_값을_두_번_들지_않는다():
