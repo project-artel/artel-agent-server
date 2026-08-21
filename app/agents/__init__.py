@@ -28,6 +28,13 @@ from app.agents.scenario import (
     ScenarioStep,
     TestCaseListItem,
 )
+from app.agents.step_phrasing import (
+    PhrasedStep,
+    PhrasedSteps,
+    StepPhrasingAgent,
+    StepPhrasingError,
+    StepPhrasingRequest,
+)
 
 __all__ = [
     "DEFAULT_LANGUAGE",
@@ -45,6 +52,8 @@ __all__ = [
     "KnowledgeQueryAgentRequest",
     "KnowledgeQueryGenerationError",
     "OutputLanguage",
+    "PhrasedStep",
+    "PhrasedSteps",
     "ScenarioAgent",
     "ScenarioAgentRequest",
     "ScenarioAgentResult",
@@ -52,5 +61,8 @@ __all__ = [
     "ScenarioGenerationError",
     "ScenarioPlan",
     "ScenarioStep",
+    "StepPhrasingAgent",
+    "StepPhrasingError",
+    "StepPhrasingRequest",
     "TestCaseListItem",
 ]

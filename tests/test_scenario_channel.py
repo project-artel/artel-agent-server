@@ -144,3 +144,31 @@ def test_deliver_drops_an_unreadable_result_frame() -> None:
         assert await task is None
 
     asyncio.run(run())
+
+
+# --- progress ------------------------------------------------------------------
+
+
+def test_report_goes_out_as_a_progress_frame() -> None:
+    async def run() -> None:
+        channel, sent = make_channel()
+
+        await channel.report("thinking")
+
+        assert sent == [{"type": "progress", "stage": "thinking"}]
+
+    asyncio.run(run())
+
+
+def test_a_dead_socket_does_not_fail_the_turn() -> None:
+    # A progress line is worth less than the turn it would kill. The socket will
+    # fail again on the result frame, where the failure means something.
+    async def run() -> None:
+        async def send(_frame: dict) -> None:
+            raise RuntimeError("socket is gone")
+
+        channel = ScenarioChannel(send)
+
+        await channel.report("thinking")
+
+    asyncio.run(run())

@@ -307,6 +307,7 @@ def test_every_live_agent_has_a_v1(monkeypatch) -> None:
             "scenario",
             "game_context",
             "knowledge_query",
+            "step_phrasing",
         }
         for agent in known_agents():
             assert available_versions(agent)[0] == "v1"
