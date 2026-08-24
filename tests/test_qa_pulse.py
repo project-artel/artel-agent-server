@@ -394,3 +394,83 @@ def test_아무것도_말하지_않는_객체는_여전히_빠진다():
 
     assert memory.render() is not None
     assert "Canvas[2]/continue[1]" not in memory.render()
+
+
+def test_꺼진_객체는_그리지_않는다():
+    """화면에 없고 누를 수도 없는 것을 조준 후보로 권하지 않는다.
+
+    `GAME_STATE` 도 활성 GameObject 만 보냈다(`SceneScanner`). 판독이 꺼진 것까지 그리면
+    걷어내려는 그것보다 못해진다.
+    """
+    memory = fold(reading(active=[obj(selector="A[1]")], deactive=[obj(selector="B[1]")]))
+
+    view = memory.render()
+    assert "A[1]" in view
+    assert "B[1]" not in view
+
+
+def test_꺼진_객체도_들고_있는다():
+    """그리지 않는 것과 버리는 것은 다르다.
+
+    판독이 "그건 꺼졌다" 고 말한 것 자체가 사실이고, 버리면 다시 켜질 때 그 사이의 값을
+    잃어 전량 판독을 기다리게 된다.
+    """
+    memory = fold(reading(deactive=[obj(selector="B[1]")]))
+
+    held = next(iter(memory.held.values()))
+    assert held.live is False
+    assert held.members  # 값은 그대로 있다
+
+
+def test_다시_켜지면_돌아온다():
+    """판독이 그 객체를 active 통에 넣어 보내므로 저절로 돌아온다. 되살리는 코드가 따로
+    있어야 하는 것이 아니다 — 어느 통에 들어가는가가 곧 그 진술이다."""
+    memory = fold(
+        reading(deactive=[obj(selector="B[1]")]),
+        reading(reading=2, whole=False, active=[obj(selector="B[1]")]),
+    )
+
+    assert "B[1]" in memory.render()
+
+
+def test_풀에서_꺼내_쓰는_씬에서_프롬프트가_자라지_않는다():
+    """카드 스무 장짜리 풀에서 손에 든 셋만 활성이면 프롬프트에 드는 것도 셋이다.
+
+    풀은 객체를 재사용하므로 selector 가 그대로다 — `held` 는 풀 크기에서 수렴하고,
+    렌더는 활성 수만큼이다. 이 테스트가 없으면 "꺼진 것도 그린다" 로 되돌아갔을 때
+    긴 전투에서만, 그것도 프롬프트 길이로만 드러난다.
+    """
+    pool = [f"Card(Clone)[{i}]" for i in range(1, 21)]
+    hand, rest = pool[:3], pool[3:]
+    memory = fold(
+        reading(
+            whole=True,
+            active=[obj(selector=s) for s in hand],
+            deactive=[obj(selector=s) for s in rest],
+        )
+    )
+    def drawn(mem) -> int:
+        """렌더에 이름이 오른 카드 수. 판독 로그 절은 자기 상한이 따로 있어 총 줄 수로는
+        객체 증가를 가릴 수 없다."""
+        return sum(1 for line in mem.render().splitlines() if "Card(Clone)[" in line)
+
+    assert drawn(memory) == len(hand)
+
+    # 한 장 내고 한 장 뽑기를 스무 번. 풀이 재사용되므로 새 키가 생기지 않는다.
+    for turn in range(20):
+        out, inn = hand.pop(0), rest.pop(0)
+        hand.append(inn)
+        rest.append(out)
+        memory.apply(
+            PulseReading.model_validate(
+                reading(
+                    reading=turn + 2,
+                    whole=False,
+                    active=[obj(selector=inn)],
+                    deactive=[obj(selector=out)],
+                )
+            )
+        )
+
+    assert len(memory.held) == len(pool)   # 풀 크기에서 수렴한다
+    assert drawn(memory) == len(hand)      # 손에 든 수만큼만 그린다

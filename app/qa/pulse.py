@@ -317,14 +317,25 @@ class PulseMemory(BaseModel):
                 name = f"{(entry.declaring or '').split('.')[-1]}.{entry.member}"
                 lines.append(f"  {name} = {entry.value!r}{self._moved(key)}")
 
-        objects = sorted(self.held.items(), key=lambda pair: (not pair[1].live, pair[0]))
+        objects = sorted(self.held.items())
         for key, obj in objects:
+            # 꺼진 것은 그리지 않는다. 화면에 없고 누를 수도 없어 조준 후보가 아니고,
+            # GAME_STATE 도 활성 GameObject 만 보냈다 — 여기서 그리면 그것보다 못해진다.
+            #
+            # 들고 있기는 한다. 판독이 "그건 꺼졌다" 고 말한 것 자체가 사실이고, 다시 켜지면
+            # 판독이 그 객체를 active 통에 넣어 보내므로 저절로 돌아온다. held 에서 지우면
+            # 그 사이 값을 잃고 다시 켜질 때 전량 판독을 기다리게 된다.
+            #
+            # 풀에서 꺼내 쓰는 게임이 이것으로 산다: 카드 스무 장짜리 풀에서 손에 든 셋만
+            # 활성이면, 프롬프트에 드는 것도 셋이다.
+            if not obj.live:
+                continue
             # 멤버가 없어도 쓴다. 판독이 유일한 출처일 때, 조준값과 무엇을 할 수 있는지만
             # 들고 오는 객체가 대다수다 — 그것을 버리면 누를 것이 화면에서 사라진다.
             if not obj.members and not obj.offers and obj.id is None:
                 continue
             where = obj.selector or obj.path or key
-            lines.append(f"{where}{self._aim(obj)}{'' if obj.live else ' (off)'}:")
+            lines.append(f"{where}{self._aim(obj)}:")
             offered = self._offered(obj)
             if offered:
                 lines.append(f"  {offered}")
