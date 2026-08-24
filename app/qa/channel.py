@@ -44,6 +44,16 @@ ACTION_TIMEOUT_SECONDS = 30.0
 # unbounded one would park the run until the overall deadline killed it.
 MAX_SCENE_WAIT_SECONDS = 30.0
 
+# 액션 뒤에 다음 판독을 기다리는 상한.
+#
+# SDK 는 0.1초마다 읽고 1초마다 배치로 보낸다. 액션 직후에 돌아오면 그 배치가 아직
+# 안 나갔을 수 있고, 그러면 도구가 액션 **이전**의 화면을 그린다. 배치 주기보다 조금
+# 길게 잡아 그 창을 덮는다.
+#
+# 새 대기가 아니다 — 종전에는 액션 배치 끝에 `scan_scene` 을 태워 그 왕복을 기다렸다.
+# 이 값은 그 왕복을 대신하고, 화면이 실제로 움직였으면 그보다 먼저 풀린다.
+READING_WAIT_SECONDS = 1.5
+
 # Ceiling on a wait for the operator. Longer than a scene wait because a person
 # has to read the question and type, and shorter than the run's deadline so the
 # run still ends by its own account rather than by being killed mid-wait.
@@ -150,6 +160,10 @@ class QaRunChannel:
         # Set exactly while that list has something in it, so a tool can wait on
         # the operator instead of only picking messages up in passing.
         self._operator_arrived = asyncio.Event()
+        # 판독이 하나 도착할 때마다 세운다. 액션 뒤에 다음 배치를 기다리는 쪽을 깨우는
+        # 데만 쓰고, "몇 개 왔나" 는 `pulse.readings` 가 센다 — 이벤트는 놓칠 수 있고
+        # 개수는 놓칠 수 없다.
+        self._reading_arrived = asyncio.Event()
         # Everything the operator has said this run, in order — the durable record
         # beside the delivery queue above, which is emptied as soon as a tool picks
         # it up. Once delivered, an instruction exists only inside one tool result's
@@ -197,49 +211,108 @@ class QaRunChannel:
     async def look(
         self, after_seconds: float, message: str, step: int | None = None
     ) -> bool:
-        """Ask the game for the current scene. True when a fresh one arrived.
+        """게임의 지금 화면을 본다. 볼 것이 있으면 참.
 
-        Sent as an ACTION carrying `scan_scene`, the same path the acting tools
-        use. There was a second path — a `REQUEST_GAME_STATE` frame that made
-        Orchestration send the SDK a top-level `GET_GAME_STATE` — but the SDK
-        treats that as a compatibility alias and names `scan_scene` as the real
-        method (see ArtelManager's own error text). Two paths to one answer also
-        made the timeline lie: the `GET_GAME_STATE` row logged this envelope
-        rather than the frame that actually went out.
+        **판독이 흐르면 아무것도 보내지 않는다.** 판독은 물어서 오는 것이 아니라 게임이
+        도는 동안 계속 도착하는 관측이라, 여기서 할 일은 이미 쥐고 있는 그림이 쓸 만한지
+        가리는 것뿐이다. 참이 아닌 경우는 아무것도 들은 적이 없을 때다.
+
+        판독을 한 번도 못 들었으면 종전 경로로 돌아간다 — `scan_scene` 을 실은 ACTION 을
+        보내고 `GAME_STATE` 가 오는지 본다. 구버전 SDK 는 판독을 내지 않으므로 그 경로가
+        살아 있어야 한다(ARTEL-516). 그 왕복 동안 첫 판독이 도착하면 그것도 참으로 센다.
+
+        그 종전 경로가 왜 ACTION 인가: `REQUEST_GAME_STATE` 라는 두 번째 길이 있었는데
+        SDK 가 그것을 호환 별칭으로 다루고 `scan_scene` 을 진짜 이름으로 부른다
+        (ArtelManager 의 오류 문구가 그렇게 적혀 있다). 두 길이 한 답으로 모이는 것은
+        타임라인도 거짓말하게 만들었다 — `GET_GAME_STATE` 줄이 실제로 나간 프레임이
+        아니라 이 봉투를 적었다.
         """
         self._raise_if_cancelled()
         if after_seconds > 0:
             # Safe to sleep: the run is its own asyncio task (see
             # app/api/qa_sessions.py), so this holds up nothing but this tool.
             await asyncio.sleep(min(after_seconds, MAX_SCENE_WAIT_SECONDS))
+
+        if self.scene.pulse.seen:
+            return True
+
+        # 판독을 아직 한 번도 못 들었다. 구버전일 수도, 채널이 켜지는 중일 수도 있는데
+        # 여기서 그것을 가리려고 기다리지 않는다 — 판독이 영영 안 오는 게임에서는 그
+        # 기다림을 매번 치르게 되고, 왕복 자체가 이미 그 창을 준다.
+        #
         # Frames, not observations: `updates` restarts at 1 on a scene change,
         # so comparing it would report a transition as the game having stayed
         # silent.
-        before = self.scene.frames
+        before_frames = self.scene.frames
+        before_readings = self.scene.pulse.readings
         await self.dispatch_actions(
             [JsonRpcAction(id=1, method="scan_scene", params=[])], message, step
         )
-        return self.scene.frames > before
+        return (
+            self.scene.frames > before_frames
+            or self.scene.pulse.readings > before_readings
+        )
 
     async def act_and_look(
         self, actions: list[JsonRpcAction], message: str, step: int | None = None
     ) -> tuple[ActionResultPayload | None, bool]:
-        """Run actions, then read the scene they produced, in one batch.
+        """액션을 돌리고, 그것이 만든 화면을 읽는다.
 
-        `scan_scene` rides at the end of the same batch on purpose. Asked for
-        separately it answers straight out of the SDK's message handler and can
-        return the screen as it was *before* a click's cursor movement finished —
-        the agent would then judge the step against a stale scene. Queued behind
-        the actions it cannot run early.
+        판독이 흐르면 배치에 `scan_scene` 을 태우지 않는다. 그 액션의 유일한 일이
+        `GAME_STATE` 를 만드는 것이고, 그 채널이 꺼진 빌드에서는 하는 일이 없다.
 
-        Returns the results and whether a fresh scene arrived.
+        대신 **다음 판독을 기다린다.** 이것이 이 변경의 값이다 — 판독은 1초 배치라
+        `ACTION_RESULT` 가 돌아온 시점에는 액션의 결과가 아직 안 나갔을 수 있고, 그대로
+        그리면 도구가 액션 이전의 화면을 보여 준다. 종전에 `scan_scene` 이 같은 배치
+        끝에 탄 것도 같은 이유였다: 따로 물으면 SDK 의 메시지 핸들러가 곧장 답해, 클릭의
+        커서 이동이 끝나기 전 화면이 돌아왔다.
+
+        기다림이 빈손으로 끝나는 것은 정상이다. SDK 는 움직인 것이 없으면 판독을 아예
+        내지 않는다(`Pulse.Take` 의 `settled`). 그래서 거짓은 "게임이 죽었다"가 아니라
+        "화면이 그대로다"를 뜻하고, 부르는 쪽이 그 둘을 갈라 읽는다.
+
+        Returns the results and whether anything fresh arrived.
         """
-        before = self.scene.frames
-        batch = actions + [
-            JsonRpcAction(id=len(actions) + 1, method="scan_scene", params=[])
-        ]
+        before_frames = self.scene.frames
+        before_readings = self.scene.pulse.readings
+        listening = self.scene.pulse.seen
+
+        batch = list(actions)
+        if not listening:
+            batch.append(JsonRpcAction(id=len(actions) + 1, method="scan_scene", params=[]))
+
         result = await self.dispatch_actions(batch, message, step)
-        return result, self.scene.frames > before
+
+        if listening:
+            await self._await_reading(before_readings, READING_WAIT_SECONDS)
+
+        arrived = (
+            self.scene.frames > before_frames
+            or self.scene.pulse.readings > before_readings
+        )
+        return result, arrived
+
+    async def _await_reading(self, after: int, timeout: float) -> bool:
+        """`after` 개보다 판독이 더 쌓일 때까지 기다린다. 최대 `timeout` 초.
+
+        도착 이벤트가 아니라 **개수**를 본다. 이벤트만 보면 기다리기 시작하기 전에 이미
+        도착한 판독을 못 본 것으로 세는데, 액션의 결과를 실은 배치가 `ACTION_RESULT` 보다
+        먼저 도착하는 일이 실제로 있다 — SDK 가 0.1초마다 읽으므로 그쪽이 더 빠를 수 있다.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while self.scene.pulse.readings <= after:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            # `on_pulse` 는 같은 이벤트 루프의 동기 콜백이라, 이 clear 와 위의 검사
+            # 사이에 판독이 끼어들 수 없다.
+            self._reading_arrived.clear()
+            try:
+                await asyncio.wait_for(self._reading_arrived.wait(), remaining)
+            except asyncio.TimeoutError:
+                return False
+        return True
 
     async def dispatch_actions(
         self, actions: list[JsonRpcAction], message: str, step: int | None = None
@@ -370,6 +443,8 @@ class QaRunChannel:
         아니라 게임이 도는 동안 계속 도착하는 관측이고, 도구가 그것을 기다리지 않는다.
         """
         self.scene.pulse.apply(PulseReading.model_validate(raw.get("payload") or {}))
+        # 액션 뒤에 다음 배치를 기다리는 쪽을 깨운다(ARTEL-516).
+        self._reading_arrived.set()
 
     def on_action_result(self, raw: dict) -> None:
         correlation = raw.get("correlationId")

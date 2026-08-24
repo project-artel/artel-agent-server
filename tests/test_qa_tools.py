@@ -1032,3 +1032,148 @@ def test_a_search_says_which_step_asked() -> None:
         assert searches[0]["payload"]["step"] == 3
 
     asyncio.run(run())
+
+
+# --- 판독만 흐를 때의 도구 결과 (ARTEL-516) ---------------------------------
+
+
+def reading(reading_id: int = 1, whole: bool = True, objects: list | None = None) -> dict:
+    return {
+        "type": "PULSE",
+        "payload": {
+            "schema": 2,
+            "reading": reading_id,
+            "scene": "Lobby",
+            "whole": whole,
+            "active": objects or [],
+            "deactive": [],
+            "changed": [],
+        },
+    }
+
+
+def start_button(label: str = "Start") -> dict:
+    return {
+        "selector": "StartButton[1]",
+        "id": -101,
+        "rect": {"x": 860, "y": 600, "w": 200, "h": 60},
+        "offers": {"clicks": [{"event": "onClick", "method": "TitleSceneManager.StartGame"}]},
+        "members": [
+            {"on": "TitleSceneManager", "member": "Label", "value": label, "asked": True}
+        ],
+    }
+
+
+def test_observe_does_not_say_the_game_was_silent_when_readings_are_flowing() -> None:
+    """`GAME_STATE` 가 꺼진 빌드에서 도구가 매 턴 거짓말하던 자리다.
+
+    판독은 멀쩡히 흐르는데 도착 판정이 `scene.frames` 만 봐서, 게임이 답했는데도
+    "답하지 않았다" 를 읽었다. 로컬 실측에서 런이 그래도 통과한 것은 러너가 매 턴 끝에
+    상시 블록을 붙이고 에이전트가 도구 결과를 무시했기 때문이다 — 통과했다고 해서
+    거짓말이 값이 없는 것은 아니다.
+    """
+
+    async def run() -> None:
+        channel, _, tools, sent = make()
+        channel.on_pulse(reading(objects=[start_button()]))
+
+        answer_text = await tools["observe_scene"].ainvoke({"step": 1, "thought": "본다"})
+
+        assert "did not answer" not in answer_text
+        # 판독 블록이 실렸다. 조준값과 가능한 조작까지(ARTEL-512).
+        assert "StartButton[1]" in answer_text
+        assert "id=-101" in answer_text
+        assert "TitleSceneManager.StartGame" in answer_text
+        # 물어보지 않았다.
+        assert actions(sent) == []
+
+    asyncio.run(run())
+
+
+def test_an_action_result_carries_the_reading_that_followed_it() -> None:
+    """액션 도구의 결과에 판독 블록이 실린다."""
+
+    async def run() -> None:
+        channel, _, tools, sent = make(timeout=1.0)
+        channel.on_pulse(reading(objects=[start_button()]))
+
+        async def reply() -> None:
+            for _ in range(50):
+                if actions(sent):
+                    break
+                await asyncio.sleep(0)
+            channel.on_action_result(
+                {
+                    "correlationId": actions(sent)[-1]["messageId"],
+                    "payload": {"results": [{"id": 1, "success": True}]},
+                }
+            )
+            channel.on_pulse(
+                reading(reading_id=2, whole=False, objects=[start_button(label="Loading…")])
+            )
+
+        asyncio.create_task(reply())
+        body = await tools["click_button"].ainvoke(
+            {"step": 1, "thought": "시작을 누른다", "target_id": -101}
+        )
+
+        assert "did not arrive" not in body
+        assert "button_click: ok" in body
+        assert "Loading…" in body, "액션 뒤의 판독이 실렸다"
+
+    asyncio.run(run())
+
+
+def test_a_still_screen_is_reported_as_still_not_as_silence() -> None:
+    """아무것도 안 움직이면 그렇게 말하고, 화면은 그대로 그린다.
+
+    SDK 가 움직인 것 없는 판독을 안 보내므로 이 경우가 흔하다 — 클릭이 아무 일도 하지
+    않은 스텝이 그렇고, 그것이야말로 판정하려는 것이다. 여기서 화면을 감추면 판정할
+    근거가 사라진다.
+    """
+
+    async def run() -> None:
+        channel, _, tools, sent = make(timeout=1.0)
+        channel.on_pulse(reading(objects=[start_button()]))
+
+        async def reply() -> None:
+            for _ in range(50):
+                if actions(sent):
+                    break
+                await asyncio.sleep(0)
+            channel.on_action_result(
+                {
+                    "correlationId": actions(sent)[-1]["messageId"],
+                    "payload": {"results": [{"id": 1, "success": True}]},
+                }
+            )
+            # 판독은 오지 않는다. 화면이 그대로다.
+
+        asyncio.create_task(reply())
+        body = await tools["click_button"].ainvoke(
+            {"step": 1, "thought": "시작을 누른다", "target_id": -101}
+        )
+
+        assert "did not arrive" not in body
+        assert "Nothing on the screen moved." in body
+        assert "StartButton[1]" in body, "그대로인 화면도 보여 준다"
+
+    asyncio.run(run())
+
+
+def test_an_old_sdk_still_hears_the_scene_did_not_arrive() -> None:
+    """판독이 없는 게임에서는 종전 문구가 그대로다. 이 판정을 무디게 만들지 않는다."""
+
+    async def run() -> None:
+        channel, _, tools, sent = make()
+
+        answer(channel, sent, results=[{"id": 1, "success": True}])
+        body = await tools["click_button"].ainvoke(
+            {"step": 1, "thought": "누른다", "target_id": -101}
+        )
+
+        assert "The scene did not arrive" in body
+        methods = [item["method"] for item in actions(sent)[-1]["payload"]["actions"]]
+        assert "scan_scene" in methods, "구버전에는 여전히 태운다"
+
+    asyncio.run(run())

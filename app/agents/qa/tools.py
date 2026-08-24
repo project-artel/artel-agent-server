@@ -342,7 +342,8 @@ def build_tools(
         lines = []
         for item in result.results:
             # Anything past the batch is the trailing scan_scene, which is ours
-            # rather than something the agent asked for.
+            # rather than something the agent asked for. 판독이 흐르면 그 꼬리를 아예
+            # 안 태우므로 걸리는 것이 없다 — 그래도 남긴다. 판독 없는 게임이 그 경로다.
             if item.id not in methods:
                 continue
             outcome = "ok" if item.success else f"FAILED — {item.error or 'no reason given'}"
@@ -355,6 +356,15 @@ def build_tools(
             view = channel.scene.render(state.watermark)
             state.watermark = channel.scene.updates
             body = f"{body}\n\n{view}"
+        elif channel.scene.pulse.seen:
+            # 판독이 흐르는데 새로 온 것이 없다 = 화면이 움직이지 않았다. SDK 는 움직인
+            # 것이 없으면 판독을 아예 내지 않으므로 침묵이 곧 "그대로"다(ARTEL-516).
+            #
+            # 그래도 화면은 그린다. 여기서 감추면 액션이 아무것도 바꾸지 않았다는 것을
+            # 판정하려는 스텝이 볼 것을 잃는다 — 그것이야말로 보여 줘야 하는 결과다.
+            view = channel.scene.render(state.watermark)
+            state.watermark = channel.scene.updates
+            body = f"{body}\n\nNothing on the screen moved.\n\n{view}"
         else:
             body = f"{body}\n\nThe scene did not arrive; observe again to see the result."
         return with_operator_messages(body, messages)
