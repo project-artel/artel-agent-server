@@ -314,6 +314,23 @@ class ScenarioChannel:
             self._search_waiter = None
             self._pending_search_id = None
 
+    async def report(self, stage: str) -> None:
+        """Say where the turn is. Fire-and-forget: nothing waits for an answer.
+
+        The far side sees every tool call as a frame, but not the model turns in
+        between — and those are most of the wall clock. Without this, a turn that
+        thinks for forty seconds and calls one tool looks the same as one that
+        died right after the tool.
+
+        Never raises. A progress line is worth less than the turn it would kill,
+        and a socket that has gone away will fail again on the result frame, where
+        the failure actually means something.
+        """
+        try:
+            await self._send({"type": "progress", "stage": stage})
+        except Exception:  # noqa: BLE001 - see docstring
+            logger.debug("[scenario] progress frame dropped (%s)", stage, exc_info=True)
+
     # --- inbound --------------------------------------------------------------
 
     def deliver(self, raw: dict) -> bool:
