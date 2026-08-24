@@ -1,4 +1,5 @@
 from enum import StrEnum
+from typing import Literal
 
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -109,6 +110,32 @@ class AuthoredStep(BaseModel):
     case_id: int | None = None
     hint: str | None = None
     input: str | None = None
+    # 이 스텝을 어디서 가져왔는가(ARTEL-467).
+    #
+    # 검증 스텝은 원래 근거가 있었다 — `case_id`가 "이 스텝은 이 케이스를 본다"고 말해 준다.
+    # **브리지만 없었고**, 그래서 지어낸 스텝과 알고 쓴 스텝을 기계가 구분할 수 없었다.
+    # 그 구분이 없는 것이 실행 중에 터지는 지점이다.
+    #
+    # 한 문자열이 아니라 셋으로 나눈 것은 프로토타입에서 `"unknown:StagePosition을…"` 한 필드로
+    # 두었다가 파싱이 필요해졌고, `case_id`가 있는데 근거는 간선이라고 적은 계약 위반이 8건
+    # 나왔기 때문이다.
+    step_source: Literal["CASE", "CAPABILITY", "UNKNOWN", "HUMAN"] | None = Field(
+        default=None,
+        description=(
+            "Where this step came from. Set it on every step.\n"
+            "  CASE        this step verifies the case in case_id\n"
+            "  CAPABILITY  this step takes the route find_path gave you — put its id in\n"
+            "              step_source_capability_id\n"
+            "  UNKNOWN     no known route. Put what is blocking in step_unknown_reason,\n"
+            "              and say so in `message` too.\n"
+            "  HUMAN       the user told you how this is done, in this conversation. Use it\n"
+            "              ONLY for that: it is an attribution, and it is shown to them as\n"
+            "              their own answer. Guessing here puts words in their mouth.\n"
+            "A step you cannot ground in one of these is a step that fails when someone runs it."
+        ),
+    )
+    step_source_capability_id: int | None = None
+    step_unknown_reason: str | None = None
 
 
 class ScenarioPlan(BaseModel):
