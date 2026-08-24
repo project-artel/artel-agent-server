@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import logging
 
 import openai
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
@@ -21,6 +22,8 @@ from app.sessions.store import SessionExpired
 
 
 router = APIRouter(tags=["scenario"])
+
+logger = logging.getLogger(__name__)
 
 
 class OpenSessionRequest(BaseModel):
@@ -182,6 +185,21 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     await send(_error_event("validation_error", str(error)))
                 except openai.APIError as error:
                     await send(_error_event("llm_error", str(error)))
+                except asyncio.CancelledError:
+                    # The turn was cancelled without a `close` frame having asked
+                    # for it. Nobody is coming with a result, so say so.
+                    logger.warning("[session] turn cancelled: %s", session_id)
+                    await send(_error_event("turn_failed", "The turn was cancelled."))
+                except Exception:
+                    # **Anything unhandled ends the turn, not the session.** Before
+                    # this, an exception outside the three cases above escaped the
+                    # loop and closed the socket with no frame sent — the client saw
+                    # a turn that never finished and no reason (ARTEL-510). What it
+                    # was is for the log; what the client needs is that it is over.
+                    logger.exception("[session] turn failed: %s", session_id)
+                    await send(
+                        _error_event("turn_failed", "The turn failed. Try again.")
+                    )
                 else:
                     # None only from the first turn when there was no pending
                     # input; there is nothing to report and the session waits.
