@@ -7,6 +7,7 @@ These pin the frames themselves — category, step, and the actions inside them.
 """
 
 import asyncio
+import json
 
 from app.agents.qa.arch import default_resolved_arch
 from app.agents.qa.tools import QaRunState, build_tools
@@ -74,13 +75,19 @@ def answer(
 
 
 def test_observe_returns_the_change_since_the_last_look() -> None:
-    async def run() -> None:
-        channel, _, tools, sent = make()
+    """프레임을 게임이 스스로 올린다 — `PollSceneState` 가 하는 일이다.
 
-        answer(channel, sent, observables={"Score": {"value": 0}})
+    묻고 답하는 대신 밀어 넣는 모양이 된 것이 ARTEL-516 이다. 워터마크가 그대로라
+    "지난번 이후 무엇이 움직였나" 는 종전과 같이 나온다.
+    """
+
+    async def run() -> None:
+        channel, _, tools, _ = make()
+
+        channel.on_game_state(scene({"Score": {"value": 0}}))
         await tools["observe_scene"].ainvoke({"step": 1, "thought": "화면을 본다"})
 
-        answer(channel, sent, observables={"Score": {"value": 100}})
+        channel.on_game_state(scene({"Score": {"value": 100}}))
         second = await tools["observe_scene"].ainvoke(
             {"step": 1, "thought": "점수가 올랐는지 본다"}
         )
@@ -102,27 +109,21 @@ def test_observe_says_so_when_the_game_is_silent() -> None:
     asyncio.run(run())
 
 
-def test_observing_goes_out_as_an_action_carrying_only_scan_scene() -> None:
-    """One path to the scene, and it is the SDK's own JSON-RPC method.
+def test_observing_asks_the_game_for_nothing() -> None:
+    """`observe_scene` 이 프레임을 하나도 안 보낸다. 남는 것은 생각 한 줄뿐이다.
 
-    `observe_scene` used to send a REQUEST_GAME_STATE frame, which Orchestration
-    turned into a top-level GET_GAME_STATE — an alias the SDK keeps only for
-    compatibility while naming `scan_scene` as the real method.
+    종전에는 `scan_scene` 을 실은 ACTION 이 나갔다. 그 액션의 유일한 일이 `GAME_STATE` 를
+    만드는 것인데, ARTEL-513 이 그 채널을 끄면 오류를 답하고 켜 두면 `PollSceneState` 가
+    이미 같은 것을 스스로 올린다 — 어느 쪽에서도 하는 일이 없다(ARTEL-516).
     """
 
     async def run() -> None:
         channel, _, tools, sent = make()
+        channel.on_pulse(reading())
 
-        answer(channel, sent, observables={})
         await tools["observe_scene"].ainvoke({"step": 2, "thought": "화면을 본다"})
 
-        assert [frame["type"] for frame in sent] == [
-            MessageType.LOG.value,
-            MessageType.ACTION.value,
-        ]
-        assert actions(sent)[0]["payload"]["actions"] == [
-            {"id": 1, "jsonrpc": "2.0", "method": "scan_scene", "params": []}
-        ]
+        assert [frame["type"] for frame in sent] == [MessageType.LOG.value]
 
     asyncio.run(run())
 
@@ -175,8 +176,8 @@ def test_pressing_a_key_logs_the_reason_and_batches_a_scan() -> None:
         assert logs(sent)[0]["payload"]["message"] == "대사를 넘긴다"
 
         methods = [a["method"] for a in actions(sent)[0]["payload"]["actions"]]
-        # The scan rides in the same batch so it cannot answer before the key does.
-        assert methods == ["key_click", "scan_scene"]
+        # 꼬리가 사라진 자리. 액션 뒤의 화면은 판독이 실어 온다.
+        assert methods == ["key_click"], "꼬리가 붙지 않는다(ARTEL-516)"
 
     asyncio.run(run())
 
@@ -192,7 +193,6 @@ def test_moving_the_pointer_sends_the_screen_coordinates() -> None:
 
         assert actions(sent)[0]["payload"]["actions"] == [
             {"id": 1, "jsonrpc": "2.0", "method": "move_mouse", "params": [860, 540]},
-            {"id": 2, "jsonrpc": "2.0", "method": "scan_scene", "params": []},
         ]
 
     asyncio.run(run())
@@ -322,18 +322,17 @@ def test_a_drag_goes_out_as_one_batch_in_order() -> None:
             {"id": 2, "jsonrpc": "2.0", "method": "mouse_down", "params": [0]},
             {"id": 3, "jsonrpc": "2.0", "method": "move_mouse", "params": [700, 200]},
             {"id": 4, "jsonrpc": "2.0", "method": "mouse_up", "params": [0]},
-            {"id": 5, "jsonrpc": "2.0", "method": "scan_scene", "params": []},
         ]
 
     asyncio.run(run())
 
 
 def test_pausing_and_resuming_go_out_as_the_time_actions() -> None:
-    """Freezing the game is an action like any other, so a scan rides with it.
+    """멈추는 것도 다른 액션과 같은 액션이다. 배치에 실려 나가는 것은 그것 하나다.
 
-    Without the scan the agent would freeze the screen and then have to ask for
-    it separately — one round trip during which the thing it paused to read may
-    already be gone.
+    종전에는 꼬리 `scan_scene` 이 함께 탔다 — 따로 물으면 그 왕복 동안 멈춰서 읽으려던
+    것이 이미 사라질 수 있었기 때문이다. 지금은 판독이 그 자리를 대신하고, 그래서 그
+    왕복을 기다리는 대신 다음 배치를 기다린다(ARTEL-516).
     """
 
     async def run() -> None:
@@ -350,16 +349,17 @@ def test_pausing_and_resuming_go_out_as_the_time_actions() -> None:
         assert [
             [item["method"] for item in frame["payload"]["actions"]]
             for frame in actions(sent)
-        ] == [["pause_time", "scan_scene"], ["resume_time", "scan_scene"]]
+        ] == [["pause_time"], ["resume_time"]]
 
     asyncio.run(run())
 
 
 def test_resetting_goes_out_as_the_reset_action() -> None:
-    """The scan riding with it is what makes the reset usable.
+    """리셋만 나간다. 새 화면은 판독이 실어 온다.
 
-    Every target id the agent holds dies with the old scene, so a reset that
-    came back without a fresh scene would leave it acting on corpses.
+    에이전트가 쥔 target id 는 옛 씬과 함께 죽으므로 리셋 뒤에는 반드시 새 화면이 와야
+    한다. 종전에는 꼬리 `scan_scene` 이 그것을 보장했고, 지금은 씬이 바뀌면 SDK 가 전량
+    판독을 내는 것이 보장한다(`LiveState.Compose` 의 `everything`).
     """
 
     async def run() -> None:
@@ -372,8 +372,7 @@ def test_resetting_goes_out_as_the_reset_action() -> None:
             "Resetting the game"
         ]
         assert [item["method"] for item in actions(sent)[0]["payload"]["actions"]] == [
-            "reset_game",
-            "scan_scene",
+            "reset_game"
         ]
 
     asyncio.run(run())
@@ -1161,8 +1160,12 @@ def test_a_still_screen_is_reported_as_still_not_as_silence() -> None:
     asyncio.run(run())
 
 
-def test_an_old_sdk_still_hears_the_scene_did_not_arrive() -> None:
-    """판독이 없는 게임에서는 종전 문구가 그대로다. 이 판정을 무디게 만들지 않는다."""
+def test_a_game_that_reports_nothing_is_told_so() -> None:
+    """두 채널 다 조용하면 그렇게 말한다. 이 판정을 무디게 만들지 않았다.
+
+    묻지 않게 된 뒤에도 "안 왔다" 는 여전히 값이다 — 다만 이제 그것은 "물었는데 답이
+    없다" 가 아니라 "게임이 화면을 아예 보고하지 않는다" 를 뜻하고, 문구가 그렇게 말한다.
+    """
 
     async def run() -> None:
         channel, _, tools, sent = make()
@@ -1172,8 +1175,8 @@ def test_an_old_sdk_still_hears_the_scene_did_not_arrive() -> None:
             {"step": 1, "thought": "누른다", "target_id": -101}
         )
 
-        assert "The scene did not arrive" in body
-        methods = [item["method"] for item in actions(sent)[-1]["payload"]["actions"]]
-        assert "scan_scene" in methods, "구버전에는 여전히 태운다"
+        assert "button_click: ok" in body, "액션 자체는 답했다"
+        assert "not reporting the screen" in body
+        assert "scan_scene" not in json.dumps(sent)
 
     asyncio.run(run())

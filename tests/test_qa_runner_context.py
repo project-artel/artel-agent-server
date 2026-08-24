@@ -50,14 +50,16 @@ class ScriptedModel(BaseChatModel):
 
 def make_channel() -> tuple[QaRunChannel, list[dict]]:
     """A channel whose `send` answers ACTION frames the way the game would,
-    synchronously, so the tool call resolves without a background task."""
+    synchronously, so the tool call resolves without a background task.
+
+    프레임은 게임이 스스로 올린다 — 실제 SDK 의 `PollSceneState` 가 그 모양이고,
+    에이전트는 ARTEL-516 이후로 화면을 묻지 않는다. 그래서 붙자마자 한 장 올리고,
+    액션이 나갈 때마다 그것이 만든 화면을 다시 올린다.
+    """
     sent: list[dict] = []
     tick = 0
 
-    async def send(frame: dict) -> None:
-        sent.append(frame)
-        if frame["type"] != MessageType.ACTION.value:
-            return
+    def push() -> None:
         nonlocal tick
         tick += 1
         channel.on_game_state(
@@ -72,12 +74,19 @@ def make_channel() -> tuple[QaRunChannel, list[dict]]:
                 },
             }
         )
+
+    async def send(frame: dict) -> None:
+        sent.append(frame)
+        if frame["type"] != MessageType.ACTION.value:
+            return
+        push()
         results = [{"id": a["id"], "success": True} for a in frame["payload"]["actions"]]
         channel.on_action_result(
             {"correlationId": frame["messageId"], "payload": {"results": results}}
         )
 
     channel = QaRunChannel(qa_try_id=1, send=send)
+    push()
     return channel, sent
 
 
@@ -183,10 +192,12 @@ def test_the_current_scene_is_the_last_thing_the_model_reads_every_turn(
         # the marker too. Only a message that IS a view counts here.
         return [m for m in messages if str(m.content).startswith(CURRENT_SCENE_START)]
 
-    # Not on the first call — no frame has arrived yet, so there is no scene.
-    assert views(model.received[0]) == []
-
-    for received in model.received[1:]:
+    # 첫 호출에도 실린다. 게임이 붙자마자 프레임을 올리기 때문이다 — 에이전트가 아직
+    # 아무것도 묻지 않았는데 화면이 있다는 것이 이 블록의 요점이고, 화면을 묻는 액션이
+    # 사라진 뒤(ARTEL-516)로는 **묻는 길이 아예 없다.**
+    #
+    # 아무것도 도착하지 않은 창은 아래 `..._before_anything_arrives` 가 지킨다.
+    for received in model.received:
         last = received[-1]
         assert isinstance(last, HumanMessage)
         assert str(last.content).startswith(CURRENT_SCENE_START)
@@ -194,3 +205,18 @@ def test_the_current_scene_is_the_last_thing_the_model_reads_every_turn(
         # Exactly one, every turn: it is appended to the request rather than
         # written into the graph's state, so it cannot pile up.
         assert views(received) == [last]
+
+
+def test_no_scene_block_before_anything_arrives() -> None:
+    """한 프레임도 못 받았으면 블록이 없다.
+
+    붙자마자 프레임이 온다는 것과 "안 와도 있는 척한다"는 다르다. 뒤의 것이면 에이전트가
+    빈 화면을 실제 화면으로 읽는다.
+    """
+    channel = QaRunChannel(qa_try_id=1, send=_swallow)
+
+    assert channel.scene.render_now() is None
+
+
+async def _swallow(frame: dict) -> None:
+    return None

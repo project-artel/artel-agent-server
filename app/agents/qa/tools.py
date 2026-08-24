@@ -306,7 +306,7 @@ def build_tools(
         are looking; both go on the timeline.
         """
         await channel.note(thought, LogCategory.THOUGHT, step)
-        arrived = await channel.look(wait_seconds, thought, step)
+        arrived = await channel.look(wait_seconds)
         messages = channel.drain_operator_messages()
         if not arrived:
             return with_operator_messages(
@@ -341,9 +341,9 @@ def build_tools(
         methods = {action.id: action.method for action in actions}
         lines = []
         for item in result.results:
-            # Anything past the batch is the trailing scan_scene, which is ours
-            # rather than something the agent asked for. 판독이 흐르면 그 꼬리를 아예
-            # 안 태우므로 걸리는 것이 없다 — 그래도 남긴다. 판독 없는 게임이 그 경로다.
+            # 에이전트가 부르지 않은 것은 거른다. 지금은 배치에 우리가 끼우는 것이
+            # 없으므로(ARTEL-516 이 꼬리 `scan_scene` 을 뺐다) 걸릴 것이 없지만, 게임이
+            # 배치에 없던 id 로 답하면 그것을 액션 결과인 척 옮기지 않는다.
             if item.id not in methods:
                 continue
             outcome = "ok" if item.success else f"FAILED — {item.error or 'no reason given'}"
@@ -366,7 +366,10 @@ def build_tools(
             state.watermark = channel.scene.updates
             body = f"{body}\n\nNothing on the screen moved.\n\n{view}"
         else:
-            body = f"{body}\n\nThe scene did not arrive; observe again to see the result."
+            body = (
+                f"{body}\n\nThe game is not reporting the screen at all. "
+                "Observe again, or judge the step from the outcome above."
+            )
         return with_operator_messages(body, messages)
 
     @tool(description=CAPTURE_SCREEN_DESCRIPTION.format(limit=arch.max_captures_per_run))

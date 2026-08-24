@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 
@@ -28,34 +29,40 @@ def scene_frame(scene: str = "Lobby", observables: dict | None = None) -> dict:
     }
 
 
-def test_looking_goes_out_as_a_scan_scene_action() -> None:
-    """One path to the scene: the SDK's JSON-RPC method, same as every other action.
+def test_looking_asks_the_game_for_nothing() -> None:
+    """`look` 이 프레임을 하나도 안 보낸다.
 
-    There used to be a second — a REQUEST_GAME_STATE frame that Orchestration
-    turned into a top-level GET_GAME_STATE — which the SDK only keeps as an
-    alias, and which made the timeline log this envelope instead of the frame
-    that actually reached the game.
+    종전에는 `scan_scene` 을 실은 ACTION 이 나갔다. 그 액션의 유일한 일이 `GAME_STATE` 를
+    만드는 것인데, ARTEL-513 이 그 채널을 끄면 오류를 답하고, 켜 두면 `PollSceneState` 가
+    이미 같은 것을 1초마다 스스로 올린다 — 어느 쪽에서도 하는 일이 없다(ARTEL-516).
+
+    두 채널 다 묻지 않고 도착한다는 것이 이 파일이 지킬 계약이다.
     """
 
     async def run() -> None:
-        channel, sent = make_channel()
+        channel, sent = make_channel(timeout=0.05)
+        channel.on_pulse(pulse_frame())
 
-        async def answer() -> None:
-            await asyncio.sleep(0)
-            channel.on_game_state(scene_frame(observables={"Score": {"value": 1}}))
-            channel.on_action_result(
-                {"correlationId": sent[0]["messageId"], "payload": {"results": []}}
-            )
+        assert await channel.look(0.0) is True
+        assert sent == []
 
-        asyncio.create_task(answer())
-        arrived = await channel.look(0.0, "look")
+    asyncio.run(run())
 
-        assert arrived is True
-        assert sent[0]["type"] == MessageType.ACTION.value
-        assert sent[0]["payload"]["actions"] == [
-            {"id": 1, "jsonrpc": "2.0", "method": "scan_scene", "params": []}
-        ]
-        # The memory is updated on the way in, so the tool can render a diff.
+
+def test_a_volunteered_scene_is_enough_to_look_at() -> None:
+    """스위치를 되돌린 빌드에서는 폴러가 올린 프레임이 답이다.
+
+    ARTEL-513 은 되돌릴 수 있어야 하고, 되돌리면 `GAME_STATE` 가 묻지 않아도 흐른다.
+    그때 그것을 못 본 척하면 이 도구가 거짓말하던 자리로 되돌아간다 — 판독을 세게 된 것과
+    같은 이유로 프레임도 여전히 센다.
+    """
+
+    async def run() -> None:
+        channel, sent = make_channel(timeout=0.05)
+        channel.on_game_state(scene_frame(observables={"Score": {"value": 1}}))
+
+        assert await channel.look(0.0) is True
+        assert sent == []
         assert channel.scene.observables["Score"].current == 1
 
     asyncio.run(run())
@@ -70,36 +77,29 @@ def test_a_scene_transition_counts_as_a_scene_arriving() -> None:
     """
 
     async def run() -> None:
-        channel, sent = make_channel()
+        channel, _ = make_channel(timeout=0.05)
 
-        async def answer(scene: str) -> None:
-            await asyncio.sleep(0)
-            channel.on_game_state(scene_frame(scene=scene))
-            channel.on_action_result(
-                {"correlationId": sent[-1]["messageId"], "payload": {"results": []}}
-            )
-
-        asyncio.create_task(answer("Lobby"))
-        await channel.look(0.0, "look")
-        asyncio.create_task(answer("Lobby"))
-        await channel.look(0.0, "look")
-
-        asyncio.create_task(answer("Shop"))
-        assert await channel.look(0.0, "look") is True
-        assert channel.scene.scene == "Shop"
-        # The per-scene counter did restart; the run-wide one did not.
-        assert channel.scene.updates == 1
-        assert channel.scene.frames == 3
+        channel.on_game_state(scene_frame(scene="Lobby"))
+        assert await channel.look(0.0) is True
+        channel.on_game_state(scene_frame(scene="Arena"))
+        assert await channel.look(0.0) is True
+        assert channel.scene.updates == 1, "전환이 카운터를 되돌렸다"
+        assert channel.scene.frames == 2
 
     asyncio.run(run())
 
 
-def test_looking_reports_false_when_no_scene_arrives() -> None:
-    """No answer is a value, not an exception — the agent decides what to do."""
+def test_looking_reports_false_when_nothing_has_ever_arrived() -> None:
+    """No answer is a value, not an exception — the agent decides what to do.
+
+    묻지 않게 된 뒤에도 이 판정은 무디어지지 않는다. 한 배치만 기다려 보고 — 런이 막
+    시작한 창이 그 모양이다 — 그래도 빈손이면 거짓이다.
+    """
 
     async def run() -> None:
-        channel, _ = make_channel(timeout=0.05)
-        assert await channel.look(0.0, "look") is False
+        channel, sent = make_channel(timeout=0.05)
+        assert await channel.look(0.0) is False
+        assert sent == [], "빈손이어도 묻지는 않는다"
 
     asyncio.run(run())
 
@@ -154,7 +154,7 @@ def test_cancel_stops_the_next_tool() -> None:
         channel.on_cancel()
 
         with pytest.raises(QaCancelled):
-            await channel.look(0.0, "look")
+            await channel.look(0.0)
 
     asyncio.run(run())
 
@@ -267,84 +267,23 @@ def pulse_frame(
     }
 
 
-def test_looking_sends_nothing_once_readings_are_flowing() -> None:
-    """판독이 흐르면 `look` 이 아무것도 보내지 않는다.
+def test_looking_waits_one_batch_for_the_very_first_reading() -> None:
+    """런이 막 시작한 창. `start_readings` 는 나갔고 첫 배치는 아직이다.
 
-    이것이 ARTEL-516 이 하려는 일이다. `scan_scene` 의 유일한 일이 `GAME_STATE` 를
-    만드는 것이고 ARTEL-513 이 그 채널을 끄므로, 태워 봐야 오류만 돌아온다. 판독은
-    물어서 오는 것이 아니라 게임이 도는 동안 계속 도착하므로 물을 이유도 없다.
+    여기서 안 기다리면 런의 첫 관찰이 언제나 "답하지 않았다" 가 되고, 그 한 턴은 모델
+    호출 하나다 — 한 배치를 기다리는 쪽이 싸다. 무한정 기다리지는 않는다.
     """
 
     async def run() -> None:
         channel, sent = make_channel(timeout=0.05)
-        channel.on_pulse(pulse_frame())
 
-        arrived = await channel.look(0.0, "look")
-
-        assert arrived is True
-        # 왕복이 아예 없다. 있었다면 여기에 ACTION 봉투가 남는다.
-        assert sent == []
-
-    asyncio.run(run())
-
-
-def test_looking_still_asks_when_no_reading_has_ever_come() -> None:
-    """구버전 SDK 는 판독을 내지 않는다. 그 경로가 종전대로 살아 있어야 한다.
-
-    ARTEL-513 은 되돌릴 수 있어야 하고, 되돌린 빌드와 아직 안 올라간 빌드가 같은
-    서버에 붙는다. 판독을 한 번도 못 들었다는 것 하나로 그것을 가린다.
-    """
-
-    async def run() -> None:
-        channel, sent = make_channel()
-
-        async def answer() -> None:
-            await asyncio.sleep(0)
-            channel.on_game_state(scene_frame())
-            channel.on_action_result(
-                {"correlationId": sent[0]["messageId"], "payload": {"results": []}}
-            )
-
-        asyncio.create_task(answer())
-        arrived = await channel.look(0.0, "look")
-
-        assert arrived is True
-        assert sent[0]["payload"]["actions"][0]["method"] == "scan_scene"
-
-    asyncio.run(run())
-
-
-def test_a_first_reading_during_the_round_trip_counts_as_an_answer() -> None:
-    """왕복 도중에 첫 판독이 오면 그것도 답이다.
-
-    런이 막 시작한 창이 이 모양이다 — `start_readings` 는 나갔고 첫 배치는 아직이라
-    `pulse.seen` 이 거짓이다. `GAME_STATE` 가 꺼진 빌드에서 `scan_scene` 은 오류를
-    답하므로, 판독을 안 세면 게임이 멀쩡한데도 "답하지 않았다" 가 된다.
-    """
-
-    async def run() -> None:
-        channel, sent = make_channel()
-
-        async def answer() -> None:
-            await asyncio.sleep(0)
+        async def first() -> None:
+            await asyncio.sleep(0.05)
             channel.on_pulse(pulse_frame())
-            # SDK 가 꺼진 채널에 대해 답하는 모양: 오류이고, 화면은 없다.
-            channel.on_action_result(
-                {
-                    "correlationId": sent[0]["messageId"],
-                    "payload": {
-                        "results": [
-                            {"id": 1, "success": False, "error": "GAME_STATE is switched off"}
-                        ]
-                    },
-                }
-            )
 
-        asyncio.create_task(answer())
-        arrived = await channel.look(0.0, "look")
-
-        assert arrived is True
-        assert channel.scene.frames == 0, "화면은 오지 않았다. 판독만 왔다"
+        asyncio.create_task(first())
+        assert await channel.look(0.0) is True
+        assert sent == []
 
     asyncio.run(run())
 
@@ -372,6 +311,7 @@ def test_acting_does_not_ride_a_scan_scene_once_readings_are_flowing() -> None:
         assert arrived is True
         methods = [action["method"] for action in sent[0]["payload"]["actions"]]
         assert methods == ["button_click"], "꼬리가 붙지 않는다"
+        assert "scan_scene" not in json.dumps(sent), "어디에도 나가지 않는다"
 
     asyncio.run(run())
 

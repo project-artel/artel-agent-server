@@ -208,24 +208,21 @@ class QaRunChannel:
     async def emit(self, message_type: MessageType, payload, correlation_id: str | None = None) -> None:
         await self._send(self._frame(message_type, payload, correlation_id))
 
-    async def look(
-        self, after_seconds: float, message: str, step: int | None = None
-    ) -> bool:
+    async def look(self, after_seconds: float) -> bool:
         """게임의 지금 화면을 본다. 볼 것이 있으면 참.
 
-        **판독이 흐르면 아무것도 보내지 않는다.** 판독은 물어서 오는 것이 아니라 게임이
-        도는 동안 계속 도착하는 관측이라, 여기서 할 일은 이미 쥐고 있는 그림이 쓸 만한지
-        가리는 것뿐이다. 참이 아닌 경우는 아무것도 들은 적이 없을 때다.
+        **아무것도 보내지 않는다.** 판독은 물어서 오는 것이 아니라 게임이 도는 동안 계속
+        도착하는 관측이고, `GAME_STATE` 도 켜져 있으면 `PollSceneState` 가 스스로 올린다.
+        두 채널 다 묻지 않는다 — 그래서 여기서 할 일은 이미 쥐고 있는 그림이 쓸 만한지
+        가리는 것뿐이다.
 
-        판독을 한 번도 못 들었으면 종전 경로로 돌아간다 — `scan_scene` 을 실은 ACTION 을
-        보내고 `GAME_STATE` 가 오는지 본다. 구버전 SDK 는 판독을 내지 않으므로 그 경로가
-        살아 있어야 한다(ARTEL-516). 그 왕복 동안 첫 판독이 도착하면 그것도 참으로 센다.
+        여기서 `scan_scene` 이 사라졌다(ARTEL-516). 그 액션의 유일한 일이 `GAME_STATE` 를
+        만드는 것인데, 채널이 꺼진 빌드에서는 오류를 답하고 켜진 빌드에서는 폴러가 이미
+        같은 것을 올리고 있으므로 어느 쪽에서도 하는 일이 없다.
 
-        그 종전 경로가 왜 ACTION 인가: `REQUEST_GAME_STATE` 라는 두 번째 길이 있었는데
-        SDK 가 그것을 호환 별칭으로 다루고 `scan_scene` 을 진짜 이름으로 부른다
-        (ArtelManager 의 오류 문구가 그렇게 적혀 있다). 두 길이 한 답으로 모이는 것은
-        타임라인도 거짓말하게 만들었다 — `GET_GAME_STATE` 줄이 실제로 나간 프레임이
-        아니라 이 봉투를 적었다.
+        아무것도 들은 적이 없으면 한 배치만 기다려 본다. 런이 막 시작한 창이 그 모양이다 —
+        `start_readings` 는 나갔고 첫 배치는 아직이다. 그래도 안 오면 거짓이고, 부르는 쪽이
+        더 기다릴지 스텝을 실패로 볼지 정한다.
         """
         self._raise_if_cancelled()
         if after_seconds > 0:
@@ -233,58 +230,46 @@ class QaRunChannel:
             # app/api/qa_sessions.py), so this holds up nothing but this tool.
             await asyncio.sleep(min(after_seconds, MAX_SCENE_WAIT_SECONDS))
 
-        if self.scene.pulse.seen:
+        if self._something_to_show():
             return True
 
-        # 판독을 아직 한 번도 못 들었다. 구버전일 수도, 채널이 켜지는 중일 수도 있는데
-        # 여기서 그것을 가리려고 기다리지 않는다 — 판독이 영영 안 오는 게임에서는 그
-        # 기다림을 매번 치르게 되고, 왕복 자체가 이미 그 창을 준다.
-        #
-        # Frames, not observations: `updates` restarts at 1 on a scene change,
-        # so comparing it would report a transition as the game having stayed
-        # silent.
-        before_frames = self.scene.frames
-        before_readings = self.scene.pulse.readings
-        await self.dispatch_actions(
-            [JsonRpcAction(id=1, method="scan_scene", params=[])], message, step
-        )
-        return (
-            self.scene.frames > before_frames
-            or self.scene.pulse.readings > before_readings
-        )
+        await self._await_reading(self.scene.pulse.readings, READING_WAIT_SECONDS)
+        return self._something_to_show()
+
+    def _something_to_show(self) -> bool:
+        """볼 것이 있나. 두 채널 중 하나라도 무언가 실어 왔으면 참.
+
+        Frames, not observations: `updates` restarts at 1 on a scene change, so
+        comparing that would report a transition as the game having stayed silent.
+
+        `GAME_STATE` 를 여전히 세는 것은 그 채널에 여지를 남기는 것이 아니라 **도착한 것을
+        없다고 하지 않는 것**이다. ARTEL-513 의 스위치를 되돌리면 폴러가 프레임을 올리고,
+        그때 그것을 못 본 척하면 이 도구가 거짓말하던 자리로 되돌아간다.
+        """
+        return self.scene.pulse.seen or self.scene.frames > 0
 
     async def act_and_look(
         self, actions: list[JsonRpcAction], message: str, step: int | None = None
     ) -> tuple[ActionResultPayload | None, bool]:
         """액션을 돌리고, 그것이 만든 화면을 읽는다.
 
-        판독이 흐르면 배치에 `scan_scene` 을 태우지 않는다. 그 액션의 유일한 일이
-        `GAME_STATE` 를 만드는 것이고, 그 채널이 꺼진 빌드에서는 하는 일이 없다.
+        배치에 `scan_scene` 을 태우지 않는다. 대신 **다음 판독을 기다린다.** 판독은 1초
+        배치라 `ACTION_RESULT` 가 돌아온 시점에는 액션의 결과가 아직 안 나갔을 수 있고,
+        그대로 그리면 도구가 액션 이전의 화면을 보여 준다. `scan_scene` 이 같은 배치 끝에
+        탔던 이유가 정확히 그것이었으므로 — 따로 물으면 SDK 의 메시지 핸들러가 곧장 답해
+        클릭의 커서 이동이 끝나기 전 화면이 돌아왔다 — 이 기다림이 그 왕복을 대신한다.
 
-        대신 **다음 판독을 기다린다.** 이것이 이 변경의 값이다 — 판독은 1초 배치라
-        `ACTION_RESULT` 가 돌아온 시점에는 액션의 결과가 아직 안 나갔을 수 있고, 그대로
-        그리면 도구가 액션 이전의 화면을 보여 준다. 종전에 `scan_scene` 이 같은 배치
-        끝에 탄 것도 같은 이유였다: 따로 물으면 SDK 의 메시지 핸들러가 곧장 답해, 클릭의
-        커서 이동이 끝나기 전 화면이 돌아왔다.
-
-        기다림이 빈손으로 끝나는 것은 정상이다. SDK 는 움직인 것이 없으면 판독을 아예
-        내지 않는다(`Pulse.Take` 의 `settled`). 그래서 거짓은 "게임이 죽었다"가 아니라
-        "화면이 그대로다"를 뜻하고, 부르는 쪽이 그 둘을 갈라 읽는다.
+        기다림이 빈손으로 끝나는 것은 정상이다. SDK 는 움직인 것이 없으면 판독을 아예 내지
+        않는다(`Pulse.Take` 의 `settled`). 그래서 거짓은 "게임이 죽었다"가 아니라 "화면이
+        그대로다"를 뜻하고, 부르는 쪽이 그 둘을 갈라 읽는다.
 
         Returns the results and whether anything fresh arrived.
         """
         before_frames = self.scene.frames
         before_readings = self.scene.pulse.readings
-        listening = self.scene.pulse.seen
 
-        batch = list(actions)
-        if not listening:
-            batch.append(JsonRpcAction(id=len(actions) + 1, method="scan_scene", params=[]))
-
-        result = await self.dispatch_actions(batch, message, step)
-
-        if listening:
-            await self._await_reading(before_readings, READING_WAIT_SECONDS)
+        result = await self.dispatch_actions(actions, message, step)
+        await self._await_reading(before_readings, READING_WAIT_SECONDS)
 
         arrived = (
             self.scene.frames > before_frames
@@ -430,10 +415,11 @@ class QaRunChannel:
     # --- inbound --------------------------------------------------------------
 
     def on_game_state(self, raw: dict) -> None:
-        # No future to resolve: a scene answers the `scan_scene` action it rode
-        # in with, and the ACTION_RESULT is what releases the waiting tool. Scenes
-        # the game volunteers land here too, and are folded into memory the same
-        # way — the watermark means the next render still reports their changes.
+        # 풀어 줄 future 가 없다. 에이전트가 화면을 묻지 않기 때문이다(ARTEL-516) —
+        # 여기 오는 프레임은 전부 게임이 스스로 올린 것이고, `PollSceneState` 가 그
+        # 출처다. 도구를 풀어 주는 것은 액션의 ACTION_RESULT 다.
+        #
+        # 워터마크가 있어서 늦게 도착해도 다음 렌더가 그 변화를 여전히 보고한다.
         self.scene.apply(GameState.model_validate(raw.get("payload") or {}))
 
     def on_pulse(self, raw: dict) -> None:
