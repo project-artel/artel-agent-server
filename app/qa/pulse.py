@@ -115,6 +115,8 @@ class PulseObject(BaseModel):
     path: str | None = None
     selector: str | None = None
     world: dict[str, Any] | None = None
+    # 화면 좌표. 조준의 대체 수단이고, 화면 크기와 맞대면 화면 안인지도 나온다.
+    rect: dict[str, Any] | None = None
     offers: dict[str, Any] | None = None
     members: list[PulseMember] = Field(default_factory=list)
 
@@ -167,9 +169,13 @@ class _HeldObject(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     scene: str | None = None
+    # 액션이 대상을 지목하는 값. 접을 때 버리면 독자는 무엇이 바뀌었는지 알면서
+    # 그것을 건드릴 방법이 없다 — 판독이 이것을 싣는 이유가 그것이다.
+    id: int | None = None
     path: str | None = None
     selector: str | None = None
     world: dict[str, Any] | None = None
+    rect: dict[str, Any] | None = None
     offers: dict[str, Any] | None = None
     # True when the object last arrived under `active`.
     live: bool = True
@@ -259,9 +265,12 @@ class PulseMemory(BaseModel):
                 was = self.held.get(obj.key)
                 held = _HeldObject(
                     scene=obj.scene or (was.scene if was else None),
+                    # 0 이 유효한 id 는 아니지만 None 과 가리려면 is not None 이어야 한다.
+                    id=obj.id if obj.id is not None else (was.id if was else None),
                     path=obj.path or (was.path if was else None),
                     selector=obj.selector or (was.selector if was else None),
                     world=obj.world or (was.world if was else None),
+                    rect=obj.rect or (was.rect if was else None),
                     offers=obj.offers or (was.offers if was else None),
                     live=live,
                     members=dict(was.members) if was else {},
@@ -308,12 +317,28 @@ class PulseMemory(BaseModel):
                 name = f"{(entry.declaring or '').split('.')[-1]}.{entry.member}"
                 lines.append(f"  {name} = {entry.value!r}{self._moved(key)}")
 
-        objects = sorted(self.held.items(), key=lambda pair: (not pair[1].live, pair[0]))
+        objects = sorted(self.held.items())
         for key, obj in objects:
-            if not obj.members:
+            # 꺼진 것은 그리지 않는다. 화면에 없고 누를 수도 없어 조준 후보가 아니고,
+            # GAME_STATE 도 활성 GameObject 만 보냈다 — 여기서 그리면 그것보다 못해진다.
+            #
+            # 들고 있기는 한다. 판독이 "그건 꺼졌다" 고 말한 것 자체가 사실이고, 다시 켜지면
+            # 판독이 그 객체를 active 통에 넣어 보내므로 저절로 돌아온다. held 에서 지우면
+            # 그 사이 값을 잃고 다시 켜질 때 전량 판독을 기다리게 된다.
+            #
+            # 풀에서 꺼내 쓰는 게임이 이것으로 산다: 카드 스무 장짜리 풀에서 손에 든 셋만
+            # 활성이면, 프롬프트에 드는 것도 셋이다.
+            if not obj.live:
+                continue
+            # 멤버가 없어도 쓴다. 판독이 유일한 출처일 때, 조준값과 무엇을 할 수 있는지만
+            # 들고 오는 객체가 대다수다 — 그것을 버리면 누를 것이 화면에서 사라진다.
+            if not obj.members and not obj.offers and obj.id is None:
                 continue
             where = obj.selector or obj.path or key
-            lines.append(f"{where}{'' if obj.live else ' (off)'}:")
+            lines.append(f"{where}{self._aim(obj)}:")
+            offered = self._offered(obj)
+            if offered:
+                lines.append(f"  {offered}")
             for member_key in sorted(obj.members):
                 member = obj.members[member_key]
                 name = f"{(member.on or '').split('.')[-1]}.{member.member}"
@@ -323,6 +348,44 @@ class PulseMemory(BaseModel):
 
         lines.append(PULSE_VIEW_END)
         return "\n".join(lines)
+
+    @staticmethod
+    def _aim(obj: "_HeldObject") -> str:
+        """조준에 필요한 것: 무엇으로 지목하고 화면 어디인가.
+
+        selector 는 사람이 읽는 주소이고 액션이 받는 것은 아직 id 다. 둘을 함께 쓰는 것이
+        ARTEL-480 이 끝나기 전까지의 정직한 모양이다 — 하나만 주면 독자가 나머지를 물어야 한다.
+        """
+        bits = []
+        if obj.id is not None:
+            bits.append(f"id={obj.id}")
+        rect = obj.rect or {}
+        if all(k in rect for k in ("x", "y", "w", "h")):
+            bits.append(f"at {rect['x']},{rect['y']} {rect['w']}x{rect['h']}")
+        return f"  [{' · '.join(bits)}]" if bits else ""
+
+    @staticmethod
+    def _offered(obj: "_HeldObject") -> str:
+        """이 객체에 무엇을 할 수 있나.
+
+        스캔이 볼 수 없는 둘이 여기 있다(`WatchList.Offer`) — 어떤 키가 뜻을 가지는가, 그리고
+        어떤 객체가 포인터에 답하는가. 배선된 메서드 이름까지 함께 쓴다: 누른 뒤 아무것도
+        움직이지 않았을 때, 무엇이 불렸어야 하는지를 아는 독자만 그것을 결함으로 부를 수 있다.
+        """
+        offers = obj.offers or {}
+        parts = []
+        clicks = offers.get("clicks") or []
+        for call in clicks:
+            on = call.get("on") or "?"
+            method = call.get("method") or "?"
+            parts.append(f"click → {on}.{method}")
+        keys = offers.get("keys") or []
+        if keys:
+            parts.append("keys: " + ", ".join(str(k) for k in keys))
+        pointers = offers.get("pointers") or []
+        if pointers:
+            parts.append("pointer: " + ", ".join(str(p) for p in pointers))
+        return "can do — " + " · ".join(parts) if parts else ""
 
     @staticmethod
     def _log_line(entry: ReadingLog) -> str:
