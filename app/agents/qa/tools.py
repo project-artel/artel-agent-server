@@ -306,7 +306,7 @@ def build_tools(
         are looking; both go on the timeline.
         """
         await channel.note(thought, LogCategory.THOUGHT, step)
-        arrived = await channel.look(wait_seconds, thought, step)
+        arrived = await channel.look(wait_seconds)
         messages = channel.drain_operator_messages()
         if not arrived:
             return with_operator_messages(
@@ -341,8 +341,9 @@ def build_tools(
         methods = {action.id: action.method for action in actions}
         lines = []
         for item in result.results:
-            # Anything past the batch is the trailing scan_scene, which is ours
-            # rather than something the agent asked for.
+            # 에이전트가 부르지 않은 것은 거른다. 지금은 배치에 우리가 끼우는 것이
+            # 없으므로(ARTEL-516 이 꼬리 `scan_scene` 을 뺐다) 걸릴 것이 없지만, 게임이
+            # 배치에 없던 id 로 답하면 그것을 액션 결과인 척 옮기지 않는다.
             if item.id not in methods:
                 continue
             outcome = "ok" if item.success else f"FAILED — {item.error or 'no reason given'}"
@@ -355,8 +356,20 @@ def build_tools(
             view = channel.scene.render(state.watermark)
             state.watermark = channel.scene.updates
             body = f"{body}\n\n{view}"
+        elif channel.scene.pulse.seen:
+            # 판독이 흐르는데 새로 온 것이 없다 = 화면이 움직이지 않았다. SDK 는 움직인
+            # 것이 없으면 판독을 아예 내지 않으므로 침묵이 곧 "그대로"다(ARTEL-516).
+            #
+            # 그래도 화면은 그린다. 여기서 감추면 액션이 아무것도 바꾸지 않았다는 것을
+            # 판정하려는 스텝이 볼 것을 잃는다 — 그것이야말로 보여 줘야 하는 결과다.
+            view = channel.scene.render(state.watermark)
+            state.watermark = channel.scene.updates
+            body = f"{body}\n\nNothing on the screen moved.\n\n{view}"
         else:
-            body = f"{body}\n\nThe scene did not arrive; observe again to see the result."
+            body = (
+                f"{body}\n\nThe game is not reporting the screen at all. "
+                "Observe again, or judge the step from the outcome above."
+            )
         return with_operator_messages(body, messages)
 
     @tool(description=CAPTURE_SCREEN_DESCRIPTION.format(limit=arch.max_captures_per_run))
