@@ -301,3 +301,96 @@ def test_모르는_타입은_여전히_거절된다():
     service._channels["s"] = object()
 
     assert service.deliver("s", {"type": "NOT_A_TYPE", "payload": {}}) is False
+
+
+# ── 조준값과 가능한 조작 (ARTEL-512) ─────────────────────────────────────────
+#
+# 판독은 이것들을 처음부터 싣고 있었다. 접는 과정에서 잃거나 그리지 않았을 뿐이라,
+# 여기서 지키는 것은 "도착한 것이 프롬프트까지 간다" 하나다.
+
+
+def test_조준값이_접히는_과정에서_살아남는다():
+    """`id` 가 없으면 독자는 무엇이 바뀌었는지 알면서 그것을 건드릴 방법이 없다.
+
+    판독이 `id` 를 매 기록에 싣는 이유가 그것이고(`LiveState.Object` 주석), 접을 때
+    버리면 그 의도가 마지막 한 칸에서 무너진다.
+    """
+    memory = fold(reading(active=[obj(id=26168)]))
+
+    held = next(iter(memory.held.values()))
+    assert held.id == 26168
+    assert "id=26168" in memory.render()
+
+
+def test_조준값이_델타에서도_유지된다():
+    """델타는 안 바뀐 것을 다시 말하지 않는다. `id` 는 결코 바뀌지 않으므로 델타에
+    없을 수 있고, 그때 이전 값을 잃으면 눌 수 있던 것이 눌 수 없게 된다."""
+    memory = fold(
+        reading(active=[obj(id=26168)]),
+        reading(reading=2, whole=False, active=[obj(id=None)]),
+    )
+
+    assert next(iter(memory.held.values())).id == 26168
+
+
+def test_화면_사각형이_실린다():
+    """좌표는 조준의 대체 수단이다. 컨트롤로 만들어지지 않은 것을 겨누는 유일한 방법이
+    rect 이고, 판독이 그것을 싣는데 모델에 자리가 없어 사라지고 있었다."""
+    memory = fold(reading(active=[obj(rect={"x": 860, "y": 600, "w": 200, "h": 60})]))
+
+    assert "at 860,600 200x60" in memory.render()
+
+
+def test_가능한_조작이_실린다():
+    """`offers` 는 스캔이 볼 수 없는 둘을 준다 — 어떤 키가 뜻을 가지는가, 어떤 객체가
+    포인터에 답하는가. 배선된 메서드 이름까지 함께 쓰는 것은, 누른 뒤 아무것도 움직이지
+    않았을 때 무엇이 불렸어야 하는지를 아는 독자만 그것을 결함으로 부를 수 있기 때문이다.
+    """
+    memory = fold(
+        reading(
+            active=[
+                obj(
+                    offers={
+                        "clicks": [
+                            {"on": "TitleSceneManager", "event": "m_OnClick", "method": "StartGame"}
+                        ],
+                        "keys": ["space"],
+                        "pointers": ["left"],
+                    }
+                )
+            ]
+        )
+    )
+
+    view = memory.render()
+    assert "click → TitleSceneManager.StartGame" in view
+    assert "keys: space" in view
+    assert "pointer: left" in view
+
+
+def test_멤버가_없어도_누를_것이면_그린다():
+    """판독이 유일한 출처일 때, 감시 대상 멤버가 없고 조준값과 `offers` 만 들고 오는
+    객체가 대다수다. 그것을 건너뛰면 누를 것이 화면에서 통째로 사라진다 — 실측에서
+    에이전트가 아홉 턴을 조준값 찾는 데 쓰고 결국 화면 캡처로 좌표를 눈으로 찾았다.
+    """
+    memory = fold(
+        reading(
+            active=[
+                obj(
+                    members=[],
+                    offers={"clicks": [{"on": "M", "event": "m_OnClick", "method": "Go"}]},
+                )
+            ]
+        )
+    )
+
+    assert "Canvas[2]/continue[1]" in memory.render()
+
+
+def test_아무것도_말하지_않는_객체는_여전히_빠진다():
+    """상한이 있어야 한다. 조준값도 조작도 멤버도 없는 객체는 판독이 그것에 대해 할 말이
+    없는 객체이고, 그것까지 그리면 화면이 배경으로 덮인다."""
+    memory = fold(reading(active=[obj(id=None, members=[], offers=None)]))
+
+    assert memory.render() is not None
+    assert "Canvas[2]/continue[1]" not in memory.render()
