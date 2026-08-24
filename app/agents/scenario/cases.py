@@ -205,3 +205,53 @@ def render_results(payload: TestCaseSearchResult, remaining: int) -> str:
         "For each case a scenario verifies, write the step(s) that exercise it and "
         f"set that step's `case_id` to the case's id.\n\n{budget}"
     )
+
+
+FIND_PATH_DESCRIPTION = """What has to happen between two test cases.
+
+Call this whenever the next case you want sits in a different situation from the last one —
+a different screen, or a different value of something their preconditions name. Do NOT guess
+what goes in between; that is what this answers.
+
+It replies one of three ways.
+
+  KNOWN         The route, as a list of actions. Write each one as a bridge step (case_id null),
+                in the order given, between the two cases.
+  NOT_REQUIRED  Nothing goes in between. The two cases follow directly.
+  UNKNOWN       **The route is not known.** Do not invent one. Say in `message` that you do not
+                know how to reach that state and name what is blocking, so the user can tell you
+                or it can be found by playing. Leaving a case out and saying why is a correct
+                answer; a step that will fail when run is not.
+
+`blocked_by` names what stands in the way — a scene pair like `Map_scene→GameClearScene`, or a
+variable like `StagePosition`. Quote it when you say you do not know: the user can answer a
+question about a named thing, not about a vague gap.
+
+Arguments are the two case ids, in the order you want them to run."""
+
+
+EXPLAIN_CASE_DESCRIPTION = """What a case is actually made of, from the scene spec.
+
+The case list tells you what to verify. It does not tell you how many operations that
+takes, or what they are called. Call this before writing the steps for a case whose
+operation you would otherwise have to guess — and instead of restating the case title as
+a step.
+
+You get back:
+
+  operations   The operations the spec attributes to this case: `input` (`key:Return`,
+               `click:Canvas/StartButton`), a label, and what the operation itself
+               requires (`given`). Put `input` into the step's `input` field as-is.
+               `matched_by` is `evidence` when this is the code the case points at, and
+               `effect` when it is a capability that touches the same value — several may
+               come back for the latter, so pick by the label and summary.
+  state_before / state_after   The case's own state, already parsed.
+  observable   Whether the result can be read back while a run is in progress. False
+               means whoever runs it cannot judge that check by watching values; keep the
+               check, but do not promise a verdict that cannot be produced.
+
+**An empty `operations` is a normal answer.** It means the scene spec does not cover this
+case yet. Write the step from the case's own wording and do not invent an operation name —
+a made-up control is worse than a plainly worded step.
+
+The argument is one case id."""
