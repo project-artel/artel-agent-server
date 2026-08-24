@@ -28,6 +28,7 @@ from app.qa.envelope import (
     MessageType,
     outbound_envelope,
 )
+from app.qa.pulse import PulseReading
 from app.qa.scene import SceneMemory
 
 logger = logging.getLogger(__name__)
@@ -361,6 +362,14 @@ class QaRunChannel:
         # the game volunteers land here too, and are folded into memory the same
         # way — the watermark means the next render still reports their changes.
         self.scene.apply(GameState.model_validate(raw.get("payload") or {}))
+
+    def on_pulse(self, raw: dict) -> None:
+        """판독 하나를 씬 메모리 위에 얹는다.
+
+        `on_game_state` 와 달리 풀어 줄 future 가 없다. 판독은 무엇을 물어서 오는 것이
+        아니라 게임이 도는 동안 계속 도착하는 관측이고, 도구가 그것을 기다리지 않는다.
+        """
+        self.scene.pulse.apply(PulseReading.model_validate(raw.get("payload") or {}))
 
     def on_action_result(self, raw: dict) -> None:
         correlation = raw.get("correlationId")

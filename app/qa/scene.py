@@ -11,6 +11,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.qa.envelope import ActionRecord, GameState, Interactable, Rect, Screen, Visual
+from app.qa.pulse import PulseMemory
 
 # Per key. Long enough to show a path like 100 → 80 → 60, short enough that a
 # chatty value cannot grow the session without bound.
@@ -231,6 +232,14 @@ class SceneMemory(BaseModel):
     visual_last_seen: dict[str, int] = Field(default_factory=dict)
     actions: list[ActionRecord] = Field(default_factory=list)
     actions_at: list[int] = Field(default_factory=list)
+    # 판독 채널(ARTEL-401). 씬이 바뀌어도 비우지 않는다 — 판독 자신이 씬 전환에서 전량을
+    # 보내며 스스로 갈아치우고, 여기서 또 비우면 그 전량이 도착하기 전 창이 빈 채로 남는다.
+    #
+    # 위의 `observables` 와 함께 산다. 지금은 두 출처가 공존하고 판독이 우선인데, 우선한다는
+    # 것은 값을 덮어쓴다는 뜻이 아니라 **자기 블록으로 따로 실린다**는 뜻이다: 스냅샷에서
+    # 복원한 값과 게임에서 직접 읽은 값이 어긋날 때 어느 쪽이 무엇인지 읽는 쪽이 가릴 수
+    # 있어야 한다. `states` 를 걷어내 하나로 만드는 것은 ARTEL-400 이다.
+    pulse: PulseMemory = Field(default_factory=PulseMemory)
 
     def apply(self, state: GameState) -> None:
         if state.scene != self.scene:
@@ -325,7 +334,10 @@ class SceneMemory(BaseModel):
         so the few things that moved are readable.
         """
         if self.scene is None:
-            return "No scene has been received yet."
+            pulse = self.pulse.render()
+            # 판독만 도착한 경우. GAME_STATE 가 없다고 판독을 감추면 그 채널이 유일한
+            # 상태 출처가 되는 날(ARTEL-400) 화면이 통째로 비어 보인다.
+            return pulse if pulse is not None else "No scene has been received yet."
 
         lines = [f"scene: {self.scene}  (observation {self.updates})"]
         if self.screen is not None:
@@ -379,6 +391,11 @@ class SceneMemory(BaseModel):
             lines.append("on screen:")
             lines.extend(_visual_line(visual) for visual in self.visuals)
 
+        pulse = self.pulse.render()
+        if pulse is not None:
+            lines.append("")
+            lines.append(pulse)
+
         body = "\n".join(lines)
         start = f"{SCENE_VIEW_START_PREFIX}{self.updates}{SCENE_VIEW_START_SUFFIX}"
         return f"{start}\n{body}\n{SCENE_VIEW_END}"
@@ -403,7 +420,10 @@ class SceneMemory(BaseModel):
         report, since nothing dispatched it.
         """
         if self.scene is None:
-            return None
+            pulse = self.pulse.render()
+            if pulse is None:
+                return None
+            return f"{CURRENT_SCENE_START}\n{pulse}\n{CURRENT_SCENE_END}"
 
         lines = [f"scene: {self.scene}  (observation {self.updates})"]
         if self.screen is not None:
@@ -438,6 +458,11 @@ class SceneMemory(BaseModel):
             lines.append("")
             lines.append(f"the game ran, newest last (up to {MAX_ACTIONS_IN_LIVE_VIEW}):")
             lines.extend(_action_line(record, at) for record, at in recent)
+
+        pulse = self.pulse.render()
+        if pulse is not None:
+            lines.append("")
+            lines.append(pulse)
 
         body = "\n".join(lines)
         return f"{CURRENT_SCENE_START}\n{body}\n{CURRENT_SCENE_END}"

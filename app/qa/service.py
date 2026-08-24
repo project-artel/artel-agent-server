@@ -196,6 +196,8 @@ class QaExecutionService:
                 channel.on_game_state(raw)
             elif message_type == MessageType.ACTION_RESULT:
                 channel.on_action_result(raw)
+            elif message_type == MessageType.PULSE:
+                channel.on_pulse(raw)
             elif message_type == MessageType.KNOWLEDGE_SEARCH_RESULT:
                 channel.on_knowledge_search_result(raw)
             elif message_type == MessageType.KNOWLEDGE_EXPAND_RESULT:
