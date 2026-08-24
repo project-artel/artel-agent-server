@@ -186,6 +186,40 @@ class ReviewedCases(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class QuestionOption(BaseModel):
+    """One thing the user can pick.
+
+    `label` is written as the user's own instruction ("타이틀 버튼 확인도 담아 줘"), because
+    that sentence is what comes back on the next turn. Anything that needs translating
+    into an instruction later is a label that was written for the wrong reader.
+    """
+
+    id: str
+    label: str
+    detail: str | None = None
+
+
+class ScenarioQuestion(BaseModel):
+    """Something to ask the user, with somewhere for them to click (ARTEL-487).
+
+    Asking already happened — one authoring message in seven ended with a question. It
+    was buried in prose, so it read as explanation and nobody answered it. This is that
+    same question with an id, a reason, and options.
+
+    **Asking does not replace authoring.** The question does not block saving, so write
+    the scenarios you can ground and ask about the part you cannot. A turn that only
+    asks spends the user's time twice.
+    """
+
+    id: str
+    text: str
+    # Why this is being asked. A question with a stated reason can be answered; a bare
+    # one asks the user to guess what the tool wants.
+    why: str | None = None
+    options: list[QuestionOption] = Field(default_factory=list)
+    allow_free_text: bool = True
+
+
 class ScenarioAgentResult(BaseModel):
     message: str
     # The run goal, decomposed. Empty when no matching cases were found: the agent
@@ -197,6 +231,11 @@ class ScenarioAgentResult(BaseModel):
     # population to be exhaustive over. Orchestration reads None as "skip the check",
     # which is also the rollback path: stop emitting this and the checking stops.
     reviewed: ReviewedCases | None = None
+    # One thing to ask the user (ARTEL-487). None on an ordinary turn.
+    #
+    # **One at a time.** Two questions leave the user no way to say which one they
+    # answered, and the screen no way to route the reply.
+    question: ScenarioQuestion | None = None
 
 
 # ScenarioAgentRequest references ScenarioPlan (defined after it) via a forward
