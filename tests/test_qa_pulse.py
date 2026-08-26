@@ -666,3 +666,88 @@ def test_an_old_sdk_still_gets_its_keys_drawn():
     out = memory.render() or ""
     assert "keys: key:Space (down)" in out
     assert "effect unknown" not in out, "모양이 다를 뿐 모르는 것이 아니다"
+
+
+# --- SDK 가 접어 보내는 모양 (ARTEL-540 / ARTEL-552) ---------------------------
+
+
+def _folded(scene: str = "Battle") -> dict:
+    """새 모양: `on` 을 컴포넌트마다 한 번, 객체의 `scene` 은 생략, `type` 없음."""
+    return {
+        "schema": 2,
+        "reading": 1,
+        "scene": scene,
+        "whole": True,
+        "active": [
+            {
+                "id": -101,
+                "selector": "Enemy[1]",
+                "rect": {"x": 1, "y": 2, "w": 3, "h": 4},
+                "by": [
+                    {
+                        "on": "Combat.Enemies.SwordEnemy",
+                        "m": [
+                            {"member": "Hp", "value": 20},
+                            {"member": "MaxHp", "value": 20},
+                        ],
+                    },
+                    {"on": "Combat.SlimeAnimator", "m": [{"member": "sprite", "value": "a"}]},
+                ],
+            }
+        ],
+        "deactive": [],
+        "changed": [],
+    }
+
+
+def test_members_folded_by_component_are_spread_again():
+    """`on` 을 멤버마다 되풀이하지 않는 것은 전송의 사정이다.
+
+    한 문서에서 `on` 316개 중 295개가 같은 값이었다. 접는 것은 SDK 가 하고, 읽는 쪽은 펴서
+    종전과 같은 것을 본다 — 병합도 렌더도 접힌 모양을 알 이유가 없다.
+    """
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(_folded()))
+
+    out = memory.render() or ""
+    assert "SwordEnemy.Hp = 20" in out
+    assert "SwordEnemy.MaxHp = 20" in out
+    assert "SlimeAnimator.sprite = 'a'" in out
+
+
+def test_an_object_without_a_scene_takes_the_readings():
+    """객체의 `scene` 이 없으면 판독의 것이다. 다른 씬의 객체만 제 이름을 댄다.
+
+    키가 `{scene}/{selector}` 라 이것을 안 채우면 같은 객체가 씬마다 다른 키로 앉는다.
+    """
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(_folded(scene="Battle")))
+
+    keys = list(memory.held)
+    assert keys == ["Battle/Enemy[1]"], keys
+
+
+def test_the_old_flat_shape_still_reads():
+    """구버전 SDK 는 멤버를 평평하게 보낸다. 그 빌드가 붙어도 읽힌다."""
+    memory = PulseMemory()
+    memory.apply(
+        PulseReading.model_validate(
+            {
+                "schema": 2,
+                "reading": 1,
+                "scene": "Battle",
+                "whole": True,
+                "active": [
+                    {
+                        "scene": "Battle",
+                        "id": -101,
+                        "selector": "Enemy[1]",
+                        "members": [{"on": "SwordEnemy", "member": "Hp", "value": 20}],
+                    }
+                ],
+                "deactive": [],
+                "changed": [],
+            }
+        )
+    )
+    assert "SwordEnemy.Hp = 20" in (memory.render() or "")
