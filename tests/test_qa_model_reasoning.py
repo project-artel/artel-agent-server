@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from app.api.qa_sessions import OpenQaSessionRequest
 from app.agents.qa import runner as runner_module
+from app.config import get_settings
 from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState
 from app.llm import chat_model
@@ -337,3 +338,34 @@ def test_run_start_log_names_reasoning(monkeypatch, caplog) -> None:
     assert len(starting) == 1
     assert "'model': 'anthropic/claude-sonnet-5'" in starting[0]
     assert "'reasoning': {'effort': 'high'}" in starting[0]
+
+
+def test_a_model_call_carries_a_request_timeout_and_bounded_retries(
+    monkeypatch,
+) -> None:
+    """A call that never comes back must end as a failure, not as a wait (ARTEL-510).
+
+    The OpenAI client defaults to 600 s with 2 retries. With those defaults a
+    stalled upstream held one authoring turn for up to 30 minutes while the person
+    watching the chat had nothing to read and no way out but reloading the page.
+    """
+    created: list[dict] = []
+
+    class FakeChat:
+        def __init__(self, **kwargs):
+            created.append(kwargs)
+
+    monkeypatch.setattr(chat_model, "ChatOpenAI", FakeChat)
+    chat_model.build_chat_model.cache_clear()
+    try:
+        chat_model.build_chat_model(LLMModel.claude_sonnet_5)
+    finally:
+        chat_model.build_chat_model.cache_clear()
+
+    settings = get_settings()
+    assert created[0]["timeout"] == settings.openrouter_timeout_seconds
+    assert created[0]["max_retries"] == settings.openrouter_max_retries
+    # Whatever the values are, they have to be tighter than the client defaults —
+    # that is the whole point of setting them.
+    assert settings.openrouter_timeout_seconds < 600
+    assert settings.openrouter_max_retries < 2
