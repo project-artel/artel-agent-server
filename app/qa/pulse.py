@@ -122,10 +122,39 @@ class PulseObject(BaseModel):
     rect: dict[str, Any] | None = None
     offers: dict[str, Any] | None = None
     members: list[PulseMember] = Field(default_factory=list)
+    # 컴포넌트별로 묶인 멤버. `on` 을 멤버마다 되풀이하지 않으려고 SDK 가 이렇게 낸다
+    # (ARTEL-540) — 한 문서에서 `on` 316개 중 295개가 같은 값이었다.
+    by: list["PulseComponent"] = Field(default_factory=list)
+
+    def flatten(self, scene: str | None) -> "PulseObject":
+        """읽는 쪽이 쓰던 모양으로 되돌린다.
+
+        접는 것은 전송의 사정이지 이 메모리의 사정이 아니다. 여기서 한 번 펴 두면 병합도
+        렌더도 종전 그대로다 — 그 둘이 접힌 모양을 알 이유가 없다.
+        """
+        if not self.by and self.scene is not None:
+            return self
+
+        spread = list(self.members)
+        for group in self.by:
+            for member in group.m:
+                spread.append(member.model_copy(update={"on": group.on}))
+
+        # 최상위와 같은 씬은 객체가 제 이름을 대지 않는다. 다른 씬의 객체만 댄다.
+        return self.model_copy(update={"members": spread, "by": [], "scene": self.scene or scene})
 
     @property
     def key(self) -> str:
         return f"{self.scene or ''}/{self.selector or self.path or ''}"
+
+
+class PulseComponent(BaseModel):
+    """한 컴포넌트가 내놓은 멤버들. `on` 을 한 번만 쓴다."""
+
+    model_config = ConfigDict(extra="allow")
+
+    on: str | None = None
+    m: list[PulseMember] = Field(default_factory=list)
 
 
 class PulseReading(BaseModel):
@@ -297,7 +326,8 @@ class PulseMemory(BaseModel):
         # Which list an object arrives in is what says whether it is on. It is
         # not a field on the object, so it cannot disagree with itself.
         for live, arrived in ((True, reading.active), (False, reading.deactive)):
-            for obj in arrived:
+            for folded in arrived:
+                obj = folded.flatten(reading.scene)
                 was = self.held.get(obj.key)
                 held = _HeldObject(
                     scene=obj.scene or (was.scene if was else None),
