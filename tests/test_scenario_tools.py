@@ -6,7 +6,11 @@ channel supplies each outcome and the test asserts what the model is told.
 
 import asyncio
 
-from app.agents.scenario.cases import MAX_SEARCHES_PER_RUN, TestCaseSearchState
+from app.agents.scenario.cases import (
+    MAX_SEARCHES_PER_RUN,
+    RESULT_LIMIT,
+    TestCaseSearchState,
+)
 from app.agents.scenario.tools import build_tools
 from app.sessions.channel import (
     TestCaseHit,
@@ -59,9 +63,9 @@ def test_a_hit_is_rendered_with_ids_to_reference() -> None:
 
     assert "id 42" in out
     assert "Buy with gold" in out
-    assert "5 case search(es) left" in out  # 6 budget, 1 used
+    assert f"{MAX_SEARCHES_PER_RUN - 1} case search(es) left" in out
     assert state.searches_attempted == 1
-    assert channel.calls == [("buy an item", None, 10)]
+    assert channel.calls == [("buy an item", None, RESULT_LIMIT)]
 
 
 def test_an_empty_result_tells_the_agent_not_to_invent() -> None:
@@ -106,4 +110,4 @@ def test_a_blank_category_is_sent_as_none() -> None:
 
     _call(search, query="q", category="  ")
 
-    assert channel.calls == [("q", None, 10)]
+    assert channel.calls == [("q", None, RESULT_LIMIT)]

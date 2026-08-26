@@ -11,6 +11,7 @@ import asyncio
 
 from app.agents.qa.knowledge import (
     KNOWLEDGE_RELATIONS,
+    MAX_LINKS_PER_RUN,
     MAX_NEIGHBOUR_SUMMARY_CHARS,
     render_expansion,
     render_neighbour,
@@ -364,7 +365,7 @@ def test_link_budget_is_separate_from_unlink() -> None:
     async def run() -> None:
         _, state, tools, sent = make()
         seen(state, "1", "2")
-        state.knowledge_links_attempted = 99
+        state.knowledge_links_attempted = MAX_LINKS_PER_RUN
 
         refused = await tools["link_knowledge"].ainvoke(
             {

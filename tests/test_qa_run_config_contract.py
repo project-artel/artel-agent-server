@@ -8,7 +8,7 @@ some later comparison will group by.
 import pytest
 from fastapi.testclient import TestClient
 
-from app.agents.qa.arch import QA_ARCH_LABEL
+from app.agents.qa.arch import QA_ARCH_LABEL, RUN_DEADLINE_SECONDS, TOOL_CALLS_PER_STEP
 from app.llm.models import DEFAULT_MODEL, LLMModel
 from app.main import app
 from app.prompts import load_prompt, resolve_version
@@ -97,8 +97,8 @@ def test_omitting_arch_is_todays_structure() -> None:
     assert open_session()["run_config"] == open_session()["run_config"]
 
     arch = open_session()["run_config"]["arch"]
-    assert arch["tool_calls_per_step"] == 15
-    assert arch["deadline_seconds"] == 600.0
+    assert arch["tool_calls_per_step"] == TOOL_CALLS_PER_STEP
+    assert arch["deadline_seconds"] == RUN_DEADLINE_SECONDS
     assert arch["vision"] is True
 
 
@@ -115,7 +115,8 @@ def test_a_requested_structure_comes_back_resolved() -> None:
 
 def test_an_out_of_range_knob_is_refused() -> None:
     response = client.post(
-        "/internal/qa-sessions", json=open_request(arch={"tool_calls_per_step": 10_000})
+        "/internal/qa-sessions",
+        json=open_request(arch={"tool_calls_per_step": 10_000_000}),
     )
 
     assert response.status_code == 422

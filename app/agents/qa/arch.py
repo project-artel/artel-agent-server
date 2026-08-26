@@ -51,9 +51,13 @@ _FINGERPRINT_SCHEME = 1
 # The fixed part of the tool-call budget: the opening observation, `finish_run`,
 # and the headroom between them. The per-run allowances are added on top of it
 # rather than folded into it — see `ResolvedArch.tool_call_limit`.
-BASE_TOOL_CALLS = 10
-TOOL_CALLS_PER_STEP = 15
-RUN_DEADLINE_SECONDS = 600.0
+#
+# Set to a ceiling no real run reaches. Both bounds are runaway guards now, not
+# a ration: a run cut off mid-scenario reports nothing, which is the one outcome
+# worse than a slow run. A caller that wants a bounded structure sends its own.
+BASE_TOOL_CALLS = 1_000
+TOOL_CALLS_PER_STEP = 1_000
+RUN_DEADLINE_SECONDS = 86_400.0
 
 # --- how much of the game and the knowledge base one run may move -------------
 #
@@ -62,52 +66,25 @@ RUN_DEADLINE_SECONDS = 600.0
 # asked to use different ones: two runs that differ only in how much they may
 # look up are two structures, and the number has to be somewhere the fingerprint
 # can see it. `knowledge.py` and `vision.py` re-export them under their old names
-# and keep the prose about rationing, which is still theirs.
-
-# A run that keeps capturing instead of deciding is a run that will hit the
-# deadline with nothing reported.
-MAX_CAPTURES_PER_RUN = 12
-
-# A run that keeps looking things up instead of deciding fails the same way.
-# Lower than the capture budget because a game's rules do not change during a
-# run: the second search on the same subject learns nothing the first did not.
-MAX_SEARCHES_PER_RUN = 6
-
-# How much a run may add, and how much it may correct: `record_knowledge` and
-# `update_knowledge` share this one allowance. Below the search budget because a
-# run that learns five durable rules about a game has had an unusually
-# instructive hour; one that claims more is filing observations, not knowledge.
-# See `knowledge.py` for why the two writes are capped together rather than apart.
-MAX_RECORDS_PER_RUN = 5
-
-# How much a run may erase, and the smallest number here on purpose. Deletion is
-# the least reversible thing the agent does and the least watched — see
-# `knowledge.py` for the rest of that argument, and for the defences around it.
-MAX_FORGETS_PER_RUN = 2
-
-# How many relations a run may assert between entries (ARTEL-274). Below the
-# record budget because a run that learns five durable rules rarely establishes
-# more than a few relations among them, and because each link is a durable claim
-# that every later run reads.
-MAX_LINKS_PER_RUN = 3
-
-# How many it may withdraw. The same number as `MAX_FORGETS_PER_RUN`, but for a
-# different reason: withdrawing a link is far less destructive than deleting an
-# entry — the two entries survive, and what is lost is one connection and the
-# sentence behind it. What the two share is that both are QUIET. A route removed
-# by mistake simply stops being there, and nobody is prompted to look.
-MAX_UNLINKS_PER_RUN = 2
-
-# How many times a run may walk the graph further than the hop that already came
-# with its searches. Below the search budget because an expansion is only useful
-# after a search, and the automatic one-hop already covers the common case.
-MAX_EXPANDS_PER_RUN = 3
-
-# How many defects one run may file. A cap at all because an agent that reports
-# the same broken screen once per step turns one bug into a page of them; ten
-# because a run that finds more than ten distinct defects has answered the
-# question the scenario was asking long before it gets there.
-MAX_ISSUES_PER_RUN = 10
+# and keep the prose about what each tool is for, which is still theirs.
+#
+# Every default below is a ceiling no real run reaches. The numbers used to be a
+# ration — each sized against the argument that a run which keeps looking things
+# up never decides — and what they produced in practice was runs that stopped
+# mid-scenario with the question unanswered. Rationing is left to the tool
+# descriptions, which still say what each tool is and is not for.
+#
+# They stay as `QaArchSpec` fields rather than being deleted: a structural
+# experiment can still ask for a rationed run, and the fingerprint still has to
+# separate one that did from one that did not.
+MAX_CAPTURES_PER_RUN = 1_000_000
+MAX_SEARCHES_PER_RUN = 1_000_000
+MAX_RECORDS_PER_RUN = 1_000_000
+MAX_FORGETS_PER_RUN = 1_000_000
+MAX_LINKS_PER_RUN = 1_000_000
+MAX_UNLINKS_PER_RUN = 1_000_000
+MAX_EXPANDS_PER_RUN = 1_000_000
+MAX_ISSUES_PER_RUN = 1_000_000
 
 
 class VisionMode(StrEnum):
@@ -130,25 +107,25 @@ class QaArchError(ValueError):
 class QaArchSpec(BaseModel):
     """A requested structure. Every field optional; the defaults are today's run.
 
-    Bounded because it arrives over the API: an unbounded call budget or deadline
-    is a way to spend a model's context and a game's time that no scenario asked
-    for.
+    The ceilings are runaway guards, not rations: they sit far above what any
+    scenario asks for, and exist so a malformed request cannot ask for an
+    unbounded call budget or a deadline that never fires.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     label: str = Field(default=QA_ARCH_LABEL, max_length=50)
-    base_tool_calls: int = Field(default=BASE_TOOL_CALLS, ge=1, le=100)
-    tool_calls_per_step: int = Field(default=TOOL_CALLS_PER_STEP, ge=1, le=100)
-    deadline_seconds: float = Field(default=RUN_DEADLINE_SECONDS, gt=0, le=3600)
-    max_searches_per_run: int = Field(default=MAX_SEARCHES_PER_RUN, ge=0, le=50)
-    max_records_per_run: int = Field(default=MAX_RECORDS_PER_RUN, ge=0, le=50)
-    max_forgets_per_run: int = Field(default=MAX_FORGETS_PER_RUN, ge=0, le=50)
-    max_links_per_run: int = Field(default=MAX_LINKS_PER_RUN, ge=0, le=50)
-    max_unlinks_per_run: int = Field(default=MAX_UNLINKS_PER_RUN, ge=0, le=50)
-    max_expands_per_run: int = Field(default=MAX_EXPANDS_PER_RUN, ge=0, le=50)
-    max_captures_per_run: int = Field(default=MAX_CAPTURES_PER_RUN, ge=0, le=100)
-    max_issues_per_run: int = Field(default=MAX_ISSUES_PER_RUN, ge=0, le=50)
+    base_tool_calls: int = Field(default=BASE_TOOL_CALLS, ge=1, le=1_000_000)
+    tool_calls_per_step: int = Field(default=TOOL_CALLS_PER_STEP, ge=1, le=1_000_000)
+    deadline_seconds: float = Field(default=RUN_DEADLINE_SECONDS, gt=0, le=86_400)
+    max_searches_per_run: int = Field(default=MAX_SEARCHES_PER_RUN, ge=0, le=1_000_000)
+    max_records_per_run: int = Field(default=MAX_RECORDS_PER_RUN, ge=0, le=1_000_000)
+    max_forgets_per_run: int = Field(default=MAX_FORGETS_PER_RUN, ge=0, le=1_000_000)
+    max_links_per_run: int = Field(default=MAX_LINKS_PER_RUN, ge=0, le=1_000_000)
+    max_unlinks_per_run: int = Field(default=MAX_UNLINKS_PER_RUN, ge=0, le=1_000_000)
+    max_expands_per_run: int = Field(default=MAX_EXPANDS_PER_RUN, ge=0, le=1_000_000)
+    max_captures_per_run: int = Field(default=MAX_CAPTURES_PER_RUN, ge=0, le=1_000_000)
+    max_issues_per_run: int = Field(default=MAX_ISSUES_PER_RUN, ge=0, le=1_000_000)
     vision: VisionMode = VisionMode.auto
     fold_stale_scenes: bool = True
     # Folds the neighbour blocks the search volunteers, and only those (ARTEL-277).
