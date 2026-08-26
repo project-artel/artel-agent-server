@@ -1318,7 +1318,7 @@ def build_tools(
         )
 
     @tool
-    async def reset_game(step: int, thought: str) -> str:
+    async def reset_game(step: int, thought: str, clear_player_prefs: bool = False) -> str:
         """Put the game back to the state the run started in.
 
         For a step that needs a clean game and no path back to one — a tutorial
@@ -1328,16 +1328,42 @@ def build_tools(
 
         It reloads the game's first scene, so everything on screen now is gone,
         and so is whatever the game was keeping across scene loads: managers,
-        score, inventory. What it cannot undo is saved data — a game that writes
-        progress to disk comes back holding it, and a step that depends on a
-        fresh save file needs the operator.
+        score, inventory. A `pause_game_time` freeze and any held key or mouse
+        button are released first, so the fresh game starts with nothing pressed.
+        Every target id you have is dead afterwards; observe before you act again.
 
-        A `pause_game_time` freeze and any held key or mouse button are released
-        first, so the fresh game starts with nothing pressed. Every target id you
-        have is dead afterwards; observe before you act again.
+        `clear_player_prefs=True` also deletes the game's PlayerPrefs — the small
+        key/value store a game keeps its "tutorial seen" flag, its difficulty and
+        volume settings, and its high score in. The SDK's own entries are kept,
+        so the run itself survives. Ask for it only when the thing standing in
+        your way outlives a restart: an intro or tutorial the game plays once per
+        install rather than once per session, a setting saved by an earlier run,
+        a high score the step is judging. A gate that lasts only the session is
+        already gone after a plain reset, and the flag buys you nothing there. Do
+        not ask for it when the step's precondition is *having* progress — the
+        wipe deletes the very thing that step needs.
+
+        The wipe is irreversible. There is no restore, and every later step and
+        every later scenario in this run inherits the emptied store.
+
+        Even with the flag on, the game's own save files are untouched. A game
+        that writes its progress to a file of its own comes back holding it, so a
+        step that depends on a fresh save file still needs the operator. An
+        emptied store is also not a promise that the game is in a first-run
+        state: a manager destroyed by the reload can write its keys straight back
+        in `OnDestroy`.
+
+        A game built on an SDK older than this flag ignores it and resets scene
+        state only, and this tool cannot tell — the reset reports success either
+        way. So when a step depended on the wipe and the game still behaves as
+        though the data is there, report the step on what you actually saw
+        instead of resetting again; the retry does the same thing.
         """
+        # 플래그가 꺼져 있으면 params를 아예 비운다. 기본 호출의 wire를 지금과 byte 단위로
+        # 같게 두어야 이 파라미터를 모르는 옛 SDK가 아무 변화도 보지 않는다.
+        params: list[Any] = [{"clearPlayerPrefs": True}] if clear_player_prefs else []
         return await _run(
-            [JsonRpcAction(id=1, method="reset_game")],
+            [JsonRpcAction(id=1, method="reset_game", params=params)],
             thought,
             "Resetting the game",
             step,

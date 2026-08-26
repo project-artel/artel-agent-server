@@ -374,8 +374,63 @@ def test_resetting_goes_out_as_the_reset_action() -> None:
         assert [item["method"] for item in actions(sent)[0]["payload"]["actions"]] == [
             "reset_game"
         ]
+        # 기본 호출은 params가 빈 채로 나간다. clearPlayerPrefs 를 모르는 옛 SDK 가 보는
+        # frame 이 지금과 동일해야 하므로, 이 단언이 그 하위 호환을 고정한다.
+        assert actions(sent)[0]["payload"]["actions"][0]["params"] == []
 
     asyncio.run(run())
+
+
+def test_a_reset_can_ask_for_the_player_prefs_to_go() -> None:
+    """저장 데이터까지 지우라는 요청은 wire 파라미터 하나로 나간다.
+
+    SDK 는 camelCase 로 읽으므로(`capture_screen` 의 `maxEdge`·`padding` 과 같은 규칙)
+    Python 쪽 snake_case 인자가 `clearPlayerPrefs` 로 번역돼야 한다. frame 전체를 고정해
+    키 이름이 조용히 어긋나는 것을 막는다.
+    """
+
+    async def run() -> None:
+        _, _, tools, sent = make()
+        await tools["reset_game"].ainvoke(
+            {
+                "step": 1,
+                "thought": "튜토리얼을 처음 보는 상태로 되돌린다",
+                "clear_player_prefs": True,
+            }
+        )
+
+        assert actions(sent)[0]["payload"]["actions"] == [
+            {
+                "id": 1,
+                "jsonrpc": "2.0",
+                "method": "reset_game",
+                "params": [{"clearPlayerPrefs": True}],
+            }
+        ]
+
+    asyncio.run(run())
+
+
+def test_the_reset_tool_says_what_the_wipe_does_not_reach() -> None:
+    """지우는 것과 지우지 못하는 것이 둘 다 설명에 있어야 한다.
+
+    `PlayerPrefs` 만 적혀 있으면 에이전트는 저장 데이터가 전부 사라진다고 읽는다. 플래그를
+    켜도 게임 자신의 save file 은 그대로 남고, 그 경우엔 operator 가 필요하다는 기존
+    탈출구가 여전히 유효하다.
+
+    한계 문장은 통째로 고정한다. `"disk"` 나 `"save file"` 같은 조각은 플래그 이전 설명에도
+    이미 있었으므로 아무것도 구별하지 못한다 — "wipe 가 save file 까지 지운다"로 뒤집어
+    써도 그 조각들은 그대로 남아 테스트가 통과한다. 문장을 고쳐 쓰면 이 테스트가 깨지는데,
+    그건 오타가 아니라 결정이다. 깨졌을 때 할 일은 단언을 느슨하게 푸는 것이 아니라 새 문장이
+    같은 한계를 말하는지 확인하는 것이다.
+    """
+    _, _, tools, _ = make()
+
+    description = tools["reset_game"].description
+
+    assert "PlayerPrefs" in description
+    assert "Even with the flag on, the game's own save files are untouched." in description
+    assert "still needs the operator" in description
 
 
 def test_resume_reports_the_games_refusal() -> None:
