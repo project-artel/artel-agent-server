@@ -333,12 +333,25 @@ def test_조준값이_델타에서도_유지된다():
     assert next(iter(memory.held.values())).id == 26168
 
 
-def test_화면_사각형이_실린다():
+def test_화면_사각형이_중심으로_실린다():
     """좌표는 조준의 대체 수단이다. 컨트롤로 만들어지지 않은 것을 겨누는 유일한 방법이
-    rect 이고, 판독이 그것을 싣는데 모델에 자리가 없어 사라지고 있었다."""
+    rect 이고, 판독이 그것을 싣는데 모델에 자리가 없어 사라지고 있었다.
+
+    싣는 것은 **중심**이다. 판독의 `rect.x/y` 는 요소의 좌상단인데 포인터 도구가 받는
+    것은 겨눌 점이라, 모서리를 그대로 내면 크기의 절반만큼 어긋난 자리를 겨누게 된다.
+    `GAME_STATE` 쪽(`app/qa/scene.py` 의 `_where`)은 처음부터 중심을 냈고 여기만
+    빠져 있었다(ARTEL-569). 표기 `@` 도 그쪽과 맞춘 것이다."""
     memory = fold(reading(active=[obj(rect={"x": 860, "y": 600, "w": 200, "h": 60})]))
 
-    assert "at 860,600 200x60" in memory.render()
+    assert "@ 960,630 200x60" in memory.render()
+
+
+def test_소수점_좌표도_중심을_낸다():
+    """SDK 는 rect 를 `"0.####"` 로 쓰므로 정수가 아닐 수 있다. 그때 조준이 깨지지 않고,
+    잘라 낸 값도 픽셀 아래라 화면의 무엇도 다르게 그려지지 않는다."""
+    memory = fold(reading(active=[obj(rect={"x": 860.5, "y": 600.25, "w": 200, "h": 60})]))
+
+    assert "@ 960,630 200x60" in memory.render()
 
 
 def test_가능한_조작이_실린다():

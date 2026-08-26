@@ -25,6 +25,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.qa.envelope import center_of
+
 # 한 번에 들여다볼 수 있는 객체 수. 부분 일치가 많이 걸려도 프롬프트를 삼키지 않도록.
 MAX_INSPECTED = 5
 
@@ -517,9 +519,20 @@ class PulseMemory(BaseModel):
         bits = []
         if obj.id is not None:
             bits.append(f"id={obj.id}")
+
+        # 모서리가 아니라 **중심**을 낸다. 판독이 싣는 `rect.x/y` 는 요소의 좌상단이고,
+        # 포인터 도구가 받는 것은 겨눌 점이다. 그대로 내면 276px 짜리에서 138px 씩
+        # 어긋나고, 읽는 쪽은 그것이 모서리인 줄 모르므로 어긋난 자리에서 드래그를
+        # 시작한다(ARTEL-569).
+        #
+        # 표기도 `@` 로 맞춘다. `app/qa/scene.py` 의 `_where` 가 같은 뜻을 같은 모양으로
+        # 내고 있었고, 여기만 `at` 이었다. 두 줄이 같은 것을 뜻하는 척하면서 다른 것을
+        # 뜻하는 상태였다.
         rect = obj.rect or {}
-        if all(k in rect for k in ("x", "y", "w", "h")):
-            bits.append(f"at {rect['x']},{rect['y']} {rect['w']}x{rect['h']}")
+        corner = [rect.get(k) for k in ("x", "y", "w", "h")]
+        if all(isinstance(value, (int, float)) for value in corner):
+            x, y = center_of(*corner)
+            bits.append(f"@ {x},{y} {int(corner[2])}x{int(corner[3])}")
         return f"  [{' · '.join(bits)}]" if bits else ""
 
     @staticmethod
