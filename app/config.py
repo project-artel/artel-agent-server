@@ -18,6 +18,20 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_site_url: str | None = None
     openrouter_app_title: str = "Artel Agent Server"
+    # Per-request ceiling on a model call, and how many times the client retries.
+    #
+    # Not tuning knobs — the difference between a slow answer and no answer. The
+    # OpenAI client defaults to 600 s with 2 retries, so a stalled upstream holds
+    # one request for up to 30 minutes while every caller, including a person
+    # watching a chat, waits with nothing to read. That happened: an authoring
+    # turn was still "requesting" 500 s in and the only way out was reloading the
+    # page (ARTEL-510).
+    #
+    # 180 s is above the slowest authoring turn measured (a 66-case project ran
+    # ~70 s) with room for a reasoning model, and far below a wait a person
+    # accepts without being told something is wrong.
+    openrouter_timeout_seconds: float = 180.0
+    openrouter_max_retries: int = 1
 
     # LangSmith tracing. Disabled unless both the flag and the key are set, so
     # a deploy without credentials degrades to "no traces" instead of failing.

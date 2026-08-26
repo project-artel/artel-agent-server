@@ -76,6 +76,10 @@ def build_chat_model(
         temperature=TEMPERATURE,
         default_headers=headers or None,
         extra_body=extra_body,
+        # A call that never comes back has to end as a failure, not as a wait.
+        # Why these values: see Settings.openrouter_timeout_seconds.
+        timeout=settings.openrouter_timeout_seconds,
+        max_retries=settings.openrouter_max_retries,
         callbacks=[UsageCallback()],
     )
 
