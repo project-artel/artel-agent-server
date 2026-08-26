@@ -13,12 +13,21 @@ PR should let reviewer understand intent, verify evidence, and identify risk wit
 - Run required validation.
 - Confirm migrations, configuration, and rollback needs.
 
+## Language
+
+Write the pull request title and body in Korean. Keep the Conventional Commit
+type and optional scope in English.
+
+Keep verbatim in English regardless: code identifiers, file paths, commands,
+log output, error strings, API names, technical terminology, and the section
+headings from the body template below.
+
 ## Title
 
-Use Conventional Commit format:
+Use Conventional Commit format, with the summary in Korean:
 
 ```text
-<type>(<optional-scope>): <imperative summary>
+<type>(<optional-scope>): <한글 변경 사항>
 ```
 
 ## Assignee and Labels
