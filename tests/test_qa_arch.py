@@ -13,11 +13,19 @@ from pydantic import ValidationError
 
 from app.agents.qa import arch as arch_module
 from app.agents.qa.arch import (
+    BASE_TOOL_CALLS,
     DEFAULT_ARCH,
+    MAX_EXPANDS_PER_RUN,
+    MAX_FORGETS_PER_RUN,
+    MAX_LINKS_PER_RUN,
+    MAX_RECORDS_PER_RUN,
+    MAX_SEARCHES_PER_RUN,
+    MAX_UNLINKS_PER_RUN,
     QA_ARCH_LABEL,
     QaArchError,
     QaArchSpec,
     ResolvedArch,
+    TOOL_CALLS_PER_STEP,
     VisionMode,
     resolve_arch,
     structure_of,
@@ -151,15 +159,16 @@ def test_deleting_without_being_able_to_replace_is_refused() -> None:
     "field, value",
     [
         ("tool_calls_per_step", 0),
-        ("tool_calls_per_step", 1000),
+        ("tool_calls_per_step", 1_000_001),
         ("deadline_seconds", 0),
-        ("deadline_seconds", 10_000),
+        ("deadline_seconds", 86_401),
         ("max_captures_per_run", -1),
     ],
 )
 def test_the_knobs_are_bounded(field, value) -> None:
-    """They arrive over the API. An unbounded budget is a way to spend a model's
-    context and a game's time that no scenario asked for."""
+    """They arrive over the API. The ceilings sit far above any real run, so what
+    they catch is a malformed request rather than an ambitious one — but an
+    unbounded call budget or a deadline that never fires still has to be refused."""
     with pytest.raises(ValueError):
         QaArchSpec(**{field: value})
 
@@ -167,7 +176,7 @@ def test_the_knobs_are_bounded(field, value) -> None:
 # --- the budget ---------------------------------------------------------------
 
 
-def test_the_default_budget_matches_what_runs_had_before() -> None:
+def test_the_default_budget_is_the_base_plus_the_run_scoped_allowances() -> None:
     """The allowances are added to the base, not taken out of the steps: left
     inside, `search_knowledge` would spend its budget on the scenario and shorten
     every run by however much it looked things up."""
@@ -175,17 +184,33 @@ def test_the_default_budget_matches_what_runs_had_before() -> None:
     # base + searches + records + forgets + links + unlinks + expands. The graph
     # allowances join the base for the same reason the others did: they are
     # run-scoped, not per-step, so leaving them inside the step allowance would
-    # shorten every run by however much it walked the graph.
-    base = 10 + 6 + 5 + 2 + 3 + 2 + 3
+    # shorten every run by however much it walked the graph. Read off the
+    # constants rather than written out: the numbers are ceilings now and move
+    # together, and a copy here would only assert that somebody updated a copy.
+    base = (
+        BASE_TOOL_CALLS
+        + MAX_SEARCHES_PER_RUN
+        + MAX_RECORDS_PER_RUN
+        + MAX_FORGETS_PER_RUN
+        + MAX_LINKS_PER_RUN
+        + MAX_UNLINKS_PER_RUN
+        + MAX_EXPANDS_PER_RUN
+    )
 
-    assert arch.tool_call_limit(1) == base + 15
-    assert arch.tool_call_limit(4) == base + 60
+    assert arch.tool_call_limit(1) == base + TOOL_CALLS_PER_STEP
+    assert arch.tool_call_limit(4) == base + TOOL_CALLS_PER_STEP * 4
     # A scenario with no steps still gets one step's worth rather than none.
     assert arch.tool_call_limit(0) == arch.tool_call_limit(1)
 
 
-def test_a_wider_allowance_widens_the_budget() -> None:
-    assert resolved(max_searches_per_run=10).tool_call_limit(1) == resolved().tool_call_limit(1) + 4
+def test_an_allowance_moves_the_budget_with_it() -> None:
+    """Narrowed rather than widened: the default now sits at the field's ceiling,
+    and a rationed run is the thing a caller still asks for."""
+    narrower = MAX_SEARCHES_PER_RUN - 4
+    assert (
+        resolved(max_searches_per_run=narrower).tool_call_limit(1)
+        == resolved().tool_call_limit(1) - 4
+    )
 
 
 # --- what the default is ------------------------------------------------------
