@@ -474,3 +474,195 @@ def test_풀에서_꺼내_쓰는_씬에서_프롬프트가_자라지_않는다()
 
     assert len(memory.held) == len(pool)   # 풀 크기에서 수렴한다
     assert drawn(memory) == len(hand)      # 손에 든 수만큼만 그린다
+
+
+# --- 창을 타는 렌더와 상세 조회 (ARTEL-541) -----------------------------------
+
+
+def _reading(n: int, *members, whole: bool = False, selector: str = "Enemy[1]") -> dict:
+    """판독 하나. `members` 는 (이름, 값) 쌍이다."""
+    return {
+        "schema": 2,
+        "reading": n,
+        "scene": "Battle",
+        "whole": whole,
+        "active": [
+            {
+                "scene": "Battle",
+                "id": -101,
+                "selector": selector,
+                "rect": {"x": 10, "y": 20, "w": 30, "h": 40},
+                "offers": {"clicks": [{"event": "onClick", "method": "Enemy.Hit"}]},
+                "members": [
+                    {"on": "Enemy", "member": name, "value": value, "asked": True}
+                    for name, value in members
+                ],
+            }
+        ],
+        "deactive": [],
+        "changed": [f"Enemy::{name}" for name, _ in members],
+    }
+
+
+def test_a_value_that_did_not_move_again_is_not_drawn_again():
+    """판독은 이미 델타다. 지난번에 그린 값을 매 턴 다시 적을 이유가 없다.
+
+    이것이 이 변경의 전부다 — 실측에서 매 턴 5,148 토큰이던 것이 758 이 됐다. 객체 40개짜리
+    샘플 게임의 전투에서 그랬고, 비용이 씬 크기에 비례하던 것을 변화량에 비례하게 만든다.
+    """
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(_reading(1, ("Hp", 100), whole=True)))
+
+    first = memory.render()
+    assert "Hp = 100" in first
+
+    # 아무것도 안 왔다. 값은 그대로지만 독자는 이미 읽었다.
+    second = memory.render()
+    assert "Hp = 100" not in second
+
+    memory.apply(PulseReading.model_validate(_reading(2, ("Hp", 80))))
+    third = memory.render()
+    assert "Hp = 80" in third, "움직인 값은 다시 그린다"
+
+
+def test_what_you_can_act_on_is_drawn_every_turn():
+    """조작 가능한 것은 창과 무관하게 매번 그린다.
+
+    **이 성질을 잃으면 줄인 것이 아니라 눈을 가린 것이다.** GAME_STATE 시절 에이전트가 화면을
+    물어보느라 34턴을 쓰다 죽었고, 상시로 보이게 하니 4턴에 끝났다. 무엇을 누를 수 있는지는
+    그 "묻지 않아도 보이는" 것의 절반이다.
+    """
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(_reading(1, ("Hp", 100), whole=True)))
+    memory.render()
+
+    again = memory.render()
+    assert "Enemy[1]" in again
+    assert "id=-101" in again, "조준값이 남는다"
+    assert "can do" in again, "무엇을 할 수 있는지가 남는다"
+    assert "Hp" not in again, "값은 안 남는다 — 그것은 안 움직였다"
+
+
+def test_a_run_of_identical_readings_folds_into_one_line():
+    """한 멤버만 계속 움직이는 판독은 한 줄로 접는다.
+
+    실측에서 전투 중 변화의 98%가 `SlimeAnimator::spriteRenderer` 하나였다. 애니메이션이
+    스프라이트를 갈아 끼우는 것이지 QA 가 판정할 값이 아닌데, 그것이 판독 로그 열 줄을
+    독차지해 프롬프트의 31%를 먹었다.
+    """
+    memory = PulseMemory()
+    for n in range(1, 7):
+        memory.apply(PulseReading.model_validate(_reading(n, ("sprite", f"frame{n}"))))
+
+    out = memory.render()
+    assert "readings, only" in out
+    assert "Enemy::sprite" in out
+    # 접혔으니 판독 번호가 줄줄이 나오지 않는다.
+    assert out.count("(delta") == 0
+
+
+def test_inspect_answers_with_everything_it_holds():
+    """상시 블록이 안 싣는 값을 물으면 답한다.
+
+    줄이는 것과 잃는 것의 차이가 여기 있다. 안 움직인 값을 매 턴 적지 않되, 스텝이 그 값에
+    걸리면 가져올 수 있어야 한다.
+    """
+    memory = PulseMemory()
+    memory.apply(
+        PulseReading.model_validate(_reading(1, ("Hp", 100), ("MaxHp", 100), whole=True))
+    )
+    memory.render()  # 다 그렸다. 이제 창에는 아무것도 없다
+
+    assert "Hp = 100" not in (memory.render() or "")
+    found = memory.inspect("Enemy")
+    assert "Hp = 100" in found
+    assert "MaxHp = 100" in found
+
+
+def test_inspect_takes_a_partial_address():
+    """블록에 적히는 주소는 길고 대괄호 안 숫자는 바뀔 수 있다. 정확히 옮겨 적기를
+    요구하면 그것 자체가 왕복을 만든다."""
+    memory = PulseMemory()
+    memory.apply(
+        PulseReading.model_validate(
+            _reading(1, ("Hp", 7), whole=True, selector="RangedCat(Clone)[17]")
+        )
+    )
+    assert "Hp = 7" in memory.inspect("RangedCat")
+
+
+def test_inspect_says_so_when_nothing_matches():
+    """빈손을 조용히 돌려주면 에이전트가 그것을 '값이 없다'로 읽는다."""
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(_reading(1, ("Hp", 7), whole=True)))
+    assert "No object matching" in memory.inspect("Nothing")
+
+
+# --- 키가 무엇을 하는지 (ARTEL-539) -------------------------------------------
+
+
+def _with_keys(keys) -> dict:
+    return {
+        "schema": 2,
+        "reading": 1,
+        "scene": "Map_scene",
+        "whole": True,
+        "active": [
+            {
+                "scene": "Map_scene",
+                "id": -1,
+                "selector": "MapScene[1]",
+                "offers": {"keys": keys},
+                "members": [],
+            }
+        ],
+        "deactive": [],
+        "changed": [],
+    }
+
+
+def test_a_key_says_what_it_does():
+    """이름만으로는 다섯 키 중 무엇을 눌러야 할지 못 고른다.
+
+    stage 에서 Map 씬의 QA 가 화살표와 Return 을 대등하게 받고 위/아래를 눌러 보다 전투에
+    진입하지 못했다. 근거 문서는 `Return` 이 씬을 바꾼다는 것을 알고 있었고, 그 앎이 채널에서
+    버려지고 있었다.
+    """
+    memory = PulseMemory()
+    memory.apply(
+        PulseReading.model_validate(
+            _with_keys(
+                [
+                    {"key": "key:UpArrow (down)", "does": ["sets MapMove.position"]},
+                    {
+                        "key": "key:Return (down)",
+                        "does": ["sets StageDataSingleton.stagePosition", "→ TurnBattleScene"],
+                    },
+                ]
+            )
+        )
+    )
+
+    out = memory.render()
+    assert "key:Return (down) → sets StageDataSingleton.stagePosition; → TurnBattleScene" in out
+    assert "key:UpArrow (down) → sets MapMove.position" in out
+
+
+def test_a_key_whose_effect_is_unknown_says_so():
+    """비어 있는 것을 '아무 일도 안 한다' 로 읽히게 두지 않는다.
+
+    분석이 못 읽은 것과 정말 아무 일도 안 하는 것은 에이전트의 다음 수가 다르다 — 앞의 것은
+    눌러 볼 값이 있고 뒤의 것은 없다.
+    """
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(_with_keys([{"key": "key:Space (down)"}])))
+    assert "key:Space (down) (effect unknown)" in (memory.render() or "")
+
+
+def test_an_old_sdk_still_gets_its_keys_drawn():
+    """구버전은 키를 문자열로 보낸다. 그 빌드도 무엇을 누를 수 있는지는 말할 수 있어야 한다."""
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(_with_keys(["key:Space (down)"])))
+    out = memory.render() or ""
+    assert "keys: key:Space (down)" in out
+    assert "effect unknown" not in out, "모양이 다를 뿐 모르는 것이 아니다"
