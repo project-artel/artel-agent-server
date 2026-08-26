@@ -372,6 +372,23 @@ def build_tools(
             )
         return with_operator_messages(body, messages)
 
+    @tool
+    async def inspect_object(step: int, selector: str, thought: str) -> str:
+        """Read every value the game holds on one object.
+
+        The scene block shows what CHANGED and what you can ACT ON. It does not
+        list every value, because most of them do not move and a screen with a
+        hundred objects would push everything else out of your context.
+
+        Use this when a step turns on a value you cannot see there — an enemy's
+        health, a counter, a flag. `selector` is the address printed in the scene
+        block, and a partial one matches (`RangedCat` finds `RangedCat(Clone)[17]`).
+        """
+        await channel.note(thought, LogCategory.THOUGHT, step)
+        found = channel.scene.pulse.inspect(selector)
+        messages = channel.drain_operator_messages()
+        return with_operator_messages(found, messages)
+
     @tool(description=CAPTURE_SCREEN_DESCRIPTION.format(limit=arch.max_captures_per_run))
     async def capture_screen(step: int, thought: str, target_id: int | None = None) -> str:
         # What the agent reads is CAPTURE_SCREEN_DESCRIPTION above, not this.
@@ -1603,6 +1620,7 @@ def build_tools(
     # name string that drifted away from what it is called here.
     tools: list[BaseTool] = [
         observe_scene,
+        inspect_object,
         search_knowledge,
         record_knowledge,
         update_knowledge,

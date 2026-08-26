@@ -25,6 +25,9 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# 한 번에 들여다볼 수 있는 객체 수. 부분 일치가 많이 걸려도 프롬프트를 삼키지 않도록.
+MAX_INSPECTED = 5
+
 # How many readings a key survives after it stops being reported.
 #
 # Only used for the change counter below — held objects and their values are
@@ -180,6 +183,12 @@ class _HeldObject(BaseModel):
     # True when the object last arrived under `active`.
     live: bool = True
     members: dict[str, PulseMember] = Field(default_factory=dict)
+    # 멤버마다 그 값이 마지막으로 도착한 판독 번호. 델타만 그리려면 "언제 온 것인가"가
+    # 필요한데, 값 자체는 그것을 말하지 않는다 — 같은 값이 두 번 오면 구분이 안 된다.
+    #
+    # 판독 번호를 쓰는 이유: 판독은 이미 델타라 도착했다는 것 자체가 움직였다는 뜻이다.
+    # 도구가 언제 화면을 봤는지와는 무관하게 셀 수 있다.
+    at: dict[str, int] = Field(default_factory=dict)
 
 
 class PulseMemory(BaseModel):
@@ -210,6 +219,11 @@ class PulseMemory(BaseModel):
     log: list[ReadingLog] = Field(default_factory=list)
     # 상한에 걸려 버린 판독이 있었나. 읽는 쪽이 "이것이 전부"라고 잘못 읽지 않도록.
     trimmed: bool = False
+    # statics 도 객체 멤버와 같은 이유로 도착 시점을 남긴다.
+    static_at: dict[str, int] = Field(default_factory=dict)
+    # 마지막으로 그린 판독 번호. 이 장부를 여기 두는 이유는 "무엇까지 보여줬나" 가 이 메모리
+    # 자신의 사정이기 때문이다 — 부르는 쪽마다 따로 세면 둘이 어긋날 자리가 생긴다.
+    drawn: int = 0
 
     @property
     def seen(self) -> bool:
@@ -257,6 +271,7 @@ class PulseMemory(BaseModel):
 
         for entry in reading.statics:
             self.statics[entry.key] = entry
+            self.static_at[entry.key] = self.readings
 
         # Which list an object arrives in is what says whether it is on. It is
         # not a field on the object, so it cannot disagree with itself.
@@ -275,18 +290,36 @@ class PulseMemory(BaseModel):
                     live=live,
                     members=dict(was.members) if was else {},
                 )
+                held.at = dict(was.at) if was else {}
                 for member in obj.members:
                     held.members[member.key] = member
+                    held.at[member.key] = self.readings
                 self.held[obj.key] = held
 
-    def render(self) -> str | None:
+    def render(self, since: int | None = None) -> str | None:
         """The pulse view, or None when no reading has arrived.
+
+        `since` 는 마지막으로 그린 판독 번호다. 그 뒤에 도착한 값만 그린다 — 판독은 이미
+        델타라 도착했다는 것 자체가 움직였다는 뜻이고, 도착하지 않은 값은 독자가 지난번에
+        이미 읽었다.
+
+        **조작할 수 있는 것은 창과 무관하게 매번 그린다.** 그것이 없으면 에이전트가 무엇을
+        누를 수 있는지 물어봐야 하고, 그 왕복이 이 채널이 없애려던 것이다. 대신 값은 싣지
+        않는다 — 안 움직인 값은 이미 알고 있다.
+
+        `since=0` 은 종전과 같은 전량이다. 처음 보는 독자에게는 전부가 새것이다.
 
         None is what keeps an SDK that sends no pulse reading exactly as it was:
         nothing is appended, so every prompt is byte-identical to before.
         """
         if not self.seen:
             return None
+
+        # 부르는 쪽이 창을 정하지 않으면 지난번에 그린 자리부터다. 그리고 나면 그 자리를
+        # 옮긴다 — 같은 값을 두 번 그리지 않기 위해서다.
+        if since is None:
+            since = self.drawn
+        self.drawn = self.readings
 
         lines = [PULSE_VIEW_START]
         head = f"reading {self.reading}"
@@ -299,20 +332,38 @@ class PulseMemory(BaseModel):
             # Said out loud so "nothing moved" is not read as "nothing is there".
             lines.append(f"could not read: {self.unwatchable}")
 
-        if self.log:
+        # 로그도 창을 탄다. 지난번에 그린 판독을 다시 적으면 그만큼이 매 턴 반복된다.
+        #
+        # 그리고 **한 종류만 계속 움직이는 판독은 한 줄로 접는다.** 실측에서 전투 중 변화의
+        # 98%가 `SlimeAnimator::spriteRenderer` 하나였다 — 애니메이션이 스프라이트를 갈아
+        # 끼우는 것이지 QA 가 판정할 값이 아닌데, 그것이 로그 열 줄을 독차지했다.
+        window = [e for e in self.log if (e.reading or 0) > since] or self.log[-1:]
+        if window:
             lines.append("")
-            head = f"readings, oldest first (last {MAX_READING_LOG})"
+            head = f"readings since you last looked (last {MAX_READING_LOG} kept)"
             if self.trimmed:
                 # 열 개가 전부라고 읽으면 그 앞을 없었던 일로 세게 된다.
                 head += " — earlier readings dropped"
             lines.append(head + ":")
-            for entry in self.log:
-                lines.append(f"  {entry.reading} ({self._log_line(entry)})")
+            # 객체가 아니라 **멤버**로 접는다. 같은 애니메이션이 적 다섯에서 돌면 판독마다
+            # 대상이 달라 객체로는 안 접히는데, 말하는 내용은 하나다.
+            members = {k.rsplit("|", 1)[-1] for e in window for k in e.changed}
+            if len(window) > 2 and 0 < len(members) <= 2:
+                said = ", ".join(sorted(members))
+                where = {k.rsplit("|", 1)[0].rsplit("/", 1)[-1] for e in window for k in e.changed}
+                lines.append(
+                    f"  {len(window)} readings, only {said} moved"
+                    + (f" (on {len(where)} objects)" if len(where) > 1 else "")
+                )
+            else:
+                for entry in window:
+                    lines.append(f"  {entry.reading} ({self._log_line(entry)})")
             lines.append("")
 
-        if self.statics:
+        fresh_statics = [k for k in sorted(self.statics) if self.static_at.get(k, 0) > since]
+        if fresh_statics:
             lines.append("statics:")
-            for key in sorted(self.statics):
+            for key in fresh_statics:
                 entry = self.statics[key]
                 name = f"{(entry.declaring or '').split('.')[-1]}.{entry.member}"
                 lines.append(f"  {name} = {entry.value!r}{self._moved(key)}")
@@ -334,12 +385,23 @@ class PulseMemory(BaseModel):
             # 들고 오는 객체가 대다수다 — 그것을 버리면 누를 것이 화면에서 사라진다.
             if not obj.members and not obj.offers and obj.id is None:
                 continue
+
+            fresh = [k for k in sorted(obj.members) if obj.at.get(k, 0) > since]
+            # 조작할 수 있다는 것은 **무엇을 할지 아는 것**이다. id 는 거의 모든 객체에
+            # 실리므로 그것으로 가르면 아무것도 안 걸러진다 — offers 가 그 선이다.
+            actionable = bool(obj.offers)
+
+            # 이번 창에 아무 말도 없고 누를 수도 없는 객체는 건너뛴다. 독자가 이미 아는
+            # 것을 다시 적는 자리다.
+            if not fresh and not actionable:
+                continue
+
             where = obj.selector or obj.path or key
             lines.append(f"{where}{self._aim(obj)}:")
             offered = self._offered(obj)
             if offered:
                 lines.append(f"  {offered}")
-            for member_key in sorted(obj.members):
+            for member_key in fresh:
                 member = obj.members[member_key]
                 name = f"{(member.on or '').split('.')[-1]}.{member.member}"
                 asked = "" if member.asked is not False else " (unasked)"
@@ -347,6 +409,51 @@ class PulseMemory(BaseModel):
                 lines.append(f"  {name} = {member.value!r}{asked}{moved}")
 
         lines.append(PULSE_VIEW_END)
+        return "\n".join(lines)
+
+    def inspect(self, selector: str) -> str:
+        """한 객체가 쥔 값 전부. 창과 무관하게 지금 아는 것을 다 적는다.
+
+        상시 블록이 변화와 조작 가능한 것만 싣게 되면서 생긴 짝이다. 안 움직인 값은 매 턴
+        적지 않되, 물으면 답할 수 있어야 한다 — 그러지 않으면 줄인 것이 아니라 잃은 것이다.
+
+        부분 일치를 받는 이유: 블록에 적히는 주소는 `RangedCat(Clone)[17]` 처럼 길고, 대괄호
+        안 숫자는 씬을 다시 걸을 때마다 달라질 수 있다. 정확히 옮겨 적기를 요구하면 그 자체가
+        왕복을 만든다.
+        """
+        needle = (selector or "").strip().lower()
+        if not needle:
+            return "Name the object you want to inspect."
+
+        hits = [
+            (key, obj)
+            for key, obj in sorted(self.held.items())
+            if needle in (obj.selector or "").lower() or needle in (obj.path or "").lower()
+        ]
+        if not hits:
+            return (
+                f"No object matching {selector!r}. The scene block lists what is there; "
+                "the address printed beside each one is what this takes."
+            )
+
+        lines = []
+        for key, obj in hits[:MAX_INSPECTED]:
+            where = obj.selector or obj.path or key
+            state = "" if obj.live else "  (switched off)"
+            lines.append(f"{where}{self._aim(obj)}{state}:")
+            offered = self._offered(obj)
+            if offered:
+                lines.append(f"  {offered}")
+            if not obj.members:
+                lines.append("  (no values are being read on this object)")
+            for member_key in sorted(obj.members):
+                member = obj.members[member_key]
+                name = f"{(member.on or '').split('.')[-1]}.{member.member}"
+                asked = "" if member.asked is not False else " (unasked)"
+                lines.append(f"  {name} = {member.value!r}{asked}")
+        if len(hits) > MAX_INSPECTED:
+            # 잘랐다는 것을 말한다. 조용히 자르면 독자가 이것을 전부로 읽는다.
+            lines.append(f"({len(hits) - MAX_INSPECTED} more objects match; name one more exactly)")
         return "\n".join(lines)
 
     @staticmethod
