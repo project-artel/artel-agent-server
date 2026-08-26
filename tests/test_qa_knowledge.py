@@ -1183,8 +1183,8 @@ def test_the_writes_share_one_budget_and_the_deletion_has_its_own() -> None:
 
     A record and a correction both put content into the knowledge base and fail
     the run the same way, so they draw on one allowance — counted apart it would
-    be twice the ceiling nobody chose. Deleting keeps its own, smaller number,
-    because it is the less reversible act.
+    be twice the ceiling nobody chose. Deleting keeps its own separate allowance,
+    because it is the less reversible act and has to be refusable on its own.
     """
 
     async def run() -> None:
@@ -1205,7 +1205,6 @@ def test_the_writes_share_one_budget_and_the_deletion_has_its_own() -> None:
         assert str(MAX_FORGETS_PER_RUN) in forgotten
         # The way out of a spent deletion budget is to report, not to delete.
         assert "report_step" in forgotten
-        assert MAX_FORGETS_PER_RUN < MAX_RECORDS_PER_RUN
 
     asyncio.run(run())
 

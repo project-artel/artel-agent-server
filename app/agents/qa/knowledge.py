@@ -78,13 +78,13 @@ from app.agents.qa.arch import (  # noqa: E402 - re-export, kept below the prose
 # results are NOT folded the way scene views are (`fold_stale_scenes` only folds
 # what carries a scene marker), so every hit stays in the transcript until the
 # run ends.
-RESULT_LIMIT = 5
+RESULT_LIMIT = 100
 
 # Per hit. A knowledge entry's description is written for a human reading the
 # knowledge base, and can run long; what the agent needs is enough to settle one
 # question. Clipped rather than dropped, and the clip says so, so the agent can
 # tell "that is all there is" from "there is more".
-MAX_DESCRIPTION_CHARS = 500
+MAX_DESCRIPTION_CHARS = 5_000
 
 # The topics knowledge is filed under, as Orchestration defines them. Checked
 # here so a bad filter costs nothing: Orchestration rejects the whole search on

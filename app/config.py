@@ -18,6 +18,20 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_site_url: str | None = None
     openrouter_app_title: str = "Artel Agent Server"
+    # Per-request ceiling on a model call, and how many times the client retries.
+    #
+    # Not tuning knobs — the difference between a slow answer and no answer. The
+    # OpenAI client defaults to 600 s with 2 retries, so a stalled upstream holds
+    # one request for up to 30 minutes while every caller, including a person
+    # watching a chat, waits with nothing to read. That happened: an authoring
+    # turn was still "requesting" 500 s in and the only way out was reloading the
+    # page (ARTEL-510).
+    #
+    # 180 s is above the slowest authoring turn measured (a 66-case project ran
+    # ~70 s) with room for a reasoning model, and far below a wait a person
+    # accepts without being told something is wrong.
+    openrouter_timeout_seconds: float = 180.0
+    openrouter_max_retries: int = 1
 
     # LangSmith tracing. Disabled unless both the flag and the key are set, so
     # a deploy without credentials degrades to "no traces" instead of failing.
@@ -39,7 +53,7 @@ class Settings(BaseSettings):
 
     redis_url: str = "redis://localhost:6379/0"
     session_ttl_seconds: int = 3600
-    history_max_turns: int = 10
+    history_max_turns: int = 100_000
 
     # Default prompt version per agent, matching a directory under
     # app/prompts/<agent>/. Unset means the highest version present, so a new
@@ -122,13 +136,13 @@ class Settings(BaseSettings):
     # HNSW and IVFFlat indexes — 3072 would force halfvec on the storage side.
     embedding_model: str = "openai/text-embedding-3-large"
     embedding_dimensions: int = 1024
-    # One request's worth of texts. Unbounded batches are how a backfill worker
-    # turns a retry loop into a timeout and a bill.
-    embedding_batch_limit: int = 128
+    # One request's worth of texts. LangChain still slices the batch into
+    # chunks of this size, so raising it raises what one request carries.
+    embedding_batch_limit: int = 100_000
 
     # Knowledge items per /knowledge-queries call. Each item is its own model
     # call, so this bounds fan-out, not payload size.
-    knowledge_query_batch_limit: int = 32
+    knowledge_query_batch_limit: int = 100_000
 
     # Where LLM usage records are shipped. Unset switches collection off
     # entirely — a local run or a test has nowhere to send them, and an
@@ -142,12 +156,12 @@ class Settings(BaseSettings):
     llm_usage_flush_interval_seconds: float = 5.0
     # Ceiling on records held while Orchestration is unreachable. Past it the
     # oldest go, because an outage must cost accuracy rather than the process.
-    llm_usage_max_buffer: int = 1000
+    llm_usage_max_buffer: int = 1_000_000
 
     # /extract source fetch guards. allowed_hosts empty = no host restriction
     # (rely on the caller passing presigned URLs to the expected bucket).
-    extract_max_bytes: int = 20 * 1024 * 1024
-    extract_timeout_seconds: float = 30.0
+    extract_max_bytes: int = 2 * 1024 * 1024 * 1024
+    extract_timeout_seconds: float = 3600.0
     extract_allowed_hosts: list[str] = Field(default_factory=list)
 
 
