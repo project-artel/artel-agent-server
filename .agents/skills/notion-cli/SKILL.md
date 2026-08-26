@@ -9,6 +9,20 @@ description: >-
 
 # Notion CLI
 
+## ARTEL workspace discovery
+
+When a task needs ARTEL project context from Notion, read `🧭 Artel Index`
+first:
+
+```bash
+ntn pages get 3c80bce5-474c-8125-89f1-dcbef41b2726
+```
+
+Use its workspace map and API Spec, Documents, Progress Log, and Personal Notes
+area indexes to understand the structure and locate relevant context before
+searching or writing. Prefer IDs from the index over ambiguous page or database
+names.
+
 ## Look things up before answering
 
 The CLI is self-documenting. Always prefer running these commands over guessing
