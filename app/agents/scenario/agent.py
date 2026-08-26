@@ -28,6 +28,7 @@ from langgraph.errors import GraphRecursionError
 from app.agents.base import AgentContext
 from app.agents.scenario.cases import MAX_SEARCHES_PER_RUN, TestCaseSearchState
 from app.agents.scenario.errors import ScenarioGenerationError
+from app.agents.scenario.progress import ProgressCallback
 from app.agents.scenario.prompt import build_messages, build_system_prompt
 from app.agents.scenario.schemas import ScenarioAgentRequest, ScenarioAgentResult
 from app.agents.scenario.tools import build_tools
@@ -109,6 +110,10 @@ class ScenarioAgent:
         config = {
             **context.trace_config("scenario-generation"),
             "recursion_limit": RECURSION_LIMIT,
+            # The turn reports its own model turns (ARTEL-487). Orchestration sees
+            # the tool frames but not the time between them, and that time is most
+            # of the wait — see app/agents/scenario/progress.py.
+            "callbacks": [ProgressCallback(channel)],
         }
         try:
             result_state = await agent.ainvoke({"messages": messages}, config)

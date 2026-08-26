@@ -301,3 +301,176 @@ def test_모르는_타입은_여전히_거절된다():
     service._channels["s"] = object()
 
     assert service.deliver("s", {"type": "NOT_A_TYPE", "payload": {}}) is False
+
+
+# ── 조준값과 가능한 조작 (ARTEL-512) ─────────────────────────────────────────
+#
+# 판독은 이것들을 처음부터 싣고 있었다. 접는 과정에서 잃거나 그리지 않았을 뿐이라,
+# 여기서 지키는 것은 "도착한 것이 프롬프트까지 간다" 하나다.
+
+
+def test_조준값이_접히는_과정에서_살아남는다():
+    """`id` 가 없으면 독자는 무엇이 바뀌었는지 알면서 그것을 건드릴 방법이 없다.
+
+    판독이 `id` 를 매 기록에 싣는 이유가 그것이고(`LiveState.Object` 주석), 접을 때
+    버리면 그 의도가 마지막 한 칸에서 무너진다.
+    """
+    memory = fold(reading(active=[obj(id=26168)]))
+
+    held = next(iter(memory.held.values()))
+    assert held.id == 26168
+    assert "id=26168" in memory.render()
+
+
+def test_조준값이_델타에서도_유지된다():
+    """델타는 안 바뀐 것을 다시 말하지 않는다. `id` 는 결코 바뀌지 않으므로 델타에
+    없을 수 있고, 그때 이전 값을 잃으면 눌 수 있던 것이 눌 수 없게 된다."""
+    memory = fold(
+        reading(active=[obj(id=26168)]),
+        reading(reading=2, whole=False, active=[obj(id=None)]),
+    )
+
+    assert next(iter(memory.held.values())).id == 26168
+
+
+def test_화면_사각형이_실린다():
+    """좌표는 조준의 대체 수단이다. 컨트롤로 만들어지지 않은 것을 겨누는 유일한 방법이
+    rect 이고, 판독이 그것을 싣는데 모델에 자리가 없어 사라지고 있었다."""
+    memory = fold(reading(active=[obj(rect={"x": 860, "y": 600, "w": 200, "h": 60})]))
+
+    assert "at 860,600 200x60" in memory.render()
+
+
+def test_가능한_조작이_실린다():
+    """`offers` 는 스캔이 볼 수 없는 둘을 준다 — 어떤 키가 뜻을 가지는가, 어떤 객체가
+    포인터에 답하는가. 배선된 메서드 이름까지 함께 쓰는 것은, 누른 뒤 아무것도 움직이지
+    않았을 때 무엇이 불렸어야 하는지를 아는 독자만 그것을 결함으로 부를 수 있기 때문이다.
+    """
+    memory = fold(
+        reading(
+            active=[
+                obj(
+                    offers={
+                        "clicks": [
+                            {"on": "TitleSceneManager", "event": "m_OnClick", "method": "StartGame"}
+                        ],
+                        "keys": ["space"],
+                        "pointers": ["left"],
+                    }
+                )
+            ]
+        )
+    )
+
+    view = memory.render()
+    assert "click → TitleSceneManager.StartGame" in view
+    assert "keys: space" in view
+    assert "pointer: left" in view
+
+
+def test_멤버가_없어도_누를_것이면_그린다():
+    """판독이 유일한 출처일 때, 감시 대상 멤버가 없고 조준값과 `offers` 만 들고 오는
+    객체가 대다수다. 그것을 건너뛰면 누를 것이 화면에서 통째로 사라진다 — 실측에서
+    에이전트가 아홉 턴을 조준값 찾는 데 쓰고 결국 화면 캡처로 좌표를 눈으로 찾았다.
+    """
+    memory = fold(
+        reading(
+            active=[
+                obj(
+                    members=[],
+                    offers={"clicks": [{"on": "M", "event": "m_OnClick", "method": "Go"}]},
+                )
+            ]
+        )
+    )
+
+    assert "Canvas[2]/continue[1]" in memory.render()
+
+
+def test_아무것도_말하지_않는_객체는_여전히_빠진다():
+    """상한이 있어야 한다. 조준값도 조작도 멤버도 없는 객체는 판독이 그것에 대해 할 말이
+    없는 객체이고, 그것까지 그리면 화면이 배경으로 덮인다."""
+    memory = fold(reading(active=[obj(id=None, members=[], offers=None)]))
+
+    assert memory.render() is not None
+    assert "Canvas[2]/continue[1]" not in memory.render()
+
+
+def test_꺼진_객체는_그리지_않는다():
+    """화면에 없고 누를 수도 없는 것을 조준 후보로 권하지 않는다.
+
+    `GAME_STATE` 도 활성 GameObject 만 보냈다(`SceneScanner`). 판독이 꺼진 것까지 그리면
+    걷어내려는 그것보다 못해진다.
+    """
+    memory = fold(reading(active=[obj(selector="A[1]")], deactive=[obj(selector="B[1]")]))
+
+    view = memory.render()
+    assert "A[1]" in view
+    assert "B[1]" not in view
+
+
+def test_꺼진_객체도_들고_있는다():
+    """그리지 않는 것과 버리는 것은 다르다.
+
+    판독이 "그건 꺼졌다" 고 말한 것 자체가 사실이고, 버리면 다시 켜질 때 그 사이의 값을
+    잃어 전량 판독을 기다리게 된다.
+    """
+    memory = fold(reading(deactive=[obj(selector="B[1]")]))
+
+    held = next(iter(memory.held.values()))
+    assert held.live is False
+    assert held.members  # 값은 그대로 있다
+
+
+def test_다시_켜지면_돌아온다():
+    """판독이 그 객체를 active 통에 넣어 보내므로 저절로 돌아온다. 되살리는 코드가 따로
+    있어야 하는 것이 아니다 — 어느 통에 들어가는가가 곧 그 진술이다."""
+    memory = fold(
+        reading(deactive=[obj(selector="B[1]")]),
+        reading(reading=2, whole=False, active=[obj(selector="B[1]")]),
+    )
+
+    assert "B[1]" in memory.render()
+
+
+def test_풀에서_꺼내_쓰는_씬에서_프롬프트가_자라지_않는다():
+    """카드 스무 장짜리 풀에서 손에 든 셋만 활성이면 프롬프트에 드는 것도 셋이다.
+
+    풀은 객체를 재사용하므로 selector 가 그대로다 — `held` 는 풀 크기에서 수렴하고,
+    렌더는 활성 수만큼이다. 이 테스트가 없으면 "꺼진 것도 그린다" 로 되돌아갔을 때
+    긴 전투에서만, 그것도 프롬프트 길이로만 드러난다.
+    """
+    pool = [f"Card(Clone)[{i}]" for i in range(1, 21)]
+    hand, rest = pool[:3], pool[3:]
+    memory = fold(
+        reading(
+            whole=True,
+            active=[obj(selector=s) for s in hand],
+            deactive=[obj(selector=s) for s in rest],
+        )
+    )
+    def drawn(mem) -> int:
+        """렌더에 이름이 오른 카드 수. 판독 로그 절은 자기 상한이 따로 있어 총 줄 수로는
+        객체 증가를 가릴 수 없다."""
+        return sum(1 for line in mem.render().splitlines() if "Card(Clone)[" in line)
+
+    assert drawn(memory) == len(hand)
+
+    # 한 장 내고 한 장 뽑기를 스무 번. 풀이 재사용되므로 새 키가 생기지 않는다.
+    for turn in range(20):
+        out, inn = hand.pop(0), rest.pop(0)
+        hand.append(inn)
+        rest.append(out)
+        memory.apply(
+            PulseReading.model_validate(
+                reading(
+                    reading=turn + 2,
+                    whole=False,
+                    active=[obj(selector=inn)],
+                    deactive=[obj(selector=out)],
+                )
+            )
+        )
+
+    assert len(memory.held) == len(pool)   # 풀 크기에서 수렴한다
+    assert drawn(memory) == len(hand)      # 손에 든 수만큼만 그린다

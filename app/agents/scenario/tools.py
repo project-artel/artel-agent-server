@@ -29,6 +29,8 @@ from typing import TYPE_CHECKING
 from langchain_core.tools import BaseTool, tool
 
 from app.agents.scenario.cases import (
+    EXPLAIN_CASE_DESCRIPTION,
+    FIND_PATH_DESCRIPTION,
     LIST_UNCOVERED_DESCRIPTION,
     MAX_SEARCHES_PER_RUN,
     RESULT_LIMIT,
@@ -82,8 +84,86 @@ def build_tools(
             "than describing the ids."
         )
 
+    @tool(description=FIND_PATH_DESCRIPTION)
+    async def find_path(from_case_id: int, to_case_id: int) -> str:
+        # What the agent reads is FIND_PATH_DESCRIPTION, not this.
+        answer = await channel.fetch_path(from_case_id, to_case_id)
+        if answer is None:
+            return (
+                "The route lookup did not answer in time. Do not invent the steps in "
+                "between — say in `message` that you could not check the route."
+            )
+        reversed_note = (
+            "\nORDER — the other way round they chain directly: the second case's declared state "
+            "leads into the first's. This direction costs the bridge steps above. Games are not "
+            "always linear and going back may be exactly what was asked for — swap them only if "
+            "the request does not depend on this direction."
+            if answer.ordering == "REVERSED"
+            else ""
+        )
+        if answer.result == "NOT_REQUIRED":
+            return (
+                "NOT_REQUIRED — nothing goes in between. The two cases follow directly."
+                + reversed_note
+            )
+        if answer.result == "KNOWN":
+            lines = "\n".join(
+                f"  {i}. {action}"
+                + (f"   [input: {answer.inputs[i - 1]}]" if i <= len(answer.inputs) else "")
+                for i, action in enumerate(answer.actions, 1)
+            )
+            return (
+                "KNOWN — write each line below as its own bridge step (case_id null), in order:\n"
+                f"{lines}{reversed_note}"
+            )
+        blocked = answer.blocked_by or "unknown"
+        return (
+            f"UNKNOWN — the route is not in the scene spec. Blocking: {blocked}. "
+            f"{answer.note} Do not invent steps. Say so in `message`, name what is blocking, "
+            f"and ask the user how it is done.{reversed_note}"
+        )
+
+    @tool(description=EXPLAIN_CASE_DESCRIPTION)
+    async def explain_case(case_id: int) -> str:
+        # What the agent reads is EXPLAIN_CASE_DESCRIPTION, not this.
+        facts = await channel.fetch_case_facts(case_id)
+        if facts is None:
+            return (
+                "The case lookup did not answer in time. Write the step from the case's own "
+                "wording rather than guessing an operation."
+            )
+        lines = [f"case {case_id} · scene {facts.scene or 'unknown'}"]
+        if facts.state_before:
+            lines.append(
+                "  requires: "
+                + ", ".join(f"{g.variable} {g.operator} {g.value}" for g in facts.state_before)
+            )
+        if facts.state_after:
+            lines.append(
+                "  leaves: " + ", ".join(f"{k}={v}" for k, v in facts.state_after.items())
+            )
+        if not facts.operations:
+            lines.append(f"  operations: none known — {facts.note}")
+            return "\n".join(lines)
+        lines.append(f"  operations ({len(facts.operations)}):")
+        for op in facts.operations:
+            detail = f"    {op.input}"
+            if op.label:
+                detail += f"  [{op.label}]"
+            detail += f"  capability:{op.capability_id}  via {op.matched_by}"
+            if op.status != "runnable":
+                detail += f"  ({op.status})"
+            lines.append(detail)
+            if op.given:
+                lines.append(f"      needs {op.given}")
+            if op.summary:
+                lines.append(f"      {op.summary}")
+        if facts.observable is False:
+            lines.append("  observable: no — the result cannot be read back during a run.")
+        return "\n".join(lines)
+
     if has_test_case_list:
-        return [list_uncovered_cases]
+        return [list_uncovered_cases, find_path, explain_case]
 
     @tool(description=SEARCH_TEST_CASES_DESCRIPTION.format(limit=MAX_SEARCHES_PER_RUN))
     async def search_test_cases(query: str, category: str | None = None) -> str:
@@ -115,4 +195,4 @@ def build_tools(
             )
         return render_results(answer, remaining)
 
-    return [list_uncovered_cases, search_test_cases]
+    return [list_uncovered_cases, search_test_cases, find_path, explain_case]

@@ -5,7 +5,7 @@ import httpx
 from fastapi import FastAPI
 from redis.asyncio import from_url as redis_from_url
 
-from app.agents import GameContextAgent, KnowledgeQueryAgent
+from app.agents import GameContextAgent, KnowledgeQueryAgent, StepPhrasingAgent
 from app.api.embeddings import router as embeddings_router
 from app.api.extract import router as extract_router
 from app.api.knowledge_queries import router as knowledge_queries_router
@@ -14,6 +14,7 @@ from app.api.qa_sessions import router as qa_sessions_router
 from app.api.routes import router as api_router
 from app.api.sessions import router as sessions_router
 from app.api.specs_v2 import router as specs_v2_router
+from app.api.step_phrasing import router as step_phrasing_router
 from app.config import get_settings
 from app.documents import ExtractionService
 from app.llm import build_embedding_client
@@ -73,6 +74,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.embedding_client = build_embedding_client(settings)
     app.state.knowledge_query_agent = KnowledgeQueryAgent()
     app.state.knowledge_query_batch_limit = settings.knowledge_query_batch_limit
+    app.state.step_phrasing_agent = StepPhrasingAgent()
 
     # LLM spend collection. No-op without ORCHESTRATION_BASE_URL; stop() sends
     # the partial batch, without which every deploy loses one.
@@ -122,6 +124,7 @@ def create_app() -> FastAPI:
     app.include_router(knowledge_queries_router, prefix=INTERNAL_PREFIX)
     app.include_router(models_router, prefix=INTERNAL_PREFIX)
     app.include_router(specs_v2_router, prefix=INTERNAL_PREFIX)
+    app.include_router(step_phrasing_router, prefix=INTERNAL_PREFIX)
     return app
 
 

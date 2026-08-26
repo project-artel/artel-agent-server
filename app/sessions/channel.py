@@ -81,6 +81,85 @@ class UncoveredCases(BaseModel):
     scenes: list[UncoveredScene] = Field(default_factory=list)
 
 
+class ScenarioPath(BaseModel):
+    """The `find_path_result` frame: what is needed between two cases.
+
+    Three answers to one question — is a step needed in between?
+
+        KNOWN         yes, and these capabilities are it
+        NOT_REQUIRED  no, they follow directly
+        UNKNOWN       yes, but the route is not known
+
+    The third is half of why this exists. The scene spec comes from evidence and
+    observation, neither of which is exhaustive, so a missing edge does not mean
+    the route is absent — it means nobody has recorded it. `blocked_by` names what
+    stands in the way (a scene pair or a variable), and that name is what the user
+    can be asked about.
+    """
+
+    result: str = "UNKNOWN"
+    capability_ids: list[int] = Field(default_factory=list, alias="capabilityIds")
+    actions: list[str] = Field(default_factory=list)
+    # The same operations, normalized for machines: `key:Return`, `click:Canvas/Start`.
+    # Written into a step's `input` verbatim — nobody should re-derive an operation by
+    # parsing the sentence, because then rewording a step breaks whoever runs it.
+    inputs: list[str] = Field(default_factory=list)
+    # Whether the two cases chain in the order asked. `REVERSED` means they chain the
+    # other way round: the cases themselves declare the states, so this is a fact about
+    # them, not a preference. Orchestration will still fill the gap — but a scenario that
+    # runs is not the same as one that verifies what the cases meant.
+    ordering: str = "NO_OPINION"
+    blocked_by: str | None = Field(default=None, alias="blockedBy")
+    note: str = ""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class CaseOperation(BaseModel):
+    """One operation a case is made of, as the scene spec records it."""
+
+    capability_id: int = Field(alias="capabilityId")
+    input: str
+    label: str | None = None
+    summary: str = ""
+    given: str | None = None
+    status: str = ""
+    # `evidence` — the code this case points at. `effect` — a capability that touches the
+    # same value, so there may be several. Collapsing the two would hide the difference
+    # between "exactly this" and "probably one of these".
+    matched_by: str = Field(default="", alias="matchedBy")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class CaseGuard(BaseModel):
+    variable: str
+    operator: str
+    value: str
+
+
+class CaseFacts(BaseModel):
+    """The `explain_case_result` frame: what a case is actually made of.
+
+    The case list says what to verify. It does not say how many operations that
+    takes or what they are called, and that gap is why authored steps end up
+    restating the case title.
+
+    An empty `operations` is an ordinary answer, not a failure: the scene spec does
+    not know this case yet. Inventing an operation name there is worse than saying so.
+    """
+
+    test_case_id: int = Field(default=0, alias="testCaseId")
+    scene: str | None = None
+    state_before: list[CaseGuard] = Field(default_factory=list, alias="stateBefore")
+    state_after: dict[str, str] = Field(default_factory=dict, alias="stateAfter")
+    operations: list[CaseOperation] = Field(default_factory=list)
+    observable: bool | None = None
+    note: str = ""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 @dataclass(frozen=True)
 class TestCaseSearchFailed:
     """Orchestration answered the search with an `error` frame.
@@ -114,6 +193,10 @@ class ScenarioChannel:
         self._pending_search_id: str | None = None
         self._uncovered_waiter: asyncio.Future[UncoveredCases] | None = None
         self._pending_uncovered_id: str | None = None
+        self._path_waiter: asyncio.Future[ScenarioPath] | None = None
+        self._pending_path_id: str | None = None
+        self._facts_waiter: asyncio.Future[CaseFacts] | None = None
+        self._pending_facts_id: str | None = None
 
     # --- outbound -------------------------------------------------------------
 
@@ -136,6 +219,61 @@ class ScenarioChannel:
         finally:
             self._uncovered_waiter = None
             self._pending_uncovered_id = None
+
+    async def fetch_path(self, from_case_id: int, to_case_id: int) -> ScenarioPath | None:
+        """Ask what is needed between two cases. `None` when nobody answered.
+
+        The route is computed on the far side, not here. Reading a graph and
+        walking it are the kind of work a model does badly — measured: handing the
+        same scene spec to the model as prompt text left it *worse* than having
+        none at all, and moving the walk behind this call took it to zero.
+
+        Scope comes from the session binding, like the case search — the frame
+        carries no project or run id.
+        """
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[ScenarioPath] = loop.create_future()
+        self._path_waiter = waiter
+        message_id = str(uuid4())
+        self._pending_path_id = message_id
+        await self._send({
+            "type": "find_path",
+            "messageId": message_id,
+            "from_case_id": from_case_id,
+            "to_case_id": to_case_id,
+        })
+        try:
+            return await asyncio.wait_for(waiter, timeout=self._search_timeout)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            self._path_waiter = None
+            self._pending_path_id = None
+
+    async def fetch_case_facts(self, test_case_id: int) -> CaseFacts | None:
+        """Ask what a case is made of. `None` when nobody answered.
+
+        Same shape as `fetch_path`, and for the same reason: the scene spec stays on
+        the far side and only computed answers cross the wire. Scope comes from the
+        session binding.
+        """
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[CaseFacts] = loop.create_future()
+        self._facts_waiter = waiter
+        message_id = str(uuid4())
+        self._pending_facts_id = message_id
+        await self._send({
+            "type": "explain_case",
+            "messageId": message_id,
+            "testCaseId": test_case_id,
+        })
+        try:
+            return await asyncio.wait_for(waiter, timeout=self._search_timeout)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            self._facts_waiter = None
+            self._pending_facts_id = None
 
     async def search_test_cases(
         self, query: str, category: str | None, limit: int
@@ -176,6 +314,23 @@ class ScenarioChannel:
             self._search_waiter = None
             self._pending_search_id = None
 
+    async def report(self, stage: str) -> None:
+        """Say where the turn is. Fire-and-forget: nothing waits for an answer.
+
+        The far side sees every tool call as a frame, but not the model turns in
+        between — and those are most of the wall clock. Without this, a turn that
+        thinks for forty seconds and calls one tool looks the same as one that
+        died right after the tool.
+
+        Never raises. A progress line is worth less than the turn it would kill,
+        and a socket that has gone away will fail again on the result frame, where
+        the failure actually means something.
+        """
+        try:
+            await self._send({"type": "progress", "stage": stage})
+        except Exception:  # noqa: BLE001 - see docstring
+            logger.debug("[scenario] progress frame dropped (%s)", stage, exc_info=True)
+
     # --- inbound --------------------------------------------------------------
 
     def deliver(self, raw: dict) -> bool:
@@ -197,6 +352,24 @@ class ScenarioChannel:
                     and raw.get("correlationId") == self._pending_uncovered_id
                 ):
                     waiter.set_result(UncoveredCases.model_validate(raw))
+                return True
+            if message_type == "explain_case_result":
+                waiter = self._facts_waiter
+                if (
+                    waiter is not None
+                    and not waiter.done()
+                    and raw.get("correlationId") == self._pending_facts_id
+                ):
+                    waiter.set_result(CaseFacts.model_validate(raw))
+                return True
+            if message_type == "find_path_result":
+                waiter = self._path_waiter
+                if (
+                    waiter is not None
+                    and not waiter.done()
+                    and raw.get("correlationId") == self._pending_path_id
+                ):
+                    waiter.set_result(ScenarioPath.model_validate(raw))
                 return True
             if message_type == "test_case_search_result":
                 if self._answers_pending(raw):
