@@ -128,6 +128,20 @@ class ActionItemStatus(StrEnum):
 # forwarded, never stripped. Named fields below are just the always-present ones.
 
 
+def center_of(x: float, y: float, w: float, h: float) -> tuple[int, int]:
+    """조준점을 모서리와 크기에서 뽑는다.
+
+    두 채널이 이것을 쓴다 — `GAME_STATE` 는 [Rect.center] 를 거쳐, 판독은
+    `app/qa/pulse.py` 의 `_aim` 에서 직접. 계산을 두 자리에 두면 언젠가 한쪽만
+    반올림이 바뀌고, 그 차이는 1px 라 아무도 못 알아본 채로 조준이 갈린다.
+
+    판독의 좌표는 정수가 아닐 수 있다. SDK 가 `"0.####"` 로 쓰므로 `47.0` 은 `47` 로,
+    `47.5` 는 그대로 온다. 잘라 버린다 — 픽셀 아래로는 화면의 무엇도 다르게 그려지지
+    않고, 그것을 겨눈 무엇도 다른 데 떨어지지 않는다.
+    """
+    return int(x) + int(w) // 2, int(y) + int(h) // 2
+
+
 class Rect(BaseModel):
     """Where an element sits on the game's screen, in pixels.
 
@@ -146,7 +160,7 @@ class Rect(BaseModel):
     @property
     def center(self) -> tuple[int, int]:
         """The point to aim the pointer at. Derived here so no reader re-does it."""
-        return self.x + self.w // 2, self.y + self.h // 2
+        return center_of(self.x, self.y, self.w, self.h)
 
 
 class Screen(BaseModel):
