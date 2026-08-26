@@ -168,6 +168,27 @@ class ReadingLog(BaseModel):
     moved: int = 0
 
 
+def _key_line(offered: Any) -> str:
+    """키 하나를 사람이 고를 수 있게 쓴다.
+
+    이름만으로는 못 고른다. Map 씬의 QA 가 화살표 다섯과 Return 을 대등하게 받고 위/아래를
+    눌러 보다 전투에 진입하지 못했다 — 근거는 `Return` 이 씬을 바꾼다는 것을 알고 있었는데
+    그 앎이 채널에서 버려지고 있었다(ARTEL-539).
+
+    옛 SDK 는 문자열만 보낸다. 그때는 종전대로 이름만 쓴다.
+    """
+    if not isinstance(offered, dict):
+        return str(offered)
+
+    name = offered.get("key") or "?"
+    does = offered.get("does")
+    if not does:
+        # 빈 것과 없는 것을 같이 다룬다. 어느 쪽이든 "무엇을 하는지 모른다" 이고, 그것을
+        # "아무 일도 안 한다" 로 읽히게 두지 않는다.
+        return f"{name} (effect unknown)"
+    return f"{name} → {'; '.join(str(d) for d in does)}"
+
+
 class _HeldObject(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -488,7 +509,7 @@ class PulseMemory(BaseModel):
             parts.append(f"click → {on}.{method}")
         keys = offers.get("keys") or []
         if keys:
-            parts.append("keys: " + ", ".join(str(k) for k in keys))
+            parts.append("keys: " + ", ".join(_key_line(k) for k in keys))
         pointers = offers.get("pointers") or []
         if pointers:
             parts.append("pointer: " + ", ".join(str(p) for p in pointers))

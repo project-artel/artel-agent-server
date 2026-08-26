@@ -596,3 +596,73 @@ def test_inspect_says_so_when_nothing_matches():
     memory = PulseMemory()
     memory.apply(PulseReading.model_validate(_reading(1, ("Hp", 7), whole=True)))
     assert "No object matching" in memory.inspect("Nothing")
+
+
+# --- 키가 무엇을 하는지 (ARTEL-539) -------------------------------------------
+
+
+def _with_keys(keys) -> dict:
+    return {
+        "schema": 2,
+        "reading": 1,
+        "scene": "Map_scene",
+        "whole": True,
+        "active": [
+            {
+                "scene": "Map_scene",
+                "id": -1,
+                "selector": "MapScene[1]",
+                "offers": {"keys": keys},
+                "members": [],
+            }
+        ],
+        "deactive": [],
+        "changed": [],
+    }
+
+
+def test_a_key_says_what_it_does():
+    """이름만으로는 다섯 키 중 무엇을 눌러야 할지 못 고른다.
+
+    stage 에서 Map 씬의 QA 가 화살표와 Return 을 대등하게 받고 위/아래를 눌러 보다 전투에
+    진입하지 못했다. 근거 문서는 `Return` 이 씬을 바꾼다는 것을 알고 있었고, 그 앎이 채널에서
+    버려지고 있었다.
+    """
+    memory = PulseMemory()
+    memory.apply(
+        PulseReading.model_validate(
+            _with_keys(
+                [
+                    {"key": "key:UpArrow (down)", "does": ["sets MapMove.position"]},
+                    {
+                        "key": "key:Return (down)",
+                        "does": ["sets StageDataSingleton.stagePosition", "→ TurnBattleScene"],
+                    },
+                ]
+            )
+        )
+    )
+
+    out = memory.render()
+    assert "key:Return (down) → sets StageDataSingleton.stagePosition; → TurnBattleScene" in out
+    assert "key:UpArrow (down) → sets MapMove.position" in out
+
+
+def test_a_key_whose_effect_is_unknown_says_so():
+    """비어 있는 것을 '아무 일도 안 한다' 로 읽히게 두지 않는다.
+
+    분석이 못 읽은 것과 정말 아무 일도 안 하는 것은 에이전트의 다음 수가 다르다 — 앞의 것은
+    눌러 볼 값이 있고 뒤의 것은 없다.
+    """
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(_with_keys([{"key": "key:Space (down)"}])))
+    assert "key:Space (down) (effect unknown)" in (memory.render() or "")
+
+
+def test_an_old_sdk_still_gets_its_keys_drawn():
+    """구버전은 키를 문자열로 보낸다. 그 빌드도 무엇을 누를 수 있는지는 말할 수 있어야 한다."""
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(_with_keys(["key:Space (down)"])))
+    out = memory.render() or ""
+    assert "keys: key:Space (down)" in out
+    assert "effect unknown" not in out, "모양이 다를 뿐 모르는 것이 아니다"
