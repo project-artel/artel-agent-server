@@ -420,7 +420,7 @@ class SceneMemory(BaseModel):
         report, since nothing dispatched it.
         """
         if self.scene is None:
-            pulse = self.pulse.render()
+            pulse = self.pulse.render_now()
             if pulse is None:
                 return None
             return f"{CURRENT_SCENE_START}\n{pulse}\n{CURRENT_SCENE_END}"
@@ -459,7 +459,7 @@ class SceneMemory(BaseModel):
             lines.append(f"the game ran, newest last (up to {MAX_ACTIONS_IN_LIVE_VIEW}):")
             lines.extend(_action_line(record, at) for record, at in recent)
 
-        pulse = self.pulse.render()
+        pulse = self.pulse.render_now()
         if pulse is not None:
             lines.append("")
             lines.append(pulse)

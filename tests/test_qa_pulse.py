@@ -208,6 +208,74 @@ def test_statics_는_객체_아래로_섞이지_않는다():
     assert [m.member for m in held.members.values()] == ["turn"]
 
 
+def test_라이브_뷰는_창을_먹지_않는다():
+    """한 턴에 도구 결과와 라이브 뷰가 각각 그린다. 둘 다 창을 옮기던 때, 먼저 그린
+    쪽이 창을 먹고 뒤에 붙는 라이브 뷰가 비어서 올라갔다 — 그리고 에이전트가 매 턴
+    실제로 읽는 것이 그 라이브 뷰다(ARTEL-579)."""
+    memory = fold(reading(active=[obj()]))
+
+    memory.render()          # 도구 결과가 먼저 그린다
+    live = memory.render_now()
+
+    assert "TurnBattleSystem.turn = 2" in live
+
+
+def test_라이브_뷰는_값이_멈춰도_계속_보여준다():
+    """판단이 필요한 것은 대체로 멈춰 있는 상태다. 대화창이 떠 있다는 사실은 뜨는
+    순간에만 소식이고 그 뒤로는 내내 조건인데, 창은 소식만 그린다."""
+    memory = fold(reading(active=[obj()]))
+    memory.render()
+    memory.apply(
+        PulseReading.model_validate(reading(reading=2, whole=False, active=[]))
+    )
+
+    live = memory.render_now()
+
+    assert "TurnBattleSystem.turn = 2" in live
+
+
+def test_전량_뷰에서도_소식만_표시된다():
+    """전부 그리면서 `since=0` 을 소식 기준으로도 쓰면 모든 줄에 표가 붙어 표가 뜻을
+    잃는다. 무엇을 그릴지와 무엇이 소식인지는 다른 질문이다."""
+    memory = fold(reading(active=[obj()]))
+    memory.render()
+    memory.apply(
+        PulseReading.model_validate(
+            reading(
+                reading=2,
+                whole=False,
+                active=[
+                    {
+                        "selector": "Canvas[2]/continue[1]",
+                        "id": 26168,
+                        "members": [
+                            {
+                                "member": "phase",
+                                "value": "enemy",
+                                "on": "Battle.Turns.TurnBattleSystem",
+                            }
+                        ],
+                    }
+                ],
+            )
+        )
+    )
+
+    live = memory.render_now()
+
+    assert "TurnBattleSystem.phase = 'enemy'  (changed)" in live
+    assert "TurnBattleSystem.turn = 2\n" in live + "\n"
+    # 지난번에 이미 본 값에는 표가 안 붙는다.
+    assert "turn = 2  (changed)" not in live
+
+
+def test_창_뷰에는_소식_표가_붙지_않는다():
+    """창 뷰는 그려진 것이 곧 소식이라 표가 군더더기다."""
+    memory = fold(reading(active=[obj()]))
+
+    assert "(changed)" not in (memory.render() or "")
+
+
 def test_static_은_안_바뀌어도_계속_보인다():
     """static 은 소유자가 없어 어느 객체 아래에도 안 실린다. 델타에서 빠지면 화면
     어디에도 없다.

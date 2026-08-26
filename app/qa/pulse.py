@@ -349,7 +349,12 @@ class PulseMemory(BaseModel):
                     held.at[member.key] = self.readings
                 self.held[obj.key] = held
 
-    def render(self, since: int | None = None) -> str | None:
+    def render(
+        self,
+        since: int | None = None,
+        advance: bool = True,
+        news_since: int | None = None,
+    ) -> str | None:
         """The pulse view, or None when no reading has arrived.
 
         `since` 는 마지막으로 그린 판독 번호다. 그 뒤에 도착한 값만 그린다 — 판독은 이미
@@ -370,9 +375,20 @@ class PulseMemory(BaseModel):
 
         # 부르는 쪽이 창을 정하지 않으면 지난번에 그린 자리부터다. 그리고 나면 그 자리를
         # 옮긴다 — 같은 값을 두 번 그리지 않기 위해서다.
+        #
+        # **창을 옮기는 것은 이 경로뿐이다.** 라이브 뷰는 [render_now] 로 가고 그쪽은 옮기지
+        # 않는다. 둘 다 여기로 오던 때, 한 턴에 도구 결과가 먼저 그려 창을 먹고 나면 그 뒤에
+        # 붙는 라이브 뷰가 비어서 올라갔다(ARTEL-579).
         if since is None:
             since = self.drawn
-        self.drawn = self.readings
+        # 무엇을 그릴지(`since`)와 무엇이 소식인지(`news_since`)는 다른 질문이다. 창 뷰에서는
+        # 둘이 같아서 그릴 것이 곧 소식이지만, 전량 뷰에서는 전부 그리면서 소식만 표시해야
+        # 한다 — `since=0` 을 소식 기준으로도 쓰면 모든 줄에 표가 붙어 표가 뜻을 잃는다.
+        marking = news_since is not None and news_since != since
+        if news_since is None:
+            news_since = since
+        if advance:
+            self.drawn = self.readings
 
         lines = [PULSE_VIEW_START]
         head = f"reading {self.reading}"
@@ -432,7 +448,7 @@ class PulseMemory(BaseModel):
                 name = f"{(entry.declaring or '').split('.')[-1]}.{entry.member}"
                 # 마지막으로 본 뒤 바뀐 것만 표시한다. 전부 그리면서 표시까지 없으면 읽는 쪽이
                 # 무엇이 소식인지 스스로 찾아야 하고, 그것이 창이 하라고 있는 일이다.
-                news = "  (changed)" if self.static_at.get(key, 0) > since else ""
+                news = "  (changed)" if self.static_at.get(key, 0) > news_since else ""
                 lines.append(f"  {name} = {entry.value!r}{news}{self._moved(key)}")
 
         objects = sorted(self.held.items())
@@ -473,7 +489,13 @@ class PulseMemory(BaseModel):
                 name = f"{(member.on or '').split('.')[-1]}.{member.member}"
                 asked = "" if member.asked is not False else " (unasked)"
                 moved = self._moved(f"{key}|{member_key}", f"{where}|{member_key}")
-                lines.append(f"  {name} = {member.value!r}{asked}{moved}")
+                # 창 뷰에서는 그려진 것이 곧 소식이라 표가 군더더기다. 전량 뷰에서만 붙인다.
+                news = (
+                    "  (changed)"
+                    if marking and obj.at.get(member_key, 0) > news_since
+                    else ""
+                )
+                lines.append(f"  {name} = {member.value!r}{asked}{news}{moved}")
 
         lines.append(PULSE_VIEW_END)
         return "\n".join(lines)
@@ -522,6 +544,23 @@ class PulseMemory(BaseModel):
             # 잘랐다는 것을 말한다. 조용히 자르면 독자가 이것을 전부로 읽는다.
             lines.append(f"({len(hits) - MAX_INSPECTED} more objects match; name one more exactly)")
         return "\n".join(lines)
+
+    def render_now(self) -> str | None:
+        """지금 화면이 무엇인가. 켜져 있는 것 전부를 값과 함께.
+
+        [render] 와 답하는 질문이 다르다. 저쪽은 "내 액션이 무엇을 바꿨나" 이고 창이 맞는
+        자리다. 이쪽은 매 턴 프롬프트 꼬리에 붙어 **판단의 바탕**이 되므로 창이면 안 된다 —
+        판단이 필요한 것은 대체로 멈춰 있는 상태이기 때문이다.
+
+        화면에 버젓이 떠 있는 대사창을 에이전트가 "대사 없음" 으로 읽은 것이 그래서였다.
+        `waitingForAcknowledge` 도 `streamingText` 도 판독이 이미 들고 있었는데, 값이 한 번
+        자리 잡은 뒤로는 창 밖이라 그려지지 않았다. 그 동안 게임은 카드 드래그를 통째로
+        취소하고 있었고, 에이전트는 카드가 튕기는 것을 좌표 문제로 읽었다(ARTEL-579).
+
+        창을 옮기지 않는다. 이것을 그렸다고 해서 도구 결과가 말할 것이 줄지 않는다 — 둘은
+        같은 판독을 다른 질문으로 읽는다.
+        """
+        return self.render(since=0, advance=False, news_since=self.drawn)
 
     @staticmethod
     def _aim(obj: "_HeldObject") -> str:
