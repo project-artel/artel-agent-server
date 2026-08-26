@@ -208,6 +208,59 @@ def test_statics_는_객체_아래로_섞이지_않는다():
     assert [m.member for m in held.members.values()] == ["turn"]
 
 
+def test_static_은_안_바뀌어도_계속_보인다():
+    """static 은 소유자가 없어 어느 객체 아래에도 안 실린다. 델타에서 빠지면 화면
+    어디에도 없다.
+
+    그리고 static 으로 뽑히는 값이 대체로 래칭이다 — 한 번 켜지면 꺼질 때까지 유지되고
+    그 사이 내내 무엇을 할 수 있는지를 결정한다. 샘플 게임의 `InteractionLock.IsLocked`
+    가 그렇다: 잠긴 동안 카드 드래그가 통째로 취소되는데, 그 사실이 잠기는 순간 한 번만
+    보이고 사라졌다(ARTEL-573)."""
+    lock = {"declaring": "Core.InteractionLock", "member": "IsLocked", "value": True}
+    memory = fold(reading(statics=[lock], active=[obj()]))
+    # 한 번 보고 나면 그 판독은 더 이상 소식이 아니다.
+    memory.render()
+    memory.apply(
+        PulseReading.model_validate(
+            reading(reading=2, whole=False, statics=[], active=[])
+        )
+    )
+
+    drawn = memory.render()
+
+    assert "InteractionLock.IsLocked = True" in drawn
+    # 판독이 그 값을 다시 말하지 않았으므로 소식 표시는 없다.
+    assert "(changed)" not in drawn
+
+
+def test_바뀐_static_은_소식으로_표시된다():
+    """전부 그리면서 표시까지 없으면 읽는 쪽이 무엇이 소식인지 스스로 찾아야 하고,
+    그것이 창이 하라고 있는 일이다."""
+    memory = fold(
+        reading(
+            statics=[{"declaring": "Core.InteractionLock", "member": "IsLocked", "value": False}],
+            active=[obj()],
+        )
+    )
+    memory.render()
+    memory.apply(
+        PulseReading.model_validate(
+            reading(
+                reading=2,
+                whole=False,
+                statics=[
+                    {"declaring": "Core.InteractionLock", "member": "IsLocked", "value": True}
+                ],
+                active=[],
+            )
+        )
+    )
+
+    drawn = memory.render()
+
+    assert "InteractionLock.IsLocked = True  (changed)" in drawn
+
+
 def test_한_객체의_같은_타입_컴포넌트_둘이_서로를_덮지_않는다():
     memory = fold(
         reading(

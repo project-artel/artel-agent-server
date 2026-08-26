@@ -413,13 +413,27 @@ class PulseMemory(BaseModel):
                     lines.append(f"  {entry.reading} ({self._log_line(entry)})")
             lines.append("")
 
-        fresh_statics = [k for k in sorted(self.statics) if self.static_at.get(k, 0) > since]
-        if fresh_statics:
+        # statics 는 **매번 전부** 그린다. 이 절만 창(window)을 따르지 않는다.
+        #
+        # 소유자가 없기 때문이다. 객체 멤버는 그 객체가 아래에 그려지면서 함께 보이지만,
+        # static 은 어느 객체 아래에도 안 실린다 — 델타에서 빠지는 순간 화면 어디에도 없다.
+        #
+        # 그리고 static 으로 뽑히는 값이 대체로 **래칭**이다. 한 번 켜지면 꺼질 때까지 유지되고,
+        # 그 사이 내내 무엇을 할 수 있는지를 결정한다. 샘플 게임의 `InteractionLock.IsLocked` 가
+        # 그렇다: 대화창이 떠 있는 동안 카드 드래그가 통째로 취소되는데, 그 사실이 잠기는 순간
+        # 한 번만 보이고 사라졌다. 다음 턴의 에이전트는 잠긴 줄 모르고 끌었고, 카드가 튕기는
+        # 것을 좌표가 틀린 것으로 읽었다(ARTEL-573).
+        #
+        # 값이 열한 개다(실측). 창이 아끼는 것과 견줄 크기가 아니다.
+        if self.statics:
             lines.append("statics:")
-            for key in fresh_statics:
+            for key in sorted(self.statics):
                 entry = self.statics[key]
                 name = f"{(entry.declaring or '').split('.')[-1]}.{entry.member}"
-                lines.append(f"  {name} = {entry.value!r}{self._moved(key)}")
+                # 마지막으로 본 뒤 바뀐 것만 표시한다. 전부 그리면서 표시까지 없으면 읽는 쪽이
+                # 무엇이 소식인지 스스로 찾아야 하고, 그것이 창이 하라고 있는 일이다.
+                news = "  (changed)" if self.static_at.get(key, 0) > since else ""
+                lines.append(f"  {name} = {entry.value!r}{news}{self._moved(key)}")
 
         objects = sorted(self.held.items())
         for key, obj in objects:
