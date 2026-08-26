@@ -14,7 +14,7 @@ from app.llm.chat_model import build_chat_model, select_structured_method
 from app.llm.models import LLMModel
 
 
-_MAX_ATTEMPTS = 2
+_MAX_ATTEMPTS = 5
 
 StructuredFactory = Callable[[LLMModel], Runnable]
 

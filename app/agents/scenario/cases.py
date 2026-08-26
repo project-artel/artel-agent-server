@@ -45,21 +45,23 @@ if TYPE_CHECKING:
 
 # How many case searches one turn may make.
 #
-# A turn that keeps searching instead of deciding never returns an answer — the
-# same failure the QA search budget guards. Enough to cover a handful of distinct
-# scenarios in one decomposition, and no more.
-MAX_SEARCHES_PER_RUN = 6
+# A ceiling no real turn reaches, matching the QA run's allowances. The old
+# number rationed a turn to six searches on the argument that a turn which keeps
+# searching never decides; what it produced was decompositions that stopped
+# short of the cases they needed. What a search is for is taught by
+# `SEARCH_TEST_CASES_DESCRIPTION` instead.
+MAX_SEARCHES_PER_RUN = 1_000_000
 
 # How many hits one search brings back. Orchestration clamps this to its own
 # ceiling, so it is this side stating the context it is willing to spend, not a
 # guarantee. Higher than the knowledge search's: mapping cases into scenarios
 # wants to see the candidates, where a knowledge lookup wants the top answer.
-RESULT_LIMIT = 10
+RESULT_LIMIT = 100
 
 # Per hit. A case's precondition and expected are written for a human reading the
 # case list and can run long; the agent needs enough to decide whether the case
 # belongs in a scenario. Clipped rather than dropped, and the clip says so.
-MAX_TEXT_CHARS = 300
+MAX_TEXT_CHARS = 4_000
 
 # Written out rather than left as a docstring so the per-turn cap comes from the
 # constant above. An agent told only that searching is "limited" spends the
