@@ -8,7 +8,8 @@ Three things are pinned here, and they fail in different ways:
 - **the wiring** — a correct renderer nobody calls leaves the run exactly as
   blind as before, so a real `QaRunner.run` is driven and what the model actually
   received is inspected, the way `tests/test_qa_runner_context.py` does for the
-  fold.
+  fold. Where the block rides is asserted here too: under the scene view a tool
+  result carries and outside its markers, once per scene visit.
 - **the failure path** — the lookup is advisory, so every way it can go wrong has
   to end with a running run and no block.
 """
@@ -22,13 +23,14 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
-from app.agents.qa.context import fold_stale_scene_context
+from app.agents.qa.compaction import render_progress_ledger
+from app.agents.qa.context import FOLDED_VIEW_PREFIX
 from app.api.qa_sessions import OpenQaSessionRequest
 from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import MessageType
-from app.qa.scene import CURRENT_SCENE_END, CURRENT_SCENE_START
+from app.qa.scene import SCENE_VIEW_END, SCENE_VIEW_START_PREFIX
 from app.qa.scene_context import (
     MAX_CAPABILITIES_IN_SCENE_CONTEXT,
     MAX_KNOWLEDGE_IN_SCENE_CONTEXT,
@@ -85,8 +87,10 @@ def payload(**overrides: Any) -> dict:
                         inputKey="Escape",
                         controlPath=None,
                         controlLabel=None,
-                        status="blocked",
-                        verification="verified",
+                        # 스키마가 실제로 내는 값이다(V45 의 유도 컬럼).
+                        # 서버가 내지 않는 낱말을 픽스처에 쓰면 다음 사람이 그것을 어휘로 읽는다.
+                        status="needs-probe",
+                        verification="contradicted",
                         repeatUntilDone=True,
                         controlSelectorHint=None,
                     ),
@@ -139,9 +143,9 @@ def test_a_scene_with_capabilities_and_knowledge_gets_both() -> None:
         '  [cap-10] click "공격" (Canvas/AttackButton) — 공격 버튼으로 적을 공격한다 '
         "[runnable, unverified]  given: 전투가 시작된 뒤\n"
         "  press_key Escape — ESC 로 일시정지 메뉴를 연다 "
-        "[blocked, verified, repeat until done]\n"
+        "[needs-probe, contradicted, repeat until done]\n"
         "  (a path is where the map found the control, not something to aim at — "
-        "take ids and coordinates from the live scene above)\n"
+        "take ids and coordinates from the scene view above)\n"
         "\n"
         "knowledge anchored to this scene, id and summary only:\n"
         "  [41] 전투 중 ESC 는 아무것도 하지 않는다\n"
@@ -408,47 +412,6 @@ def test_no_ids_means_no_lookup_at_all() -> None:
     assert asyncio.run(go()) == [None, None, None]
 
 
-# --- folding ------------------------------------------------------------------
-
-
-def test_only_the_newest_scene_context_block_survives_a_fold() -> None:
-    """The same guard `fold_stale_scenes` gives the view it sits inside.
-
-    Today nothing accumulates — `_append_current_scene` builds its message with
-    `request.override`, which touches one model call and not the graph's state.
-    This is the guard for the day that changes, and it is one pass over a list
-    against a run that would otherwise carry one full copy of the same scene's
-    capabilities and knowledge per turn.
-    """
-    block = context().render("BattleScene")
-    messages: list[BaseMessage] = [
-        HumanMessage(content=f"{CURRENT_SCENE_START}\nscene: BattleScene\n{block}\n{CURRENT_SCENE_END}")
-        for _ in range(3)
-    ]
-
-    folded = fold_stale_scene_context(messages)
-
-    assert [SCENE_CONTEXT_START in str(m.content) for m in folded] == [False, False, True]
-    assert "[scene context folded" in str(folded[0].content)
-    # Only the marked span goes; the live view around it is untouched.
-    assert CURRENT_SCENE_START in str(folded[0].content)
-    assert "scene: BattleScene" in str(folded[0].content)
-    # Pure, and idempotent for a fixed `keep`.
-    assert all(SCENE_CONTEXT_START in str(m.content) for m in messages)
-    assert [str(m.content) for m in fold_stale_scene_context(folded)] == [
-        str(m.content) for m in folded
-    ]
-
-
-def test_a_message_carrying_no_block_is_returned_as_the_same_object() -> None:
-    messages: list[BaseMessage] = [
-        HumanMessage(content="아무것도 없음"),
-        ToolMessage(content="여기도 없음", tool_call_id="1"),
-    ]
-
-    assert fold_stale_scene_context(messages) == messages
-
-
 # --- the wiring ---------------------------------------------------------------
 
 
@@ -547,7 +510,7 @@ def scenario() -> QaScenario:
 
 def drive(
     monkeypatch: pytest.MonkeyPatch, scenes: list[str], scene_context: SceneContext | None
-) -> ScriptedModel:
+) -> tuple[ScriptedModel, QaRunChannel]:
     model = ScriptedModel(
         turns=[
             {"tool_calls": [{"name": "observe_scene", "args": {"step": 1, "thought": "본다"}, "id": "1"}]},
@@ -578,83 +541,175 @@ def drive(
         lambda _model, reasoning=None, **_: model,
     )
     channel = make_channel()
+    # 서비스가 시나리오 시작 전에 하는 그대로. 런너를 거치지 않는다 — 화면을 그리는
+    # 자리가 `SceneMemory` 하나뿐이라, 블록도 거기 얹힌다.
+    channel.scene.scene_context = scene_context
     # One scene per model call, the last repeating: the run stands where `scenes`
     # says it stands when each turn is answered.
     model.before_turn = lambda call: channel.push_scene(scenes[min(call - 1, len(scenes) - 1)])
     model.before_turn(1)
     state = QaRunState(total_steps=1)
 
-    asyncio.run(QaRunner().run(channel, scenario(), state, scene_context))
+    asyncio.run(QaRunner().run(channel, scenario(), state))
 
     assert state.finished
-    return model
+    return model, channel
 
 
-def live_views(messages: list[BaseMessage]) -> list[str]:
-    return [str(m.content) for m in messages if str(m.content).startswith(CURRENT_SCENE_START)]
+def scene_views(messages: list[BaseMessage]) -> list[str]:
+    """화면이 모델에게 닿는 유일한 자리 — 도구 결과. 라이브 꼬리는 ARTEL-621 이 없앴다.
+
+    `fold` 된 것도 센다. `fold_stale_scenes` 는 씬 뷰 마커 사이를 자리표로 바꾸므로,
+    그런 메시지에는 시작 마커가 남지 않는다 — 그런데 블록은 그 마커 밖에 있어 그대로
+    남고, 남는다는 것이 여기서 확인하려는 것 중 하나다.
+    """
+    return [
+        str(m.content)
+        for m in messages
+        if isinstance(m, ToolMessage)
+        and (
+            SCENE_VIEW_START_PREFIX in str(m.content)
+            or FOLDED_VIEW_PREFIX in str(m.content)
+        )
+    ]
 
 
-def test_the_block_rides_inside_the_live_scene_the_model_reads(
+def test_the_block_rides_under_the_scene_view_the_model_reads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Inside `<<current scene>>`, not beside it.
+    """씬 뷰 아래, 그리고 그 마커 **밖**이다.
 
-    The block is about the scene named on that block's first line, and a separate
-    message would leave the agent to work out which scene it belonged to.
+    위가 게임이 지금 하고 있는 것이고 이것은 그것을 어디서 하고 있는지에 대한 문서다.
+    마커 밖인 것은 `fold_stale_scenes` 가 그 마커 쌍 사이를 통째로 자리표로 바꾸기
+    때문이다 — 안에 넣으면 씬 뷰 하나만 남기는 `fold` 에 블록도 함께 사라진다.
     """
-    model = drive(monkeypatch, ["BattleScene"], context())
+    model, _channel = drive(monkeypatch, ["BattleScene"], context())
 
-    views = live_views(model.received[-1])
-    assert views
-    for view in views:
-        assert view.startswith(CURRENT_SCENE_START)
-        assert view.endswith(CURRENT_SCENE_END)
-        assert "scene: BattleScene" in view
-        assert SCENE_CONTEXT_START in view
-        assert "[41] 전투 중 ESC 는 아무것도 하지 않는다" in view
+    # 두 번째 호출이 받은 것. 씬 뷰가 아직 하나뿐이라 `fold` 가 손대지 않은 상태다.
+    views = scene_views(model.received[1])
+    assert len(views) == 1
+    first = views[0]
+    assert "scene: BattleScene" in first
+    assert SCENE_CONTEXT_START in first
+    assert SCENE_CONTEXT_END in first
+    assert "[41] 전투 중 ESC 는 아무것도 하지 않는다" in first
+    # 마커 밖: 씬 뷰가 닫힌 **뒤**에 온다.
+    assert first.index(SCENE_VIEW_END) < first.index(SCENE_CONTEXT_START)
+
+
+def test_the_block_is_drawn_once_per_scene_visit_not_once_per_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """도구 결과는 대화에 쌓인다. 매번 그리면 한 씬에 머문 턴 수만큼 같은 문단이 남는다.
+
+    종전에는 매 모델 호출 뒤에 붙었다 사라지는 꼬리라 이 질문이 없었다. 그 꼬리를
+    ARTEL-621 이 없앴고, 남는 자리에 그리게 된 이상 한 번이 맞는 횟수다.
+    """
+    model, _channel = drive(monkeypatch, ["BattleScene"], context())
+
+    views = scene_views(model.received[-1])
+    assert len(views) >= 2
+    assert [SCENE_CONTEXT_START in view for view in views] == [True] + [False] * (
+        len(views) - 1
+    )
+
+
+def test_the_block_survives_the_fold_that_swallows_the_view_it_sits_under(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`fold` 되는 것은 화면이고, 블록은 그 화면이 무엇인지에 대한 설명이다.
+
+    `fold_stale_scenes` 는 가장 새 씬 뷰 하나만 전문으로 남긴다. 블록을 실은 것은 그
+    씬에 처음 들어선 도구 결과이므로, 마커 안에 있었다면 두 번째 씬 뷰가 도착하는
+    순간 사라졌을 것이다.
+    """
+    model, _channel = drive(monkeypatch, ["BattleScene"], context())
+
+    sent = model.received[-1]
+    folded = [
+        str(m.content)
+        for m in sent
+        if isinstance(m, ToolMessage) and FOLDED_VIEW_PREFIX in str(m.content)
+    ]
+    assert folded, "가장 새 씬 뷰 말고는 `fold` 돼 있어야 한다"
+    assert any(SCENE_CONTEXT_START in view for view in folded)
+    assert any("[41] 전투 중 ESC 는 아무것도 하지 않는다" in view for view in folded)
 
 
 def test_the_block_follows_the_scene_when_the_scene_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The scene name is read out of `SceneMemory` on every call, never cached.
+    """씬이 바뀌면 그 씬 조각이 새로 그려진다. 씬 이름을 캐싱하지 않는 것이 그 자체로
+    전환 처리다.
 
-    So the slice moves with the game and no code has to notice a transition.
+    두 도구 결과를 씬 이름이 아니라 **블록 내용**으로 가른다. 앞의 것은 `fold` 돼 있고,
+    씬 이름은 `fold` 되는 마커 안에 있어 남지 않는다 — 블록은 마커 밖이라 남는다.
     """
-    model = drive(monkeypatch, ["BattleScene", "GhostScene"], context())
+    model, _channel = drive(monkeypatch, ["BattleScene", "GhostScene"], context())
 
-    first = live_views(model.received[0])[-1]
-    later = live_views(model.received[-1])[-1]
+    views = scene_views(model.received[-1])
+    assert len(views) >= 2
+    first, second = views[0], views[1]
 
-    assert "scene: BattleScene" in first
     assert "전투 중 ESC 는 아무것도 하지 않는다" in first
     assert "여기서는 저장이 되지 않는다" not in first
 
-    assert "scene: GhostScene" in later
-    assert "여기서는 저장이 되지 않는다" in later
-    assert "전투 중 ESC 는 아무것도 하지 않는다" not in later
+    assert "여기서는 저장이 되지 않는다" in second
+    assert "전투 중 ESC 는 아무것도 하지 않는다" not in second
+    assert "scene: GhostScene" in second
 
 
 def test_a_run_without_a_lookup_still_runs_and_reads_the_scene(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The failure path, end to end: no block, and everything else unchanged."""
-    model = drive(monkeypatch, ["BattleScene"], None)
+    model, _channel = drive(monkeypatch, ["BattleScene"], None)
 
-    views = live_views(model.received[-1])
+    views = scene_views(model.received[-1])
     assert views
     assert all(SCENE_CONTEXT_START not in view for view in views)
-    assert all("scene: BattleScene" in view for view in views)
+    assert any("scene: BattleScene" in view for view in views)
 
 
 def test_a_scene_the_lookup_does_not_cover_leaves_the_view_alone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    model = drive(monkeypatch, ["SomeOtherScene"], context())
+    model, _channel = drive(monkeypatch, ["SomeOtherScene"], context())
 
-    views = live_views(model.received[-1])
+    views = scene_views(model.received[-1])
     assert views
     assert all(SCENE_CONTEXT_START not in view for view in views)
+
+
+def test_the_compaction_ledger_carries_the_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """화면과 같은 이유로, 그리고 이쪽이 더 급하다.
+
+    화면은 다음 도구 결과가 다시 그리지만, 블록은 씬에 들어설 때 한 번만 그려진다.
+    그것을 실은 도구 결과가 요약으로 대체되면 그 씬에 머무는 동안 다시 오지 않는다
+    (ARTEL-622 가 화면에 대해 세운 것과 같은 보장).
+    """
+    _model, channel = drive(monkeypatch, ["BattleScene"], context())
+
+    ledger = render_progress_ledger(QaRunState(total_steps=1), channel)
+
+    assert "The screen as it stands right now:" in ledger
+    assert SCENE_CONTEXT_START in ledger
+    assert "[41] 전투 중 ESC 는 아무것도 하지 않는다" in ledger
+
+
+def test_the_ledger_does_not_say_the_block_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """씬이 막 바뀐 자리에서 압축이 걸리면 원장의 `render` 자신이 블록을 그린다."""
+    _model, channel = drive(monkeypatch, ["BattleScene"], context())
+    # 씬이 막 바뀐 상태로 되돌린다: 다음 렌더가 블록을 그린다.
+    channel.scene.scene_context_drawn_for = None
+
+    ledger = render_progress_ledger(QaRunState(total_steps=1), channel)
+
+    assert ledger.count(SCENE_CONTEXT_START) == 1
 
 
 # --- the session path ---------------------------------------------------------
@@ -673,13 +728,17 @@ class SilentResetPolicy:
 
 
 class RecordingRunner:
-    """Records the scene context each scenario was started with."""
+    """Records the scene context each scenario was started with.
+
+    Off the channel rather than off a runner argument: the lookup is handed to
+    `SceneMemory`, which is the one place a screen is drawn from.
+    """
 
     def __init__(self, seen: list) -> None:
         self._seen = seen
 
-    async def run_with_deadline(self, channel, scenario, scene_context=None):
-        self._seen.append((channel.qa_try_id, scene_context))
+    async def run_with_deadline(self, channel, scenario):
+        self._seen.append((channel.qa_try_id, channel.scene.scene_context))
         return None, None
 
 
