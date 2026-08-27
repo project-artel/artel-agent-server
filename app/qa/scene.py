@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.qa.envelope import ActionRecord, GameState, Interactable, Rect, Screen, Visual
 from app.qa.pulse import PulseMemory
+from app.qa.scene_context import SceneContext
 
 # Per key. Long enough to show a path like 100 → 80 → 60, short enough that a
 # chatty value cannot grow the session without bound.
@@ -234,6 +235,21 @@ class SceneMemory(BaseModel):
     # 복원한 값과 게임에서 직접 읽은 값이 어긋날 때 어느 쪽이 무엇인지 읽는 쪽이 가릴 수
     # 있어야 한다. `states` 를 걷어내 하나로 만드는 것은 ARTEL-400 이다.
     pulse: PulseMemory = Field(default_factory=PulseMemory)
+    # 이 빌드의 씬별 capability 와 앵커 지식, 시나리오 시작에 한 번 받아 통째로 (ARTEL-612).
+    #
+    # 여기서 아무것도 조회하지 않는다. 부르는 것은 `app/qa/service.py` 이고 이 필드는 그
+    # 결과를 담기만 한다 — 조회를 여기 두면 프레임만 아는 클래스가 네트워크 의존을 갖는다.
+    # 없으면 `None` 이고, 그때 이 클래스는 종전과 한 글자도 다르지 않게 그린다.
+    scene_context: SceneContext | None = None
+    # 맥락 블록을 마지막으로 그린 씬 이름. 씬이 바뀐 뒤 첫 렌더에만 그리게 하는 장부다.
+    #
+    # 블록은 씬이 바뀔 때만 바뀌는데 도구 결과는 대화에 쌓이므로, 매번 그리면 한 씬에
+    # 머문 턴 수만큼 같은 문단이 컨텍스트에 남는다. 종전 라이브 뷰는 매 호출 교체되는
+    # 꼬리라 이 값이 없어도 됐다 — 그 꼬리가 프롬프트 접두를 깨뜨려 없어졌다(ARTEL-621).
+    #
+    # 블록이 `None` 으로 나와도 이 값을 옮긴다. 조회에 없는 씬을 매 턴 다시 물어보는 것은
+    # 답이 바뀌지 않는 질문을 반복하는 것이다.
+    scene_context_drawn_for: str | None = None
 
     def apply(self, state: GameState) -> None:
         if state.scene != self.scene:
@@ -340,7 +356,9 @@ class SceneMemory(BaseModel):
             # 바꾸는데, 이 갈래가 내는 것은 **행위의 기록**이라 접히면 안 된다. 씬 페이지가
             # 다음 도구 결과 하나에 먹히고(`DEFAULT_KEEP_SCENES = 1` 이 목록 전체 기준이다),
             # 옛 메시지를 고쳐 쓰는 일이라 프롬프트 접두까지 깨진다.
-            return pulse if pulse is not None else "No scene has been received yet."
+            if pulse is None:
+                return "No scene has been received yet."
+            return self._with_scene_context(pulse)
 
         lines = [f"scene: {self.scene}  (observation {self.updates})"]
         if self.screen is not None:
@@ -401,4 +419,41 @@ class SceneMemory(BaseModel):
 
         body = "\n".join(lines)
         start = f"{SCENE_VIEW_START_PREFIX}{self.updates}{SCENE_VIEW_START_SUFFIX}"
-        return f"{start}\n{body}\n{SCENE_VIEW_END}"
+        # 맥락 블록은 마커 **밖**이다. `fold_stale_scenes` 가 이 마커 쌍을 통째로 자리표로
+        # 바꾸는데, 그 안에 넣으면 씬 뷰 하나만 남기는 `fold` 에 블록도 함께 사라진다.
+        # `fold` 되는 것은 화면이고, 블록은 그 화면이 무엇인지에 대한 설명이라 같이 갈
+        # 이유가 없다.
+        return self._with_scene_context(f"{start}\n{body}\n{SCENE_VIEW_END}")
+
+    def scene_context_block(self) -> str | None:
+        """이 씬에 대해 이미 알려진 것. 조회가 그 씬을 싣지 않았으면 `None`.
+
+        장부(`scene_context_drawn_for`)를 보지 않는다. 이미 그렸든 아니든 지금 씬의 블록을
+        내놓는 자리이고, 압축이 이것을 쓴다 — 원장이 화면을 다시 말할 때 그 화면에 대한
+        설명도 함께 가야, 블록을 실었던 도구 결과가 요약으로 대체돼도 남는다(ARTEL-622 가
+        화면에 대해 세운 것과 같은 이유다).
+        """
+        if self.scene_context is None:
+            return None
+        return self.scene_context.render(self.scene or self.pulse.scene)
+
+    def _with_scene_context(self, view: str) -> str:
+        """`view` 아래에, 런이 이 씬으로 막 옮겨 왔을 때만 맥락 블록을 붙인다.
+
+        아래인 것은 위가 게임이 **지금** 하고 있는 것이고 이것은 그것을 어디서 하고 있는지에
+        대한 문서이기 때문이다. 종전에는 매 모델 호출 뒤에 붙던 라이브 뷰 안에 들어갔는데,
+        그 뷰가 없어졌다(ARTEL-621) — 화면을 내는 자리가 도구 결과 하나뿐이므로 블록도
+        그리로 온다. 도구 결과는 대화에 남으므로, 한 번 그리면 그 씬에 머무는 동안 그
+        자리에 있다.
+
+        씬 이름은 `pulse` 에서도 읽는다. `pulse` 만 오는 게임에서는 `self.scene` 이 끝까지
+        `None` 이고, 그것만 보면 블록이 영영 안 뜬다.
+        """
+        if self.scene_context is None:
+            return view
+        name = self.scene or self.pulse.scene
+        if not name or name == self.scene_context_drawn_for:
+            return view
+        self.scene_context_drawn_for = name
+        block = self.scene_context_block()
+        return view if block is None else f"{view}\n\n{block}"

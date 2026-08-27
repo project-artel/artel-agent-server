@@ -104,6 +104,12 @@ This rule covers source files only. Documentation, commit messages, and PR
 bodies keep the language their own conventions already set — `AGENTS.md`,
 `commit.md`, `pull-request.md`.
 
+Which words count as a technical term is decided in
+[`../../AGENTS.md`](../../AGENTS.md). Follow its terminology rule whenever you
+write a comment: a thing the code names keeps the name the code gave it, in
+backticks, even inside a Korean sentence. That rule is wider than this one — it
+also covers plan documents and pull request bodies.
+
 Existing English comments are not a defect. Rewrite one only when you are
 already changing that code; a comment-language sweep is unrelated churn.
 

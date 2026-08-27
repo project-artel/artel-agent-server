@@ -43,7 +43,7 @@ ARTEL-590 이 이미 기준을 산문으로 써 두었다 — "여기서만 참�
   화면에 묶일 수 있어서 배열이다. `KnowledgeAnchorView` 는 `scene_name` (필수) 과
   `screen_id` (문자열, null 허용) 다 — 다른 id 계열과 같이 문자열로 나온다.
 - 히트 렌더의 앵커 줄은 이웃 블록(`<<neighbours of ...>>`) **앞**에 둔다.
-  `fold_stale_knowledge` 가 그 블록만 정확히 갈아치우므로, 앞에 두면 접기와 무관하다.
+  `fold_stale_knowledge` 가 그 블록만 정확히 갈아치우므로, 앞에 두면 `fold` 와 무관하다.
 
 ## Approach (Checklist)
 
