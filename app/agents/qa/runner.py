@@ -11,12 +11,12 @@ import logging
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import wrap_model_call
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
 from app.agents.qa.arch import ResolvedArch
 from app.agents.qa.compaction import QaCompactionMiddleware
-from app.qa.scene import CURRENT_SCENE_START, SCENE_VIEW_START_PREFIX
+from app.qa.scene import SCENE_VIEW_START_PREFIX
 from app.agents.qa.context import (
     FOLDED_VIEW_PREFIX,
     fold_stale_knowledge,
@@ -131,31 +131,6 @@ def _plan(scenario: QaScenario) -> str:
         f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
         "Begin. Observe the screen first."
     )
-
-
-def _build_append_current_scene(channel: QaRunChannel):
-    """Put the scene as it stands right now at the end of every model call.
-
-    The tool loop only ever showed the agent a scene it had asked for, so a frame
-    the game volunteered sat in `SceneMemory` unread until the next tool call
-    happened to render it. This closes that: the current scene is in front of the
-    model on every turn, whether or not it looked, and it is written fresh each
-    time rather than accumulated — `request.override` touches this one call, not
-    the graph's state, so nothing here survives into the next turn to be resent.
-    """
-
-    @wrap_model_call
-    async def _append_current_scene(request, handler):
-        view = channel.scene.render_now()
-        if view is None:  # No frame has arrived yet; there is nothing to say.
-            return await handler(request)
-        return await handler(
-            request.override(messages=[*request.messages, HumanMessage(content=view)])
-        )
-
-    return _append_current_scene
-
-
 def middleware_names_for(arch: ResolvedArch) -> tuple[str, ...]:
     """Which middleware this structure wraps its model calls in, in order.
 
@@ -184,11 +159,16 @@ def middleware_names_for(arch: ResolvedArch) -> tuple[str, ...]:
     # inject and nothing to trim.
     if arch.vision:
         names.append("capture_vision")
-    # The live scene is appended after those: the fold has run over the tool
-    # messages and the image trim has happened, which leaves it as the actual
-    # final message the model reads. Usage logging sits innermost, so it reports
-    # what was actually sent.
-    names += ["append_current_scene", "log_token_usage"]
+    # 여기에 라이브 씬을 붙이던 자리다. 뺐다 — 매 모델 호출 맨 뒤에 붙었다 사라지는 메시지가
+    # 프롬프트 접두를 매 턴 깨뜨려, 캐시가 시스템 프롬프트에서 멈춰 있었다. 크기의 문제가
+    # 아니었고 10 토큰짜리 고정 꼬리도 똑같이 깼다.
+    #
+    # 화면은 이제 도구 결과가 낸다. `create_agent` 는 도구 호출이 없는 응답에 루프를 끝내므로
+    # (`langchain/agents/factory.py`) 런 중간의 모든 모델 호출은 직전 도구 결과 뒤에 온다 —
+    # 꼬리가 메우려던 틈이 애초에 없었다(ARTEL-621).
+    #
+    # 사용량 로깅은 가장 안쪽이다. 실제로 나간 것을 보고해야 한다.
+    names += ["log_token_usage"]
     return tuple(names)
 
 
@@ -221,7 +201,6 @@ def build_middleware(
         "fold_scene_views": lambda: _fold_scene_views,
         "fold_knowledge_neighbours": lambda: _fold_knowledge_neighbours,
         "capture_vision": lambda: QaCaptureVisionMiddleware(state),
-        "append_current_scene": lambda: _build_append_current_scene(channel),
         "log_token_usage": lambda: _log_token_usage,
     }
     return [builders[name]() for name in middleware_names_for(arch)]
@@ -259,13 +238,16 @@ def _context_shape(messages) -> str:
 
     캐시가 조용히 실패하듯 컨텍스트도 조용히 찬다. 그래서 조사용이 아니라 상시로 둔다.
 
+    라이브 뷰를 따로 세던 칸이 있었다. 그 답이 나왔으므로 뺐다 — 매 턴 교체되던 그 꼬리가
+    프롬프트 접두를 깨뜨리는 원인이었고, 지금은 화면이 도구 결과 안에 있다(ARTEL-621).
+
     세는 자리가 요점이다. 이 미들웨어는 순서상 마지막이라 여기 오는 `messages` 는 접기와
     라이브 뷰가 모두 적용된 뒤 — **실제로 나가는 그 목록**이다.
 
     토큰은 근사로 센다. 정확한 값은 provider 가 `usage_metadata` 로 주고, 이 줄이 답하는
     것은 총량이 아니라 **비율**이다.
     """
-    live = folded = kept = 0
+    folded = kept = 0
     by_kind: dict[str, int] = {}
 
     for message in messages:
@@ -274,12 +256,6 @@ def _context_shape(messages) -> str:
         # 하고, 그 차이로 조용히 빈 문자열이 되면 분해가 전부 0 으로 보인다.
         content = message.content
         text = content if isinstance(content, str) else ""
-
-        # 라이브 뷰는 `_append_current_scene` 가 붙인 것 하나다. 종류로는 Human 이라
-        # 섞이는데, 이 줄이 답해야 하는 첫 질문이 바로 그것이 몇 %인가다.
-        if isinstance(message, HumanMessage) and text.startswith(CURRENT_SCENE_START):
-            live += size
-            continue
 
         if isinstance(message, ToolMessage):
             # 접힌 자리와 전문으로 남은 자리를 가른다. `fold_stale_scenes` 가 실제로
@@ -292,12 +268,11 @@ def _context_shape(messages) -> str:
         kind = type(message).__name__.removesuffix("Message").lower()
         by_kind[kind] = by_kind.get(kind, 0) + size
 
-    total = live + sum(by_kind.values())
+    total = sum(by_kind.values())
     if total <= 0:
         return "messages=0"
 
-    parts = [f"live={live}({100 * live // total}%)"]
-    parts += [
+    parts = [
         f"{kind}={size}({100 * size // total}%)"
         for kind, size in sorted(by_kind.items(), key=lambda pair: -pair[1])
     ]

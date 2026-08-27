@@ -217,7 +217,7 @@ def test_langchain_sends_reasoning_in_openrouter_request(monkeypatch) -> None:
     transport = httpx.MockTransport(respond)
     monkeypatch.setattr(
         chat_model,
-        "_PrefixCacheableChatOpenAI",
+        "ChatOpenAI",
         lambda **kwargs: ChatOpenAI(
             **kwargs, http_client=httpx.Client(transport=transport)
         ),
@@ -243,7 +243,7 @@ def test_omitted_reasoning_is_not_sent_and_uses_a_distinct_cache_entry(
         def __init__(self, **kwargs):
             created.append(kwargs)
 
-    monkeypatch.setattr(chat_model, "_PrefixCacheableChatOpenAI", FakeChat)
+    monkeypatch.setattr(chat_model, "ChatOpenAI", FakeChat)
     chat_model.build_chat_model.cache_clear()
     try:
         plain = chat_model.build_chat_model(LLMModel.claude_sonnet_5)
@@ -278,7 +278,7 @@ def test_caching_is_opt_in_and_only_for_anthropic(monkeypatch) -> None:
         def __init__(self, **kwargs):
             created.append(kwargs)
 
-    monkeypatch.setattr(chat_model, "_PrefixCacheableChatOpenAI", FakeChat)
+    monkeypatch.setattr(chat_model, "ChatOpenAI", FakeChat)
     chat_model.build_chat_model.cache_clear()
     try:
         chat_model.build_chat_model(LLMModel.claude_opus_4_8, cache_prompt=True)
@@ -355,7 +355,7 @@ def test_a_model_call_carries_a_request_timeout_and_bounded_retries(
         def __init__(self, **kwargs):
             created.append(kwargs)
 
-    monkeypatch.setattr(chat_model, "_PrefixCacheableChatOpenAI", FakeChat)
+    monkeypatch.setattr(chat_model, "ChatOpenAI", FakeChat)
     chat_model.build_chat_model.cache_clear()
     try:
         chat_model.build_chat_model(LLMModel.claude_sonnet_5)

@@ -282,6 +282,12 @@ class ActionResultPayload(BaseModel):
     message: str | None = None
     batchId: int | None = None
     results: list[ActionResultItem] = Field(default_factory=list)
+    # 배치의 마지막 액션이 끝난 Unity 프레임 (SDK ARTEL-620). 판독이 싣는 `frame` 과 같은
+    # 시계라, 이 값보다 뒤인 판독만이 "내 액션 이후"다.
+    #
+    # `None` 은 이 필드를 모르는 옛 SDK 다. 그때는 시간으로 어림잡던 종전 동작으로 돌아간다 —
+    # 새 SDK 를 요구하면 그 게임의 QA 가 통째로 멎는데, 이 값이 주는 것은 그만한 것이 아니다.
+    frame: int | None = None
 
 
 class KnowledgeNeighbour(BaseModel):

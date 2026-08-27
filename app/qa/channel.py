@@ -318,7 +318,7 @@ class QaRunChannel:
         before_readings = self.scene.pulse.readings
 
         result = await self.dispatch_actions(actions, message, step)
-        await self._await_reading(before_readings, READING_WAIT_SECONDS)
+        await self._await_reading(before_readings, READING_WAIT_SECONDS, getattr(result, "frame", None))
 
         arrived = (
             self.scene.frames > before_frames
@@ -326,16 +326,34 @@ class QaRunChannel:
         )
         return result, arrived
 
-    async def _await_reading(self, after: int, timeout: float) -> bool:
-        """`after` 개보다 판독이 더 쌓일 때까지 기다린다. 최대 `timeout` 초.
+    async def _await_reading(
+        self, after: int, timeout: float, frame: int | None = None
+    ) -> bool:
+        """액션 이후의 판독이 올 때까지 기다린다. 최대 `timeout` 초.
 
         도착 이벤트가 아니라 **개수**를 본다. 이벤트만 보면 기다리기 시작하기 전에 이미
         도착한 판독을 못 본 것으로 세는데, 액션의 결과를 실은 배치가 `ACTION_RESULT` 보다
         먼저 도착하는 일이 실제로 있다 — SDK 가 0.1초마다 읽으므로 그쪽이 더 빠를 수 있다.
+
+        `frame` 이 있으면 **개수만으로는 부족하다.** 읽기(0.1초)와 전달(1초)이 두 속도라,
+        액션 직후 도착하는 첫 배치는 액션 **전에** 잡힌 것일 수 있다. 그것을 결과로 치면
+        도구가 액션 이전 화면을 보여 주고, 에이전트는 안 먹혔다고 읽어 같은 것을 또 누른다.
+        그래서 그 프레임보다 뒤에 잡힌 판독이 올 때까지 기다린다(ARTEL-621).
+
+        `frame` 이 없으면 종전대로 개수만 본다 — 그 필드를 모르는 옛 SDK 다.
         """
+        def arrived() -> bool:
+            if self.scene.pulse.readings <= after:
+                return False
+            if frame is None:
+                return True
+            # 판독의 frame 은 그것이 잡힌 프레임이다. 액션이 끝난 뒤라야 결과다.
+            latest = self.scene.pulse.frame
+            return latest is None or latest > frame
+
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
-        while self.scene.pulse.readings <= after:
+        while not arrived():
             remaining = deadline - loop.time()
             if remaining <= 0:
                 return False

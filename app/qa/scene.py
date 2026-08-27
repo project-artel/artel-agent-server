@@ -35,12 +35,6 @@ MAX_ACTIONS_IN_LIVE_VIEW = 10
 # remains of every screen it has ever shown.
 MISSING_LIFETIME = 5
 
-# `render_now`'s output is wrapped in these. Its own pair, not the tool-result
-# view's: the live view is injected fresh at the tail of every model call and
-# must never be mistaken for a stale view worth folding.
-CURRENT_SCENE_START = "<<current scene>>"
-CURRENT_SCENE_END = "<<end current scene>>"
-
 # `render`'s output is wrapped in these so a later pass — `fold_stale_scenes` in
 # `app/agents/qa/context.py` — can find exactly where the view starts and ends
 # inside a tool message that may also carry action-outcome lines above it and an
@@ -327,16 +321,25 @@ class SceneMemory(BaseModel):
             if at > watermark
         ]
 
-    def render(self, watermark: int) -> str:
+    def render(self, watermark: int, since_action: int | None = None) -> str:
         """The Agent-facing view: what changed since it last looked.
 
         Deliberately not a dump of the frame. The unchanged majority is summarised
         so the few things that moved are readable.
+
+        `since_action` 은 이 행위가 끝난 Unity 프레임이다. 판독이 유일한 출처인 지금, 그보다
+        뒤에 잡힌 판독만이 이 행위의 결과다 — 그것이 없으면 창의 경계가 타이머가 되고, 액션
+        직후 도착한 배치가 액션 **전**에 잡힌 것일 수 있다(ARTEL-621).
         """
         if self.scene is None:
-            pulse = self.pulse.render()
+            pulse = self.pulse.since_action(since_action)
             # 판독만 도착한 경우. GAME_STATE 가 없다고 판독을 감추면 그 채널이 유일한
             # 상태 출처가 되는 날(ARTEL-400) 화면이 통째로 비어 보인다.
+            #
+            # 마커로 감싸지 않는다. 접기(`fold_stale_scenes`)가 그 마커를 찾아 자리표로
+            # 바꾸는데, 이 갈래가 내는 것은 **행위의 기록**이라 접히면 안 된다. 씬 페이지가
+            # 다음 도구 결과 하나에 먹히고(`DEFAULT_KEEP_SCENES = 1` 이 목록 전체 기준이다),
+            # 옛 메시지를 고쳐 쓰는 일이라 프롬프트 접두까지 깨진다.
             return pulse if pulse is not None else "No scene has been received yet."
 
         lines = [f"scene: {self.scene}  (observation {self.updates})"]
@@ -399,70 +402,3 @@ class SceneMemory(BaseModel):
         body = "\n".join(lines)
         start = f"{SCENE_VIEW_START_PREFIX}{self.updates}{SCENE_VIEW_START_SUFFIX}"
         return f"{start}\n{body}\n{SCENE_VIEW_END}"
-
-    def render_now(self) -> str | None:
-        """The whole scene as it stands, with every value's history. `None` before
-        the first frame.
-
-        Written fresh at the tail of every model call (see the middleware in
-        `app/agents/qa/runner.py`), which is what makes it "now": the agent never
-        has to have asked for it, and it can never be a turn out of date. The
-        views inside tool results answer a narrower question — what one action
-        changed — and go stale the moment the next frame lands.
-
-        Not a diff, so no watermark: each observable and each visual carries its
-        own path instead, up to `MAX_VALUES_PER_OBSERVABLE` entries. The path is
-        what a diff-against-a-watermark cannot give once the watermark has moved
-        past the change.
-
-        Actions are here too, but only the newest `MAX_ACTIONS_IN_LIVE_VIEW` —
-        an action the game ran on its own is the one thing no tool result can
-        report, since nothing dispatched it.
-        """
-        if self.scene is None:
-            pulse = self.pulse.render_now()
-            if pulse is None:
-                return None
-            return f"{CURRENT_SCENE_START}\n{pulse}\n{CURRENT_SCENE_END}"
-
-        lines = [f"scene: {self.scene}  (observation {self.updates})"]
-        if self.screen is not None:
-            lines.append(f"screen: {self.screen.w}x{self.screen.h} pixels")
-
-        if self.observables:
-            lines.append("")
-            lines.append("values, oldest first:")
-            for key, track in self.observables.items():
-                note = "  (gone from the scene)" if key in self.missing else ""
-                if track.trimmed:
-                    note += "  (earlier changes trimmed)"
-                lines.append(f"  {key}: {_path(track, repr)}{note}")
-
-        lines.append("")
-        lines.append("you can act on:")
-        lines.extend(_interactable_line(item) for item in self.interactables)
-
-        if self.visuals:
-            lines.append("")
-            lines.append("on screen:")
-            for key, visual in zip(_visual_keys(self.visuals), self.visuals):
-                lines.append(_visual_line(visual))
-                track = self.visual_rects.get(key)
-                # Only when it actually moved. A path of one is the position the
-                # line above already printed.
-                if track is not None and track.changes:
-                    lines.append(f"      moved: {_rect_path(track)}")
-
-        recent = list(zip(self.actions, self.actions_at))[-MAX_ACTIONS_IN_LIVE_VIEW:]
-        if recent:
-            lines.append("")
-            lines.append(f"the game ran, newest last (up to {MAX_ACTIONS_IN_LIVE_VIEW}):")
-            lines.extend(_action_line(record, at) for record, at in recent)
-
-        pulse = self.pulse.render_now()
-        if pulse is not None:
-            lines.append("")
-            lines.append(pulse)
-
-        body = "\n".join(lines)
-        return f"{CURRENT_SCENE_START}\n{body}\n{CURRENT_SCENE_END}"

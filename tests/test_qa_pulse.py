@@ -208,52 +208,28 @@ def test_statics_는_객체_아래로_섞이지_않는다():
     assert [m.member for m in held.members.values()] == ["turn"]
 
 
-def test_라이브_뷰는_창을_먹지_않는다():
-    """한 턴에 도구 결과와 라이브 뷰가 각각 그린다. 둘 다 창을 옮기던 때, 먼저 그린
-    쪽이 창을 먹고 뒤에 붙는 라이브 뷰가 비어서 올라갔다 — 그리고 에이전트가 매 턴
-    실제로 읽는 것이 그 라이브 뷰다(ARTEL-579)."""
-    memory = fold(reading(active=[obj()]))
+def test_행위_이후의_판독만_그린다():
+    """창의 경계가 타이머가 아니라 행위다.
 
-    memory.render()          # 도구 결과가 먼저 그린다
-    live = memory.render_now()
-
-    assert "TurnBattleSystem.turn = 2" in live
-
-
-def test_라이브_뷰는_값이_멈춰도_계속_보여준다():
-    """판단이 필요한 것은 대체로 멈춰 있는 상태다. 대화창이 떠 있다는 사실은 뜨는
-    순간에만 소식이고 그 뒤로는 내내 조건인데, 창은 소식만 그린다."""
-    memory = fold(reading(active=[obj()]))
-    memory.render()
-    memory.apply(
-        PulseReading.model_validate(reading(reading=2, whole=False, active=[]))
-    )
-
-    live = memory.render_now()
-
-    assert "TurnBattleSystem.turn = 2" in live
-
-
-def test_전량_뷰에서도_소식만_표시된다():
-    """전부 그리면서 `since=0` 을 소식 기준으로도 쓰면 모든 줄에 표가 붙어 표가 뜻을
-    잃는다. 무엇을 그릴지와 무엇이 소식인지는 다른 질문이다."""
-    memory = fold(reading(active=[obj()]))
-    memory.render()
+    읽기(0.1초)와 전달(1초)이 두 속도라, 액션 직후 도착하는 첫 배치는 액션 **전에**
+    잡힌 것일 수 있다. 그것을 결과로 치면 도구가 액션 이전 화면을 보여 주고, 에이전트는
+    안 먹혔다고 읽어 같은 것을 또 누른다(ARTEL-621)."""
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(reading(reading=1, frame=100, active=[obj()])))
+    # 첫 판독은 전량이라 페이지가 먼저 나간다. 그것을 소진하고 나서 델타를 본다.
+    memory.since_action(None)
     memory.apply(
         PulseReading.model_validate(
             reading(
                 reading=2,
+                frame=200,
                 whole=False,
                 active=[
                     {
                         "selector": "Canvas[2]/continue[1]",
                         "id": 26168,
                         "members": [
-                            {
-                                "member": "phase",
-                                "value": "enemy",
-                                "on": "Battle.Turns.TurnBattleSystem",
-                            }
+                            {"member": "phase", "value": "enemy", "on": "Battle.Turns.TurnBattleSystem"}
                         ],
                     }
                 ],
@@ -261,19 +237,40 @@ def test_전량_뷰에서도_소식만_표시된다():
         )
     )
 
-    live = memory.render_now()
+    # 프레임 100 은 판독 1 이 잡힌 자리다. 그 뒤에 온 것만 이 행위의 결과다.
+    drawn = memory.since_action(100)
 
-    assert "TurnBattleSystem.phase = 'enemy'  (changed)" in live
-    assert "TurnBattleSystem.turn = 2\n" in live + "\n"
-    # 지난번에 이미 본 값에는 표가 안 붙는다.
-    assert "turn = 2  (changed)" not in live
+    assert "TurnBattleSystem.phase = 'enemy'" in drawn
+    assert "TurnBattleSystem.turn" not in drawn
 
 
-def test_창_뷰에는_소식_표가_붙지_않는다():
-    """창 뷰는 그려진 것이 곧 소식이라 표가 군더더기다."""
-    memory = fold(reading(active=[obj()]))
+def test_프레임을_모르면_종전의_창으로_돌아간다():
+    """그 필드를 모르는 옛 SDK 다. 없는 경계를 지어내면 판독을 통째로 잃는다."""
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(reading(reading=1, frame=100, active=[obj()])))
 
-    assert "(changed)" not in (memory.render() or "")
+    assert memory.after_frame(None) is None
+    # 지어내지 않고 그린다.
+    assert "TurnBattleSystem.turn" in memory.since_action(None)
+
+
+def test_씬이_바뀌면_한_번은_전량으로_그린다():
+    """델타만 이어 붙이면 독자가 씬 경계를 지나 거슬러 읽어야 한다. 판독이 그 경계를
+    이미 말해 주므로 여기서 새 규칙을 만들지 않는다."""
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(reading(reading=1, frame=100, active=[obj()])))
+    memory.since_action(None)          # 첫 전량을 소진한다
+
+    # 씬이 바뀐다 — SDK 가 whole 을 보낸다.
+    memory.apply(
+        PulseReading.model_validate(reading(reading=2, frame=200, whole=True, active=[obj()]))
+    )
+
+    assert memory.page_due
+    page = memory.since_action(150)
+    assert "TurnBattleSystem.turn" in page, "전량이라야 새 화면이 한 덩어리로 온다"
+    # 한 번만이다. 그 뒤로는 델타이고, 페이지는 대화에 남는다.
+    assert not memory.page_due
 
 
 def test_static_은_안_바뀌어도_계속_보인다():
@@ -368,7 +365,7 @@ def test_판독이_없으면_아무것도_실리지_않는다():
     """구버전 SDK 호환 — 이것이 깨지면 프롬프트가 통째로 달라진다."""
     memory = SceneMemory()
     assert memory.pulse.render() is None
-    assert memory.render_now() is None
+    assert memory.pulse.since_action(None) is None
     assert memory.render(0) == "No scene has been received yet."
 
 
@@ -376,7 +373,7 @@ def test_판독만_와도_보인다():
     memory = SceneMemory()
     memory.pulse.apply(PulseReading.model_validate(reading(active=[obj()])))
 
-    now = memory.render_now()
+    now = memory.render(0)
     assert now is not None
     assert "TurnBattleSystem.turn" in now
     assert "could not read: 1126" in now

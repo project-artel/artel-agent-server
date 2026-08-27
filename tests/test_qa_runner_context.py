@@ -23,7 +23,6 @@ from app.agents.qa.tools import QaRunState
 from app.qa.schemas import QaCaseRef, QaScenario, QaStep
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import MessageType
-from app.qa.scene import CURRENT_SCENE_END, CURRENT_SCENE_START
 
 
 class ScriptedModel(BaseChatModel):
@@ -180,71 +179,53 @@ def test_the_model_receives_folded_views_but_the_channel_keeps_the_full_text(
     assert any(frame["type"] == MessageType.STATUS.value for frame in log_and_status_frames)
 
 
-def test_the_current_scene_is_the_last_thing_the_model_reads_every_turn(
+def test_아무것도_모델_뒤에_덧붙지_않는다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The whole point of the live view: the agent never has to have asked."""
+    """매 호출 맨 뒤에 붙었다 사라지는 메시지가 없다.
 
+    그런 꼬리는 프롬프트 접두를 매 턴 깨뜨린다 — 저장된 프롬프트가 새 요청의 완전한
+    접두가 되는 일이 영영 없어서, 캐시가 시스템 프롬프트에서 멈춘다. 크기의 문제가
+    아니었고 10 토큰짜리 고정 꼬리도 똑같이 깼다(ARTEL-621).
+
+    화면은 도구 결과가 낸다. `create_agent` 가 도구 호출 없는 응답에 루프를 끝내므로
+    런 중간의 모든 모델 호출은 직전 도구 결과 뒤에 오고, 꼬리가 메우려던 틈이 없다.
+    """
     model, _channel, _sent = scripted_run(monkeypatch)
 
-    def views(messages: list[BaseMessage]) -> list[BaseMessage]:
-        # The system prompt teaches the agent how to read this block, so it names
-        # the marker too. Only a message that IS a view counts here.
-        return [m for m in messages if str(m.content).startswith(CURRENT_SCENE_START)]
+    first, rest = model.received[0], model.received[1:]
+    # 첫 호출은 시스템 프롬프트와 시나리오뿐이다. 아직 도구를 부른 적이 없다.
+    assert isinstance(first[-1], HumanMessage)
 
-    # 첫 호출에도 실린다. 게임이 붙자마자 프레임을 올리기 때문이다 — 에이전트가 아직
-    # 아무것도 묻지 않았는데 화면이 있다는 것이 이 블록의 요점이고, 화면을 묻는 액션이
-    # 사라진 뒤(ARTEL-516)로는 **묻는 길이 아예 없다.**
-    #
-    # 아무것도 도착하지 않은 창은 아래 `..._before_anything_arrives` 가 지킨다.
-    for received in model.received:
-        last = received[-1]
-        assert isinstance(last, HumanMessage)
-        assert str(last.content).startswith(CURRENT_SCENE_START)
-        assert str(last.content).endswith(CURRENT_SCENE_END)
-        # Exactly one, every turn: it is appended to the request rather than
-        # written into the graph's state, so it cannot pile up.
-        assert views(received) == [last]
-
-
-def test_no_scene_block_before_anything_arrives() -> None:
-    """한 프레임도 못 받았으면 블록이 없다.
-
-    붙자마자 프레임이 온다는 것과 "안 와도 있는 척한다"는 다르다. 뒤의 것이면 에이전트가
-    빈 화면을 실제 화면으로 읽는다.
-    """
-    channel = QaRunChannel(qa_try_id=1, send=_swallow)
-
-    assert channel.scene.render_now() is None
+    # 그 뒤로는 매번 도구 결과가 마지막이다. 미들웨어가 뒤에 얹었다면 그것이 마지막일
+    # 것이고, 이 검사가 그것을 잡는다.
+    assert rest, "루프가 한 번도 안 돌았다면 이 검사가 아무것도 안 지킨다"
+    for received in rest:
+        assert isinstance(received[-1], ToolMessage), type(received[-1]).__name__
 
 
 async def _swallow(frame: dict) -> None:
     return None
 
+def test_컨텍스트_분해가_종류별로_센다():
+    """총량만으로는 무엇을 고쳐야 하는지가 안 나온다.
 
-def test_컨텍스트_분해가_라이브_뷰를_따로_센다():
-    """이 줄이 답해야 하는 첫 질문이 그것이다 — 라이브 뷰가 전체의 몇 %인가.
-
-    종류로는 Human 이라 그냥 세면 시나리오와 섞인다. 섞이면 판독 렌더를 줄이는 것이
-    의미가 있는지 없는지를 로그가 말해 주지 못한다(ARTEL-604)."""
+    라이브 뷰를 따로 세던 칸이 있었다. 그 답이 나왔으므로 뺐다 — 매 턴 교체되던 그
+    꼬리가 프롬프트 접두를 깨뜨리는 원인이었고, 지금은 화면이 도구 결과 안에 있다."""
     from langchain_core.messages import AIMessage, HumanMessage
 
     from app.agents.qa.runner import _context_shape
-    from app.qa.scene import CURRENT_SCENE_START
 
     shape = _context_shape(
         [
             HumanMessage(content="시나리오 " * 200),
             AIMessage(content="추론 " * 100),
-            HumanMessage(content=CURRENT_SCENE_START + "\n판독 " * 300),
         ]
     )
 
-    assert "live=" in shape
-    assert "live=0(" not in shape
-    # 라이브 뷰가 human 에 섞이지 않았다.
     assert "human=" in shape
-
+    assert "ai=" in shape
+    assert "live=" not in shape
 
 def test_컨텍스트_분해가_접힌_뷰와_남은_뷰를_가른다():
     """`fold_stale_scenes` 가 실제로 얼마나 누르는지는 이 둘의 비에서만 나온다."""
