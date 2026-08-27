@@ -882,3 +882,46 @@ def test_the_old_flat_shape_still_reads():
         )
     )
     assert "SwordEnemy.Hp = 20" in (memory.render() or "")
+
+
+def test_태그가_조준값_옆에_실린다():
+    """`CompareTag` 로 갈라지는 규칙이 흔하고, 그 갈래가 QA 가 확인해야 하는 규칙인
+    경우도 흔하다. 샘플 게임에서 어느 카드가 어느 조합 칸에 들어가는지가 이것으로
+    갈리는데, 판독에 그 값이 없어 에이전트가 카드를 반대로 넣었다(ARTEL-631)."""
+    memory = fold(reading(active=[obj(tag="Spell")]))
+
+    assert "tag=Spell" in memory.since_action(None)
+
+
+def test_태그가_없으면_조용하다():
+    """SDK 가 `Untagged` 를 안 보낸다. 여기서 없다는 것은 태그가 없다는 뜻이고,
+    기본값을 모든 객체에 붙이면 문서만 커지고 말하는 것이 없다."""
+    memory = fold(reading(active=[obj()]))
+
+    assert "tag=" not in memory.since_action(None)
+
+
+def test_델타가_태그를_다시_말하지_않아도_지킨다():
+    """장부를 타므로 안 바뀐 태그는 델타에 안 실린다. 그때 잃으면 카드가 어느 칸에
+    들어가는지를 한 판독 뒤에 잊는다."""
+    memory = fold(reading(active=[obj(tag="Spell")]))
+    memory.since_action(None)
+    memory.apply(
+        PulseReading.model_validate(
+            reading(
+                reading=2,
+                whole=False,
+                active=[
+                    {
+                        "selector": "Canvas[2]/continue[1]",
+                        "id": 26168,
+                        "members": [
+                            {"member": "turn", "value": 3, "on": "Battle.Turns.TurnBattleSystem"}
+                        ],
+                    }
+                ],
+            )
+        )
+    )
+
+    assert "tag=Spell" in memory.since_action(None)

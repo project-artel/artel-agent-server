@@ -122,6 +122,12 @@ class PulseObject(BaseModel):
     world: dict[str, Any] | None = None
     # 화면 좌표. 조준의 대체 수단이고, 화면 크기와 맞대면 화면 안인지도 나온다.
     rect: dict[str, Any] | None = None
+    # 게임이 이 객체를 무엇으로 분류해 두었는가(ARTEL-631). `CompareTag` 로 갈라지는 규칙이
+    # 흔하고, 그 갈래가 QA 가 확인해야 하는 규칙인 경우도 흔하다 — 샘플 게임에서 어느 카드가
+    # 어느 조합 칸에 들어가는지가 이것으로 갈린다.
+    #
+    # `Untagged` 는 SDK 가 안 보낸다. 여기서 `None` 은 "태그가 없다" 이지 "모른다" 가 아니다.
+    tag: str | None = None
     offers: dict[str, Any] | None = None
     members: list[PulseMember] = Field(default_factory=list)
     # 컴포넌트별로 묶인 멤버. `on` 을 멤버마다 되풀이하지 않으려고 SDK 가 이렇게 낸다
@@ -231,6 +237,8 @@ class _HeldObject(BaseModel):
     selector: str | None = None
     world: dict[str, Any] | None = None
     rect: dict[str, Any] | None = None
+    # 게임이 이 객체를 무엇으로 분류해 두었는가(ARTEL-631).
+    tag: str | None = None
     offers: dict[str, Any] | None = None
     # True when the object last arrived under `active`.
     live: bool = True
@@ -378,6 +386,7 @@ class PulseMemory(BaseModel):
                     selector=obj.selector or (was.selector if was else None),
                     world=obj.world or (was.world if was else None),
                     rect=obj.rect or (was.rect if was else None),
+                    tag=obj.tag or (was.tag if was else None),
                     offers=obj.offers or (was.offers if was else None),
                     live=live,
                     members=dict(was.members) if was else {},
@@ -618,6 +627,12 @@ class PulseMemory(BaseModel):
         bits = []
         if obj.id is not None:
             bits.append(f"id={obj.id}")
+
+        # 게임이 이 객체를 무엇으로 분류해 두었는가(ARTEL-631). 조준값 옆이 그 자리다 —
+        # 무엇을 겨눌지 고를 때 필요한 것이고, 실제로 어느 카드가 어느 조합 칸에 들어가는지가
+        # 이것으로 갈린다. 그것을 몰라 에이전트가 카드를 반대로 넣었다.
+        if obj.tag:
+            bits.append(f"tag={obj.tag}")
 
         # 모서리가 아니라 **중심**을 낸다. 판독이 싣는 `rect.x/y` 는 요소의 좌상단이고,
         # 포인터 도구가 받는 것은 겨눌 점이다. 그대로 내면 276px 짜리에서 138px 씩
