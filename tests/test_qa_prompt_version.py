@@ -255,7 +255,7 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v11() -> None:
+def test_the_default_qa_version_is_v12() -> None:
     """A run that names no version has to get the newest prompt.
 
     This is also the trap in adding a version: `resolve_version` returns the
@@ -265,7 +265,53 @@ def test_the_default_qa_version_is_v11() -> None:
     `set_input_axis` before the tool exists teaches the agent to reach for
     something that is not there.
     """
-    assert resolve_version("qa_run") == "v11"
+    assert resolve_version("qa_run") == "v12"
+
+
+def test_v12_drops_the_screen_map_and_says_what_a_screen_anchors() -> None:
+    """The map moved to Orchestration's `content_map`, so the prompt stops asking for one.
+
+    A deletion is the one prompt change that cannot be checked by "everything the
+    old version said, the new one still says", so what it leaves behind has to be
+    pinned instead: the section is gone, the two sentences that leaned on it no
+    longer name a route, and the criterion that replaces it is stated — a fact true
+    only here says where, a fact true everywhere says nothing.
+
+    The tool descriptions carry the same rule (ARTEL-192 makes them the single
+    source for how to CALL a tool), and `tests/test_qa_knowledge_graph.py` pins
+    that half. This half is the habit that spans `record_knowledge` and
+    `link_knowledge`, which no one description owns.
+    """
+    v11 = load_prompt("qa_run", "system", "v11").body
+    v12 = load_prompt("qa_run", "system", "v12").body
+
+    assert "### The screen map" in v11
+    assert "### The screen map" not in v12
+    assert "LEADS_TO" not in v12
+
+    # The opening that leaned on the deleted section, and the section that took its
+    # place. "the clearest case" was the sentence pointing back at the screen map.
+    assert "### Structuring the rest of what you know" in v12
+    assert "the clearest case" not in v12
+    assert "The list of screens and the routes between them are NOT that." in v12
+    assert "Say which screen or scene it holds on when you record it" in v12
+    assert "names no screen at all" in v12
+
+    # Breakage is still reported rather than unlinked; only the routes went.
+    assert "removing a link because the build is broken" in v12
+
+
+def test_v12_defines_the_same_roles_as_v11() -> None:
+    """A version directory missing a role breaks only the runs that need it.
+
+    `vision_directive` is loaded from the resolved version, so a v12 without it
+    raises at run time for a vision run and never for a text-only one.
+    """
+    assert roles_in("qa_run", "v12") == roles_in("qa_run", "v11")
+    # Reading a screen did not change, so the file did not either.
+    assert load_prompt("qa_run", "vision_directive", "v12").body == (
+        load_prompt("qa_run", "vision_directive", "v11").body
+    )
 
 
 def test_v9_structures_the_body_and_adds_the_knowledge_base_section() -> None:

@@ -98,10 +98,16 @@ KNOWLEDGE_TAGS = ("CONTROL", "RULE", "OBJECTIVE", "UI", "MISC")
 # refusal since ARTEL-332, so this is no longer the only thing keeping a bad frame
 # from being reported as a success — it is now a round trip the run does not spend.
 #
-# There is deliberately no catch-all. An agent with one easy option and four hard
+# There is deliberately no catch-all. An agent with one easy option and three hard
 # ones picks the easy one, and the graph degrades to untyped; the tool description
-# says instead that if none of the five fits, do not link.
-KNOWLEDGE_RELATIONS = ("LEADS_TO", "CONTRADICTS", "REFINES", "DEPENDS_ON", "REPLACES")
+# says instead that if none of the four fits, do not link.
+#
+# `LEADS_TO` left this tuple with ARTEL-590. The screen map — which screens exist
+# and how you get between them — is owned by Orchestration's `content_map` schema,
+# filled from play, and a second copy built by the agent only gave later runs two
+# maps that disagreed. Reading is a separate matter: `_REVERSED` still knows the
+# relation, because the edges written before this are still in the graph.
+KNOWLEDGE_RELATIONS = ("CONTRADICTS", "REFINES", "DEPENDS_ON", "REPLACES")
 
 # The label a vector neighbour is printed under. Never sent: Orchestration's CHECK
 # constraint has no such relation, because a stored similarity turns silently false
@@ -184,13 +190,18 @@ about the game, and filing them poisons the answers later runs get. "Buying is
 blocked while gold is below the price" is knowledge; "buying is blocked right
 now" is not.
 
-Screens count, and they are the most useful thing you can leave behind. File one
-entry per screen — a scene, and also each panel, overlay, dialog or tab that
-changes what you can act on, since a shop panel over the town is somewhere you can
-act and is its own place. Tag it {ui_tag}, say what the screen is for and what can
-be done there, and connect it to the screens it leads to with `link_knowledge`.
-The same test applies: "the top bar carries a gold counter" is the screen, "the
-gold counter reads 340" is this moment.
+Do NOT record which screens the game has, or how to get from one to another. That
+map is built from play and kept elsewhere; a copy written here leaves a later run
+holding two maps that disagree, with nothing to say which one moved.
+
+What does belong here is the fact that only holds in one place: a control that
+behaves on this screen unlike anywhere else, a screen whose usual way back does
+nothing, a purchase this shop refuses in a way no other does. Say which screen or
+scene it holds on, because an exception nobody can locate is one a later run
+cannot use, and one that reads as a rule about the game teaches every other screen
+something false. Anything true wherever the player is — how the game reads input,
+what a resource is for, what the objective is — names no screen at all: a fact
+tied to one screen is a fact the run standing on the next one never finds.
 
 Do NOT record what the scenario already told you. Do NOT record a bug: a build
 behaving wrongly is a finding for `report_step`, not a rule to teach the next
@@ -275,8 +286,6 @@ them.
 
 `relation` is one of {relations}, and each means something a reader ACTS on:
 
-- `LEADS_TO` — from one screen to another. `from` is where you were, `to` is where
-  you ended up. This is what builds the game's map.
 - `CONTRADICTS` — the two cannot both be true. The most valuable link there is,
   and the one most often left unrecorded, because the moment you notice it is
   usually the moment you are busy deciding which of them to believe.
@@ -285,16 +294,13 @@ them.
 - `DEPENDS_ON` — `from` only holds while `to` holds. A precondition.
 - `REPLACES` — `from` supersedes `to`, which you have deleted or are about to.
 
-If none of the five fits, do NOT link. Two entries being about vaguely the same
+If none of the four fits, do NOT link. Two entries being about vaguely the same
 subject is not a relation — searching already finds those, and a link that says
 nothing crowds out the ones that say something.
 
 `note` is required and it is the only record of why you thought the connection was
-real, so write what someone would need who later asks whether it should be there.
-For `LEADS_TO` the note is not the reason but the ACTION — "the Shop button on the
-town top bar", "Escape, or the X in the panel's top right" — because that sentence
-is what makes the route usable by a run that has never walked it. A condition
-belongs there too: "the Continue button, only after a save exists".
+real, so write what someone would need who later asks whether it should be there —
+what you saw, and any condition the connection holds under.
 
 Both ids must be ones this run has been shown, either as a search hit or as a
 neighbour line under one.
@@ -304,18 +310,20 @@ A run gets {limit} links. Send each one once — a repeat comes back refused."""
 UNLINK_KNOWLEDGE_DESCRIPTION = """Remove a relation between two knowledge entries.
 
 The bar is lower than deleting an entry — both entries survive, and what is lost
-is one connection and the sentence behind it. But it is just as quiet: a route you
-remove simply stops being there, for every run after this one, with nobody
+is one connection and the sentence behind it. But it is just as quiet: a connection
+you remove simply stops being there, for every run after this one, with nobody
 prompted to look.
 
-The mistake to avoid is removing a link because the BUILD is broken. A door that
-will not open is far more often a bug than a route that no longer exists, and that
-belongs in `report_issue` — unlink it and you have deleted the map instead of
-reporting the breakage. Before removing a `LEADS_TO`, read its note: a route
-recorded as conditional is not gone just because the condition is not met right now.
+The mistake to avoid is removing a link because the BUILD is broken. A connection
+that does not hold today is far more often a bug than a claim that was never true,
+and that belongs in `report_issue` — unlink it and you have deleted what an earlier
+run worked out instead of reporting the breakage. Read the note first: it says what
+the connection was asserted on, and a condition that is not met right now is not
+the same as a connection that was wrong.
 
-Remove a link when the connection itself was wrong: the route never existed, the
-two entries do not actually contradict, the precondition was misread.
+Remove a link when the connection itself was wrong: the two entries do not
+actually contradict, the precondition was misread, the narrower case refines
+something else.
 
 Name it the way you saw it — `from_knowledge_id`, `to_knowledge_id` and the same
 `relation`. Your `thought` is the only record of why it went away, so write it there.
@@ -365,6 +373,14 @@ def render_neighbour(neighbour) -> str:
 # How a relation reads when the entry you are looking at is on the receiving end.
 # `CONTRADICTS` is absent on purpose: it is symmetric, and a direction word there
 # would invent a claim the graph never made.
+#
+# `LEADS_TO` is here and NOT in `KNOWLEDGE_RELATIONS`, which is deliberate. The
+# agent can no longer write one (ARTEL-590 handed the screen map to Orchestration's
+# `content_map`), but the edges earlier runs wrote are still stored and still come
+# back on a search hit or an expansion. Dropping the label would render them as the
+# raw relation with no direction, so an entry reached BY a route would read as one
+# leading to it — the map inverted, in the results of a change that was meant to
+# stop maintaining a map at all.
 _REVERSED = {
     "LEADS_TO": "reached from",
     "REFINES": "refined by",
@@ -476,9 +492,10 @@ def render_expansion(payload, remaining: int) -> str:
     """What the model reads after an expansion that ran.
 
     The note IS printed here, unlike in a hit's folded neighbour lines. This is
-    the call the agent spent a budget slot on precisely to see more, and for a
-    `LEADS_TO` the note is the whole payload — it is where the route stops being
-    a fact about the graph and becomes something you can walk.
+    the call the agent spent a budget slot on precisely to see more, and the note
+    is often the whole payload — the condition a `DEPENDS_ON` holds under, or what
+    an older `LEADS_TO` edge says you did to walk it. Without it the answer is a
+    fact about the graph rather than something to act on.
     """
     budget = f"{remaining} knowledge expansion(s) left in this run."
     if not payload.neighbors:
