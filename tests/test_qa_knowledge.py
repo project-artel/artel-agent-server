@@ -30,12 +30,13 @@ from app.agents.qa.knowledge import (
     MAX_SEARCHES_PER_RUN,
     RESULT_LIMIT,
     render_description,
+    render_hit,
 )
 from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState, build_tools
 from app.qa.schemas import QaCaseRef, QaScenario, QaStep
 from app.qa.channel import QaRunChannel
-from app.qa.envelope import MessageType
+from app.qa.envelope import KnowledgeSearchHit, LogCategory, MessageType
 from app.qa.scene import SCENE_VIEW_START_PREFIX
 
 
@@ -260,6 +261,82 @@ def test_a_hit_carries_where_it_came_from_and_how_close_it_is() -> None:
         assert "0.41" in result
 
     asyncio.run(run())
+
+
+def test_a_hit_with_an_anchor_says_where_it_holds() -> None:
+    """An anchored fact read as a rule about the game is applied where it is false,
+    so the place has to survive into what the agent reads (ARTEL-592)."""
+
+    async def run() -> None:
+        channel, _, tools, sent = make()
+
+        answer(
+            channel,
+            sent,
+            {
+                "query": "q",
+                "model": "e5",
+                "results": [
+                    hit(anchors=[{"scene_name": "ShopScene", "screen_id": "12"}])
+                ],
+            },
+        )
+        result = await tools["search_knowledge"].ainvoke(
+            {"step": 1, "thought": "확인", "query": "구매 규칙"}
+        )
+
+        assert "holds on ShopScene (screen 12)" in result
+
+    asyncio.run(run())
+
+
+def test_a_hit_anchored_to_several_places_names_them_all_on_one_line() -> None:
+    """One entry can be tied to more than one screen, and a line per anchor would
+    let a well-travelled rule out-print the hit it belongs to."""
+
+    async def run() -> None:
+        channel, _, tools, sent = make()
+
+        answer(
+            channel,
+            sent,
+            {
+                "query": "q",
+                "model": "e5",
+                "results": [
+                    hit(
+                        anchors=[
+                            {"scene_name": "ShopScene", "screen_id": "12"},
+                            {"scene_name": "InventoryScene"},
+                        ]
+                    )
+                ],
+            },
+        )
+        result = await tools["search_knowledge"].ainvoke(
+            {"step": 1, "thought": "확인", "query": "구매 규칙"}
+        )
+
+        assert "holds on ShopScene (screen 12), InventoryScene" in result
+
+    asyncio.run(run())
+
+
+def test_a_hit_without_an_anchor_reads_exactly_as_it_did_before() -> None:
+    """No empty line and no "none" label — the three lines and nothing else.
+
+    A fact true wherever the player is is the common case, so a line spent saying
+    so would grow every transcript and invite the reading that the anchor went
+    missing rather than was never claimed. An Orchestration that predates anchors
+    sends every hit this way, which is the same shape.
+    """
+    unanchored = KnowledgeSearchHit(**hit())
+
+    assert render_hit(1, unanchored) == (
+        "1. [id 41 · RULE · from DOCS · similarity 0.83]\n"
+        "   구매는 소지금이 가격 이상일 때만 가능하다\n"
+        "   소지금이 가격보다 적으면 구매 버튼은 비활성 상태가 되고 눌러도 반응하지 않는다."
+    )
 
 
 def test_a_long_description_is_clipped_and_says_so() -> None:
@@ -515,6 +592,12 @@ def test_a_record_goes_out_as_a_knowledge_create_frame() -> None:
     `KnowledgeMutationRequest` reads `tag`, `summary` and `description` and takes
     the project, the source and the source id from the run itself — so a frame
     that named any of those would be ignored at best.
+
+    A write that names no anchor carries the two anchor fields as nulls (ARTEL-592)
+    and means exactly what it meant before they existed: this fact is true wherever
+    the player is. Null rather than absent because `outbound_envelope` dumps the
+    whole model — the same way `step` has always ridden on a search — and the far
+    side reads a null anchor as no anchor.
     """
 
     async def run() -> None:
@@ -526,8 +609,98 @@ def test_a_record_goes_out_as_a_knowledge_create_frame() -> None:
             "tag": "RULE",
             "summary": "구매는 소지금이 가격 이상일 때만 가능하다",
             "description": "소지금이 가격보다 적으면 구매 버튼이 비활성 상태가 된다.",
+            "scene_name": None,
+            "screen_id": None,
         }
         assert "RULE" in result
+
+    asyncio.run(run())
+
+
+def test_an_anchored_record_carries_the_scene_and_the_screen() -> None:
+    """Both fields travel exactly as the agent named them (ARTEL-592).
+
+    The scene name is not validated against anything: a project with no content
+    map still has scene names, and checking them here would refuse every anchor
+    that project could ever write. The screen id is text, like every other id
+    crossing this boundary, so a 64-bit value cannot lose precision through JSON.
+    """
+
+    async def run() -> None:
+        _, _, tools, sent = make()
+
+        await record(tools, scene_name="ShopScene", screen_id="12")
+
+        payload = creates(sent)[-1]["payload"]
+        assert payload["scene_name"] == "ShopScene"
+        assert payload["screen_id"] == "12"
+
+    asyncio.run(run())
+
+
+def test_a_scene_without_a_screen_is_a_complete_anchor() -> None:
+    """A screen is decided from observation and often is not, so the scene alone
+    has to be sayable — otherwise the run with no screen number files the fact as
+    a rule about the whole game, which is the one reading that is false."""
+
+    async def run() -> None:
+        _, _, tools, sent = make()
+
+        await record(tools, scene_name="ShopScene")
+
+        payload = creates(sent)[-1]["payload"]
+        assert payload["scene_name"] == "ShopScene"
+        assert payload["screen_id"] is None
+
+    asyncio.run(run())
+
+
+def test_a_blank_scene_name_is_the_same_as_naming_none() -> None:
+    """Whitespace is not a place. Sent through, it would file the entry under an
+    anchor no later search could ever match."""
+
+    async def run() -> None:
+        _, _, tools, sent = make()
+
+        await record(tools, scene_name="   ")
+
+        assert creates(sent)[-1]["payload"]["scene_name"] is None
+
+    asyncio.run(run())
+
+
+def test_a_blank_screen_id_is_the_same_as_naming_none() -> None:
+    """Washed like the scene name, and washed BEFORE the pairing check — otherwise
+    a blank string would refuse a write whose anchor is a scene and nothing more."""
+
+    async def run() -> None:
+        _, _, tools, sent = make()
+
+        await record(tools, scene_name="ShopScene", screen_id="  ")
+
+        payload = creates(sent)[-1]["payload"]
+        assert payload["scene_name"] == "ShopScene"
+        assert payload["screen_id"] is None
+
+    asyncio.run(run())
+
+
+def test_a_screen_without_a_scene_is_refused_before_the_frame_goes_out() -> None:
+    """Orchestration refuses this pair, and its refusal costs a round trip.
+
+    Refused here for the reason an unknown tag is: a screen lives inside a scene,
+    so an anchor naming a screen and no scene cannot be read back later as which
+    scene's screen it was. The refusal names the repair, because the agent that
+    knew the number can supply the name.
+    """
+
+    async def run() -> None:
+        _, _, tools, sent = make()
+
+        result = await record(tools, screen_id="12")
+
+        assert creates(sent) == []
+        assert "`screen_id` needs the `scene_name`" in result
 
     asyncio.run(run())
 

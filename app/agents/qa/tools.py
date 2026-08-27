@@ -529,11 +529,16 @@ def build_tools(
         description=RECORD_KNOWLEDGE_DESCRIPTION.format(
             limit=arch.max_records_per_run,
             tags=", ".join(KNOWLEDGE_TAGS),
-            ui_tag="UI",
         )
     )
     async def record_knowledge(
-        step: int, thought: str, tag: str, summary: str, description: str
+        step: int,
+        thought: str,
+        tag: str,
+        summary: str,
+        description: str,
+        scene_name: str | None = None,
+        screen_id: str | None = None,
     ) -> str:
         # What the agent reads is RECORD_KNOWLEDGE_DESCRIPTION, not this.
         #
@@ -581,11 +586,34 @@ def build_tools(
                 "recorded. Write them out and call this again."
             ) + render_missing_knowledge_warning(outstanding)
 
+        # The anchor is whatever the agent named, and nothing else. There is no line
+        # here that reads the run's current scene, and there must not be: a rule true
+        # everywhere would then be filed under whichever screen the run happened to
+        # be standing on, and a rule filed that way is one the run on the next screen
+        # never finds.
+        scene = (scene_name or "").strip() or None
+        screen = (screen_id or "").strip() or None
+        if scene is None and screen is not None:
+            # Orchestration refuses this pair as well. Refused here first for the
+            # reason the tag and the blank summary are — and this one is worth the
+            # words, because the mistake has an obvious repair the agent can make.
+            return (
+                "`screen_id` needs the `scene_name` it belongs to, so nothing was "
+                "recorded. Name the scene as well and call this again, or leave both "
+                "out if this fact is true wherever the player is."
+            ) + render_missing_knowledge_warning(outstanding)
+
         state.knowledge_records_attempted += 1
         try:
             answer = await channel.write_knowledge(
                 MessageType.KNOWLEDGE_CREATE,
-                KnowledgeCreatePayload(tag=topic, summary=fact, description=detail),
+                KnowledgeCreatePayload(
+                    tag=topic,
+                    summary=fact,
+                    description=detail,
+                    scene_name=scene,
+                    screen_id=screen,
+                ),
             )
         except QaCancelled:
             # The operator ended the run. That is not this tool's to swallow.
@@ -920,8 +948,8 @@ def build_tools(
             # silence. Refused here so the agent learns the link did not happen.
             return (
                 "Nothing was linked: `note` is required. It is the only record of "
-                "why you thought the connection was real — and for LEADS_TO it is "
-                "what you did to get there, which is what makes the route usable."
+                "why you thought the connection was real, and of any condition it "
+                "holds under."
             )
 
         source = (from_knowledge_id or "").strip()
