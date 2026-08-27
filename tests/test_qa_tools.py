@@ -1305,3 +1305,44 @@ def test_지식_검색은_화면을_안_들고_온다() -> None:
         assert "Card(Clone)[16]" not in answered
 
     asyncio.run(run())
+
+
+def test_화면은_한_번만_실린다() -> None:
+    """화면을 붙이는 자리가 하나여야 한다는 것의 나머지 반쪽이다.
+
+    ARTEL-635 가 공통 지점을 만들면서 종전에 자기가 그리던 도구들의 그리기를 안 걷어냈다.
+    판독이 유일한 출처인 지금 `render` 는 워터마크가 아니라 **마지막 행위**를 경계로 삼으므로,
+    같은 결과 안에서 두 번째 호출이 첫 번째와 똑같은 것을 낸다 — 액션 하나의 결과에 판독
+    블록이 두 번 실렸다.
+    """
+
+    async def run() -> None:
+        _channel, _state, tools, _sent = _with_a_screen()
+        looked = await tools["observe_scene"].ainvoke({"step": 1, "thought": "본다"})
+        assert looked.count("<<pulse>>") == 1, looked
+
+        channel, _, action_tools, sent = make(timeout=1.0)
+        channel.on_pulse(reading(objects=[start_button()]))
+
+        async def reply() -> None:
+            for _ in range(200):
+                if actions(sent):
+                    break
+                await asyncio.sleep(0)
+            channel.on_action_result(
+                {
+                    "correlationId": actions(sent)[-1]["messageId"],
+                    "payload": {"results": [{"id": 1, "success": True}], "frame": 100},
+                }
+            )
+            channel.on_pulse(
+                reading(reading_id=2, whole=False, objects=[start_button(label="Loading…")])
+            )
+
+        asyncio.create_task(reply())
+        acted = await action_tools["click_button"].ainvoke(
+            {"step": 1, "thought": "누른다", "target_id": -101}
+        )
+        assert acted.count("<<pulse>>") == 1, acted
+
+    asyncio.run(run())
