@@ -28,7 +28,11 @@ screen, so no scene view is produced and none is appended to any result — see
 is the thing to avoid.
 """
 
-from app.qa.envelope import KnowledgeSearchHit, KnowledgeSearchResultPayload
+from app.qa.envelope import (
+    KnowledgeAnchor,
+    KnowledgeSearchHit,
+    KnowledgeSearchResultPayload,
+)
 
 # --- how much of the knowledge base one run may move -------------------------
 #
@@ -196,12 +200,15 @@ holding two maps that disagree, with nothing to say which one moved.
 
 What does belong here is the fact that only holds in one place: a control that
 behaves on this screen unlike anywhere else, a screen whose usual way back does
-nothing, a purchase this shop refuses in a way no other does. Say which screen or
-scene it holds on, because an exception nobody can locate is one a later run
-cannot use, and one that reads as a rule about the game teaches every other screen
-something false. Anything true wherever the player is — how the game reads input,
-what a resource is for, what the objective is — names no screen at all: a fact
-tied to one screen is a fact the run standing on the next one never finds.
+nothing, a purchase this shop refuses in a way no other does. Name where it holds
+in `scene_name`, spelled the way the game spells that scene, because an exception
+nobody can locate is one a later run cannot use, and one that reads as a rule about
+the game teaches every other screen something false. Add `screen_id` only when a
+screen's id has been shown to you, copied exactly as it was printed — `scene_name`
+on its own is a complete answer, and a `screen_id` without it is refused. Anything true wherever the player is — how
+the game reads input, what a resource is for, what the objective is — leaves both
+out: a fact tied to one screen is a fact the run standing on the next one never
+finds.
 
 Do NOT record what the scenario already told you. Do NOT record a bug: a build
 behaving wrongly is a finding for `report_step`, not a rule to teach the next
@@ -452,6 +459,29 @@ def render_description(description: str) -> str:
     return f"{description[:MAX_DESCRIPTION_CHARS]}… [truncated]"
 
 
+def render_anchors(anchors: list[KnowledgeAnchor]) -> str:
+    """Where a hit holds, folded to one line, or nothing at all.
+
+    Empty for a hit with no anchor, and the caller then appends nothing — an entry
+    that claims no screen is the common case, and it is the one this line must not
+    grow the transcript for.
+
+    An anchor with no scene name is dropped rather than printed as a bare screen
+    number. The pair is what locates the fact, and a number on its own asks the
+    agent to guess which scene it belonged to.
+    """
+    places = [
+        f"{anchor.scene_name} (screen {anchor.screen_id})"
+        if anchor.screen_id
+        else anchor.scene_name
+        for anchor in anchors
+        if anchor.scene_name
+    ]
+    if not places:
+        return ""
+    return f"   [holds on {', '.join(places)}]"
+
+
 def render_hit(index: int, hit: KnowledgeSearchHit) -> str:
     """One hit, with the provenance the agent needs to weigh it.
 
@@ -466,6 +496,13 @@ def render_hit(index: int, hit: KnowledgeSearchHit) -> str:
     has not been shown, so an entry the agent never read is an entry it can
     neither correct nor delete; unprinted, the id would make that rule
     unsatisfiable rather than safe.
+
+    An anchor, where there is one, gets its own line for the reason the tag does:
+    it qualifies the claim. Without it a fact that holds on one screen reads as a
+    rule about the whole game, and the agent applies it where it is false. A hit
+    with no anchor prints exactly what it printed before anchors existed — an
+    empty line saying "no screen" would spend transcript on the common case and
+    invite the reading that the anchor is missing rather than absent.
     """
     header = (
         f"{index}. [id {hit.id or 'unknown'} · {hit.tag or 'UNTAGGED'} · "
@@ -475,6 +512,9 @@ def render_hit(index: int, hit: KnowledgeSearchHit) -> str:
     lines = [header, f"   {hit.summary}"] if hit.summary else [header]
     if body:
         lines.append(f"   {body}")
+    anchor_line = render_anchors(hit.anchors)
+    if anchor_line:
+        lines.append(anchor_line)
     if hit.neighbors:
         # Wrapped so `fold_stale_knowledge` can replace exactly this span and
         # nothing else — the hit's own summary and description must survive, and

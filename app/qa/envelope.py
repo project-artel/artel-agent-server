@@ -306,6 +306,31 @@ class KnowledgeNeighbour(BaseModel):
     via: str = ""
 
 
+class KnowledgeAnchor(BaseModel):
+    """One place an entry is tied to: the fact holds there and not everywhere.
+
+    A list rather than a single value on the hit below, because one entry can be
+    tied to several screens. An EMPTY list is not "the anchors could not be read"
+    — it is the ordinary case of a fact true wherever the player is, and it is
+    also what an Orchestration that predates anchors sends.
+
+    `screen_id` absent is normal too: a screen is decided from observation, and
+    when it was not decided the anchor says the scene and stops there. It is text
+    for the reason every other id here is — a 64-bit value must not lose precision
+    on the way through JSON — and it goes back out that way on
+    `KnowledgeCreatePayload`.
+
+    Both fields default, as on `KnowledgeSearchHit`: an anchor that failed
+    validation would take the whole answer down with it, and the tool that asked
+    would sit until its own timeout.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    scene_name: str = ""
+    screen_id: str | None = None
+
+
 class KnowledgeSearchHit(BaseModel):
     """One piece of project knowledge the search matched.
 
@@ -333,6 +358,11 @@ class KnowledgeSearchHit(BaseModel):
     # Orchestration that predates the graph — or one with `expand-search-hits`
     # turned off — simply sends hits without it and nothing here notices.
     neighbors: list[KnowledgeNeighbour] = Field(default_factory=list)
+    # Where this entry holds, when it holds in one place only (ARTEL-592). Defaults
+    # to empty for the same reason `neighbors` does: an Orchestration that does not
+    # send anchors and an entry that has none read identically here, and both mean
+    # "no screen is claimed".
+    anchors: list[KnowledgeAnchor] = Field(default_factory=list)
 
 
 class KnowledgeExpandResultPayload(BaseModel):
@@ -480,6 +510,32 @@ class KnowledgeCreatePayload(BaseModel):
     tag: str
     summary: str
     description: str
+    # The ANCHOR: where this fact holds, when it holds in one place only (ARTEL-592).
+    # A control that behaves on this screen unlike anywhere else, a screen whose
+    # usual way back does nothing. A fact true wherever the player is fills neither
+    # field, and that asymmetry is the whole design — a fact tied to one screen is
+    # a fact the run standing on the next one never finds.
+    #
+    # NOTHING here reads the run's current scene. Filling the anchor from wherever
+    # the run happened to be standing would file every game-wide rule under one
+    # screen; the agent names it or leaves it out.
+    #
+    # Optional for the reason `KnowledgeSearchPayload.step` is optional: an
+    # Orchestration that does not know these fields ignores unknown payload fields,
+    # so neither side has to deploy first. A frame carrying neither is treated
+    # exactly as it was before anchors existed.
+    #
+    # `screen_id` travels as text for the reason every other id crossing this
+    # boundary does — `knowledge_id` on the update and the delete, both endpoints of
+    # a link: a 64-bit value must not lose precision on the way through JSON. It
+    # comes back the same way on `KnowledgeAnchor`.
+    #
+    # `screen_id` cannot travel alone. A screen lives inside a scene, so an anchor
+    # naming a screen and no scene cannot later be read back as which scene's
+    # screen it was — Orchestration refuses that pair, and `record_knowledge`
+    # refuses it here before a frame is spent finding out.
+    scene_name: str | None = None
+    screen_id: str | None = None
 
 
 class KnowledgeUpdatePayload(BaseModel):
