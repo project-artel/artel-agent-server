@@ -11,11 +11,17 @@ import logging
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import wrap_model_call
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages.utils import count_tokens_approximately
 
 from app.agents.qa.arch import ResolvedArch
 from app.agents.qa.compaction import QaCompactionMiddleware
-from app.agents.qa.context import fold_stale_knowledge, fold_stale_scenes
+from app.qa.scene import CURRENT_SCENE_START, SCENE_VIEW_START_PREFIX
+from app.agents.qa.context import (
+    FOLDED_VIEW_PREFIX,
+    fold_stale_knowledge,
+    fold_stale_scenes,
+)
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.vision import QaCaptureVisionMiddleware
@@ -243,9 +249,65 @@ async def _fold_knowledge_neighbours(request, handler):
     return await handler(request.override(messages=fold_stale_knowledge(request.messages)))
 
 
+def _context_shape(messages) -> str:
+    """무엇이 컨텍스트를 채웠는지, 한 줄로.
+
+    총량만으로는 무엇을 고쳐야 하는지가 안 나온다. 실제로 stage 런이 137k 에서 163k 까지
+    한 번도 안 꺾이고 자랐는데, 그 턴당 1,000 이 어디서 오는지 로그가 말하지 않아 추정으로
+    최적화하게 됐다 — 판독 렌더를 줄이는 데 매달렸지만 라이브 뷰는 `request.override` 로 그
+    호출에만 붙고 누적되지 않으므로 애초에 주범이 아니었다(ARTEL-604).
+
+    캐시가 조용히 실패하듯 컨텍스트도 조용히 찬다. 그래서 조사용이 아니라 상시로 둔다.
+
+    세는 자리가 요점이다. 이 미들웨어는 순서상 마지막이라 여기 오는 `messages` 는 접기와
+    라이브 뷰가 모두 적용된 뒤 — **실제로 나가는 그 목록**이다.
+
+    토큰은 근사로 센다. 정확한 값은 provider 가 `usage_metadata` 로 주고, 이 줄이 답하는
+    것은 총량이 아니라 **비율**이다.
+    """
+    live = folded = kept = 0
+    by_kind: dict[str, int] = {}
+
+    for message in messages:
+        size = count_tokens_approximately([message])
+        # `content` 를 직접 읽는다. `.text` 는 langchain 버전에 따라 메서드였다 프로퍼티였다
+        # 하고, 그 차이로 조용히 빈 문자열이 되면 분해가 전부 0 으로 보인다.
+        content = message.content
+        text = content if isinstance(content, str) else ""
+
+        # 라이브 뷰는 `_append_current_scene` 가 붙인 것 하나다. 종류로는 Human 이라
+        # 섞이는데, 이 줄이 답해야 하는 첫 질문이 바로 그것이 몇 %인가다.
+        if isinstance(message, HumanMessage) and text.startswith(CURRENT_SCENE_START):
+            live += size
+            continue
+
+        if isinstance(message, ToolMessage):
+            # 접힌 자리와 전문으로 남은 자리를 가른다. `fold_stale_scenes` 가 실제로
+            # 얼마나 누르는지는 이 둘의 비에서만 나온다.
+            if FOLDED_VIEW_PREFIX in text:
+                folded += 1
+            elif SCENE_VIEW_START_PREFIX in text:
+                kept += 1
+
+        kind = type(message).__name__.removesuffix("Message").lower()
+        by_kind[kind] = by_kind.get(kind, 0) + size
+
+    total = live + sum(by_kind.values())
+    if total <= 0:
+        return "messages=0"
+
+    parts = [f"live={live}({100 * live // total}%)"]
+    parts += [
+        f"{kind}={size}({100 * size // total}%)"
+        for kind, size in sorted(by_kind.items(), key=lambda pair: -pair[1])
+    ]
+    parts.append(f"views folded={folded} kept={kept}")
+    return f"approx={total} " + " ".join(parts)
+
+
 @wrap_model_call
 async def _log_token_usage(request, handler):
-    """Log what each model call cost, and how much of it came from cache.
+    """Log what each model call cost, how much came from cache, and what filled it.
 
     Prompt caching fails silently: a prefix under the model's minimum size, or one
     that changed since the last call, is billed in full with no error and no
@@ -256,7 +318,17 @@ async def _log_token_usage(request, handler):
     The details dict is logged whole rather than picked apart: which keys
     OpenRouter fills in varies by provider, and an unread key is worth more here
     than a `0` for one this provider never sends.
+
+    The shape line comes from the request rather than the response, so it is
+    written even when a call fails before any usage comes back — a call that died
+    on input size is exactly the one whose shape someone will want.
     """
+    # 계측이 런을 죽이지 않는다. 여기서 오르는 예외는 모델 호출을 통째로 날리는데,
+    # 그것을 감수할 만한 것이 로그 한 줄에는 없다.
+    messages = getattr(request, "messages", None)
+    if messages is not None:
+        logger.info("[QA] context %s", _context_shape(messages))
+
     response = await handler(request)
     for message in response.result:
         usage = getattr(message, "usage_metadata", None)

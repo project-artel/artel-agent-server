@@ -51,6 +51,11 @@ from app.qa.scene import SCENE_VIEW_END, SCENE_VIEW_START_PREFIX, SCENE_VIEW_STA
 # worth one. A second would be two stale snapshots under a fresh one.
 DEFAULT_KEEP_SCENES = 1
 
+# 자리표를 알아보는 접두. 계측(`app/agents/qa/runner.py`)이 "접힌 것" 과 "전문으로 남은 것" 을
+# 세려면 둘을 가릴 단서가 필요한데, 자리표는 일부러 마커 문법을 안 쓰므로(아래 `_placeholder`
+# 참고) 문구의 앞머리가 그 단서다. 문구를 고칠 사람이 이것도 같이 보도록 꺼내 둔다.
+FOLDED_VIEW_PREFIX = "[scene view from observation "
+
 # Matches exactly what `SceneMemory.render` wrapped its output in: the start
 # marker (which carries the observation number), the view body, and the end
 # marker. `re.DOTALL` so the body's newlines count as "any character" — the
@@ -72,7 +77,7 @@ def _placeholder(at: str) -> str:
     # "not a live marker" and is what the model needs anyway — which observation
     # this was, that it is stale, and what to do about it.
     return (
-        f"[scene view from observation {at} folded — it is stale, the scene has "
+        f"{FOLDED_VIEW_PREFIX}{at} folded — it is stale, the scene has "
         "moved on since then. Call observe_scene if you need to see it again.]"
     )
 

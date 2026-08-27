@@ -220,3 +220,71 @@ def test_no_scene_block_before_anything_arrives() -> None:
 
 async def _swallow(frame: dict) -> None:
     return None
+
+
+def test_컨텍스트_분해가_라이브_뷰를_따로_센다():
+    """이 줄이 답해야 하는 첫 질문이 그것이다 — 라이브 뷰가 전체의 몇 %인가.
+
+    종류로는 Human 이라 그냥 세면 시나리오와 섞인다. 섞이면 판독 렌더를 줄이는 것이
+    의미가 있는지 없는지를 로그가 말해 주지 못한다(ARTEL-604)."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from app.agents.qa.runner import _context_shape
+    from app.qa.scene import CURRENT_SCENE_START
+
+    shape = _context_shape(
+        [
+            HumanMessage(content="시나리오 " * 200),
+            AIMessage(content="추론 " * 100),
+            HumanMessage(content=CURRENT_SCENE_START + "\n판독 " * 300),
+        ]
+    )
+
+    assert "live=" in shape
+    assert "live=0(" not in shape
+    # 라이브 뷰가 human 에 섞이지 않았다.
+    assert "human=" in shape
+
+
+def test_컨텍스트_분해가_접힌_뷰와_남은_뷰를_가른다():
+    """`fold_stale_scenes` 가 실제로 얼마나 누르는지는 이 둘의 비에서만 나온다."""
+    from langchain_core.messages import ToolMessage
+
+    from app.agents.qa.context import _placeholder
+    from app.agents.qa.runner import _context_shape
+    from app.qa.scene import SCENE_VIEW_END, SCENE_VIEW_START_PREFIX, SCENE_VIEW_START_SUFFIX
+
+    view = f"{SCENE_VIEW_START_PREFIX}7{SCENE_VIEW_START_SUFFIX}\n값들\n{SCENE_VIEW_END}"
+    shape = _context_shape(
+        [
+            ToolMessage(content=_placeholder("3"), tool_call_id="a"),
+            ToolMessage(content=_placeholder("4"), tool_call_id="b"),
+            ToolMessage(content=view, tool_call_id="c"),
+        ]
+    )
+
+    assert "views folded=2 kept=1" in shape
+
+
+def test_컨텍스트_분해가_빈_목록에도_답한다():
+    """0 으로 나누지 않는다. 첫 호출 전이나 압축 직후에 실제로 빌 수 있다."""
+    from app.agents.qa.runner import _context_shape
+
+    assert _context_shape([]) == "messages=0"
+
+
+def test_컨텍스트_분해가_런을_죽이지_않는다():
+    """여기서 오르는 예외는 모델 호출을 통째로 날린다. 로그 한 줄에는 그것을
+    감수할 만한 것이 없다."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from langchain_core.messages import AIMessage
+
+    from app.agents.qa.runner import _log_token_usage
+
+    async def handler(_request):
+        return SimpleNamespace(result=[AIMessage(content="ok")])
+
+    # `messages` 가 없는 request 여도 호출이 지나간다.
+    asyncio.run(_log_token_usage.awrap_model_call(object(), handler))

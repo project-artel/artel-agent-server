@@ -258,8 +258,10 @@ def test_token_usage_log_reports_cache_reads(caplog) -> None:
     async def handler(_request):
         return SimpleNamespace(result=[reply])
 
+    request = SimpleNamespace(messages=[HumanMessage(content="상점을 열어 본다.")])
+
     with caplog.at_level(logging.INFO):
-        asyncio.run(_log_token_usage.awrap_model_call(object(), handler))
+        asyncio.run(_log_token_usage.awrap_model_call(request, handler))
 
     assert "cache_read': 4800" in caplog.text
     assert "input=5000" in caplog.text
