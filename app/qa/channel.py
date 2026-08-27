@@ -26,6 +26,8 @@ from app.qa.envelope import (
     LogCategory,
     LogPayload,
     MessageType,
+    ToolCallPayload,
+    ToolResultPayload,
     outbound_envelope,
 )
 from app.qa.pulse import PulseReading
@@ -151,6 +153,14 @@ class QaRunChannel:
         # base's, and folding it in here would spread this change across a path
         # this issue does not touch.
         self._pending: dict[str, _PendingRequest] = {}
+        # tool_call_id -> 그 호출을 실은 TOOL 프레임의 messageId (ARTEL-609).
+        #
+        # 답이 correlation 으로 그것을 실어야 화면이 호출과 답을 한 행으로 묶는다. 짝을
+        # 맺는 두 값 중 앞의 것은 모델이 지은 id 라, 이 대응을 아는 자리가 여기 말고 없다.
+        #
+        # 답을 기다리는 것이 아니라서 `_pending` 과 섞지 않는다. 저쪽은 future 를 들고
+        # 타임아웃과 취소 규칙이 붙지만, 이쪽은 기억해 두었다가 꺼내 쓰는 것이 전부다.
+        self._tool_frames: dict[str, str] = {}
         self.scene = SceneMemory()
         self.cancelled = False
         # Operator messages that arrived since the agent last looked. Delivered
@@ -204,6 +214,45 @@ class QaRunChannel:
 
     async def say(self, message: str, step: int | None = None) -> None:
         await self._send(self._frame(MessageType.CHAT, ChatPayload(message=message, step=step)))
+
+    async def tool_call(
+        self, tool: str, tool_call_id: str, args: dict[str, Any], step: int | None = None
+    ) -> None:
+        """모델이 부른 tool 하나를 타임라인에 남긴다. 아무것도 기다리지 않는다.
+
+        그 프레임의 messageId 를 `tool_call_id` 로 기억해 둔다. 답이 그것을 correlation
+        으로 실어야 화면이 호출과 답을 짝지을 수 있고, 짝을 맺는 두 값 중 하나는 모델이
+        지은 id 라 여기 말고는 대응을 아는 자리가 없다.
+        """
+        frame = self._frame(
+            MessageType.TOOL,
+            ToolCallPayload(
+                message=tool, tool=tool, tool_call_id=tool_call_id, args=args, step=step
+            ),
+        )
+        self._tool_frames[tool_call_id] = frame["messageId"]
+        await self._send(frame)
+
+    async def tool_result(
+        self, tool: str, tool_call_id: str, content: str, step: int | None = None
+    ) -> None:
+        """그 tool 이 돌려준 것을 타임라인에 남긴다.
+
+        대응은 꺼내면서 지운다. 답이 오지 않는 호출은 런이 끝날 때까지 한 칸을 차지하지만,
+        런 하나의 tool 호출 수만큼이 상한이라 자라도 문제가 되지 않는다.
+
+        correlation 이 없을 수 있다. 호출 프레임을 못 본 답 — 컴팩션 뒤에 남은 꼬리가
+        그렇다 — 은 짝 없이 제 줄로 뜬다. 지어낸 correlation 을 다는 것보다 낫다.
+        """
+        await self._send(
+            self._frame(
+                MessageType.TOOL_RESULT,
+                ToolResultPayload(
+                    message=tool, tool=tool, tool_call_id=tool_call_id, content=content, step=step
+                ),
+                self._tool_frames.pop(tool_call_id, None),
+            )
+        )
 
     async def emit(self, message_type: MessageType, payload, correlation_id: str | None = None) -> None:
         await self._send(self._frame(message_type, payload, correlation_id))

@@ -34,6 +34,21 @@ class MessageType(StrEnum):
     LOG = "LOG"
     ACTION = "ACTION"
     STATUS = "STATUS"
+    # 모델이 부른 tool 하나와 그것이 돌려준 것(ARTEL-609).
+    #
+    # `ACTION` 이 이 자리를 대신하지 못한다. 그것은 조작 tool 이 SDK 로 내보낸 요청이라
+    # tool 28개 중 15개만 남기고, 지식 검색이나 스텝 판정처럼 SDK 를 거치지 않는 13개는
+    # 아무 흔적도 남기지 않았다 — 그래서 타임라인을 읽어도 에이전트가 무엇을 불렀는지
+    # 알 수 없었다.
+    #
+    # 이 두 프레임은 tool 이 각자 내지 않는다. 러너의 `_log_reasoning` 한 곳에서 낸다.
+    # 그 자리가 모든 tool 이 지나가는 길목이고, 개별 tool 이 스스로 남기는 방식은 새
+    # tool 이 생길 때마다 빠뜨린다.
+    #
+    # 철자는 Orchestration 의 `SUPPORTED_TYPES` 와 정확히 같아야 한다. 모르는 타입은
+    # 라우터가 통째로 거절한다.
+    TOOL = "TOOL"
+    TOOL_RESULT = "TOOL_RESULT"
     # Asks the project's knowledge base a question. This name and the result type
     # above are spelled exactly as Orchestration's QaAgentInboundRouter expects
     # them: it rejects an unknown type outright, and that rejection reaches the
@@ -428,6 +443,41 @@ class LogPayload(BaseModel):
     level: LogLevel = LogLevel.INFO
     category: LogCategory
     message: str
+    step: int | None = None
+
+
+class ToolCallPayload(BaseModel):
+    """모델이 부른 tool 하나.
+
+    `message` 가 `tool` 과 같은 값을 한 번 더 이고 있는 것은 중복이 아니다. Orchestration
+    의 라우터는 표시용 `payload.message` 가 비어 있으면 프레임을 통째로 거절하므로, 그
+    가드를 지나는 값이 여기 있어야 한다.
+
+    `args` 는 모델이 쓴 그대로다. 모든 tool 이 받는 `thought` 도 그 안에 있고, 그래서 tool
+    이 따로 남기던 산문 한 줄이 필요 없어졌다.
+    """
+
+    message: str
+    tool: str
+    tool_call_id: str
+    args: dict[str, Any] = Field(default_factory=dict)
+    step: int | None = None
+
+
+class ToolResultPayload(BaseModel):
+    """그 tool 이 모델에게 돌려준 것.
+
+    `content` 는 잘라서 싣는다. `observe_scene` 이 씬 렌더를 통째로 돌려주는데, 이 프레임은
+    qa_log 행이 되고 SSE 로도 발행되므로 자르지 않으면 타임라인 한 줄이 수십 KB 가 된다.
+
+    성패를 담는 불리언이 없다. tool 은 문자열 하나를 돌려줄 뿐이라 서버가 지어낼 수 없다 —
+    조작이 실제로 됐는지는 같은 왕복의 `ACTION_RESULT` 가 말한다.
+    """
+
+    message: str
+    tool: str
+    tool_call_id: str
+    content: str
     step: int | None = None
 
 

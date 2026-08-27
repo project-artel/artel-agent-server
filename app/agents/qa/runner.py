@@ -530,16 +530,15 @@ class QaRunner:
                 kind = getattr(message, "type", None)
 
                 if kind == "tool":
+                    content = _clip(str(getattr(message, "content", "")))
                     logger.info(
                         "[QA] tool result ← %s\n%s",
                         getattr(message, "name", "?"),
-                        _clip(str(getattr(message, "content", ""))),
+                        content,
                     )
+                    await self._log_tool_result(channel, message, content)
                     continue
 
-                # Tool results are already visible as their own frames; echoing
-                # them to the timeline would bury the reasoning in what it
-                # reasoned about.
                 if kind != "ai":
                     continue
 
@@ -551,8 +550,53 @@ class QaRunner:
                     [{"name": call.get("name"), "args": call.get("args")} for call in calls]
                     or "(none)",
                 )
+                # 모델이 제 말로 쓴 추론. tool 의 `thought` 인자와 다른 것이라 남긴다 —
+                # 저쪽은 호출 하나를 설명하는 한 줄이고, 이쪽은 무엇을 부를지 고른 이유다.
                 if text:
                     await channel.note(text, LogCategory.THOUGHT)
+                for call in calls:
+                    await self._log_tool_call(channel, call)
+
+    @staticmethod
+    def _step_of(args: dict) -> int | None:
+        """그 호출이 붙은 시나리오 스텝. 거의 모든 tool 이 `step` 을 인자로 받는다.
+
+        모델이 채우는 값이라 믿고 쓰지 않는다. 정수가 아니면 없는 것으로 둔다 — 화면이
+        이것으로 로그를 스텝 구간에 나누므로, 엉뚱한 값이 들어가면 한 줄이 남의 구간에
+        가서 앉는다.
+        """
+        step = args.get("step")
+        return step if isinstance(step, int) and not isinstance(step, bool) else None
+
+    async def _log_tool_call(self, channel: QaRunChannel, call: dict) -> None:
+        """호출 하나를 타임라인에 낸다.
+
+        이름과 id 가 없는 호출은 내지 않는다. 그런 것은 짝지을 수도, 무엇이 불렸는지 말할
+        수도 없어서 화면에 이름 없는 줄만 하나 늘린다.
+        """
+        tool = call.get("name")
+        tool_call_id = call.get("id")
+        if not tool or not tool_call_id:
+            return
+        # LangChain 이 `tool_calls[].args` 를 dict 로 검증하므로 모양은 믿어도 된다.
+        # 없는 경우만 있다 — 인자 없는 tool 이 그렇다.
+        args = call.get("args") or {}
+        await channel.tool_call(tool, tool_call_id, args, self._step_of(args))
+
+    async def _log_tool_result(self, channel: QaRunChannel, message, content: str) -> None:
+        """그 호출의 답을 타임라인에 낸다.
+
+        `content` 는 부르는 쪽이 이미 자른 것을 받는다. 콘솔과 타임라인이 같은 문자열을
+        보게 하려는 것이고, 자르는 길이가 두 자리에서 갈리지 않게 하려는 것이다.
+
+        스텝은 답에 실려 오지 않는다. 화면은 짝이 되는 호출 프레임에서 그것을 읽는다.
+        """
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if not tool_call_id:
+            return
+        await channel.tool_result(
+            str(getattr(message, "name", "") or "tool"), tool_call_id, content
+        )
 
     async def run_with_deadline(
         self, channel: QaRunChannel, scenario: QaScenario

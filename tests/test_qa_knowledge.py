@@ -35,7 +35,7 @@ from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState, build_tools
 from app.qa.schemas import QaCaseRef, QaScenario, QaStep
 from app.qa.channel import QaRunChannel
-from app.qa.envelope import LogCategory, MessageType
+from app.qa.envelope import MessageType
 from app.qa.scene import SCENE_VIEW_START_PREFIX
 
 
@@ -202,8 +202,13 @@ def test_a_search_goes_out_as_a_knowledge_search_frame() -> None:
     asyncio.run(run())
 
 
-def test_the_reason_for_searching_reaches_the_timeline() -> None:
-    """`thought` is the only record of why the run spent a search."""
+def test_searching_writes_no_thought_row_of_its_own() -> None:
+    """`thought` 는 이제 tool 이 남기지 않는다(ARTEL-609).
+
+    왜 검색 한 번을 썼는지는 러너가 내는 TOOL 프레임의 인자로 남고, 그 계약은
+    `tests/test_qa_reasoning_log.py` 가 고정한다. 여기서 확인하는 것은 이 tool 이
+    검색 프레임 말고는 아무것도 내지 않는다는 것이다.
+    """
 
     async def run() -> None:
         channel, _, tools, sent = make()
@@ -213,11 +218,8 @@ def test_the_reason_for_searching_reaches_the_timeline() -> None:
             {"step": 3, "thought": "규칙이 애매해 문서를 본다", "query": "구매 규칙"}
         )
 
-        rows = [f for f in sent if f["type"] == MessageType.LOG.value]
-        assert [(r["payload"]["message"], r["payload"]["step"]) for r in rows] == [
-            ("규칙이 애매해 문서를 본다", 3)
-        ]
-        assert rows[0]["payload"]["category"] == LogCategory.THOUGHT.value
+        assert [f for f in sent if f["type"] == MessageType.LOG.value] == []
+        assert [f["type"] for f in sent] == [MessageType.KNOWLEDGE_SEARCH.value]
 
     asyncio.run(run())
 
@@ -900,9 +902,13 @@ def test_a_late_write_answer_does_not_resolve_the_next_request() -> None:
     asyncio.run(run())
 
 
-def test_the_reason_for_writing_reaches_the_timeline() -> None:
-    """`thought` is the only record of why the knowledge base changed, and on a
-    deletion it is the only thing a reviewer can weigh the deletion against."""
+def test_the_writes_send_only_their_own_frames() -> None:
+    """쓰기 tool 도 제 이유를 LOG 로 남기지 않는다(ARTEL-609).
+
+    지식창고를 왜 바꿨는지 — 삭제라면 리뷰어가 그 삭제를 저울질할 유일한 근거 — 는 러너가
+    내는 TOOL 프레임의 인자로 남는다. 사라진 것은 tool 이 스스로 적던 LOG 줄뿐이고, 쓰기
+    프레임 자체는 그대로다.
+    """
 
     async def run() -> None:
         _, state, tools, sent = make()
@@ -912,13 +918,12 @@ def test_the_reason_for_writing_reaches_the_timeline() -> None:
         await update(tools, step=3, thought="빌드에 맞게 이 항목을 고친다")
         await forget(tools, step=4, thought="이 항목은 더 이상 사실이 아니다")
 
-        rows = [f for f in sent if f["type"] == MessageType.LOG.value]
-        assert [(r["payload"]["message"], r["payload"]["step"]) for r in rows] == [
-            ("새 규칙을 남긴다", 2),
-            ("빌드에 맞게 이 항목을 고친다", 3),
-            ("이 항목은 더 이상 사실이 아니다", 4),
+        assert [f for f in sent if f["type"] == MessageType.LOG.value] == []
+        assert [f["type"] for f in sent] == [
+            MessageType.KNOWLEDGE_CREATE.value,
+            MessageType.KNOWLEDGE_UPDATE.value,
+            MessageType.KNOWLEDGE_DELETE.value,
         ]
-        assert {r["payload"]["category"] for r in rows} == {LogCategory.THOUGHT.value}
 
     asyncio.run(run())
 

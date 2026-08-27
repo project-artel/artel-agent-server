@@ -13,7 +13,7 @@ from app.agents.qa.arch import default_resolved_arch
 from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.vision import MAX_CAPTURES_PER_RUN
 from app.qa.channel import QaRunChannel
-from app.qa.envelope import LogCategory, MessageType
+from app.qa.envelope import MessageType
 
 
 def make(total_steps: int = 1, timeout: float = 0.05):
@@ -110,7 +110,7 @@ def test_observe_says_so_when_the_game_is_silent() -> None:
 
 
 def test_observing_asks_the_game_for_nothing() -> None:
-    """`observe_scene` 이 프레임을 하나도 안 보낸다. 남는 것은 생각 한 줄뿐이다.
+    """`observe_scene` 이 프레임을 하나도 안 보낸다.
 
     종전에는 `scan_scene` 을 실은 ACTION 이 나갔다. 그 액션의 유일한 일이 `GAME_STATE` 를
     만드는 것인데, ARTEL-513 이 그 채널을 끄면 오류를 답하고 켜 두면 `PollSceneState` 가
@@ -123,13 +123,21 @@ def test_observing_asks_the_game_for_nothing() -> None:
 
         await tools["observe_scene"].ainvoke({"step": 2, "thought": "화면을 본다"})
 
-        assert [frame["type"] for frame in sent] == [MessageType.LOG.value]
+        # 생각 한 줄조차 남지 않는다. 그 이유는 러너가 내는 TOOL 프레임의 인자로
+        # 실린다(ARTEL-609).
+        assert sent == []
 
     asyncio.run(run())
 
 
-def test_observing_writes_a_thought_row() -> None:
-    """The one tool that used to be silent. Five looks in a real run logged nothing."""
+def test_a_tool_writes_no_thought_row_of_its_own() -> None:
+    """`thought` 는 이제 tool 이 남기지 않는다(ARTEL-609).
+
+    각 tool 이 제 이유를 LOG 한 줄로 적던 것이 로그를 산문으로 채운 원인이었다 — 무슨
+    tool 이 불렸는지는 어디에도 없고 "씬 캡처 했습니다" 같은 문장만 남았다. 지금은 러너가
+    호출마다 TOOL 프레임을 내고 `thought` 는 그 인자로 실린다. 그쪽 계약은
+    `tests/test_qa_reasoning_log.py` 가 고정한다.
+    """
 
     async def run() -> None:
         channel, _, tools, sent = make()
@@ -139,9 +147,7 @@ def test_observing_writes_a_thought_row() -> None:
             {"step": 3, "thought": "로딩이 끝났는지 확인한다"}
         )
 
-        assert [(row["payload"]["category"], row["payload"]["message"]) for row in logs(sent)] == [
-            (LogCategory.THOUGHT.value, "로딩이 끝났는지 확인한다")
-        ]
+        assert logs(sent) == []
 
     asyncio.run(run())
 
@@ -164,7 +170,7 @@ def test_operator_message_is_appended_to_the_next_tool_result() -> None:
     asyncio.run(run())
 
 
-def test_pressing_a_key_logs_the_reason_and_batches_a_scan() -> None:
+def test_pressing_a_key_needs_no_target_and_batches_no_tail() -> None:
     """press_key needs no target, so it works on a screen with nothing clickable."""
 
     async def run() -> None:
@@ -172,8 +178,6 @@ def test_pressing_a_key_logs_the_reason_and_batches_a_scan() -> None:
         await tools["press_key"].ainvoke(
             {"step": 1, "key_code": "Space", "duration_seconds": 0.5, "thought": "대사를 넘긴다"}
         )
-
-        assert logs(sent)[0]["payload"]["message"] == "대사를 넘긴다"
 
         methods = [a["method"] for a in actions(sent)[0]["payload"]["actions"]]
         # 꼬리가 사라진 자리. 액션 뒤의 화면은 판독이 실어 온다.
@@ -474,9 +478,6 @@ def test_waiting_for_the_operator_returns_what_they_said() -> None:
         )
 
         assert "그 화면은 건너뛰어" in result
-        # The reason for stopping the run belongs on the timeline like any other.
-        assert logs(sent)[0]["payload"]["message"] == "시나리오에 없는 화면이라 물어본다"
-        assert logs(sent)[0]["payload"]["step"] == 2
         # Nothing was asked of the game while it waited.
         assert actions(sent) == []
 
@@ -561,8 +562,10 @@ def test_every_outbound_frame_carries_the_step_number() -> None:
     """`step` was null on all 451 rows of a real run because no tool passed one.
 
     Without it the timeline cannot say which scenario step a row belongs to, so
-    the LOG, the ACTION, the STATUS and the CHAT all have to carry the number the
-    agent named.
+    the ACTION, the STATUS and the CHAT all have to carry the number the agent
+    named. LOG 는 이 목록에서 빠졌다 — tool 이 제 이유를 LOG 로 남기지 않게 되면서
+    (ARTEL-609) 여기서 나오는 LOG 가 없다. 그 자리의 step 은 러너가 내는 TOOL 프레임이
+    이고, `tests/test_qa_reasoning_log.py` 가 고정한다.
     """
 
     async def run() -> None:
@@ -585,7 +588,7 @@ def test_every_outbound_frame_carries_the_step_number() -> None:
         for frame in sent:
             by_type.setdefault(frame["type"], []).append(frame["payload"].get("step"))
 
-        assert by_type[MessageType.LOG.value] == [4, 4, 4]
+        assert MessageType.LOG.value not in by_type
         assert by_type[MessageType.ACTION.value] == [4]
         assert by_type[MessageType.STATUS.value] == [4]
         assert by_type[MessageType.CHAT.value] == [4]
@@ -643,9 +646,6 @@ def test_a_reported_issue_goes_out_as_an_issue_frame_with_its_evidence() -> None
         assert payload["reproduction"][0] == "상점을 연다"
         assert state.issues_attempted == 1
         assert "9 issue(s) left" in result
-
-        # 근거를 남긴 이유도 타임라인에 있어야 한다.
-        assert logs(sent)[-1]["payload"]["message"] == "구매 처리는 됐는데 지급이 빠졌다"
 
     asyncio.run(run())
 
@@ -881,11 +881,12 @@ def test_two_tier_summary_case_verdict_is_its_verification_step() -> None:
     asyncio.run(run())
 
 
-def test_verdict_tools_each_write_their_own_thought_row() -> None:
-    """A verdict without the reasoning behind it is the row a reviewer cannot use.
+def test_verdict_tools_write_no_thought_row_of_their_own() -> None:
+    """판정 tool 들도 제 이유를 LOG 로 남기지 않는다(ARTEL-609).
 
-    report_step, finish_run and reply_to_operator produce no action, so nothing
-    else on the timeline would say why they were called.
+    report_step, finish_run, reply_to_operator 는 액션을 내지 않으므로, 종전에는 이
+    LOG 한 줄이 "왜 불렸나"를 말하는 유일한 자리였다. 지금은 러너가 호출마다 내는 TOOL
+    프레임이 그 자리를 맡고, 이 tool 들은 제 결과 프레임만 낸다.
     """
 
     async def run() -> None:
@@ -901,14 +902,13 @@ def test_verdict_tools_each_write_their_own_thought_row() -> None:
             {"passed": True, "summary": "전부 통과", "thought": "모든 단계가 통과했다"}
         )
 
-        assert [row["payload"]["message"] for row in logs(sent)] == [
-            "화면이 바뀌었다",
-            "진행 상황을 묻길래 답한다",
-            "모든 단계가 통과했다",
+        assert logs(sent) == []
+        # 판정 자체는 그대로 나간다. 사라진 것은 이유를 적던 LOG 줄뿐이다.
+        assert [frame["type"] for frame in sent] == [
+            MessageType.STATUS.value,
+            MessageType.CHAT.value,
+            MessageType.STATUS.value,
         ]
-        assert {row["payload"]["category"] for row in logs(sent)} == {
-            LogCategory.THOUGHT.value
-        }
 
     asyncio.run(run())
 

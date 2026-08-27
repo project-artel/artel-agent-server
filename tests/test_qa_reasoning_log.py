@@ -295,3 +295,176 @@ def test_a_middleware_node_s_rewrite_is_not_logged_as_a_new_turn() -> None:
         assert logs(sent) == []
 
     asyncio.run(run())
+
+
+# --- tool calls ---------------------------------------------------------------
+#
+# 로그가 에이전트의 산문으로만 채워지던 것을 고친 자리다(ARTEL-609). tool 이름과 인자는
+# 러너가 이미 손에 쥐고 있었지만 stdout 로만 나갔고, 타임라인에는 각 tool 이 스스로 남기는
+# `thought` 한 줄뿐이었다 — "씬 캡처 했습니다" 같은 문장. 여기서 내면 tool 28개가 한 번에
+# 덮이고, 새 tool 이 생겨도 저절로 따라온다.
+
+
+def frames_of(sent: list[dict], message_type: MessageType) -> list[dict]:
+    return [frame for frame in sent if frame["type"] == message_type.value]
+
+
+def test_a_tool_call_becomes_a_tool_frame() -> None:
+    async def run() -> None:
+        channel, sent = make_channel()
+        runner = QaRunner()
+
+        await runner._log_reasoning(
+            channel,
+            {
+                "model": {
+                    "messages": [
+                        AIMessage(
+                            content="",
+                            tool_calls=[
+                                {
+                                    "name": "search_knowledge",
+                                    "args": {"step": 2, "query": "보스전 진입 조건"},
+                                    "id": "call_abc123",
+                                }
+                            ],
+                        )
+                    ]
+                }
+            },
+        )
+
+        payload = frames_of(sent, MessageType.TOOL)[0]["payload"]
+        assert payload["tool"] == "search_knowledge"
+        assert payload["tool_call_id"] == "call_abc123"
+        assert payload["args"] == {"step": 2, "query": "보스전 진입 조건"}
+        # 화면이 로그를 스텝 구간에 나누는 값. 인자에서 읽는다.
+        assert payload["step"] == 2
+        # Orchestration 라우터는 표시용 message 가 비면 프레임을 통째로 거절한다.
+        assert payload["message"] == "search_knowledge"
+
+    asyncio.run(run())
+
+
+def test_a_tool_result_carries_its_call_as_correlation() -> None:
+    """화면이 호출과 답을 한 행으로 묶는 근거. 짝이 어긋나면 남의 결과가 붙는다."""
+
+    async def run() -> None:
+        channel, sent = make_channel()
+        runner = QaRunner()
+
+        await runner._log_reasoning(
+            channel,
+            {
+                "model": {
+                    "messages": [
+                        AIMessage(
+                            content="",
+                            tool_calls=[
+                                {"name": "observe_scene", "args": {"step": 1}, "id": "call_1"}
+                            ],
+                        )
+                    ]
+                }
+            },
+        )
+        await runner._log_reasoning(
+            channel,
+            {
+                "tools": {
+                    "messages": [
+                        ToolMessage(
+                            content="scene: Lobby", name="observe_scene", tool_call_id="call_1"
+                        )
+                    ]
+                }
+            },
+        )
+
+        call = frames_of(sent, MessageType.TOOL)[0]
+        result = frames_of(sent, MessageType.TOOL_RESULT)[0]
+        assert result["correlationId"] == call["messageId"]
+        assert result["payload"]["tool"] == "observe_scene"
+        assert result["payload"]["content"] == "scene: Lobby"
+
+    asyncio.run(run())
+
+
+def test_a_result_whose_call_was_never_seen_still_lands() -> None:
+    """컴팩션 뒤에 남은 꼬리가 그렇다. 지어낸 correlation 을 다는 것보다 짝 없이 두는 편이 낫다."""
+
+    async def run() -> None:
+        channel, sent = make_channel()
+        runner = QaRunner()
+
+        await runner._log_reasoning(
+            channel,
+            {
+                "tools": {
+                    "messages": [
+                        ToolMessage(content="ok", name="report_step", tool_call_id="orphan")
+                    ]
+                }
+            },
+        )
+
+        result = frames_of(sent, MessageType.TOOL_RESULT)[0]
+        assert result["correlationId"] is None
+
+    asyncio.run(run())
+
+
+def test_a_call_missing_its_name_or_id_is_not_logged() -> None:
+    """짝지을 수도, 무엇이 불렸는지 말할 수도 없는 줄만 하나 늘린다."""
+
+    async def run() -> None:
+        channel, sent = make_channel()
+        runner = QaRunner()
+
+        await runner._log_reasoning(
+            channel,
+            {
+                "model": {
+                    "messages": [
+                        AIMessage(
+                            content="",
+                            tool_calls=[
+                                {"name": "", "args": {}, "id": "call_1"},
+                                {"name": "observe_scene", "args": {}, "id": ""},
+                            ],
+                        )
+                    ]
+                }
+            },
+        )
+
+        assert frames_of(sent, MessageType.TOOL) == []
+
+    asyncio.run(run())
+
+
+def test_a_long_tool_result_is_clipped() -> None:
+    """`observe_scene` 은 씬 렌더를 통째로 돌려준다. 이 프레임은 SSE 로도 발행된다."""
+
+    async def run() -> None:
+        channel, sent = make_channel()
+        runner = QaRunner()
+
+        await runner._log_reasoning(
+            channel,
+            {
+                "tools": {
+                    "messages": [
+                        ToolMessage(
+                            content="ㅁ" * 50_000, name="observe_scene", tool_call_id="call_1"
+                        )
+                    ]
+                }
+            },
+        )
+
+        content = frames_of(sent, MessageType.TOOL_RESULT)[0]["payload"]["content"]
+        assert len(content) < 50_000
+        assert "more characters" in content
+
+    asyncio.run(run())
