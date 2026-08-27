@@ -925,3 +925,64 @@ def test_델타가_태그를_다시_말하지_않아도_지킨다():
     )
 
     assert "tag=Spell" in memory.since_action(None)
+
+
+def test_사라졌다고_한_객체는_지운다():
+    """파괴된 객체는 어느 통에도 안 실린다 — 걷기가 살아 있는 계층만 걷기 때문이다. 그래서
+    판독이 따로 말하고(ARTEL-651), 여기서 그것을 놓는다.
+
+    꺼진 것과 달리 **지운다.** 꺼진 것은 다시 켜지면 판독이 `active` 통에 넣어 보내지만,
+    파괴된 것은 영영 안 온다.
+    """
+    memory = fold(
+        reading(active=[obj(selector="Card(Clone)[16]"), obj(selector="Word[12]")]),
+        reading(reading=2, whole=False, gone=["TurnBattleScene/Card(Clone)[16]"]),
+    )
+
+    assert [held.selector for held in memory.held.values()] == ["Word[12]"]
+    assert "Card(Clone)[16]" not in memory.render()
+
+
+def test_사라진_객체는_물어도_없다():
+    """`inspect` 가 같은 자리를 본다. 화면에서만 지우고 여기 남겨 두면, 안 보이는데 물으면
+    답하는 객체가 된다."""
+    memory = fold(
+        reading(active=[obj(selector="Card(Clone)[16]")]),
+        reading(reading=2, whole=False, gone=["TurnBattleScene/Card(Clone)[16]"]),
+    )
+
+    assert "Card(Clone)[16]" not in memory.inspect("Card")
+
+
+def test_꺼진_객체는_사라진_것이_아니다():
+    """두 상태가 섞이면 풀에서 대기하는 객체가 지워지고, 그것으로 사는 게임이 있다."""
+    memory = fold(
+        reading(deactive=[obj(selector="B[1]")]),
+        reading(reading=2, whole=False, gone=[]),
+    )
+
+    assert memory.held  # 그대로 들고 있는다
+
+
+def test_사라짐을_모르는_판독은_아무_일도_안_일으킨다():
+    """그 필드가 없는 SDK 에서도 종전처럼 돈다. 잔상이 전량 판독까지 남을 뿐이다."""
+    memory = fold(
+        reading(active=[obj(selector="Card(Clone)[16]")]),
+        reading(reading=2, whole=False, changed=["TurnBattleScene/Card(Clone)[16]|active"]),
+    )
+
+    assert "Card(Clone)[16]" in memory.render()
+
+
+def test_같은_이름으로_다시_태어난_객체가_옛_이동_횟수를_안_물려받는다():
+    """selector 는 자리 번호라 다음 카드가 같은 이름을 받을 수 있다. 이동 횟수를 남겨 두면
+    갓 태어난 객체가 죽은 객체의 "여러 판독에서 움직였다"를 달고 나온다."""
+    key = "TurnBattleScene/Card(Clone)[16]|Battle.Turns.TurnBattleSystem::turn"
+    memory = fold(
+        reading(active=[obj(selector="Card(Clone)[16]")], changed=[key]),
+        reading(reading=2, whole=False, changed=[key]),
+        reading(reading=3, whole=False, gone=["TurnBattleScene/Card(Clone)[16]"]),
+        reading(reading=4, whole=False, active=[obj(selector="Card(Clone)[16]")]),
+    )
+
+    assert "moved in" not in memory.render()
