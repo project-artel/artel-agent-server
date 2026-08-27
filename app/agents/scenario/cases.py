@@ -129,6 +129,17 @@ def render_test_case_list(entries: list[TestCaseListItem]) -> str:
         if entry.precondition:
             lines.append(f"    precondition: {entry.precondition}")
         lines.append(f"    expected: {entry.expected_value}")
+        # The state this case needs and leaves, parsed from its structure rather
+        # than from the sentence above. Ordering by these is why they are here.
+        for guard in entry.state_before:
+            lines.append(f"    needs: {guard.variable} {guard.operator} {guard.value}")
+        if entry.state_after:
+            leaves = ", ".join(f"{k} {v}" for k, v in entry.state_after.items())
+            lines.append(f"    leaves: {leaves}")
+        # One step out of this screen. Blank `by` is an answer: the game goes there
+        # by itself and there is nothing to press.
+        for exit_ in entry.exits:
+            lines.append(f"    to {exit_.scene}: {exit_.by or '(goes on its own)'}")
     return "\n".join(lines)
 
 

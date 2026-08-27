@@ -46,6 +46,36 @@ class ScenarioDraft(BaseModel):
         return steps
 
 
+class CaseGuard(BaseModel):
+    """One comparison a case's precondition requires.
+
+    Read from the case's condition structure, so the whole name survives:
+    ``CombineButton.combineZone.activeSelf``, not ``activeSelf``. Rendering it to
+    a sentence and reading it back is what used to lose the owner.
+    """
+
+    variable: str
+    operator: str
+    value: str
+
+
+class SceneExit(BaseModel):
+    """One step from this screen to another.
+
+    ``by`` is what to press — a key, a control path. **Empty means the game goes
+    on its own**: nothing to press, so do not send whoever runs this looking for a
+    button. "Nothing to press" and "not known" are different answers and this field
+    keeps them apart.
+
+    Only one step out, never the full set of screens you could eventually reach:
+    measured on a real game, every screen reached every other, so the full set said
+    nothing. One step at a time is what you chain into a route.
+    """
+
+    scene: str
+    by: str | None = None
+
+
 class TestCaseListItem(BaseModel):
     """One TestCase as the session receives it, in the project's whole list.
 
@@ -66,6 +96,18 @@ class TestCaseListItem(BaseModel):
     precondition: str | None = None
     expected_value: str
     verification_status: str
+    # What the case needs, and what it leaves behind. Orchestration parses these
+    # from the case's own condition structure — not from the sentence — so both
+    # sides read one state instead of two readings of one sentence.
+    #
+    # **These were on the wire and dropped here.** The model had no such fields,
+    # so pydantic discarded them while the prompt went on telling the agent to
+    # order by them. Ordering silently fell back to re-reading the sentence.
+    state_before: list[CaseGuard] = Field(default_factory=list)
+    state_after: dict[str, str] = Field(default_factory=dict)
+    # Where this screen leads in one step, and what to press to get there.
+    # The map has known this all along; it was never sent.
+    exits: list["SceneExit"] = Field(default_factory=list)
 
 
 class ScenarioAgentRequest(BaseModel):
