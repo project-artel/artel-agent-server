@@ -82,6 +82,10 @@ class QaRunState:
         self.finished = False
         # The observation the agent last saw, so the next look is a diff.
         self.watermark = 0
+        # 마지막 행위가 끝난 Unity 프레임. 판독의 창이 여기서 시작한다 — 타이머가 아니라
+        # 행위가 경계다(ARTEL-621). `None` 은 아직 아무 행위도 없었거나, 그 필드를 모르는
+        # 옛 SDK 다.
+        self.last_action_frame: int | None = None
         # How many times `finish_run` was reached. The first attempt made with
         # steps still unreported is pushed back on; a second one closes the run
         # regardless, so a game that genuinely cannot go on is never trapped.
@@ -313,7 +317,9 @@ def build_tools(
                 "You can look again with a longer wait, or judge the step failed.",
                 messages,
             )
-        view = channel.scene.render(state.watermark)
+        # 관측은 행위가 아니다. 마지막 **행위** 이후로 무엇이 쌓였는지를 그대로 보여준다 —
+        # 관측할 때마다 경계를 옮기면, 두 번 보는 것만으로 그 사이의 변화를 잃는다.
+        view = channel.scene.render(state.watermark, since_action=state.last_action_frame)
         state.watermark = channel.scene.updates
         return with_operator_messages(view, messages)
 
@@ -348,8 +354,12 @@ def build_tools(
             lines.append(f"  {methods[item.id]}: {outcome}")
         body = "\n".join(lines) or "  (the game returned no outcome for this action)"
 
+        # 이 행위가 끝난 프레임. 그보다 뒤에 잡힌 판독만이 이 행위의 결과다(ARTEL-621).
+        # 없으면 그 필드를 모르는 옛 SDK 이고, 렌더가 종전의 창으로 돌아간다.
+        state.last_action_frame = result.frame
+
         if looked:
-            view = channel.scene.render(state.watermark)
+            view = channel.scene.render(state.watermark, since_action=result.frame)
             state.watermark = channel.scene.updates
             body = f"{body}\n\n{view}"
         elif channel.scene.pulse.seen:
@@ -358,7 +368,7 @@ def build_tools(
             #
             # 그래도 화면은 그린다. 여기서 감추면 액션이 아무것도 바꾸지 않았다는 것을
             # 판정하려는 스텝이 볼 것을 잃는다 — 그것이야말로 보여 줘야 하는 결과다.
-            view = channel.scene.render(state.watermark)
+            view = channel.scene.render(state.watermark, since_action=result.frame)
             state.watermark = channel.scene.updates
             body = f"{body}\n\nNothing on the screen moved.\n\n{view}"
         else:

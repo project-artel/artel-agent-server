@@ -276,10 +276,48 @@ class PulseMemory(BaseModel):
     # 마지막으로 그린 판독 번호. 이 장부를 여기 두는 이유는 "무엇까지 보여줬나" 가 이 메모리
     # 자신의 사정이기 때문이다 — 부르는 쪽마다 따로 세면 둘이 어긋날 자리가 생긴다.
     drawn: int = 0
+    # 전량 판독이 도착했고 아직 그것을 전량으로 그리지 않았다.
+    #
+    # 씬이 바뀌면 SDK 가 `whole` 을 보낸다. 그때 한 번은 전량으로 그려야 독자가 새 화면을
+    # 한 덩어리로 받는다 — 델타만 이어 붙이면 씬이 바뀐 자리를 지나 거슬러 읽어야 한다.
+    # 판독이 이미 그 경계를 말해 주므로 여기서 새 규칙을 만들지 않는다.
+    page_due: bool = False
 
     @property
     def seen(self) -> bool:
         return self.readings > 0
+
+    def after_frame(self, frame: int | None) -> int | None:
+        """그 프레임보다 뒤에 잡힌 판독만 남기는 창의 시작점. 모르면 `None`.
+
+        판독과 액션 결과가 같은 시계(`Time.frameCount`)를 쓰므로, 액션이 끝난 프레임보다
+        뒤인 판독이 곧 "내 행위 이후"다. 시간으로 어림잡던 것을 이것이 대신한다 — 읽기와
+        전달이 두 속도라, 액션 직후 도착하는 배치가 액션 전에 잡힌 것일 수 있었다.
+
+        `None` 을 돌려주는 경우가 둘이다. 프레임을 모르는 옛 SDK, 그리고 그 프레임이 남은
+        로그보다 오래된 경우. **둘 다 거짓말보다 낫다** — 부르는 쪽이 종전의 창으로
+        돌아가면 될 뿐이고, 없는 경계를 지어내면 판독을 통째로 잃는다.
+        """
+        if frame is None or not self.log:
+            return None
+
+        # 로그는 오래된 것이 앞이다. 그 프레임 이하인 마지막 판독이 창의 시작점 —
+        # 그것까지는 액션 이전이고, 그 뒤가 결과다.
+        cutoff = None
+        for entry in self.log:
+            if entry.frame is None or entry.reading is None:
+                continue
+            if entry.frame <= frame:
+                cutoff = entry.reading
+            else:
+                break
+
+        if cutoff is not None:
+            return cutoff
+
+        # 남은 로그가 전부 그 프레임보다 뒤다. 액션이 로그 창 밖으로 밀려났다는 뜻이라
+        # 어디까지가 결과인지 말할 수 없다.
+        return None
 
     def apply(self, reading: PulseReading) -> None:
         self.readings += 1
@@ -291,6 +329,7 @@ class PulseMemory(BaseModel):
             self.wholes += 1
             self.held = {}
             self.statics = {}
+            self.page_due = True
 
         if reading.scene is not None:
             self.scene = reading.scene
@@ -545,22 +584,29 @@ class PulseMemory(BaseModel):
             lines.append(f"({len(hits) - MAX_INSPECTED} more objects match; name one more exactly)")
         return "\n".join(lines)
 
-    def render_now(self) -> str | None:
-        """지금 화면이 무엇인가. 켜져 있는 것 전부를 값과 함께.
+    def since_action(self, frame: int | None) -> str | None:
+        """행위 하나가 무엇을 남겼나. 씬이 바뀌었으면 전량 한 페이지로.
 
-        [render] 와 답하는 질문이 다르다. 저쪽은 "내 액션이 무엇을 바꿨나" 이고 창이 맞는
-        자리다. 이쪽은 매 턴 프롬프트 꼬리에 붙어 **판단의 바탕**이 되므로 창이면 안 된다 —
-        판단이 필요한 것은 대체로 멈춰 있는 상태이기 때문이다.
+        도구 결과에 실리는 것이 이것이다. 도구 결과는 대화에 남으므로, 여기 그린 것은
+        지워지지 않는다 — 한 번 말하면 그 자리에 있다.
 
-        화면에 버젓이 떠 있는 대사창을 에이전트가 "대사 없음" 으로 읽은 것이 그래서였다.
-        `waitingForAcknowledge` 도 `streamingText` 도 판독이 이미 들고 있었는데, 값이 한 번
-        자리 잡은 뒤로는 창 밖이라 그려지지 않았다. 그 동안 게임은 카드 드래그를 통째로
-        취소하고 있었고, 에이전트는 카드가 튕기는 것을 좌표 문제로 읽었다(ARTEL-579).
+        **매 턴 교체되는 꼬리를 대신한다.** 종전에는 `render_now()` 를 모델 호출 맨 뒤에
+        붙였는데, 그것이 프롬프트 접두를 매 턴 깨뜨려 캐시가 시스템 프롬프트에서 멈췄다.
+        크기나 내용의 문제가 아니었다 — 10 토큰짜리 고정 꼬리도 똑같이 깼다(ARTEL-621).
 
-        창을 옮기지 않는다. 이것을 그렸다고 해서 도구 결과가 말할 것이 줄지 않는다 — 둘은
-        같은 판독을 다른 질문으로 읽는다.
+        씬이 바뀐 뒤 첫 호출은 **전량**이다. 새 화면을 한 덩어리로 주지 않으면 독자가 씬
+        경계를 지나 거슬러 읽어야 한다. 그 다음부터는 델타이고, 앞의 페이지가 대화에 남아
+        있으므로 잃는 것이 없다.
+
+        `frame` 은 이 행위가 끝난 Unity 프레임이다. 그보다 뒤에 잡힌 판독만이 이 행위의
+        결과다 — 0.1초 떴다 사라진 것도 거기 남는다. 모르면(옛 SDK, 또는 그 프레임이 로그
+        창 밖) 종전처럼 마지막으로 그린 자리부터 그린다.
         """
-        return self.render(since=0, advance=False, news_since=self.drawn)
+        if self.page_due:
+            self.page_due = False
+            return self.render(since=0, news_since=self.drawn)
+
+        return self.render(since=self.after_frame(frame))
 
     @staticmethod
     def _aim(obj: "_HeldObject") -> str:
