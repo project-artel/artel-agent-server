@@ -305,7 +305,6 @@ def build_tools(
         `step` is the scenario step you are working on and `thought` is why you
         are looking; both go on the timeline.
         """
-        await channel.note(thought, LogCategory.THOUGHT, step)
         arrived = await channel.look(wait_seconds)
         messages = channel.drain_operator_messages()
         if not arrived:
@@ -318,16 +317,13 @@ def build_tools(
         state.watermark = channel.scene.updates
         return with_operator_messages(view, messages)
 
-    async def _run(
-        actions: list[JsonRpcAction], thought: str, summary: str, step: int
-    ) -> str:
-        """Every acting tool goes through here: log the reasoning, act, look.
+    async def _run(actions: list[JsonRpcAction], summary: str, step: int) -> str:
+        """Every acting tool goes through here: act, then look at what it did.
 
         Takes a list because a drag is only a drag when its actions ride in one
         batch — the SDK runs a batch strictly in order, so nothing can slip
         between the press and the release.
         """
-        await channel.note(thought, LogCategory.THOUGHT, step)
         result, looked = await channel.act_and_look(actions, summary, step)
         messages = channel.drain_operator_messages()
 
@@ -384,7 +380,6 @@ def build_tools(
         health, a counter, a flag. `selector` is the address printed in the scene
         block, and a partial one matches (`RangedCat` finds `RangedCat(Clone)[17]`).
         """
-        await channel.note(thought, LogCategory.THOUGHT, step)
         found = channel.scene.pulse.inspect(selector)
         messages = channel.drain_operator_messages()
         return with_operator_messages(found, messages)
@@ -402,7 +397,6 @@ def build_tools(
                 "Judge the remaining steps from the scene text."
             )
 
-        await channel.note(thought, LogCategory.THOUGHT, step)
         state.captures_attempted += 1
         params: list[Any] = [] if target_id is None else [target_id]
         what = "the screen" if target_id is None else f"element {target_id}"
@@ -493,7 +487,6 @@ def build_tools(
                 f"Use one of {', '.join(KNOWLEDGE_TAGS)}, or leave `tag` out."
             )
 
-        await channel.note(thought, LogCategory.THOUGHT, step)
         state.knowledge_searches_attempted += 1
         answer = await channel.search_knowledge(query, topic or None, RESULT_LIMIT, step)
         messages = channel.drain_operator_messages()
@@ -610,7 +603,6 @@ def build_tools(
                 "out if this fact is true wherever the player is."
             ) + render_missing_knowledge_warning(outstanding)
 
-        await channel.note(thought, LogCategory.THOUGHT, step)
         state.knowledge_records_attempted += 1
         try:
             answer = await channel.write_knowledge(
@@ -777,7 +769,6 @@ def build_tools(
                 "be, or use `forget_knowledge` if it should simply be gone."
             )
 
-        await channel.note(thought, LogCategory.THOUGHT, step)
         state.knowledge_updates_attempted += 1
         try:
             answer = await channel.write_knowledge(
@@ -866,7 +857,6 @@ def build_tools(
                 "the hit."
             )
 
-        await channel.note(thought, LogCategory.THOUGHT, step)
         state.knowledge_forgets_attempted += 1
         try:
             answer = await channel.write_knowledge(
@@ -974,7 +964,6 @@ def build_tools(
                     "hit or with a neighbour line."
                 )
 
-        await channel.note(thought, LogCategory.THOUGHT, step)
         state.knowledge_links_attempted += 1
         try:
             answer = await channel.write_knowledge(
@@ -1043,7 +1032,6 @@ def build_tools(
                     "been shown, so you have not seen the link you are removing."
                 )
 
-        await channel.note(thought, LogCategory.THOUGHT, step)
         state.knowledge_unlinks_attempted += 1
         try:
             answer = await channel.write_knowledge(
@@ -1105,7 +1093,6 @@ def build_tools(
                 "expanded. Search for it first and use the id printed with the hit."
             )
 
-        await channel.note(thought, LogCategory.THOUGHT, step)
         state.knowledge_expands_attempted += 1
         # Clamped here as well as on the far side. Orchestration clamps rather than
         # refuses, so this only saves a round trip — but it also keeps the number
@@ -1141,7 +1128,6 @@ def build_tools(
         """
         return await _run(
             [JsonRpcAction(id=1, method="button_click", params=[target_id])],
-            thought,
             f"Clicking {target_id}",
             step,
         )
@@ -1151,7 +1137,6 @@ def build_tools(
         """Type into a text field. `target_id` must be an id from the current scene."""
         return await _run(
             [JsonRpcAction(id=1, method="enter_text", params=[target_id, value])],
-            thought,
             f"Typing into {target_id}",
             step,
         )
@@ -1166,7 +1151,6 @@ def build_tools(
         """
         return await _run(
             [JsonRpcAction(id=1, method="key_click", params=[key_code, duration_seconds])],
-            thought,
             f"Pressing {key_code}",
             step,
         )
@@ -1182,7 +1166,6 @@ def build_tools(
         """
         return await _run(
             [JsonRpcAction(id=1, method="move_mouse", params=[x, y])],
-            thought,
             f"Moving the pointer to ({x}, {y})",
             step,
         )
@@ -1200,7 +1183,6 @@ def build_tools(
         """
         return await _run(
             [JsonRpcAction(id=1, method="mouse_down", params=[button])],
-            thought,
             f"Holding mouse button {button}",
             step,
         )
@@ -1215,7 +1197,6 @@ def build_tools(
         """
         return await _run(
             [JsonRpcAction(id=1, method="mouse_up", params=[button])],
-            thought,
             f"Releasing mouse button {button}",
             step,
         )
@@ -1233,7 +1214,6 @@ def build_tools(
         """
         return await _run(
             [JsonRpcAction(id=1, method="key_down", params=[key_code])],
-            thought,
             f"Holding {key_code}",
             step,
         )
@@ -1257,7 +1237,6 @@ def build_tools(
         """
         return await _run(
             [JsonRpcAction(id=1, method="set_axis", params=[axis_name, value])],
-            thought,
             f"Setting axis {axis_name} to {value}",
             step,
         )
@@ -1281,7 +1260,6 @@ def build_tools(
         """
         return await _run(
             [JsonRpcAction(id=1, method="set_button", params=[axis_name, pressed])],
-            thought,
             f"{'Holding' if pressed else 'Releasing'} button {axis_name}",
             step,
         )
@@ -1291,7 +1269,6 @@ def build_tools(
         """Let go of a key held by `hold_key`. `key_code` must be the same one."""
         return await _run(
             [JsonRpcAction(id=1, method="key_up", params=[key_code])],
-            thought,
             f"Releasing {key_code}",
             step,
         )
@@ -1324,7 +1301,6 @@ def build_tools(
                 JsonRpcAction(id=3, method="move_mouse", params=[to_x, to_y]),
                 JsonRpcAction(id=4, method="mouse_up", params=[button]),
             ],
-            thought,
             f"Dragging from ({from_x}, {from_y}) to ({to_x}, {to_y})",
             step,
         )
@@ -1343,7 +1319,6 @@ def build_tools(
         """
         return await _run(
             [JsonRpcAction(id=1, method="pause_time")],
-            thought,
             "Pausing game time",
             step,
         )
@@ -1357,7 +1332,6 @@ def build_tools(
         """
         return await _run(
             [JsonRpcAction(id=1, method="resume_time")],
-            thought,
             "Resuming game time",
             step,
         )
@@ -1409,7 +1383,6 @@ def build_tools(
         params: list[Any] = [{"clearPlayerPrefs": True}] if clear_player_prefs else []
         return await _run(
             [JsonRpcAction(id=1, method="reset_game", params=params)],
-            thought,
             "Resetting the game",
             step,
         )
@@ -1431,7 +1404,6 @@ def build_tools(
         it: waiting is capped per call, and a couple of full waits is the whole
         run's clock, spent on nothing.
         """
-        await channel.note(thought, LogCategory.THOUGHT, step)
         waited = bounded_operator_wait(timeout_seconds)
         messages = await channel.wait_for_operator(timeout_seconds)
         if not messages:
@@ -1469,7 +1441,6 @@ def build_tools(
         # schema the model fills in: an optional array is something it can simply
         # omit, while a nullable one invites it to send `null` and then wonder
         # whether that meant "none" or "unknown".
-        await channel.note(thought, LogCategory.THOUGHT, step)
         # `knows_of`, NOT `knowledge_seen`. An entry shown only as a one-line
         # neighbour can still be what a verdict rested on, and citing it destroys
         # nothing. `knowledge_seen` is the bar for `update_knowledge` and
@@ -1578,7 +1549,6 @@ def build_tools(
                 f"again with one of {allowed}."
             )
         state.issues_attempted += 1
-        await channel.note(thought, LogCategory.THOUGHT, step)
         await channel.emit(
             MessageType.ISSUE,
             IssuePayload(
@@ -1603,7 +1573,6 @@ def build_tools(
 
         `thought` is how you reached the overall verdict; it goes on the timeline.
         """
-        await channel.note(thought, LogCategory.THOUGHT)
         state.finish_attempts += 1
 
         # A step the agent never attempted is the failure this whole change is
@@ -1639,7 +1608,6 @@ def build_tools(
         `thought` is why you are answering this way; it goes on the timeline so a
         reviewer can see the reasoning behind what the operator was told.
         """
-        await channel.note(thought, LogCategory.THOUGHT, step)
         await channel.say(message, step)
         return "Sent."
 
