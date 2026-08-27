@@ -33,6 +33,11 @@ class QaContext(BaseModel):
     game_instance_id: int
     qa_run_id: int | None = None
     scenarios: list[QaRunScenario] = []
+    # 런 시작에 씬별 capability·앵커 지식을 한 번 조회하는 데 쓰는 두 값 (ARTEL-612).
+    # 선택이다: 지금 orchestration 은 이 둘을 보내지 않고, 그때는 조회를 건너뛴 채
+    # 런이 그대로 돈다. 없는 것을 필수로 만들면 오늘의 호출자가 전부 422 가 된다.
+    project_id: int | None = None
+    game_build_id: int | None = None
 
     # --- 레거시 단일 시나리오 (하위호환) ---
     qa_try_id: int | None = None
@@ -131,6 +136,8 @@ async def open_qa_session(
         qa_run_id=payload.context.qa_run_id,
         game_instance_id=payload.context.game_instance_id,
         scenarios=payload.context.scenarios,
+        project_id=payload.context.project_id,
+        game_build_id=payload.context.game_build_id,
         model=payload.model,
         language=payload.language,
         prompt_version=payload.prompt_version,

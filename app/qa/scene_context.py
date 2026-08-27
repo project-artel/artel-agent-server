@@ -22,12 +22,15 @@ the search by scene instead would be the same mistake from the other side: the
 server-side filter drops un-anchored entries, so a scene-filtered search hides
 exactly the game-wide rules the agent most needs.
 
-**Volume is what shapes everything here.** This block is rewritten on EVERY model
-call, not once per observation — the same property that made
-`MAX_ACTIONS_IN_LIVE_VIEW` ten rather than forty in `app/qa/scene.py`. So each
-list is bounded, each line is one line, and knowledge carries an id and a summary
-and nothing else. The full text of an entry stays one `search_knowledge` away,
-which is far cheaper than paying for it on every turn of the run.
+**Where this is drawn, and why that decides its size.** It rides under the scene
+view a tool result carries (`SceneMemory.render` in `app/qa/scene.py`), drawn on
+the first render after the run moves to a new scene and not again while it stays
+there. A tool result is never rewritten, so one paint lasts the whole visit; a
+paint per turn would instead leave one copy of the same paragraph per turn
+permanently in the context. That is also why every list here is bounded, why each
+entry is one line, and why knowledge carries an id and a summary and nothing
+else — the full text stays one `search_knowledge` away, on the turn that actually
+wants it.
 
 **A failed lookup is not a failed run.** `fetch_scene_context` never raises: a run
 that cannot start because an advisory lookup timed out is worse than a run
@@ -48,11 +51,11 @@ logger = logging.getLogger(__name__)
 
 # How many capability lines the block carries, and how many knowledge lines.
 #
-# Read the comment above `MAX_ACTIONS_IN_LIVE_VIEW` in `app/qa/scene.py` first:
-# this block is rewritten on every model call, so a line here is paid once per
-# turn for the whole run, not once per observation. That is why these are single
-# digits while the payload itself will happily carry fifty capabilities for a
-# busy scene.
+# Single digits while the payload will happily carry fifty capabilities for a
+# busy scene. A line here is paid once per scene visit and then sits in the
+# conversation for the rest of the run, beside everything else that scene visit
+# produced — the block competes with the screen it describes, and the screen is
+# what a verdict is read off.
 #
 # Capabilities get the larger share because a capability is what the agent might
 # ACT on, and knowledge lines are recoverable — the id is printed, and a search
@@ -69,11 +72,13 @@ MAX_KNOWLEDGE_IN_SCENE_CONTEXT = 6
 # tell "that is all there is" from "there is more".
 MAX_TEXT_CHARS = 160
 
-# The markers the rendered block is wrapped in, so `fold_stale_scene_context` in
-# `app/agents/qa/context.py` can find exactly this span. Its own pair, distinct
-# from `CURRENT_SCENE_START` and from `SCENE_VIEW_START_PREFIX`: the block sits
-# INSIDE the live scene block, and a fold that matched either of the others
-# would either swallow the live view whole or miss this entirely.
+# The markers the rendered block is wrapped in. Its own pair, distinct from
+# `SCENE_VIEW_START_PREFIX`, and drawn OUTSIDE it: `fold_stale_scenes` replaces
+# everything between that other pair with a placeholder, and a block inside it
+# would be folded away with the screen it describes. Nothing folds this one —
+# folding rewrites a message the model has already been sent, which is what broke
+# the prompt prefix in ARTEL-621, and a block drawn once per scene visit is not
+# large enough to be worth paying that for.
 SCENE_CONTEXT_START = "<<scene context>>"
 SCENE_CONTEXT_END = "<<end scene context>>"
 
@@ -111,12 +116,12 @@ class SceneCapability(_Payload):
 
     The condition tree, the evidence address and the effect are deliberately not
     here — the endpoint does not send them, because nothing that cannot be drawn
-    as one prompt line earns a place in a block redrawn every turn.
+    as one prompt line earns a place in a block this small.
 
     `control_selector_hint` is a HINT and never an aiming key. It carries sibling
     indices, so it shifts between runs, and the action protocol takes an int
     instance id anyway. `_capability_line` prints a path only as orientation, and
-    the block's own heading says the ids to act on come from the live scene.
+    the block's own heading says the ids to act on come from the scene view.
     """
 
     capability_id: str = ""
@@ -144,7 +149,7 @@ class SceneKnowledge(_Payload):
     The description is not in the payload and must not be fetched to fill this
     line. The id is what makes the omission cheap — the agent can search the
     entry back whole on the one turn it actually needs the text, instead of the
-    run paying for that text on every turn it does not.
+    run carrying that text through every turn it does not.
     """
 
     knowledge_id: str = ""
@@ -192,10 +197,10 @@ class SceneContext(_Payload):
         """The slice for one scene, by exact name.
 
         The scene name is the only key joining the two halves — it is what the
-        content map files a capability under and what an anchor names — and it is
-        already on the first line of the live scene block. Matched exactly: a
-        game is free to name two scenes `Battle` and `Battle 2`, and a fuzzy match
-        would hand the agent another screen's rules as if they were this one's.
+        content map files a capability under and what an anchor names — and the
+        scene view above prints it. Matched exactly: a game is free to name two
+        scenes `Battle` and `Battle 2`, and a fuzzy match would hand the agent
+        another screen's rules as if they were this one's.
         """
         if not scene_name:
             return None
@@ -211,9 +216,9 @@ class SceneContext(_Payload):
         carries no entry for this scene at all. There is a real difference between
         the two, and it is not one this block can carry honestly: no entry means
         the map has no capabilities AND no anchor names the scene, which is the
-        ordinary case for most scenes of most builds. A line saying so on every
-        turn of every such scene would be the block's largest single cost and its
-        smallest contribution.
+        ordinary case for most scenes of most builds. A paragraph saying so on
+        arriving at every such scene would be the block's largest single cost and
+        its smallest contribution.
         """
         entry = self.entry_for(scene_name)
         if entry is None:
@@ -321,11 +326,11 @@ def _entry_lines(entry: SceneContextEntry) -> list[str]:
         lines.extend(_capability_line(capability) for capability in shown)
         # Said once, under the list rather than per line. A path is where the
         # control sits in the map, and the map is documentation: the build in
-        # front of you is what the live scene above reports, and its ids are the
+        # front of you is what the scene view above reports, and its ids are the
         # only thing the action tools accept.
         lines.append(
             "  (a path is where the map found the control, not something to aim at — "
-            "take ids and coordinates from the live scene above)"
+            "take ids and coordinates from the scene view above)"
         )
 
     lines.append("")
