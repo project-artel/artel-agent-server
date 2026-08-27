@@ -536,7 +536,6 @@ def build_tools(
         description=RECORD_KNOWLEDGE_DESCRIPTION.format(
             limit=arch.max_records_per_run,
             tags=", ".join(KNOWLEDGE_TAGS),
-            ui_tag="UI",
         )
     )
     async def record_knowledge(
@@ -930,8 +929,8 @@ def build_tools(
             # silence. Refused here so the agent learns the link did not happen.
             return (
                 "Nothing was linked: `note` is required. It is the only record of "
-                "why you thought the connection was real — and for LEADS_TO it is "
-                "what you did to get there, which is what makes the route usable."
+                "why you thought the connection was real, and of any condition it "
+                "holds under."
             )
 
         source = (from_knowledge_id or "").strip()

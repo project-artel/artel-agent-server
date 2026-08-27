@@ -298,17 +298,17 @@ def test_link_goes_out_with_the_relation_and_note() -> None:
         await tools["link_knowledge"].ainvoke(
             {
                 "step": 1,
-                "thought": "경로를 적는다",
+                "thought": "예외를 일반 규칙에 건다",
                 "from_knowledge_id": "1",
                 "to_knowledge_id": "2",
-                "relation": "leads_to",
-                "note": "상단바의 상점 버튼",
+                "relation": "refines",
+                "note": "상점에서만 다르게 동작한다",
             }
         )
 
         payload = frames(sent, MessageType.KNOWLEDGE_LINK)[0]["payload"]
-        assert payload["relation"] == "LEADS_TO"
-        assert payload["note"] == "상단바의 상점 버튼"
+        assert payload["relation"] == "REFINES"
+        assert payload["note"] == "상점에서만 다르게 동작한다"
         assert payload["from_knowledge_id"] == "1"
 
     asyncio.run(run())
@@ -395,8 +395,8 @@ def test_unlink_names_the_relation_not_an_edge_id() -> None:
 
         await tools["unlink_knowledge"].ainvoke(
             {
-                "step": 1, "thought": "경로가 없었다",
-                "from_knowledge_id": "1", "to_knowledge_id": "2", "relation": "LEADS_TO",
+                "step": 1, "thought": "정제 관계가 아니었다",
+                "from_knowledge_id": "1", "to_knowledge_id": "2", "relation": "REFINES",
             }
         )
 
@@ -404,7 +404,7 @@ def test_unlink_names_the_relation_not_an_edge_id() -> None:
         assert payload == {
             "from_knowledge_id": "1",
             "to_knowledge_id": "2",
-            "relation": "LEADS_TO",
+            "relation": "REFINES",
         }
 
     asyncio.run(run())
@@ -549,12 +549,77 @@ def test_an_error_frame_releases_the_expansion_not_the_search() -> None:
 
 
 def test_the_relation_vocabulary_has_no_catch_all() -> None:
-    """An agent with one easy option and four hard ones picks the easy one."""
+    """An agent with one easy option and three hard ones picks the easy one."""
     assert "RELATED_TO" not in KNOWLEDGE_RELATIONS
     assert "SEE_ALSO" not in KNOWLEDGE_RELATIONS
     # SIMILAR is a display label; sending it would be rejected by Orchestration's CHECK.
     assert "SIMILAR" not in KNOWLEDGE_RELATIONS
-    assert "LEADS_TO" in KNOWLEDGE_RELATIONS
+    assert set(KNOWLEDGE_RELATIONS) == {
+        "CONTRADICTS",
+        "REFINES",
+        "DEPENDS_ON",
+        "REPLACES",
+    }
+
+
+def test_the_agent_can_no_longer_write_a_route() -> None:
+    """The screen map moved to `content_map`, so the agent stops building a second one.
+
+    Both write paths are pinned, not just `link_knowledge`. `unlink_knowledge`
+    validates against the same tuple, so dropping the relation also stops a run
+    from tearing edges out of the map it no longer owns — which is the outcome
+    ARTEL-590 wanted, and would be silently undone by putting `LEADS_TO` back for
+    the convenience of the unlink path.
+    """
+
+    async def run() -> None:
+        _, state, tools, sent = make()
+        seen(state, "1", "2")
+
+        linked = await tools["link_knowledge"].ainvoke(
+            {
+                "step": 1, "thought": "t", "from_knowledge_id": "1",
+                "to_knowledge_id": "2", "relation": "LEADS_TO", "note": "상점 버튼",
+            }
+        )
+        unlinked = await tools["unlink_knowledge"].ainvoke(
+            {
+                "step": 1, "thought": "t", "from_knowledge_id": "1",
+                "to_knowledge_id": "2", "relation": "LEADS_TO",
+            }
+        )
+
+        assert "not a knowledge relation" in linked
+        assert "not a knowledge relation" in unlinked
+        assert not frames(sent, MessageType.KNOWLEDGE_LINK)
+        assert not frames(sent, MessageType.KNOWLEDGE_UNLINK)
+
+    asyncio.run(run())
+
+
+def test_a_stored_route_still_reads_back_in_both_directions() -> None:
+    """Edges written before ARTEL-590 are still in the graph and still come back.
+
+    The write vocabulary and the read labels are separate for exactly this: a
+    `LEADS_TO` missing from `_REVERSED` would render an entry reached BY a route as
+    one leading to it — the map inverted, by a change meant to stop keeping a map.
+    """
+    outgoing = render_neighbour(neighbour(relation="LEADS_TO", direction="OUT"))
+    incoming = render_neighbour(neighbour(relation="LEADS_TO", direction="IN"))
+
+    assert "leads_to" in outgoing
+    assert "reached from" in incoming
+
+    expanded = render_expansion(
+        KnowledgeExpandResultPayload(
+            id="1",
+            summary="마을 화면",
+            neighbors=[neighbour(relation="LEADS_TO", note="상단바의 상점 버튼")],
+        ),
+        remaining=1,
+    )
+    assert "leads_to" in expanded
+    assert "상단바의 상점 버튼" in expanded
 
 
 def test_the_neighbour_clip_is_small_enough_to_stay_a_handful_of_lines() -> None:
