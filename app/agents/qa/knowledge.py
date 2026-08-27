@@ -22,6 +22,28 @@ exempt from the write cap, and the deletion budget being the smallest allowance
 in the run. A run that deletes and then fails to record has removed knowledge
 rather than fixed it, and that stays true now that there is a better way to do it.
 
+**An anchor says where a fact is true.** Most of what belongs here is true of the
+game wherever the player is standing — how input is read, what a resource is for,
+what the objective is. Some of it is not: a control that behaves on one screen
+unlike anywhere else, a shop that refuses a purchase in a way no other does. An
+anchor is the scene, and where the run knows it the screen, that such a fact is
+tied to. It rides on the write (`scene_name` and `screen_id` on
+`KnowledgeCreatePayload`) and comes back on a hit (`anchors`).
+
+Both fields are optional, and **an absent anchor is a claim, not a gap**: it says
+the fact holds everywhere, which is the ordinary case and the one that has to stay
+cheap. That is why nothing here fills the anchor from the run's current scene —
+doing so would file every game-wide rule under whichever screen the run happened
+to be standing on, and a rule filed that way is one the run on the next screen
+never finds. The agent names the anchor or leaves it out; the failure mode runs
+both ways, and the tool description is where the agent is taught to tell them
+apart.
+
+The screen map itself is NOT anchored knowledge and does not live here at all —
+which screens exist and how to get between them is owned by Orchestration's
+`content_map`, filled from play (ARTEL-582). An anchor points AT a screen; it does
+not describe one.
+
 Nothing in this module touches the game. Neither a search nor a write changes a
 screen, so no scene view is produced and none is appended to any result — see
 `app/agents/qa/context.py` for why re-loading a scene the agent has already read
