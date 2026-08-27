@@ -19,6 +19,45 @@ from app.llm.usage import UsageCallback
 TEMPERATURE = 0.2
 
 
+class _PrefixCacheableChatOpenAI(ChatOpenAI):
+    """`"content": null` 을 빈 문자열로 되돌린다. 접두 캐시가 거기서 멈추기 때문이다.
+
+    langchain 이 일부러 넣는 동작이다.
+
+        # langchain_openai/chat_models/base.py
+        # If tool calls present, content null value should be None not empty string.
+        if "function_call" in message_dict or "tool_calls" in message_dict:
+            message_dict["content"] = message_dict["content"] or None
+
+    그 `null` 하나가 OpenRouter 를 통한 접두 캐싱을 깬다. 캐시는 첫 도구 호출 직전에서
+    멈추고, 그 뒤로 대화가 아무리 자라도 다시 안 잡힌다 — stage 런에서 컨텍스트가 25k 에서
+    68k 로 가는 동안 `cache_read` 가 10,132 에 못 박혀 있었고, 매 턴 58k 를 새로 썼다.
+
+    OpenRouter 에 직접 쏘아 갈랐다. 같은 모델·같은 메시지 목록으로 일곱 턴:
+
+        content=null   4,510 고정
+        content=""     4,724 → 6,389 (99%)
+
+    두 갈래의 차이는 이 값 하나뿐이다. 모델에게는 같은 뜻이고, `""` 로 보낸 쪽도 정상
+    응답을 돌려줬다.
+
+    직렬화 뒤에 고치는 것이 요점이다. 미들웨어에서 메시지를 아무리 손봐도
+    `_convert_message_to_dict` 가 그 뒤에서 다시 `None` 으로 만든다.
+
+    langchain 이 이 동작을 고치면 이 클래스는 무해한 no-op 이 된다. 그때 지우면 된다.
+    """
+
+    def _get_request_payload(self, input_, *, stop=None, **kwargs) -> dict:
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+
+        # responses API 는 payload 모양이 달라 `messages` 가 없다. 건드리지 않는다.
+        for message in payload.get("messages") or []:
+            if message.get("role") == "assistant" and message.get("content") is None:
+                message["content"] = ""
+
+        return payload
+
+
 @lru_cache
 def build_chat_model(
     model: LLMModel,
@@ -69,7 +108,7 @@ def build_chat_model(
         # Opus 4096) or nothing caches, silently and at no extra charge.
         extra_body["cache_control"] = {"type": "ephemeral"}
 
-    return ChatOpenAI(
+    return _PrefixCacheableChatOpenAI(
         model=model.value,
         base_url=settings.openrouter_base_url,
         api_key=settings.openrouter_api_key or "missing",
