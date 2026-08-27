@@ -82,7 +82,7 @@ class RecordingRunner:
     def __init__(self) -> None:
         self.ran = asyncio.Event()
 
-    async def run_with_deadline(self, channel, scenario):
+    async def run_with_deadline(self, channel, scenario, scene_context=None):
         self.ran.set()
         return None, None
 
@@ -255,7 +255,7 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v12() -> None:
+def test_the_default_qa_version_is_v13() -> None:
     """A run that names no version has to get the newest prompt.
 
     This is also the trap in adding a version: `resolve_version` returns the
@@ -265,7 +265,7 @@ def test_the_default_qa_version_is_v12() -> None:
     `set_input_axis` before the tool exists teaches the agent to reach for
     something that is not there.
     """
-    assert resolve_version("qa_run") == "v12"
+    assert resolve_version("qa_run") == "v13"
 
 
 def test_v12_drops_the_screen_map_and_says_what_a_screen_anchors() -> None:
@@ -299,6 +299,75 @@ def test_v12_drops_the_screen_map_and_says_what_a_screen_anchors() -> None:
 
     # Breakage is still reported rather than unlinked; only the routes went.
     assert "removing a link because the build is broken" in v12
+
+
+# v12 문단 중 v13 이 **의도적으로** 고쳐 쓴 것들. 여기 없는 문단은 한 글자도 바뀌면 안 된다.
+#
+# 전부 같은 이유다: ARTEL-621 이 매 모델 호출 뒤에 붙던 `<<current scene>>` 꼬리를 없앴는데
+# v12 본문이 그것을 그대로 가르치고 있다. v13 이 배포 즉시 기본값이 되므로, 없는 블록을
+# 가리키는 문장을 그대로 실으면 에이전트가 오지 않는 것을 기다린다.
+V13_REWRITES_FROM_V12 = (
+    "The last thing in every message you receive is a block marked `<<current scene>>`.",
+    "Inside that block, a value is written as its whole history, oldest first:",
+    "That block ends with the last handful of things the game itself ran,",
+    "Your conversation may be compacted when it grows long:",
+)
+
+
+def test_v13_teaches_the_scene_context_block_and_keeps_the_rest_of_v12() -> None:
+    """v13 is v12 plus one section, and the section's job is a boundary.
+
+    The block itself carries the same boundary (see
+    `tests/test_qa_scene_context.py`), and it is said twice on purpose: a list
+    sitting in front of the agent is read as complete, and each of the two places
+    it is said can be lost on its own — the prompt to compaction, the block to a
+    lookup that answered nothing.
+    """
+    v12 = load_prompt("qa_run", "system", "v12").body
+    v13 = load_prompt("qa_run", "system", "v13").body
+
+    assert "<<scene context>>" not in v12
+    assert "### What is already known about this scene" in v13
+
+    # The boundary, and the two things that must not be mistaken for what they
+    # are not: an id line is not the entry, and a map path is not a target.
+    assert "It is anchored knowledge only, and that is a hard boundary." in v13
+    assert '"nothing is filed under this scene alone"' in v13
+    assert "never the entry itself" in v13
+    assert "not something to aim at" in v13
+
+    # 고쳐 쓴 네 문단 말고는 v12 그대로다. 목록으로 예외를 세우는 것은, 아무 문단이나
+    # 조용히 사라지는 것을 막으면서 고친 자리는 이름을 대게 하려는 것이다.
+    for paragraph in v12.split("\n\n"):
+        if paragraph.startswith(V13_REWRITES_FROM_V12):
+            assert paragraph not in v13, "고쳐 쓴다고 해 놓고 옛 문단이 남아 있다"
+            continue
+        assert paragraph in v13
+
+
+def test_v13_stops_teaching_the_live_view_ARTEL_621_deleted() -> None:
+    """없는 블록을 가리키는 문장이 v13 에 남아 있으면 안 된다.
+
+    꼬리는 매 모델 호출 뒤에 붙었다 사라지는 메시지였고, 그것이 프롬프트 접두를 매 턴
+    깨뜨려 캐시를 못 쓰게 만들고 있었다. 화면은 이제 도구 결과 안의 씬 뷰가 내고, 압축은
+    원장이 그것을 다시 말한다(ARTEL-622).
+    """
+    v13 = load_prompt("qa_run", "system", "v13").body
+
+    assert "<<current scene>>" not in v13
+    assert "`<<scene view N>>`" in v13
+    assert "changed since your last look:" in v13
+    assert "the game ran since your last look:" in v13
+    # 압축이 화면을 다시 말한다는 것. 종전에는 꼬리가 그 보장이었다.
+    assert "That block restates the screen as it stands" in v13
+
+
+def test_v13_defines_the_same_roles_as_v12() -> None:
+    """Reading a screen did not change, so the vision half did not either."""
+    assert roles_in("qa_run", "v13") == roles_in("qa_run", "v12")
+    assert load_prompt("qa_run", "vision_directive", "v13").body == (
+        load_prompt("qa_run", "vision_directive", "v12").body
+    )
 
 
 def test_v12_defines_the_same_roles_as_v11() -> None:

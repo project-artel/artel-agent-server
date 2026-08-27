@@ -47,6 +47,7 @@ from app.agents.qa.context import fold_stale_scenes
 from app.agents.qa.tools import QaRunState
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import LogCategory
+from app.qa.scene_context import SCENE_CONTEXT_START
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +180,20 @@ def render_progress_ledger(state: QaRunState, channel: QaRunChannel) -> str:
     if channel.scene.pulse.seen or channel.scene.frames > 0:
         lines.append("")
         lines.append("The screen as it stands right now:")
-        lines.append(channel.scene.render(0))
+        view = channel.scene.render(0)
+        lines.append(view)
+
+        # 그 화면이 무엇인지에 대한 설명도 함께 간다 (ARTEL-612). 화면과 같은 이유이고,
+        # 이쪽이 더 급하다: 화면은 다음 도구 결과가 다시 그리지만, 맥락 블록은 씬이 바뀔
+        # 때 한 번만 그려진다. 그것을 실었던 도구 결과가 요약으로 대체되면 그 씬에 머무는
+        # 동안 다시는 오지 않는다.
+        #
+        # `render` 가 방금 그렸으면 두 번 말하지 않는다. 씬이 막 바뀐 자리에서 압축이
+        # 걸리면 그런 일이 실제로 생긴다.
+        block = channel.scene.scene_context_block()
+        if block is not None and SCENE_CONTEXT_START not in view:
+            lines.append("")
+            lines.append(block)
 
     return "\n".join(lines)
 

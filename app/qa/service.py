@@ -20,6 +20,7 @@ from app.qa.envelope import (
     StepStatus,
 )
 from app.qa.run_config import RunConfig, resolve_run_config
+from app.qa.scene_context import fetch_scene_context
 from app.qa.schemas import QaRunScenario, QaSessionRecord
 from app.qa.store import QaSessionStore
 from app.sessions.store import SessionExpired
@@ -59,6 +60,8 @@ class QaExecutionService:
         prompt_version: str | None = None,
         reasoning: ReasoningConfig | None = None,
         arch: QaArchSpec = DEFAULT_ARCH,
+        project_id: int | None = None,
+        game_build_id: int | None = None,
     ) -> tuple[str, RunConfig]:
         """Open a run-scoped session and return its id alongside what it will run with.
 
@@ -82,6 +85,8 @@ class QaExecutionService:
             game_instance_id=game_instance_id,
             scenarios=scenarios,
             run_config=run_config,
+            project_id=project_id,
+            game_build_id=game_build_id,
         )
         await self._store.save(session_id, record)
         return session_id, run_config
@@ -134,6 +139,26 @@ class QaExecutionService:
                         channel, StepStatus.CANCELLED, None, "QA run cancelled."
                     )
                     return
+
+            # 한 번만, 시나리오가 시작하기 전에 (ARTEL-612). 턴마다도 관측마다도 아니다 —
+            # 빌드의 씬 지도와 앵커 지식은 런이 도는 동안 바뀌지 않는다.
+            #
+            # 시나리오마다인 것은 지식 스코프가 `qa_try` 단위이기 때문이다. 세션 하나가
+            # 여러 시나리오를 돌고 각 시나리오가 자기 try 를 들고 다니므로, 한 번만 불러
+            # 돌려쓰면 두 번째 시나리오가 첫 번째의 스코프로 읽은 지식을 본다.
+            #
+            # 실패해도 `None` 일 뿐 예외가 나오지 않는다. 어드바이저리 조회 때문에 런이
+            # 시작하지 못하는 쪽이, 조언 없이 도는 런보다 나쁘다.
+            #
+            # `SceneMemory` 에 얹는 것은 화면을 그리는 자리가 거기 하나이기 때문이다.
+            # 도구 결과 셋과 압축 원장이 모두 `channel.scene.render` 를 지나가므로, 여기
+            # 한 번 얹으면 그 넷이 전부 블록을 갖는다. 런너를 거쳐 내려보내면 같은 값을
+            # 네 호출자에게 따로 건네야 한다.
+            channel.scene.scene_context = await fetch_scene_context(
+                project_id=record.project_id,
+                game_build_id=record.game_build_id,
+                qa_try_id=item.qa_try_id,
+            )
 
             runner = self._runner_factory(config=record.run_config)
             try:

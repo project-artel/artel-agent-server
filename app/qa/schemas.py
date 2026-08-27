@@ -74,6 +74,11 @@ class QaSessionRecord(BaseModel):
     # Frozen at session open (from POST /qa-sessions context).
     qa_run_id: int
     game_instance_id: int
+    # 이 런이 무엇을 도는지 orchestration 에 되물을 수 있게 하는 두 값 (ARTEL-612).
+    # 씬 맥락 조회가 경로에 둘 다 요구한다. **선택이다** — orchestration 이 아직
+    # 세션 open 에 싣지 않으므로, 없으면 조회를 하지 않고 런은 블록 없이 돈다.
+    project_id: int | None = None
+    game_build_id: int | None = None
     # The run's scenarios, executed in order — each carries its own qa_try_id.
     scenarios: list[QaRunScenario]
     # Settled at open, not at run start: the run has to be attributable from the
