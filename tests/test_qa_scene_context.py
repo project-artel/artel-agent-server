@@ -656,7 +656,11 @@ def test_the_block_follows_the_scene_when_the_scene_changes(
 
     assert "여기서는 저장이 되지 않는다" in second
     assert "전투 중 ESC 는 아무것도 하지 않는다" not in second
-    assert "scene: GhostScene" in second
+
+    # 살아 있는 뷰는 **맨 뒤**다. ARTEL-635 로 `report_step` 도 화면을 들고 오므로 그것이
+    # 마지막 뷰가 되고, 앞의 것은 접힌다(`DEFAULT_KEEP_SCENES = 1`). 이 테스트가 확인하는
+    # 것은 그대로다 — 씬이 바뀌면 그 씬의 블록이 새로 그려지고, 블록은 접혀도 남는다.
+    assert "scene: GhostScene" in views[-1]
 
 
 def test_a_run_without_a_lookup_still_runs_and_reads_the_scene(

@@ -299,6 +299,42 @@ def build_tools(
     channel: QaRunChannel, state: QaRunState, arch: ResolvedArch | None = None
 ) -> list[BaseTool]:
     arch = arch or default_resolved_arch()
+
+    def _answer(body: str, messages: list[str], screen: bool = True) -> str:
+        """모든 도구 결과가 지나는 자리. 화면과 오퍼레이터의 말을 여기서 붙인다.
+
+        **화면을 붙이는 자리가 하나여야 한다.** 도구마다 따로 붙이면 다음에 도구가 늘 때
+        또 빠지고, 실제로 그렇게 빠져 있었다 — `report_step` 이 화면 없이 답하고 있었다.
+        **스텝이 통과했는지를 정하는 그 턴에 화면이 없었다**(ARTEL-635).
+
+        종전에는 꼬리가 도구와 무관하게 매 턴 화면을 줘서 이 구멍이 없었다. ARTEL-621 이
+        그 꼬리를 없앤 것은 옳았지만 — 프롬프트 접두를 매 턴 깨뜨려 캐시를 못 쓰게 하고
+        있었다 — 도구 결과가 화면을 싣는지는 보지 않았다.
+
+        경계는 **마지막 행위**다. 관측이 그것을 옮기면 안 된다. 두 번 보는 것만으로 그
+        사이의 변화를 잃는다.
+
+        판독이 아직 없으면 조용하다. `render` 는 그때 안내 문구를 내는데, 그것을 화면인 척
+        얹으면 에이전트가 빈 화면을 실제 화면으로 읽는다.
+
+        **부르는 쪽은 화면을 직접 그리지 않는다.** 두 번 그리면 같은 것이 두 번 실린다 —
+        판독이 유일한 출처인 지금 `render` 는 워터마크가 아니라 **마지막 행위**를 경계로
+        삼으므로, 같은 결과 안에서 두 번째 호출이 첫 번째와 똑같은 것을 낸다.
+
+        `screen=False` 는 지식창고를 다루는 도구들이다. ARTEL-180 이 그것을 정하면서 이유를
+        적어 두었다 — 검색은 화면을 바꾸지 않으므로 화면을 돌려주면 문맥을 다시 쓰는 일이다.
+        그 논거가 지금도 산다: 델타가 "마지막 행위 이후"라, 검색을 두 번 하면 두 번째가 첫
+        번째와 같은 것을 반복한다. 화면이 필요하면 `observe_scene` 이 있다.
+        """
+        if screen and (channel.scene.pulse.seen or channel.scene.frames > 0):
+            view = channel.scene.render(state.watermark, since_action=state.last_action_frame)
+            state.watermark = channel.scene.updates
+            # 화면이 곧 답인 도구(`observe_scene`)는 앞에 얹을 몸통이 없다.
+            body = f"{body}\n\n{view}" if body else view
+
+        # 오퍼레이터의 말이 맨 뒤다. 지금부터 적용되는 지시라 화면보다 나중에 읽혀야 한다.
+        return with_operator_messages(body, messages)
+
     @tool
     async def observe_scene(step: int, thought: str, wait_seconds: float = 0.0) -> str:
         """Look at the game screen. Returns what changed since your last look.
@@ -312,16 +348,17 @@ def build_tools(
         arrived = await channel.look(wait_seconds)
         messages = channel.drain_operator_messages()
         if not arrived:
-            return with_operator_messages(
+            return _answer(
                 "The game did not answer. It may be loading, or it may be stuck. "
                 "You can look again with a longer wait, or judge the step failed.",
                 messages,
             )
         # 관측은 행위가 아니다. 마지막 **행위** 이후로 무엇이 쌓였는지를 그대로 보여준다 —
         # 관측할 때마다 경계를 옮기면, 두 번 보는 것만으로 그 사이의 변화를 잃는다.
-        view = channel.scene.render(state.watermark, since_action=state.last_action_frame)
-        state.watermark = channel.scene.updates
-        return with_operator_messages(view, messages)
+        #
+        # 그 경계를 `_answer` 가 들고 있으므로 여기서 따로 그리지 않는다. 이 도구는 화면이
+        # 곧 답이라 몸통이 비어 있고, 화면은 `_answer` 에서 붙는다.
+        return _answer("", messages)
 
     async def _run(actions: list[JsonRpcAction], summary: str, step: int) -> str:
         """Every acting tool goes through here: act, then look at what it did.
@@ -334,7 +371,7 @@ def build_tools(
         messages = channel.drain_operator_messages()
 
         if result is None:
-            return with_operator_messages(
+            return _answer(
                 "The game reported no result. It may still have run — observe the "
                 "scene to find out what actually happened.",
                 messages,
@@ -358,25 +395,27 @@ def build_tools(
         # 없으면 그 필드를 모르는 옛 SDK 이고, 렌더가 종전의 창으로 돌아간다.
         state.last_action_frame = result.frame
 
-        if looked:
-            view = channel.scene.render(state.watermark, since_action=result.frame)
-            state.watermark = channel.scene.updates
-            body = f"{body}\n\n{view}"
-        elif channel.scene.pulse.seen:
+        # 화면 자체는 `_answer` 가 붙인다. 여기서 그리면 같은 것이 두 번 실린다. 아래
+        # 갈래들이 하는 일은 그 화면을 **어떻게 읽을지**를 말하는 것뿐이다.
+        if not looked and channel.scene.pulse.seen:
             # 판독이 흐르는데 새로 온 것이 없다 = 화면이 움직이지 않았다. SDK 는 움직인
             # 것이 없으면 판독을 아예 내지 않으므로 침묵이 곧 "그대로"다(ARTEL-516).
             #
-            # 그래도 화면은 그린다. 여기서 감추면 액션이 아무것도 바꾸지 않았다는 것을
-            # 판정하려는 스텝이 볼 것을 잃는다 — 그것이야말로 보여 줘야 하는 결과다.
-            view = channel.scene.render(state.watermark, since_action=result.frame)
-            state.watermark = channel.scene.updates
-            body = f"{body}\n\nNothing on the screen moved.\n\n{view}"
-        else:
-            body = (
+            # 그래도 화면은 그린다(`_answer` 가). 여기서 감추면 액션이 아무것도 바꾸지
+            # 않았다는 것을 판정하려는 스텝이 볼 것을 잃는다 — 그것이야말로 보여 줘야 하는
+            # 결과다. 이 줄은 그 화면을 어떻게 읽을지를 말한다.
+            body = f"{body}\n\nNothing on the screen moved."
+        elif not looked:
+            # 판독을 한 번도 못 봤다 = 그릴 화면이 아예 없다. 화면을 `_answer` 에 맡기면
+            # GAME_STATE 프레임이 남아 있는 빌드에서 "화면을 안 준다"고 말한 바로 밑에 옛
+            # 화면을 붙이게 된다.
+            return _answer(
                 f"{body}\n\nThe game is not reporting the screen at all. "
-                "Observe again, or judge the step from the outcome above."
+                "Observe again, or judge the step from the outcome above.",
+                messages,
+                screen=False,
             )
-        return with_operator_messages(body, messages)
+        return _answer(body, messages)
 
     @tool
     async def inspect_object(step: int, selector: str, thought: str) -> str:
@@ -392,7 +431,7 @@ def build_tools(
         """
         found = channel.scene.pulse.inspect(selector)
         messages = channel.drain_operator_messages()
-        return with_operator_messages(found, messages)
+        return _answer(found, messages)
 
     @tool(description=CAPTURE_SCREEN_DESCRIPTION.format(limit=arch.max_captures_per_run))
     async def capture_screen(step: int, thought: str, target_id: int | None = None) -> str:
@@ -418,7 +457,7 @@ def build_tools(
         messages = channel.drain_operator_messages()
 
         if result is None or not result.results:
-            return with_operator_messages(
+            return _answer(
                 "The game did not answer the capture. Try again, or judge from the "
                 "scene text.",
                 messages,
@@ -430,7 +469,7 @@ def build_tools(
             # without this action answers "Unsupported method" to every capture, and an
             # agent told only that failed the step and then the whole run — over a
             # screenshot it could have done without.
-            return with_operator_messages(
+            return _answer(
                 f"The screen could not be captured — {item.error or 'no reason given'}. "
                 "Judge this step from the scene text instead, and do not capture again "
                 "in this run.",
@@ -440,7 +479,7 @@ def build_tools(
         captured = item.returnValue or {}
         url = captured.get("url")
         if not url:
-            return with_operator_messages(
+            return _answer(
                 "The game reported a capture but no image to read. Judge from the "
                 "scene text.",
                 messages,
@@ -463,7 +502,7 @@ def build_tools(
         # On the timeline so a reviewer can open exactly what the agent looked at.
         await channel.note(f"Captured {what}: {url}", LogCategory.OBSERVATION, step)
 
-        return with_operator_messages(f"Captured {what}. The image follows.", messages)
+        return _answer(f"Captured {what}. The image follows.", messages)
 
     @tool(
         description=SEARCH_KNOWLEDGE_DESCRIPTION.format(
@@ -1422,7 +1461,7 @@ def build_tools(
                 "yourself whether to wait again, carry on with what you have, or "
                 "judge the step failed."
             )
-        return with_operator_messages("The operator answered.", messages)
+        return _answer("The operator answered.", messages)
 
     @tool
     async def report_step(
@@ -1511,14 +1550,17 @@ def build_tools(
             )
         )
         if remaining <= 0:
-            return f"Recorded. That was the last step — finish the run.{note}"
+            return _answer(
+                f"Recorded. That was the last step — finish the run.{note}",
+                channel.drain_operator_messages(),
+            )
         # The verdict is recorded either way; what differs is the pull to keep
         # going. A failure is where the loop is most tempted to call it a day, so
         # that is where the next move has to be spelled out rather than implied.
         body = f"Recorded. {remaining} step(s) left — continue with step {step + 1}."
         if not passed:
             body = f"{body} A failed step is not a reason to stop."
-        return f"{body}{note}"
+        return _answer(f"{body}{note}", channel.drain_operator_messages())
 
     @tool(
         description=REPORT_ISSUE_DESCRIPTION.format(
@@ -1571,7 +1613,10 @@ def build_tools(
             ),
         )
         remaining = arch.max_issues_per_run - state.issues_attempted
-        return f"Filed as {checked.value}. {remaining} issue(s) left this run."
+        return _answer(
+            f"Filed as {checked.value}. {remaining} issue(s) left this run.",
+            channel.drain_operator_messages(),
+        )
 
     @tool
     async def finish_run(passed: bool, summary: str, thought: str) -> str:
@@ -1619,7 +1664,7 @@ def build_tools(
         reviewer can see the reasoning behind what the operator was told.
         """
         await channel.say(message, step)
-        return "Sent."
+        return _answer("Sent.", channel.drain_operator_messages())
 
     # Each name below is the decorated tool, not the function: `@tool` takes the
     # name off the function itself, so a tool can no longer end up filed under a

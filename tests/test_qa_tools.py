@@ -1236,3 +1236,113 @@ def test_a_game_that_reports_nothing_is_told_so() -> None:
         assert "scan_scene" not in json.dumps(sent)
 
     asyncio.run(run())
+
+
+def _with_a_screen():
+    """판독이 하나 도착한 채널. 판독이 유일한 출처인 지금의 모양으로."""
+    from app.qa.pulse import PulseReading
+
+    channel, state, tools, sent = make()
+    channel.scene.pulse.apply(
+        PulseReading.model_validate(
+            {
+                "schema": 2,
+                "reading": 1,
+                "frame": 100,
+                "scene": "TurnBattleScene",
+                "whole": True,
+                "statics": [],
+                "deactive": [],
+                "changed": [],
+                "active": [
+                    {
+                        "selector": "Card(Clone)[16]",
+                        "id": -12134,
+                        "members": [
+                            {"member": "cardType", "value": "Fire", "on": "Cards.Card"}
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    return channel, state, tools, sent
+
+
+def test_판정_뒤_턴에도_화면이_있다() -> None:
+    """`report_step` 다음 턴이 다음 스텝을 정하는 자리다. 거기 화면이 없으면
+    에이전트가 눈감고 넘어간다.
+
+    종전에는 꼬리가 도구와 무관하게 매 턴 화면을 줘서 이 구멍이 없었다. ARTEL-621 이
+    그 꼬리를 없앤 것은 옳았지만 — 프롬프트 접두를 매 턴 깨뜨려 캐시를 못 쓰게 하고
+    있었다 — 도구 결과가 화면을 싣는지는 보지 않았다(ARTEL-635)."""
+
+    async def run() -> None:
+        _channel, _state, tools, _sent = _with_a_screen()
+
+        answered = await tools["report_step"].ainvoke(
+            {"step": 1, "passed": True, "message": "확인함", "thought": "판정"}
+        )
+
+        assert "Card(Clone)[16]" in answered, answered
+
+    asyncio.run(run())
+
+
+def test_지식_검색은_화면을_안_들고_온다() -> None:
+    """ARTEL-180 이 정한 것이고 그 논거가 지금도 산다 — 검색은 화면을 바꾸지 않으므로
+    화면을 돌려주면 문맥을 다시 쓰는 일이다. 델타가 "마지막 행위 이후"라, 검색을 두 번
+    하면 두 번째가 첫 번째와 같은 것을 반복한다."""
+
+    async def run() -> None:
+        _channel, _state, tools, _sent = _with_a_screen()
+
+        # 답이 안 와도 좋다. 검사하는 것은 돌아온 문자열에 화면이 없다는 것뿐이다.
+        answered = await tools["search_knowledge"].ainvoke(
+            {"step": 1, "thought": "찾아본다", "query": "조합 규칙"}
+        )
+
+        assert "Card(Clone)[16]" not in answered
+
+    asyncio.run(run())
+
+
+def test_화면은_한_번만_실린다() -> None:
+    """화면을 붙이는 자리가 하나여야 한다는 것의 나머지 반쪽이다.
+
+    ARTEL-635 가 공통 지점을 만들면서 종전에 자기가 그리던 도구들의 그리기를 안 걷어냈다.
+    판독이 유일한 출처인 지금 `render` 는 워터마크가 아니라 **마지막 행위**를 경계로 삼으므로,
+    같은 결과 안에서 두 번째 호출이 첫 번째와 똑같은 것을 낸다 — 액션 하나의 결과에 판독
+    블록이 두 번 실렸다.
+    """
+
+    async def run() -> None:
+        _channel, _state, tools, _sent = _with_a_screen()
+        looked = await tools["observe_scene"].ainvoke({"step": 1, "thought": "본다"})
+        assert looked.count("<<pulse>>") == 1, looked
+
+        channel, _, action_tools, sent = make(timeout=1.0)
+        channel.on_pulse(reading(objects=[start_button()]))
+
+        async def reply() -> None:
+            for _ in range(200):
+                if actions(sent):
+                    break
+                await asyncio.sleep(0)
+            channel.on_action_result(
+                {
+                    "correlationId": actions(sent)[-1]["messageId"],
+                    "payload": {"results": [{"id": 1, "success": True}], "frame": 100},
+                }
+            )
+            channel.on_pulse(
+                reading(reading_id=2, whole=False, objects=[start_button(label="Loading…")])
+            )
+
+        asyncio.create_task(reply())
+        acted = await action_tools["click_button"].ainvoke(
+            {"step": 1, "thought": "누른다", "target_id": -101}
+        )
+        assert acted.count("<<pulse>>") == 1, acted
+
+    asyncio.run(run())
