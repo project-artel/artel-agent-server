@@ -402,3 +402,98 @@ def test_the_summary_prompt_is_versioned_like_every_other_prompt() -> None:
     # And it still says the things the ledger depends on it NOT duplicating.
     assert "restated" in prompt.body
     assert "Never write that a step passed or failed" in prompt.body
+
+
+def _screen_arrives(channel: QaRunChannel) -> None:
+    """게임이 화면을 하나 올린다. 판독이 유일한 출처인 지금의 모양으로."""
+    from app.qa.pulse import PulseReading
+
+    channel.scene.pulse.apply(
+        PulseReading.model_validate(
+            {
+                "schema": 2,
+                "reading": 1,
+                "frame": 100,
+                "scene": "Map_scene",
+                "whole": True,
+                "statics": [
+                    {"declaring": "Core.InteractionLock", "member": "IsLocked", "value": True}
+                ],
+                "active": [
+                    {
+                        "selector": "TutorialController",
+                        "id": 9001,
+                        "members": [
+                            {
+                                "member": "waitingForAcknowledge",
+                                "value": True,
+                                "on": "Tutorial.TutorialController",
+                            }
+                        ],
+                    }
+                ],
+                "deactive": [],
+                "changed": [],
+            }
+        )
+    )
+
+
+def test_원장이_지금_화면을_들고_간다() -> None:
+    """판정과 같은 이유다 — 이미 데이터로 들고 있고, 요약 모델에게 맡기면 가끔 틀리게 옮긴다.
+
+    종전에는 이 보장이 매 모델 호출 뒤에 붙는 꼬리에 걸려 있었다. 그 꼬리가 프롬프트
+    접두를 매 턴 깨뜨려 캐시를 못 쓰게 만들고 있었으므로 없앴고(ARTEL-621), 보장을
+    압축 자신이 지도록 옮겼다(ARTEL-622)."""
+    state = QaRunState(total_steps=1)
+    channel, _sent = make_channel()
+    _screen_arrives(channel)
+
+    ledger = render_progress_ledger(state, channel)
+
+    assert "The screen as it stands right now:" in ledger
+    assert "InteractionLock.IsLocked = True" in ledger
+    assert "TutorialController.waitingForAcknowledge = True" in ledger
+
+
+def test_화면이_없으면_있는_척하지_않는다() -> None:
+    """붙자마자 판독이 온다는 것과 "안 와도 있는 척한다"는 다르다. 뒤의 것이면
+    에이전트가 빈 화면을 실제 화면으로 읽는다."""
+    state = QaRunState(total_steps=1)
+    channel, _sent = make_channel()
+
+    ledger = render_progress_ledger(state, channel)
+
+    assert "The screen as it stands right now:" not in ledger
+
+
+def test_압축이_걸려도_화면이_남는다() -> None:
+    """자동 발동 경로. 압축 뒤 모델이 받는 것에 화면이 있어야 한다."""
+    state = QaRunState(total_steps=1)
+    channel, _sent = make_channel()
+    _screen_arrives(channel)
+    model = FakeSummarizer()
+    # 이 대화가 반드시 넘길 만큼 낮은 예산으로 강제로 태운다.
+    middleware = build_middleware(state, channel, model, max_input_tokens=100)
+
+    update = compact(middleware, conversation(pairs=10))
+
+    assert update is not None
+    body = "\n".join(str(m.content) for m in update["messages"])
+    assert "InteractionLock.IsLocked = True" in body
+
+
+def test_에이전트가_스스로_압축해도_화면이_남는다() -> None:
+    """`compact_context` 경로. 자동 발동만 막으면 이쪽으로 새어 나간다."""
+    state = QaRunState(total_steps=1)
+    channel, _sent = make_channel()
+    _screen_arrives(channel)
+    model = FakeSummarizer()
+    middleware = build_middleware(state, channel, model, max_input_tokens=10_000_000)
+
+    state.compaction_requested = True
+    update = compact(middleware, conversation(pairs=10))
+
+    assert update is not None
+    body = "\n".join(str(m.content) for m in update["messages"])
+    assert "InteractionLock.IsLocked = True" in body

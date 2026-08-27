@@ -12,12 +12,15 @@ limit, and keeps the newest messages verbatim. Two things make that safe to do t
 a QA run in particular:
 
 - The summary is followed by a **progress ledger**, which is generated rather
-  than summarized. Step verdicts, the steps still without one, and everything the
-  operator has said are facts this process already holds; asking a model to
-  remember them accurately would be trading certainty for nothing.
-- The current screen needs no restating. `_append_current_scene` in
-  `app/agents/qa/runner.py` puts `SceneMemory.render_now()` at the end of every
-  model call, so the agent's view of the game survives compaction untouched.
+  than summarized. Step verdicts, the steps still without one, everything the
+  operator has said, and the screen as it stands are facts this process already
+  holds; asking a model to remember them accurately would be trading certainty
+  for nothing.
+
+  화면이 여기 온 것은 ARTEL-622 부터다. 그 전에는 매 모델 호출 뒤에 붙는 꼬리가
+  그 보장을 대신했는데, 그 꼬리가 프롬프트 접두를 매 턴 깨뜨려 캐시를 못 쓰게
+  만들고 있었다(ARTEL-621). 보장을 압축 자신이 지도록 옮겼다 — 렌더 구조가 또
+  바뀌어도 여기는 안 깨진다.
 
 Two triggers, one mechanism: the automatic one at a fraction of the model's input
 budget, and `compact_context`, which the agent calls when it judges its own
@@ -159,6 +162,24 @@ def render_progress_ledger(state: QaRunState, channel: QaRunChannel) -> str:
         # instruction reads on re-entry exactly as it read when it arrived.
         lines.append("")
         lines.append(f"The operator said, and it applies from now on:\n{spoken}")
+
+    # 화면도 여기 온다. 판정과 같은 이유다 — 이미 데이터로 들고 있고, 요약 모델에게 맡기면
+    # 가끔 틀리게 옮긴다.
+    #
+    # 종전에는 이 자리가 비어 있었고, 그 근거가 매 모델 호출 뒤에 붙던 꼬리였다("The current
+    # screen needs no restating"). ARTEL-621 이 그 꼬리를 없앴다 — 프롬프트 접두를 매 턴
+    # 깨뜨려 캐시가 시스템 프롬프트에서 멈추게 하고 있었기 때문이다. 그래서 이 보장을 압축
+    # 자신이 진다. 렌더 구조가 또 바뀌어도 여기는 안 깨진다.
+    #
+    # `keep_messages` 로는 대신할 수 없다. 그것은 메시지 **개수**라 씬 경계와 무관하게 자르고,
+    # 씬 페이지가 그 밖에 있으면 화면이 통째로 사라진다.
+    # 아무것도 안 왔으면 싣지 않는다. `render` 는 그때 안내 문구를 내는데, 그것을 화면인
+    # 척 원장에 얹으면 에이전트가 빈 화면을 실제 화면으로 읽는다 — 붙자마자 판독이 온다는
+    # 것과 "안 와도 있는 척한다"는 다르다.
+    if channel.scene.pulse.seen or channel.scene.frames > 0:
+        lines.append("")
+        lines.append("The screen as it stands right now:")
+        lines.append(channel.scene.render(0))
 
     return "\n".join(lines)
 
