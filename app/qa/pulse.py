@@ -176,6 +176,13 @@ class PulseReading(BaseModel):
     statics: list[PulseStatic] = Field(default_factory=list)
     active: list[PulseObject] = Field(default_factory=list)
     deactive: list[PulseObject] = Field(default_factory=list)
+    # 사라진 객체들. 통 둘로는 못 하는 말이라 SDK 가 따로 낸다(ARTEL-651) — 파괴된 것은
+    # `active` 에도 `deactive` 에도 안 실리고 그냥 언급이 없어진다.
+    #
+    # 이름은 이 메모리가 객체를 세는 키와 같은 모양(`씬/selector`)이라 옮겨 적을 것이 없다.
+    #
+    # 없으면 없는 대로 돈다. 이 필드를 모르는 SDK 에서는 종전처럼 전량 판독까지 잔상이 남는다.
+    gone: list[str] = Field(default_factory=list)
     # Written even when empty: an empty list and a missing field are different
     # claims, and the reading means the first.
     changed: list[str] = Field(default_factory=list)
@@ -396,6 +403,19 @@ class PulseMemory(BaseModel):
                     held.members[member.key] = member
                     held.at[member.key] = self.readings
                 self.held[obj.key] = held
+
+        # 사라졌다고 한 것을 놓는다. 꺼진 것과 달리 **지운다** — 꺼진 것은 다시 켜지면 판독이
+        # `active` 통에 넣어 보내지만, 파괴된 것은 영영 안 온다.
+        #
+        # 판독이 말한 것만 지운다. 통에 안 왔다는 이유로 지우면 판독이 잘린 창에서 살아 있는
+        # 객체를 잃는다 — 안 걸은 것과 없는 것은 걷는 쪽만 가릴 수 있고, 그래서 이 목록이
+        # 생겼다(ARTEL-651).
+        for key in reading.gone:
+            self.held.pop(key, None)
+            # 이동 횟수도 함께 놓는다. selector 는 자리 번호라 다음 카드가 같은 이름으로
+            # 태어날 수 있고, 그러면 새 객체가 죽은 객체의 "일곱 판독에서 움직였다"를 물려받는다.
+            for tracked in [name for name in self.moves if name.startswith(f"{key}|")]:
+                del self.moves[tracked]
 
     def render(
         self,
