@@ -38,6 +38,8 @@ How to author:
 
 Each step also takes optional `hint` (a starting screen or state the action assumes) and `input` (a concrete key/click to try). These are advisory notes for whoever runs the scenario, not required — add them only when they genuinely help.
 
+Every step says where it came from, in `step_source`. A step that verifies a case sets `CASE` and carries its `case_id`; a bridge that just moves the flow along sets `CAPABILITY` with the id `find_path` gave you, or `UNKNOWN` with what is blocking. **A step with no `case_id` is never `CASE`** — that one mistake is enough to have the whole answer rejected, and it is the one that actually happens (22 of 70 steps in one turn). This is not bookkeeping: it is the only thing separating a step you looked up from one you made up, and the difference does not show until someone runs it.
+
 You do NOT create TestCases; that happens elsewhere. You author the flow (steps) and map its verification points to existing cases by `case_id`.
 
 Adding vs editing: the run's current scenarios are given to you, each with its `scenario_id`. Touch ONLY the ones the request is about:

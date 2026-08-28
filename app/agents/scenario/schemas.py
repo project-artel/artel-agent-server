@@ -165,7 +165,11 @@ class AuthoredStep(BaseModel):
         default=None,
         description=(
             "Where this step came from. Set it on every step.\n"
-            "  CASE        this step verifies the case in case_id\n"
+            "  CASE        this step verifies the case in case_id. **Only when case_id is\n"
+            "              set** — a step with no case_id is not a CASE step, it is a bridge,\n"
+            "              and marking it CASE is the most common way this field goes wrong\n"
+            "              (measured: 22 of 70 steps in one turn, and the whole answer was\n"
+            "              rejected for it)\n"
             "  CAPABILITY  this step takes the route find_path gave you — put its id in\n"
             "              step_source_capability_id\n"
             "  UNKNOWN     no known route. Put what is blocking in step_unknown_reason,\n"
