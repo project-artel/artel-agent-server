@@ -148,6 +148,125 @@ def test_action_result_matching_the_pending_action_resolves() -> None:
     asyncio.run(run())
 
 
+async def _dispatch(channel: QaRunChannel, method: str) -> asyncio.Task:
+    """Start one ACTION and let it reach the socket before returning (ARTEL-664)."""
+    task = asyncio.create_task(
+        channel.dispatch_actions([JsonRpcAction(id=1, method=method, params=[])], method)
+    )
+    await asyncio.sleep(0)
+    return task
+
+
+def test_two_actions_in_flight_each_get_their_own_answer() -> None:
+    """ARTEL-664: 종전에는 나간 ACTION 하나의 `future` 를 칸 하나에 들고 있었다.
+
+    그래서 뒤에 나간 `action` 이 앞의 것의 `future` 를 덮어썼고, 앞의 `action` 은 게임이
+    답을 보냈는데도 `timeout` 까지 앉아 있다가 "게임이 답하지 않았다" 가 되었다.
+    """
+
+    async def run() -> None:
+        channel, sent = make_channel(timeout=1.0)
+
+        first = await _dispatch(channel, "button_click")
+        second = await _dispatch(channel, "capture_screen")
+
+        # 나중에 나간 것이 먼저 답한다. 순서가 아니라 `correlation` 이 짝을 정한다.
+        channel.on_action_result(
+            {"correlationId": sent[1]["messageId"], "payload": {"results": [{"id": 2}]}}
+        )
+        channel.on_action_result(
+            {"correlationId": sent[0]["messageId"], "payload": {"results": [{"id": 1}]}}
+        )
+
+        assert (await first).results[0].id == 1
+        assert (await second).results[0].id == 2
+
+    asyncio.run(run())
+
+
+def test_an_uncorrelated_answer_still_resolves_a_lone_action() -> None:
+    """`correlation` 을 안 싣는 옛 orchestration 도 그대로 돈다.
+
+    기다리는 것이 하나뿐이면 그것이 짝이라는 것이 확실하므로 푼다.
+    """
+
+    async def run() -> None:
+        channel, _ = make_channel(timeout=1.0)
+
+        pending = await _dispatch(channel, "button_click")
+        channel.on_action_result({"payload": {"results": [{"id": 1}]}})
+
+        assert (await pending).results[0].id == 1
+
+    asyncio.run(run())
+
+
+def test_an_uncorrelated_answer_is_dropped_when_two_are_waiting() -> None:
+    """짝을 알 수 없으면 아무것도 풀지 않는다.
+
+    둘이 떠 있는데 짐작으로 고르면 한 `action` 이 다른 `action` 의 답을 자기 결과로 읽는다.
+    답을 못 받고 `timeout` 이 나는 편이, 남의 답을 자기 것으로 읽는 것보다 낫다.
+    """
+
+    async def run() -> None:
+        channel, _ = make_channel(timeout=0.05)
+
+        first = await _dispatch(channel, "button_click")
+        second = await _dispatch(channel, "capture_screen")
+
+        channel.on_action_result({"payload": {"results": [{"id": 1}]}})
+
+        assert await first is None
+        assert await second is None
+
+    asyncio.run(run())
+
+
+def test_a_timed_out_action_leaves_no_waiter_behind() -> None:
+    """`timeout` 으로 빠져나간 자리가 map 에 남으면 안 된다.
+
+    남으면 그 뒤로는 기다리는 것이 늘 둘 이상으로 세어져, `correlation` 없는 답이 영영
+    아무것도 못 푼다 — 관측되는 증상은 이 이슈가 고치려던 것과 똑같다.
+    """
+
+    async def run() -> None:
+        channel, _ = make_channel(timeout=0.05)
+
+        abandoned = await channel.dispatch_actions(
+            [JsonRpcAction(id=1, method="button_click", params=[])], "tap"
+        )
+        assert abandoned is None
+
+        pending = await _dispatch(channel, "button_click")
+        channel.on_action_result({"payload": {"results": [{"id": 1}]}})
+
+        assert (await pending).results[0].id == 1
+
+    asyncio.run(run())
+
+
+def test_closing_the_channel_releases_every_action_in_flight() -> None:
+    """운영자가 런을 끊으면 떠 있던 `action` 이 전부 풀려난다(ARTEL-664).
+
+    하나만 풀면 나머지는 각자 `timeout` 을 다 살고 나서야 끝나, 이미 끝난 런이 30 초를
+    더 붙들고 있다.
+    """
+
+    async def run() -> None:
+        channel, _ = make_channel(timeout=30.0)
+
+        first = await _dispatch(channel, "button_click")
+        second = await _dispatch(channel, "capture_screen")
+
+        channel.on_cancel()
+
+        for task in (first, second):
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run())
+
+
 def test_cancel_stops_the_next_tool() -> None:
     async def run() -> None:
         channel, _ = make_channel()
