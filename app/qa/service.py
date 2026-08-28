@@ -229,6 +229,16 @@ class QaExecutionService:
                 channel.on_knowledge_expand_result(raw)
             elif message_type == MessageType.KNOWLEDGE_WRITE_RESULT:
                 channel.on_knowledge_write_result(raw)
+            elif message_type == MessageType.SCREEN_SELECTOR_PROPOSAL:
+                # 받아 두기만 한다. 이 프레임에 답하는 것은 따로 띄우는 판정 agent 이고
+                # (ARTEL-656), 여기서 읽는 것은 그 질문에 곁들여 실려 오는 화면 판정뿐이다.
+                #
+                # 그래도 반드시 받아야 한다. 모르는 타입은 `False` 로 떨어져 "unsupported
+                # inbound frame" 으로 답하는데, 이 프레임은 QA agent 에게 화면 판정을 싣고
+                # 오는 유일한 통로다 — 거절하면 화면이 영영 안 보인다.
+                channel.on_screen_selector_proposal(raw)
+            elif message_type == MessageType.SCREEN_SELECTOR_RESULT:
+                channel.on_screen_selector_result(raw)
             elif message_type == MessageType.ERROR:
                 # Always accepted, answered or not. ERROR is a legitimate frame in
                 # both directions, so answering it with "unsupported inbound frame"

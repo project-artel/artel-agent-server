@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.qa.envelope import ActionRecord, GameState, Interactable, Rect, Screen, Visual
 from app.qa.pulse import PulseMemory
 from app.qa.scene_context import SceneContext
+from app.qa.screen import ScreenMap
 
 # Per key. Long enough to show a path like 100 → 80 → 60, short enough that a
 # chatty value cannot grow the session without bound.
@@ -241,6 +242,14 @@ class SceneMemory(BaseModel):
     # 결과를 담기만 한다 — 조회를 여기 두면 프레임만 아는 클래스가 네트워크 의존을 갖는다.
     # 없으면 `None` 이고, 그때 이 클래스는 종전과 한 글자도 다르지 않게 그린다.
     scene_context: SceneContext | None = None
+    # 지도가 마지막으로 말한 `screen` (ARTEL-657). 여기서 아무것도 조회하지 않는다 —
+    # 채우는 것은 `SCREEN_SELECTOR_PROPOSAL` 을 받는 `QaRunChannel` 이다.
+    #
+    # 씬이 바뀌어도 안 비운다. 판정은 자기 `scene` 이름을 들고 있고 `render` 가 그 이름을
+    # 맞대 보므로, 다른 `scene` 에서는 그리지 않으면서 되돌아왔을 때는 살아 있다. 여기서
+    # 비우면 `scene` 을 한 번 나갔다 온 것만으로 판정이 영영 사라진다 — 저쪽이 같은
+    # `(scene, selector)` 를 다시 물어보지 않기 때문이다.
+    screen_map: ScreenMap = Field(default_factory=ScreenMap)
     # 맥락 블록을 마지막으로 그린 씬 이름. 씬이 바뀐 뒤 첫 렌더에만 그리게 하는 장부다.
     #
     # 블록은 씬이 바뀔 때만 바뀌는데 도구 결과는 대화에 쌓이므로, 매번 그리면 한 씬에
@@ -369,11 +378,21 @@ class SceneMemory(BaseModel):
             # 옛 메시지를 고쳐 쓰는 일이라 프롬프트 접두까지 깨진다.
             if pulse is None:
                 return "No scene has been received yet."
-            return self._with_scene_context(pulse)
+            verdict = self.screen_map_block()
+            # 판정이 `pulse` 뷰 **위**다. 아래는 지금 무엇이 움직였나이고, 이것은 그 움직임이
+            # 지도에서 어느 화면으로 앉았나라 먼저 읽혀야 한다.
+            #
+            # 이 갈래를 빠뜨리면 실전에서 블록이 한 번도 안 뜬다. 실측 런은 `GAME_STATE` 가
+            # 0장이고 `PULSE` 만 14489장이라, 화면을 그리는 자리가 여기뿐이다.
+            body = pulse if verdict is None else f"{verdict}\n\n{pulse}"
+            return self._with_scene_context(body)
 
         lines = [f"scene: {self.scene}  (observation {self.updates})"]
         if self.screen is not None:
             lines.append(f"screen: {self.screen.w}x{self.screen.h} pixels")
+        verdict = self.screen_map_block()
+        if verdict is not None:
+            lines.append(verdict)
 
         changed = {
             key: track
@@ -435,6 +454,15 @@ class SceneMemory(BaseModel):
         # `fold` 되는 것은 화면이고, 블록은 그 화면이 무엇인지에 대한 설명이라 같이 갈
         # 이유가 없다.
         return self._with_scene_context(f"{start}\n{body}\n{SCENE_VIEW_END}")
+
+    def screen_map_block(self) -> str | None:
+        """지도가 지금 이 `scene` 에 대해 하는 말, 없으면 `None`.
+
+        `scene` 이름을 `pulse` 에서도 읽는다. `pulse` 만 오는 게임에서는 `self.scene` 이
+        끝까지 `None` 이고, 그것만 보면 블록이 영영 안 뜬다 — 맥락 블록이 같은 이유로 같은
+        폴백을 쓴다.
+        """
+        return self.screen_map.render(self.scene or self.pulse.scene)
 
     def scene_context_block(self) -> str | None:
         """이 씬에 대해 이미 알려진 것. 조회가 그 씬을 싣지 않았으면 `None`.

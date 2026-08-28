@@ -26,6 +26,9 @@ from app.qa.envelope import (
     LogCategory,
     LogPayload,
     MessageType,
+    ScreenSelectorProposalPayload,
+    ScreenSelectorResultPayload,
+    ScreenSelectorRulePayload,
     ToolCallPayload,
     ToolResultPayload,
     outbound_envelope,
@@ -81,6 +84,17 @@ KNOWLEDGE_SEARCH_TIMEOUT_SECONDS = 20.0
 # would buy nothing but a slower run.
 KNOWLEDGE_WRITE_TIMEOUT_SECONDS = 5.0
 
+# 화면 판정 목록을 고치는 프레임이 답을 기다리는 상한 (ARTEL-657).
+#
+# 지식 쓰기보다 길다. 저쪽은 항목을 앉히고 나서 그 `scene` 을 **한 번 접는다** —
+# `fold_scene_screens` 가 그 `scene` 의 화면 전부의 `discriminator` 를 다시 쓰고 같아진
+# 것끼리 묶어 `screen_capability` · `screen_transition` · `capability_observation` ·
+# `knowledge_anchor` 를 옮긴다. 문장 하나가 아니라 그 `scene` 크기만큼의 일이다.
+#
+# 그래도 검색의 상한보다는 짧다. 이 왕복은 판정에 필요한 것이 아니라 지도를 고치는 곁일이라,
+# 답이 늦는다고 런이 서 있을 이유가 없다.
+SCREEN_SELECTOR_TIMEOUT_SECONDS = 15.0
+
 
 class QaCancelled(Exception):
     """Raised inside the agent loop when the operator ends the run."""
@@ -114,6 +128,11 @@ class KnowledgeRequestFailed:
     Shared by the search, the expansion and the writes (ARTEL-332). Orchestration
     reports all three failures the same way, so telling them apart here would be
     this side inventing a distinction the wire does not carry.
+
+    화면 판정 목록을 고치는 프레임도 이것으로 답한다(ARTEL-657). 이름이 지식 쪽으로 기울어
+    있지만 이 타입이 뜻하는 것은 처음부터 "요청이 correlation 붙은 `ERROR` 로 돌아왔다"
+    하나이고, 그 짝을 쓰는 프레임이 하나 늘었을 뿐이다. 이름을 넓히는 개명은 이 이슈의
+    diff 를 여섯 파일로 벌리므로 하지 않는다.
     """
 
     reason: str
@@ -128,6 +147,7 @@ class QaRunChannel:
         send: Callable[[dict], Awaitable[None]],
         action_timeout: float = ACTION_TIMEOUT_SECONDS,
         write_timeout: float = KNOWLEDGE_WRITE_TIMEOUT_SECONDS,
+        screen_selector_timeout: float = SCREEN_SELECTOR_TIMEOUT_SECONDS,
     ) -> None:
         self._qa_try_id = qa_try_id
         self._send = send
@@ -135,6 +155,7 @@ class QaRunChannel:
         # Injectable for the same reason `action_timeout` is: a suite that waited
         # out the real one would pay it on every write it exercises.
         self._write_timeout = write_timeout
+        self._screen_selector_timeout = screen_selector_timeout
         self._sequence = 0
         # 나간 ACTION `frame` 의 messageId → 그 답을 기다리는 `future` (ARTEL-664).
         #
@@ -464,6 +485,27 @@ class QaRunChannel:
         """
         return await self._request(message_type, payload, self._write_timeout)
 
+    async def write_screen_selector_rule(
+        self, payload: ScreenSelectorRulePayload
+    ) -> ScreenSelectorResultPayload | KnowledgeRequestFailed | None:
+        """이 `scene` 에서 무엇이 `screen` 을 가르는지를 고쳐 쓴다 (ARTEL-657).
+
+        지식 쓰기와 같은 세 갈래이고, 세 번째의 뜻도 같다:
+
+        - payload — 저쪽이 항목을 읽었다. 그중 무엇을 받아들이고 무엇을 거절했는지가
+          그 안에 있다. **받아들인 것이 하나도 없는 정상 답이 있다** — 이 `scene` 에서
+          본 적 없는 selector 를 보내면 그렇게 온다
+        - `KnowledgeRequestFailed` — 프레임 자체가 못 돌았다
+        - `None` — 답이 안 왔다. 썼는지 안 썼는지 이쪽에서 알 수 없다
+
+        `None` 을 실패로 옮겨 적으면 안 된다. 이 프레임을 모르는 orchestration 은 프레임을
+        거절하고 그 거절이 이 소켓으로 안 돌아오는데, 그때 모델에게 "안 됐다" 고 하면 같은
+        항목을 계속 다시 보낸다.
+        """
+        return await self._request(
+            MessageType.SCREEN_SELECTOR_RULE, payload, self._screen_selector_timeout
+        )
+
     async def _request(self, message_type: MessageType, payload, timeout: float) -> Any:
         """Send one frame and park until its answer arrives. `None` means none did.
 
@@ -554,6 +596,42 @@ class QaRunChannel:
         The tool times out into "cannot confirm", which is what the situation is.
         """
         payload = KnowledgeWriteResultPayload.model_validate(raw.get("payload") or {})
+        correlation = raw.get("correlationId")
+        pending = self._pending.get(correlation) if isinstance(correlation, str) else None
+        if pending is not None and payload.type and payload.type != pending.request_type:
+            logger.warning(
+                "[QA] a %s answer arrived for a %s request (correlation %s); dropped",
+                payload.type,
+                pending.request_type,
+                correlation,
+            )
+            return
+        self._resolve(raw, payload)
+
+    def on_screen_selector_proposal(self, raw: dict) -> None:
+        """제안 하나에 실려 온 화면 판정을 씬 메모리에 얹는다 (ARTEL-657).
+
+        **답하지 않는다.** 이 프레임은 "이 selector 가 화면을 가르는가" 를 물어보는 것이고,
+        답하는 것은 따로 띄우는 판정 agent 다(ARTEL-656). 여기서 읽는 것은 그 질문에 곁들여
+        실려 오는 `current_screen` 뿐이다.
+
+        풀어 줄 future 도 없다. 이 프레임은 QA agent 가 무엇을 물어서 오는 것이 아니라 저쪽이
+        관측 중에 스스로 보내는 것이다 — `PULSE` 와 같은 자리다.
+        """
+        self.scene.screen_map.apply(
+            ScreenSelectorProposalPayload.model_validate(raw.get("payload") or {})
+        )
+
+    def on_screen_selector_result(self, raw: dict) -> None:
+        """목록을 고친 답을, 무엇을 물었는지와 맞대 보고 넘긴다 (ARTEL-657).
+
+        `on_knowledge_write_result` 와 같은 검사이고 여기서는 더 필요하다. 저쪽은 이 한
+        타입으로 `SCREEN_SELECTOR_RULE` 과 `SCREEN_SELECTOR_VERDICT` **양쪽**에 답하는데,
+        판정 agent 가 붙으면(ARTEL-656) 그 둘이 같은 소켓 위에 함께 산다. 그때 `type` 을
+        안 보면 남의 답이 이 tool 을 풀어 주고, 그 tool 은 자기가 보내지도 않은 항목의
+        거절 사유를 모델에게 읽어 준다.
+        """
+        payload = ScreenSelectorResultPayload.model_validate(raw.get("payload") or {})
         correlation = raw.get("correlationId")
         pending = self._pending.get(correlation) if isinstance(correlation, str) else None
         if pending is not None and payload.type and payload.type != pending.request_type:

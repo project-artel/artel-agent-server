@@ -98,6 +98,28 @@ class MessageType(StrEnum):
     # may wait for an answer, and `report_issue` validates severity itself
     # precisely because a typo would otherwise look like a successful report.
     ISSUE = "ISSUE"
+    # 이 `scene` 에서 무엇이 `screen` 을 가르는지를 고쳐 쓴다 (ARTEL-657).
+    #
+    # 철자와 payload 는 orchestration 의 `ScreenSelectorFrames.kt` 와
+    # `docs/screen-selector-frames.md` 가 정한 것 그대로다(ARTEL-655). 라우터는 모르는
+    # 타입을 통째로 거절하고, 그 거절은 기다리는 tool 에게 침묵으로 도착한다.
+    #
+    # 답을 받는다. 받아들여진 항목과 거절 사유가 [SCREEN_SELECTOR_RESULT] 로 돌아오고,
+    # 프레임 자체가 못 돈 경우는 correlation 이 붙은 `ERROR` 다 — 지식 쓰기와 같은 짝이다.
+    SCREEN_SELECTOR_RULE = "SCREEN_SELECTOR_RULE"
+    # Orchestration -> Agent
+    #
+    # 목록에 없는 selector 를 만났을 때 오는 질문 (ARTEL-655). **여기서 답하지 않는다** —
+    # 답하는 것은 따로 띄우는 판정 agent 의 몫이다(ARTEL-656). 이 서버가 이 프레임에서
+    # 읽는 것은 하나뿐이다: 지도가 지금 어느 `screen` 이라고 말하는가, 그리고 그것을 가른
+    # selector 가 무엇인가. 그 판정이 QA agent 의 화면에 실린다.
+    SCREEN_SELECTOR_PROPOSAL = "SCREEN_SELECTOR_PROPOSAL"
+    # [SCREEN_SELECTOR_RULE] 의 답. 요청의 `messageId` 가 `correlationId` 로 돌아온다.
+    #
+    # `KNOWLEDGE_WRITE_RESULT` 와 같은 구조다 — 한 타입이 여러 쓰기에 답하고, 무엇의
+    # 답인지는 payload 의 `type` 이 말한다. 저쪽은 제안에 대한 답(`SCREEN_SELECTOR_VERDICT`)
+    # 에도 이 타입으로 답하므로, 그 `type` 을 확인하지 않으면 남의 답을 제 것으로 읽는다.
+    SCREEN_SELECTOR_RESULT = "SCREEN_SELECTOR_RESULT"
     # Bidirectional
     ERROR = "ERROR"
     # Bidirectional. The operator talking to the Agent mid-run, and its reply.
@@ -691,6 +713,158 @@ class KnowledgeUnlinkPayload(BaseModel):
     from_knowledge_id: str
     to_knowledge_id: str
     relation: str
+
+
+# --- screen selector frames (ARTEL-655 의 계약, ARTEL-657 이 쓰는 부분) ---------
+#
+# 프레임 넷 중 셋이 여기 있다. 계약 원본은 orchestration 의
+# `contentmap/observe/ScreenSelectorFrames.kt` 이고 산문 설명은 그 저장소의
+# `docs/screen-selector-frames.md` 다. 이름과 필드 철자는 그쪽이 정한 것이고, 어긋나면
+# 라우터가 프레임을 거절하거나 payload 를 빈 값으로 읽는다.
+#
+# 넷 중 `SCREEN_SELECTOR_VERDICT` 만 없다. 그것은 제안에 답하는 판정 agent 의 것이고
+# (ARTEL-656), 이 서버의 QA 런은 제안에 답하지 않는다.
+
+
+class ScreenDiscriminatorEntry(BaseModel):
+    """`screen` 하나를 가른 selector 하나와 그때의 on/off.
+
+    이 배열이 곧 `discriminator` 이고, 두 `screen` 이 같은 행에 앉느냐 갈리느냐를 정하는
+    것이 이것뿐이다. 그래서 QA agent 에게 보여 줄 것도 화면 id 만이 아니라 이 목록이다 —
+    "왜 같은 화면이라고 하나" 의 답이 여기 있고, 그 답을 봐야 어느 selector 를 고칠지
+    고를 수 있다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    selector: str = ""
+    active: bool = False
+
+
+class ScreenSelectorSceneRef(BaseModel):
+    """제안이 가리키는 `scene`. 이름이 사람이 읽는 것이고 id 는 저쪽의 행 번호다."""
+
+    model_config = ConfigDict(extra="allow")
+
+    scene_id: str = ""
+    name: str = ""
+
+
+class ScreenSelectorScreenRef(BaseModel):
+    """제안에 실린 `screen` 하나.
+
+    필드가 전부 기본값을 갖는다. 이 프레임은 무엇을 물어보러 오는 것이지 런이 기다리는
+    답이 아니라, 한 칸이 비었다고 프레임을 통째로 버리면 화면 판정을 실을 유일한 통로가
+    막힌다.
+
+    `capture_url` 과 `capture_expires_at` 은 읽지 않는다. 캡처를 보고 판단하는 것은 제안에
+    답하는 쪽(ARTEL-656)이고, QA agent 는 자기 눈으로 게임을 보고 있다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    screen_id: str = ""
+    name: str | None = None
+    discriminator: list[ScreenDiscriminatorEntry] = Field(default_factory=list)
+
+
+class ScreenSelectorProposalPayload(BaseModel):
+    """`SCREEN_SELECTOR_PROPOSAL` 중 이 서버가 읽는 부분.
+
+    `changes` 와 `candidates` 를 모델에 두지 않는다. 그 둘은 "이 selector 가 화면을
+    가르는가" 에 답하기 위한 재료이고, 답하는 것은 ARTEL-656 이다. `extra="allow"` 라
+    프레임에 실려 오기는 하므로, 그 이슈가 필요할 때 필드를 세우면 된다.
+
+    **QA agent 에게 이 프레임이 유일한 화면 판정 통로다.** 그리고 이것은 관측마다 오지
+    않는다 — 저쪽은 `(scene, selector)` 마다 평생 한 번만 물어보므로, 이미 다 물어본
+    빌드에서는 한 장도 안 온다. 그래서 이 값을 그릴 때는 반드시 어느 `scene` 의 판정인지
+    함께 봐야 한다(`app/qa/screen.py`).
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    reason: str = ""
+    scene: ScreenSelectorSceneRef = Field(default_factory=ScreenSelectorSceneRef)
+    previous_screen: ScreenSelectorScreenRef | None = None
+    current_screen: ScreenSelectorScreenRef | None = None
+
+
+class ScreenSelectorEntry(BaseModel):
+    """목록에 앉힐 항목 하나. `SCREEN_SELECTOR_RULE` 이 이것의 배열로 나간다.
+
+    `pattern` 은 **정확 문자열이고 정규식이 아니다.** 이 항목은 `discriminator` 를 만드는
+    Kotlin 과 화면을 접는 SQL 양쪽에서 평가되는데, 두 정규식 엔진이 다르면 같은 화면이 두
+    `discriminator` 로 갈린다. 그리고 잘못 쓴 정확 문자열은 아무것에도 안 맞고 거절되지만,
+    잘못 쓴 정규식은 전부 맞고 그 `scene` 의 화면을 조용히 한 행으로 뭉친다.
+
+    `reason` 은 필수다. 사유 없는 항목은 나중에 사람이 되짚을 수 없고, 되짚을 수 없는
+    항목은 지울지 말지도 판단할 수 없다.
+    """
+
+    match: str
+    pattern: str
+    screen_defining: bool
+    reason: str
+
+
+class ScreenSelectorRulePayload(BaseModel):
+    """`SCREEN_SELECTOR_RULE` 의 payload. tool 둘이 이 하나로 나간다.
+
+    `scene` 은 agent 가 **지금 서 있는** `scene` 이름이다. 목록은 `scene` 단위이고, 다른
+    `scene` 은 거기 서서 본 것이 아니므로 근거가 없다 — 그래서 tool 은 이 값을 인자로 받지
+    않고 런의 현재 `scene` 에서 채운다.
+    """
+
+    scene: str
+    entries: list[ScreenSelectorEntry] = Field(default_factory=list)
+
+
+class ScreenSelectorAcceptedEntry(BaseModel):
+    """받아들여져 목록에 앉은 항목 하나. 저장된 그대로 돌아온다."""
+
+    model_config = ConfigDict(extra="allow")
+
+    match: str = ""
+    pattern: str = ""
+    screen_defining: bool = False
+
+
+class ScreenSelectorRejectedEntry(BaseModel):
+    """거절된 항목 하나와 그 사유.
+
+    사유를 그대로 모델에 옮겨 tool 결과에 싣는다. 거절을 "안 됐다" 로만 전하면 부른 쪽이
+    같은 실수를 반복하고, 이 tool 의 거절은 대부분 고칠 수 있는 것이다 — 오타 난 selector,
+    이 `scene` 에서 본 적 없는 경로.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    match: str | None = None
+    pattern: str | None = None
+    reason: str = ""
+
+
+class ScreenSelectorResultPayload(BaseModel):
+    """`SCREEN_SELECTOR_RESULT` 의 payload.
+
+    `type` 은 무엇의 답인가다. 한 타입이 `SCREEN_SELECTOR_RULE` 과
+    `SCREEN_SELECTOR_VERDICT` 양쪽에 답하므로 이 값을 확인하지 않으면 남의 답으로 tool 을
+    풀어 준다.
+
+    `folded_screens` 가 0 인 것이 보통이고 오류가 아니다. 항목을 **넣는** 답은 과거 화면을
+    다시 가르지 않는다 — 그 selector 의 값이 애초에 `discriminator` 에 안 들어갔으니
+    기록이 없어 복원할 수 없고, 다음 관측부터 갈린다. **빼는** 답만 기존 행을 접는다.
+
+    `scene_id` 는 `scene` 을 풀지 못한 거절에서 null 로 온다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str = ""
+    scene_id: str | None = None
+    accepted: list[ScreenSelectorAcceptedEntry] = Field(default_factory=list)
+    rejected: list[ScreenSelectorRejectedEntry] = Field(default_factory=list)
+    folded_screens: int = 0
 
 
 class StatusPayload(BaseModel):
