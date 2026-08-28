@@ -154,7 +154,13 @@ to lead an open-ended request toward a real gap. Do not guess at a count; this i
 where the number comes from.
 
 The answer gives ids. Their wording is in the case list you already hold — quote
-that rather than reciting numbers, which mean nothing to the person reading."""
+that rather than reciting numbers, which mean nothing to the person reading.
+
+**Answer with a journey, not a tally by screen.** "지도를 끝까지 돌아 보스까지 가면
+아홉 건이 덮입니다" tells someone what to go and play; "Map_scene 9건, StoryScene 4건"
+is a category count they still have to turn into a plan themselves. Use `to <screen>:`
+and each case's `needs:`/`leaves:` to see which uncovered cases sit on one run, and
+name that run. A screen with a large count is where to start looking, not the answer."""
 
 
 class TestCaseSearchState:
