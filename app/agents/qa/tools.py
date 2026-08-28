@@ -1581,8 +1581,33 @@ def build_tools(
             )
         )
         if remaining <= 0:
+            # 마지막 스텝을 판정한 자리다. 런 전체가 아직 앞에 있고 판정은 끝나서, 무엇이
+            # 값진 앎이었는지 되짚을 수 있는 마지막 순간이다.
+            #
+            # 도구는 있는데 안 쓴다 — 실측으로 83턴 런에서 `record_knowledge` 0회였다.
+            # 시스템 프롬프트가 시키는데도 그렇다. 기록은 이번 런의 판정에 아무것도 안
+            # 보태므로(`report_step` 도 `finish_run` 도 그것 없이 통과한다) 비용만 있고
+            # 돌아오는 것이 없는 행동이고, 무엇보다 **적을 순간이 흐름 안에 없었다**.
+            #
+            # 되돌려 보내지 않는다. `finish_run` 에서 한 번 물리는 것도 해 봤는데, 런을
+            # 닫는 테스트 열여덟 개가 걸렸다 — 앞으로 만드는 모든 런 테스트가 그 왕복을
+            # 치러야 한다는 뜻이고, 그 값은 이 한 줄이 하는 일보다 크다.
+            #
+            # 무엇을 어디에 적을지는 안 정해 준다. `record_knowledge` 가 앵커를 부르는 쪽에
+            # 맡기는 이유가 그대로 걸린다 — 어디서나 참인 규칙을 지금 서 있는 화면 아래
+            # 넣으면 다음 화면의 런이 그것을 못 찾는다.
+            ask = (
+                ""
+                if state.knowledge_records_attempted
+                else (
+                    " Before you do: if this run worked anything out that a later "
+                    "run would otherwise work out again — how an input is read, "
+                    "what a control actually does, what a rule costs — write it "
+                    "down with `record_knowledge` first."
+                )
+            )
             return _answer(
-                f"Recorded. That was the last step — finish the run.{note}",
+                f"Recorded. That was the last step — finish the run.{ask}{note}",
                 channel.drain_operator_messages(),
             )
         # The verdict is recorded either way; what differs is the pull to keep
