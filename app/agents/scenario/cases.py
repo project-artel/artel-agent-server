@@ -132,7 +132,12 @@ def render_test_case_list(entries: list[TestCaseListItem]) -> str:
         # The state this case needs and leaves, parsed from its structure rather
         # than from the sentence above. Ordering by these is why they are here.
         for guard in entry.state_before:
-            lines.append(f"    needs: {guard.variable} {guard.operator} {guard.value}")
+            needs = f"    needs: {guard.variable} {guard.operator} {guard.value}"
+            # Where that value moves. Without it every requirement reads alike, and a
+            # step that means "win three fights first" looks like one arrow key.
+            if guard.raised_in:
+                needs += f"  ← moves in {', '.join(guard.raised_in)}"
+            lines.append(needs)
         if entry.state_after:
             leaves = ", ".join(f"{k} {v}" for k, v in entry.state_after.items())
             lines.append(f"    leaves: {leaves}")

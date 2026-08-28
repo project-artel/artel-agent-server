@@ -57,6 +57,10 @@ class CaseGuard(BaseModel):
     variable: str
     operator: str
     value: str
+    # Where this value moves. Requirements all look alike on one line — `position == 0`
+    # and `StagePosition >= 1` read the same — but the first is one arrow key and the
+    # second means winning a fight. Empty when the map does not say.
+    raised_in: list[str] = Field(default_factory=list)
 
 
 class SceneExit(BaseModel):
