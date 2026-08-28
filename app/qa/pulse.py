@@ -584,12 +584,11 @@ class PulseMemory(BaseModel):
         # `whole` 페이지는 **지금 꺼져 있는 것 전부**를 한 번 센다. 페이지는 켜진 것만 그리므로,
         # scene 에 막 들어온 독자는 무엇이 있는데 꺼져 있는지를 알 길이 없다. 이름만이고 값은
         # 없다 — 꺼진 동안의 값은 `pulse` 도 안 보낸다.
-        if since == 0:
-            dark = [key for key, held in self.held.items() if not held.live]
-            if dark:
-                lines.append(f"here but switched off: {self._roll(dark)}")
+        dark = [k for k, held in self.held.items() if not held.live] if since == 0 else []
+        if dark:
+            lines.append(f"here but switched off: {self._roll(dark)}")
 
-        if gone or off or (since == 0 and any(not h.live for h in self.held.values())):
+        if gone or off or dark:
             lines.append("")
 
         # statics 는 **매번 전부** 그린다. 이 절만 창(window)을 따르지 않는다.
