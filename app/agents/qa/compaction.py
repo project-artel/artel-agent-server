@@ -157,6 +157,25 @@ def render_progress_ledger(state: QaRunState, channel: QaRunChannel) -> str:
         lines.append("")
         lines.append("Every step has a verdict. Call `finish_run` to close the run.")
 
+    # 압축이 바로 그 순간이다. 앞의 상세가 여기서 사라지므로, 그것으로만 알 수 있던 것을
+    # 남길 마지막 기회다 — 넘어가면 "이 게임은 키가 아니라 축으로 읽는다" 를 알아낸 판독도
+    # 그것을 알아낸 시도도 요약에 녹아 없어진다.
+    #
+    # 원장이 이 말을 하는 자리인 이유는 **긴 런일수록 못 적기 때문**이다. 알아낸 것이 제일
+    # 많은 런이 제일 많이 잃는다. 마지막 스텝 판정에서 한 번 말하는 것(ARTEL-667)은 그때까지
+    # 문맥이 남아 있는 런에만 닿는다.
+    #
+    # 아무것도 안 적은 런에만 말한다. 이미 적고 있는 런에게 또 시키면 표가 뜻을 잃는다.
+    if not state.knowledge_records_attempted:
+        lines.append("")
+        lines.append(
+            "Nothing has been written to the knowledge base this run, and the detail "
+            "that would support it is in the summarized part above. If this run worked "
+            "anything out that a later run would otherwise work out again — how an "
+            "input is read, what a control actually does, what a rule costs — record "
+            "it with `record_knowledge` now, while you still remember it."
+        )
+
     if channel.operator_instructions:
         spoken = "\n".join(f"  - {message}" for message in channel.operator_instructions)
         # Deliberately the same wording `with_operator_messages` uses, so an

@@ -497,3 +497,29 @@ def test_에이전트가_스스로_압축해도_화면이_남는다() -> None:
     assert update is not None
     body = "\n".join(str(m.content) for m in update["messages"])
     assert "InteractionLock.IsLocked = True" in body
+
+
+def test_원장이_압축_전에_지식을_남기라고_말한다() -> None:
+    """압축이 바로 그 순간이다. 앞의 상세가 여기서 사라지므로, 그것으로만 알 수 있던 것을
+    남길 마지막 기회다.
+
+    긴 런일수록 못 적는다 — 알아낸 것이 제일 많은 런이 제일 많이 잃는다. 마지막 스텝
+    판정에서 말하는 것(ARTEL-667)은 그때까지 문맥이 남아 있는 런에만 닿는다.
+    """
+    state = QaRunState(total_steps=2)
+    state.step_results = [QaStepResult(step=1, passed=True, message="봤다")]
+    channel, _sent = make_channel()
+
+    ledger = render_progress_ledger(state, channel)
+
+    assert "record_knowledge" in ledger, ledger
+    assert "while you still remember it" in ledger
+
+
+def test_이미_적은_런에게는_원장이_말하지_않는다() -> None:
+    """이미 적고 있는 런에게 또 시키면 표가 뜻을 잃는다."""
+    state = QaRunState(total_steps=2)
+    state.knowledge_records_attempted = 1
+    channel, _sent = make_channel()
+
+    assert "record_knowledge" not in render_progress_ledger(state, channel)
