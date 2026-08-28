@@ -537,7 +537,10 @@ def test_꺼진_객체는_그리지_않는다():
 
     view = memory.render()
     assert "A[1]" in view
-    assert "B[1]" not in view
+    # 조준 후보로는 안 올린다. 다만 꺼져 있다는 것은 한 번 말한다(ARTEL-665) — 안 그리는 것과
+    # 없다고 하는 것은 다르고, 침묵은 "이번에 소식이 없다" 와 구분이 안 된다.
+    assert "B[1]  [" not in view, view
+    assert "switched off: B[1]" in view
 
 
 def test_꺼진_객체도_들고_있는다():
@@ -583,7 +586,11 @@ def test_풀에서_꺼내_쓰는_씬에서_프롬프트가_자라지_않는다()
     def drawn(mem) -> int:
         """렌더에 이름이 오른 카드 수. 판독 로그 절은 자기 상한이 따로 있어 총 줄 수로는
         객체 증가를 가릴 수 없다."""
-        return sum(1 for line in mem.render().splitlines() if "Card(Clone)[" in line)
+        return sum(
+            1
+            for line in mem.render().splitlines()
+            if "Card(Clone)[" in line and not line.startswith(("switched off:", "here but switched off:"))
+        )
 
     assert drawn(memory) == len(hand)
 
@@ -1124,3 +1131,89 @@ def test_갚을_것이_없으면_종전과_같다():
     second = memory.render(since=1)
     assert first == second
     assert "(changed earlier)" not in first
+
+
+def test_window_와_값이_같은_자를_쓴다():
+    """`after_frame` 은 `reading` 번호를 돌려주는데 값에는 적용 횟수를 찍고 있었다. 그래서
+    `at > since` 가 `3 > 1010` 이 되어 늘 거짓이었다 — 행위 직후 `render` 에서 값이 한 줄도
+    안 나오고 `gone` 된 객체도 조용히 없어졌다(ARTEL-665).
+
+    실제 런의 모양 그대로 잰다: SDK 의 `reading` 번호는 1,000번대, 이 메모리가 적용한 것은 세 번.
+    """
+    memory = fold(reading(reading=1000, frame=5000, active=[obj(selector="Enemy[9]")]))
+    memory.since_action(4999)  # 전량 페이지를 여기서 소진한다
+
+    memory.apply(
+        PulseReading.model_validate(
+            reading(
+                reading=1010,
+                frame=5100,
+                whole=False,
+                active=[obj(selector="Enemy[9]", members=[
+                    {"on": "Combat.Enemies.Enemy", "member": "Hp", "value": 7, "asked": True}
+                ])],
+            )
+        )
+    )
+    memory.apply(
+        PulseReading.model_validate(
+            reading(reading=1020, frame=5200, whole=False, gone=["TurnBattleScene/Enemy[9]"])
+        )
+    )
+
+    assert memory.after_frame(5150) == 1010, "`window` 는 `reading` 번호로 잰다"
+    view = memory.since_action(5150)
+    assert "gone from the scene: Enemy[9]" in view, view
+
+
+def test_꺼진_것을_한_번_말한다():
+    """조합 zone 이 닫히면 칸이 목록에서 그냥 없어졌다. 없어진 것은 "이번에 소식이 없다" 와
+    구분이 안 돼서, 에이전트가 없는 칸에 카드를 끌었다."""
+    memory = fold(
+        reading(active=[obj(selector="Zone1[0]")]),
+        reading(reading=2, whole=False, deactive=[obj(selector="Zone1[0]")]),
+    )
+
+    assert "switched off: Zone1[0]" in memory.render()
+    memory.apply(PulseReading.model_validate(reading(reading=3, whole=False)))
+    assert "switched off" not in memory.render(), "한 번 말하고 만다"
+
+
+def test_처음부터_꺼져_있던_것은_소식이_아니다():
+    """처음 보는데 이미 꺼져 있는 것은 전이가 아니라 사정이다. 전량 페이지가 한 번에 세고,
+    "방금 꺼졌다" 로는 말하지 않는다."""
+    memory = fold(reading(deactive=[obj(selector="Zone1[0]")]))
+
+    view = memory.render()
+    assert not any(l.startswith("switched off:") for l in view.splitlines()), view
+    assert "here but switched off: Zone1[0]" in view
+
+
+def test_전량_페이지가_꺼진_것들을_한_번_센다():
+    """페이지는 켜진 것만 그린다. 씬에 막 들어온 독자는 무엇이 있는데 꺼져 있는지를 알
+    길이 없다."""
+    memory = fold(
+        reading(
+            active=[obj(selector="Word[12]")],
+            deactive=[obj(selector="Zone1[0]"), obj(selector="Zone2[1]")],
+        )
+    )
+
+    page = memory.render(since=0)
+    assert "here but switched off: Zone1[0], Zone2[1]" in page, page
+
+
+def test_수십이_한꺼번에_꺼져도_한_줄이_짧다():
+    """scene 이 헐리는 순간이다. 명단이 아니라 "많이 꺼졌다" 는 사실이 필요하다."""
+    memory = fold(
+        reading(active=[obj(selector=f"Pooled[{n}]") for n in range(30)]),
+        reading(
+            reading=2,
+            whole=False,
+            deactive=[obj(selector=f"Pooled[{n}]") for n in range(30)],
+        ),
+    )
+
+    line = [l for l in memory.render().splitlines() if l.startswith("switched off:")][0]
+    assert "+18 more" in line, line
+    assert len(line) < 300, line
