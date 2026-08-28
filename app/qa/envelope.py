@@ -109,11 +109,17 @@ class MessageType(StrEnum):
     SCREEN_SELECTOR_RULE = "SCREEN_SELECTOR_RULE"
     # Orchestration -> Agent
     #
-    # 목록에 없는 selector 를 만났을 때 오는 질문 (ARTEL-655). **여기서 답하지 않는다** —
-    # 답하는 것은 따로 띄우는 판정 agent 의 몫이다(ARTEL-656). 이 서버가 이 프레임에서
-    # 읽는 것은 하나뿐이다: 지도가 지금 어느 `screen` 이라고 말하는가, 그리고 그것을 가른
-    # selector 가 무엇인가. 그 판정이 QA agent 의 화면에 실린다.
+    # 목록에 없는 selector 를 만났을 때 오는 질문 (ARTEL-655). **QA 런은 여기에 답하지
+    # 않는다** — 답하는 것은 따로 띄우는 판정 agent 다(ARTEL-656,
+    # `app/qa/screen_verdict.py`). QA 런이 이 프레임에서 읽는 것은 하나뿐이다: 지도가 지금
+    # 어느 `screen` 이라고 말하는가, 그리고 그것을 가른 selector 가 무엇인가.
     SCREEN_SELECTOR_PROPOSAL = "SCREEN_SELECTOR_PROPOSAL"
+    # [SCREEN_SELECTOR_PROPOSAL] 하나에 대한 답 (ARTEL-656). 봉투의 `correlationId` 가
+    # 그 제안의 `messageId` 다.
+    #
+    # QA agent 가 보내지 않는다. 게임을 하고 있는 agent 를 세워 판정시키면 기다리는 동안
+    # 게임이 흘러가고, 그 런의 문맥과 예산이 자기 시나리오와 무관한 질문에 쓰인다.
+    SCREEN_SELECTOR_VERDICT = "SCREEN_SELECTOR_VERDICT"
     # [SCREEN_SELECTOR_RULE] 의 답. 요청의 `messageId` 가 `correlationId` 로 돌아온다.
     #
     # `KNOWLEDGE_WRITE_RESULT` 와 같은 구조다 — 한 타입이 여러 쓰기에 답하고, 무엇의
@@ -715,15 +721,17 @@ class KnowledgeUnlinkPayload(BaseModel):
     relation: str
 
 
-# --- screen selector frames (ARTEL-655 의 계약, ARTEL-657 이 쓰는 부분) ---------
+# --- screen selector frames (ARTEL-655 의 계약) --------------------------------
 #
-# 프레임 넷 중 셋이 여기 있다. 계약 원본은 orchestration 의
+# 프레임 넷이 전부 여기 있다. 계약 원본은 orchestration 의
 # `contentmap/observe/ScreenSelectorFrames.kt` 이고 산문 설명은 그 저장소의
 # `docs/screen-selector-frames.md` 다. 이름과 필드 철자는 그쪽이 정한 것이고, 어긋나면
 # 라우터가 프레임을 거절하거나 payload 를 빈 값으로 읽는다.
 #
-# 넷 중 `SCREEN_SELECTOR_VERDICT` 만 없다. 그것은 제안에 답하는 판정 agent 의 것이고
-# (ARTEL-656), 이 서버의 QA 런은 제안에 답하지 않는다.
+# 넷을 보내고 받는 주체가 둘이다. `SCREEN_SELECTOR_RULE` 은 QA agent 의 tool 이 보내고
+# (ARTEL-657), `SCREEN_SELECTOR_VERDICT` 는 QA 런 밖에서 도는 판정 agent 가 보낸다
+# (ARTEL-656). `SCREEN_SELECTOR_RESULT` 는 그 둘 모두에 답하므로 payload 의 `type` 을
+# 봐야 무엇의 답인지 알 수 있다.
 
 
 class ScreenDiscriminatorEntry(BaseModel):
@@ -757,8 +765,9 @@ class ScreenSelectorScreenRef(BaseModel):
     답이 아니라, 한 칸이 비었다고 프레임을 통째로 버리면 화면 판정을 실을 유일한 통로가
     막힌다.
 
-    `capture_url` 과 `capture_expires_at` 은 읽지 않는다. 캡처를 보고 판단하는 것은 제안에
-    답하는 쪽(ARTEL-656)이고, QA agent 는 자기 눈으로 게임을 보고 있다.
+    `capture_url` 은 서명된 단기 주소다. QA agent 는 이것을 안 읽는다 — 자기 눈으로 게임을
+    보고 있다. 이 주소를 실제로 여는 것은 제안에 답하는 판정 agent 뿐이고(ARTEL-656), 그
+    쪽에서는 이것이 "달라 보이는가" 를 판단할 유일한 그림이다.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -766,19 +775,67 @@ class ScreenSelectorScreenRef(BaseModel):
     screen_id: str = ""
     name: str | None = None
     discriminator: list[ScreenDiscriminatorEntry] = Field(default_factory=list)
+    capture_url: str | None = None
+    capture_expires_at: str | None = None
+
+
+class ScreenSelectorChange(BaseModel):
+    """잇단 두 `pulse` 사이에 달라진 것 하나.
+
+    `was` 가 `None` 이면 이 `pulse` 에서 처음 본 객체다. 있다가 사라지는 경우는 없다 —
+    `pulse` 는 말하지 않은 객체를 지우지 않는다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    selector: str = ""
+    was: bool | None = None
+    now: bool = False
+
+
+class ScreenSelectorCandidate(BaseModel):
+    """목록에 넣을지 물어보는 후보 하나와 그 통계.
+
+    통계 셋은 게임을 모르는 쪽이 판단할 수 있게 실려 오는 재료이고, **셋 다 그 자체로는
+    규칙이 아니다.** 규칙으로 쓰려던 시도가 셋 다 반례를 냈고, 그래서 이 프레임이
+    존재한다(`docs/screen-selector-frames.md` 의 표).
+
+    - `instances_in_reading` — 이 `pulse` 에서 같은 `path` 를 가진 객체 수. 여럿이면
+      스폰된 것일 수도 있고, 이름이 같은 형제 컨트롤 둘일 수도 있다
+    - `readings_seen_in_scene` — 이 `scene` 에서 이 selector 를 본 `pulse` 수. 저쪽
+      프로세스 메모리의 값이라 재시작하면 0 부터 다시 센다
+    - `distinct_values_observed` — 같은 `path` 로 접히는 서로 다른 selector 원문 수.
+      1 이면 hierarchy index 가 흔들리지 않는 고정 UI 다
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    selector: str = ""
+    path: str = ""
+    active: bool = False
+    instances_in_reading: int = 0
+    readings_seen_in_scene: int = 0
+    distinct_values_observed: int = 0
+    in_whitelist: bool = False
 
 
 class ScreenSelectorProposalPayload(BaseModel):
-    """`SCREEN_SELECTOR_PROPOSAL` 중 이 서버가 읽는 부분.
+    """`SCREEN_SELECTOR_PROPOSAL` 의 payload.
 
-    `changes` 와 `candidates` 를 모델에 두지 않는다. 그 둘은 "이 selector 가 화면을
-    가르는가" 에 답하기 위한 재료이고, 답하는 것은 ARTEL-656 이다. `extra="allow"` 라
-    프레임에 실려 오기는 하므로, 그 이슈가 필요할 때 필드를 세우면 된다.
+    두 쪽이 이 하나를 읽고 서로 다른 것을 본다. QA 런은 `current_screen` 만 본다 —
+    지도가 지금 어느 `screen` 이라고 말하는가(`app/qa/screen.py`). 판정 agent 는 전부
+    본다 — 그 판정이 **이 payload 만 보고** 나야 하기 때문이다(ARTEL-656). 특정 게임의
+    관례를 프롬프트에 적으면 그 게임에서만 맞는 판정기가 되므로, 판단에 필요한 것이 전부
+    여기 실려야 한다.
 
     **QA agent 에게 이 프레임이 유일한 화면 판정 통로다.** 그리고 이것은 관측마다 오지
     않는다 — 저쪽은 `(scene, selector)` 마다 평생 한 번만 물어보므로, 이미 다 물어본
     빌드에서는 한 장도 안 온다. 그래서 이 값을 그릴 때는 반드시 어느 `scene` 의 판정인지
     함께 봐야 한다(`app/qa/screen.py`).
+
+    `reason` 은 `unknown-selector`(목록 밖 selector 가 상태를 바꿨다) 또는
+    `scene-screen-cap`(이 `scene` 이 화면 상한에 닿았다 — 그때 후보는 지금 화면을 가르고
+    있는 것들이고 답은 **뺄** 항목이다) 이다.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -787,6 +844,8 @@ class ScreenSelectorProposalPayload(BaseModel):
     scene: ScreenSelectorSceneRef = Field(default_factory=ScreenSelectorSceneRef)
     previous_screen: ScreenSelectorScreenRef | None = None
     current_screen: ScreenSelectorScreenRef | None = None
+    changes: list[ScreenSelectorChange] = Field(default_factory=list)
+    candidates: list[ScreenSelectorCandidate] = Field(default_factory=list)
 
 
 class ScreenSelectorEntry(BaseModel):
@@ -817,6 +876,27 @@ class ScreenSelectorRulePayload(BaseModel):
 
     scene: str
     entries: list[ScreenSelectorEntry] = Field(default_factory=list)
+
+
+class ScreenSelectorVerdictPayload(BaseModel):
+    """`SCREEN_SELECTOR_VERDICT` 의 payload. 제안 하나에 대한 답이다 (ARTEL-656).
+
+    `scene` 을 안 싣는다. 저쪽은 `proposal_id` 로 그 제안의 기록에서 `scene` 을 푼다 —
+    답이 늦게 닿을 때 QA agent 는 이미 다른 `scene` 에 서 있을 수 있고, 그때 이쪽이 지금
+    서 있는 `scene` 을 실으면 남의 `scene` 목록을 고친다.
+
+    **`entries` 가 비어도 정상이다.** 기본값이 무시라, "물어본 것 중 화면을 가르는 것이
+    없다" 와 "답을 안 낸다" 가 같은 결과다. 모델이 형식을 어겼을 때도 지어내지 말고 빈
+    배열로 답한다 — 빈 답은 지도를 종전대로 두지만, 지어낸 항목은 그 `scene` 을 영구히
+    잘못 가른다.
+
+    `proposal_id` 는 봉투의 `correlationId` 와 같은 값이다. 저쪽이 둘 중 하나만 있어도
+    풀지만 둘 다 채운다 — 봉투를 안 보는 경로가 생겨도 답이 미아가 되지 않는다.
+    """
+
+    proposal_id: str
+    entries: list[ScreenSelectorEntry] = Field(default_factory=list)
+    note: str | None = None
 
 
 class ScreenSelectorAcceptedEntry(BaseModel):

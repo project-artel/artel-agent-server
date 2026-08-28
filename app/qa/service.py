@@ -22,12 +22,27 @@ from app.qa.envelope import (
 from app.qa.run_config import RunConfig, resolve_run_config
 from app.qa.scene_context import fetch_scene_context
 from app.qa.schemas import QaRunScenario, QaSessionRecord
+from app.qa.screen_verdict import ScreenSelectorAdjudicator
 from app.qa.store import QaSessionStore
 from app.sessions.store import SessionExpired
 
 logger = logging.getLogger(__name__)
 
 Send = Callable[[dict], Awaitable[None]]
+
+
+def _build_adjudicator(run_config: RunConfig) -> ScreenSelectorAdjudicator:
+    """이 런의 모델로 판정기를 세운다 (ARTEL-656).
+
+    런의 모델을 쓰는 것은 판정이 요약이 아니라 판단이기 때문이다 — 게다가 캡처를 봐야
+    하는 판단이라, 그 게임을 상대할 만하다고 이미 고른 모델이 여기서도 맞다. 값싼 모델로
+    못박은 `qa_compaction` 과 다른 판단이고, 차이는 일의 성격에 있다.
+
+    프롬프트 버전은 `SCREEN_VERDICT_PROMPT_VERSION` 이 정한다. 런의 `prompt_version` 을
+    끌어 쓰지 않는다 — 그것은 QA agent 의 프롬프트 번호이고, 두 프롬프트는 서로 다른
+    파일에 서로 다른 속도로 산다.
+    """
+    return ScreenSelectorAdjudicator(model=run_config.model)
 
 
 class QaExecutionService:
@@ -43,12 +58,17 @@ class QaExecutionService:
         store: QaSessionStore,
         runner_factory: Callable[..., QaRunner] | None = None,
         reset_policy: ResetPolicy | None = None,
+        adjudicator_factory: Callable[[RunConfig], ScreenSelectorAdjudicator] | None = None,
     ) -> None:
         self._store = store
         self._runner_factory = runner_factory or (lambda *, config: QaRunner(config))
         # 시나리오 사이 게임 초기화 정책(seam). 기본은 전체 초기화; 나중에 최소-초기화로 교체.
         self._reset_policy = reset_policy or DEFAULT_RESET_POLICY
+        # 화면 제안을 판정하는 자리(seam, ARTEL-656). 채널과 나란히 두고 함께 버린다 —
+        # 판정은 QA 런의 일이 아니므로 `QaRunChannel` 안에 살지 않는다.
+        self._adjudicator_factory = adjudicator_factory or _build_adjudicator
         self._channels: dict[str, QaRunChannel] = {}
+        self._adjudicators: dict[str, ScreenSelectorAdjudicator] = {}
 
     async def open(
         self,
@@ -104,6 +124,11 @@ class QaExecutionService:
 
     async def close(self, session_id: str) -> None:
         self._channels.pop(session_id, None)
+        adjudicator = self._adjudicators.pop(session_id, None)
+        if adjudicator is not None:
+            # 소켓이 사라진 뒤에도 모델 호출이 계속 도는 것을 막는다. 끊긴 판정은 답 없이
+            # 끝나고, 그것은 지도를 종전대로 두는 결과다.
+            adjudicator.close()
         await self._store.delete(session_id)
 
     # --- the run --------------------------------------------------------------
@@ -127,6 +152,13 @@ class QaExecutionService:
             set_usage_scope("QA_RUN", item.qa_try_id)
             channel = QaRunChannel(qa_try_id=item.qa_try_id, send=send)
             self._channels[session_id] = channel
+            # 시나리오마다 새로 세운다. 판정기는 상태를 안 들지만 도는 task 를 들고,
+            # 그 task 는 자기를 띄운 시나리오의 채널로 답한다 — 시나리오가 바뀌면 그
+            # 채널은 이미 남의 것이다.
+            previous = self._adjudicators.get(session_id)
+            if previous is not None:
+                previous.close()
+            self._adjudicators[session_id] = self._adjudicator_factory(record.run_config)
 
             # Reset before every scenario but the first — the first act of this
             # scenario's try, so the reset frame is attributed to a try about to be
@@ -165,6 +197,11 @@ class QaExecutionService:
                 state, failure = await runner.run_with_deadline(channel, item.scenario)
             finally:
                 self._channels.pop(session_id, None)
+                # 이 시나리오의 try 는 끝났다. 아직 도는 판정이 있어도 답을 실을 자리가
+                # 없으므로 끊는다 — 답하지 않는 것은 지도를 종전대로 두는 결과다.
+                ending = self._adjudicators.pop(session_id, None)
+                if ending is not None:
+                    ending.close()
 
             if channel.cancelled:
                 await self._send_terminal(
@@ -230,13 +267,18 @@ class QaExecutionService:
             elif message_type == MessageType.KNOWLEDGE_WRITE_RESULT:
                 channel.on_knowledge_write_result(raw)
             elif message_type == MessageType.SCREEN_SELECTOR_PROPOSAL:
-                # 받아 두기만 한다. 이 프레임에 답하는 것은 따로 띄우는 판정 agent 이고
-                # (ARTEL-656), 여기서 읽는 것은 그 질문에 곁들여 실려 오는 화면 판정뿐이다.
+                # 한 프레임을 둘이 읽는다. 채널은 곁들여 실려 온 화면 판정만 가져가고
+                # (ARTEL-657), 질문 자체에 답하는 것은 판정기다(ARTEL-656).
                 #
                 # 그래도 반드시 받아야 한다. 모르는 타입은 `False` 로 떨어져 "unsupported
                 # inbound frame" 으로 답하는데, 이 프레임은 QA agent 에게 화면 판정을 싣고
                 # 오는 유일한 통로다 — 거절하면 화면이 영영 안 보인다.
                 channel.on_screen_selector_proposal(raw)
+                # **아무것도 기다리지 않는다.** 이 loop 가 판정 하나를 기다리면 그동안
+                # `PULSE` 도 `ACTION_RESULT` 도 안 들어오고, 그것이 곧 런이 서는 것이다.
+                adjudicator = self._adjudicators.get(session_id)
+                if adjudicator is not None:
+                    adjudicator.answer_later(channel, raw)
             elif message_type == MessageType.SCREEN_SELECTOR_RESULT:
                 channel.on_screen_selector_result(raw)
             elif message_type == MessageType.ERROR:

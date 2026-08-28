@@ -39,21 +39,27 @@ CAPTURE_MESSAGE_KEY = "artel_capture_id"
 
 _ALLOWED_MIME_TYPES = frozenset({"image/jpeg", "image/png"})
 
+# 파일이 스스로 말하는 자기 타입. 캡처를 실어 오는 프레임이 전부 mime 을 말해 주지는
+# 않는다 — `SCREEN_SELECTOR_PROPOSAL` 은 주소만 싣는다(ARTEL-655) — 그때 확장자나 기본값을
+# 믿는 대신 바이트를 본다. 데이터 URI 에 틀린 타입을 적으면 provider 가 그림을 통째로
+# 거절하고, 그 거절은 "이미지가 없다" 가 아니라 호출 실패로 온다.
+_IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+)
+
 
 class CaptureFetchError(Exception):
     """The image could not be fetched. The run continues without it."""
 
 
-async def fetch_capture(url: str, mime_type: str) -> str:
-    """The image as a base64 data payload.
+async def download_capture(url: str) -> bytes:
+    """The image's bytes.
 
     Fetched here rather than handed to the provider as a URL: the link expires,
     storage may not be publicly readable, and a failure on our side is one we can
     explain to the agent instead of one that surfaces as a provider error.
     """
-    if mime_type not in _ALLOWED_MIME_TYPES:
-        raise CaptureFetchError(f"unsupported capture type {mime_type!r}")
-
     try:
         async with httpx.AsyncClient(timeout=DOWNLOAD_TIMEOUT_SECONDS) as client:
             response = await client.get(url)
@@ -67,7 +73,22 @@ async def fetch_capture(url: str, mime_type: str) -> str:
     except httpx.HTTPError as error:
         raise CaptureFetchError(f"could not reach storage: {error}") from error
 
-    return base64.b64encode(response.content).decode("ascii")
+    return response.content
+
+
+def image_mime_of(raw: bytes) -> str:
+    """바이트가 말하는 이미지 타입. JPEG 도 PNG 도 아니면 거절한다."""
+    for magic, mime_type in _IMAGE_MAGIC:
+        if raw.startswith(magic):
+            return mime_type
+    raise CaptureFetchError("the bytes are not a JPEG or a PNG")
+
+
+async def fetch_capture(url: str, mime_type: str) -> str:
+    """The image as a base64 data payload, for a caller that was told its type."""
+    if mime_type not in _ALLOWED_MIME_TYPES:
+        raise CaptureFetchError(f"unsupported capture type {mime_type!r}")
+    return base64.b64encode(await download_capture(url)).decode("ascii")
 
 
 def build_capture_message(capture_id: str, encoded: str, mime_type: str, caption: str):
