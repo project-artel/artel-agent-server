@@ -588,11 +588,11 @@ class PulseMemory(BaseModel):
             # 실리므로 그것으로 가르면 아무것도 안 걸러진다 — offers 가 그 선이다.
             actionable = bool(obj.offers)
 
-            # 이번 창에 아무 말도 없고, 갚을 빚도 없고, 누를 수도 없는 객체는 건너뛴다.
-            # 독자가 이미 아는 것을 다시 적는 자리다.
+            # 이번 창에 아무 말도 없고, 아직 안 말한 값도 없고, 누를 수도 없는 객체는
+            # 건너뛴다. 독자가 이미 아는 것을 다시 적는 자리다.
             #
-            # 빚이 여기 있어야 `TutorialController` 처럼 누를 것이 없는 객체가 보인다. 그것이
-            # 안 보여서 에이전트가 대사창이 떠 있는지도 모르고 진행했다.
+            # `owed` 가 여기 있어야 `TutorialController` 처럼 누를 것이 없는 객체가 보인다.
+            # 그것이 안 보여서 에이전트가 대사창이 떠 있는지도 모르고 진행했다.
             if not fresh and not owed and not actionable:
                 continue
 
@@ -612,8 +612,8 @@ class PulseMemory(BaseModel):
                     if marking and obj.at.get(member_key, 0) > news_since
                     else ""
                 )
-                # 빚으로 낸 값은 표를 단다. 창의 뜻이 "이 행위가 만든 것" 이므로, 옛 값을
-                # 표 없이 섞으면 읽는 쪽이 그것을 방금 일어난 일로 읽는다.
+                # 창 밖에서 변한 값은 표를 단다. 창의 뜻이 "이 행위가 만든 것" 이므로, 옛
+                # 값을 표 없이 섞으면 읽는 쪽이 그것을 방금 일어난 일로 읽는다.
                 earlier = "  (changed earlier)" if member_key in owed else ""
                 lines.append(f"  {name} = {member.value!r}{asked}{news}{earlier}{moved}")
                 if advance:

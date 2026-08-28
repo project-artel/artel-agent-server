@@ -1086,7 +1086,7 @@ def test_한_번_말한_값은_다시_안_말한다():
     assert "TurnBattleSystem.turn" not in memory.render(since=1)
 
 
-def test_빚만_있는_객체도_그린다():
+def test_안_말한_값만_있는_객체도_그린다():
     """`TutorialController` 처럼 누를 것이 없는 객체다. 이것이 안 보여서 에이전트가 대사창이
     떠 있는지도 모르고 진행했다."""
     memory = fold(
@@ -1116,7 +1116,7 @@ def test_빚만_있는_객체도_그린다():
 
 
 def test_갚을_것이_없으면_종전과_같다():
-    """빚이 없으면 렌더가 한 글자도 안 달라진다."""
+    """말할 것이 남지 않았으면 렌더가 한 글자도 안 달라진다."""
     memory = fold(reading(active=[obj(selector="Enemy[9]")]))
     memory.render()
 
