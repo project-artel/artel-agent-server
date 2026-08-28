@@ -51,6 +51,8 @@
     "scenario/v7/system": "62734b4f08cb0fb5fd992e861de2c149cd7dd7ffa789fe0c46eff1dfe8cebf4a",
     "scenario/v8/human": "abc987c42401ae04f5636d9a5e011b3a6c9c69728b44ca22c904d94fe142806e",
     "scenario/v8/system": "fe6e54eec6a192e44e0adc2774f3d61cdd1c774eabe87d0c86e086f8949146b3",
+    "scenario/v9/human": "abc987c42401ae04f5636d9a5e011b3a6c9c69728b44ca22c904d94fe142806e",
+    "scenario/v9/system": "59b0e65a3f946c8d8c7d0d0d1a213986b1b718da874c31945e666db84e2513ed",
     "screen_verdict/v1/human": "f1958dff017ff23e6a46560d2feb7cf221ab44033148248b2bc43749f5f4f401",
     "screen_verdict/v1/system": "eeb8d312ecf9ee2df60296f80602409a0a482f08d2d9547667499a4cc1998fd2",
     "step_phrasing/v1/human": "0fdc21deb1b90726ae0c520c7c6a9b4dcce63d312a78f31a1c70943707bd9e5e",
