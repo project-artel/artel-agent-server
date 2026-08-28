@@ -288,6 +288,12 @@ class PulseMemory(BaseModel):
     trimmed: bool = False
     # statics 도 객체 멤버와 같은 이유로 도착 시점을 남긴다.
     static_at: dict[str, int] = Field(default_factory=dict)
+    # 사라진 객체와 그것이 사라진 판독. 지운 것으로 끝내지 않고 **말하기 위해** 남긴다.
+    #
+    # 없음은 추론이고 사라짐은 진술이다. 델타에서 안 적힌 것은 "이번에 소식이 없다" 와 구분이
+    # 안 되는데, 도구 결과는 대화에 그대로 남으므로 읽는 쪽은 옛 화면에서 그 객체를 여전히
+    # 본다 — 실제로 파괴된 카드의 좌표로 두 번 드래그했다(ARTEL-663).
+    gone_at: dict[str, int] = Field(default_factory=dict)
     # 마지막으로 그린 판독 번호. 이 장부를 여기 두는 이유는 "무엇까지 보여줬나" 가 이 메모리
     # 자신의 사정이기 때문이다 — 부르는 쪽마다 따로 세면 둘이 어긋날 자리가 생긴다.
     drawn: int = 0
@@ -344,6 +350,9 @@ class PulseMemory(BaseModel):
             self.wholes += 1
             self.held = {}
             self.statics = {}
+            # 전량 판독은 쥔 것을 통째로 갈아치운다. 그 앞에서 무엇이 사라졌다는 말은 새
+            # 화면에 대고 할 말이 아니다.
+            self.gone_at = {}
             self.page_due = True
 
         if reading.scene is not None:
@@ -412,10 +421,20 @@ class PulseMemory(BaseModel):
         # 생겼다(ARTEL-651).
         for key in reading.gone:
             self.held.pop(key, None)
+            # 지운 것으로 끝내지 않는다. 렌더가 이것을 말한다 — 지우기만 하면 읽는 쪽은
+            # 대화에 남은 옛 화면에서 그 객체를 계속 본다.
+            self.gone_at[key] = self.readings
             # 이동 횟수도 함께 놓는다. selector 는 자리 번호라 다음 카드가 같은 이름으로
             # 태어날 수 있고, 그러면 새 객체가 죽은 객체의 "일곱 판독에서 움직였다"를 물려받는다.
             for tracked in [name for name in self.moves if name.startswith(f"{key}|")]:
                 del self.moves[tracked]
+
+        if len(self.gone_at) > MAX_TRACKED_KEYS:
+            # 오래된 것부터 버린다. 이미 말한 사라짐은 대화에 남아 있다.
+            for key in sorted(self.gone_at, key=self.gone_at.get)[
+                : len(self.gone_at) - MAX_TRACKED_KEYS
+            ]:
+                del self.gone_at[key]
 
     def render(
         self,
@@ -495,6 +514,16 @@ class PulseMemory(BaseModel):
             else:
                 for entry in window:
                     lines.append(f"  {entry.reading} ({self._log_line(entry)})")
+            lines.append("")
+
+        # 사라진 것을 말한다. 창을 타므로 한 번 말하고 만다.
+        #
+        # 자리는 판독 로그 다음, 화면 앞이다 — 무엇이 없어졌는지가 지금 화면을 읽는 전제다.
+        # 문구는 GAME_STATE 갈래(`scene.py` 의 `missing`)와 같은 것을 쓴다. 두 채널이 같은
+        # 것을 다르게 말하면 읽는 쪽이 둘을 다른 사실로 읽는다.
+        gone = [key for key, at in self.gone_at.items() if at > since]
+        if gone:
+            lines.append(f"gone from the scene: {', '.join(sorted(self._named(k) for k in gone))}")
             lines.append("")
 
         # statics 는 **매번 전부** 그린다. 이 절만 창(window)을 따르지 않는다.
@@ -707,6 +736,18 @@ class PulseMemory(BaseModel):
         named = ", ".join(entry.changed)
         rest = entry.moved - len(entry.changed)
         return f"delta — {named}" + (f", +{rest} more" if rest > 0 else "")
+
+    def _named(self, key: str) -> str:
+        """객체를 부르는 이름. 화면의 머리줄과 같은 모양으로.
+
+        `held` 의 키는 `씬/selector` 인데 객체는 `selector` 로 그려진다. 사라진 것만 다른
+        모양으로 부르면 읽는 쪽이 그것을 같은 객체로 못 알아본다. 다른 씬의 것은 씬을 달고
+        있어야 하므로 지금 씬일 때만 뗀다.
+        """
+        prefix = f"{self.scene}/" if self.scene else None
+        if prefix and key.startswith(prefix):
+            return key[len(prefix) :]
+        return key
 
     def _moved(self, *keys: str) -> str:
         """How many readings this key moved in, when that is more than one.
