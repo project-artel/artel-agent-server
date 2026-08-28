@@ -648,6 +648,25 @@ class QaRunChannel:
             ScreenSelectorProposalPayload.model_validate(raw.get("payload") or {})
         )
 
+    def on_screen_settled(self, raw: dict) -> None:
+        """관측이 확정한 화면을 씬 메모리에 얹는다 (ARTEL-668).
+
+        **QA agent 가 화면을 보는 통로가 이것이다.** 제안(`on_screen_selector_proposal`)도
+        같은 값을 곁들여 싣지만 그쪽은 `(scene, selector)` 마다 평생 한 번만 나가므로,
+        이미 한 번 플레이한 빌드에서는 한 장도 안 온다. 이 프레임은 화면이 바뀔 때마다
+        오고, 그 `scene` 의 목록이 비어 있어도 온다.
+
+        payload 를 `ScreenSelectorProposalPayload` 로 읽는다. 저쪽이 세 필드를 글자 그대로
+        같은 철자로 싣기로 정했고, 같은 값의 두 번째 모델을 두면 한쪽만 필드가 늘어도
+        아무도 모른다.
+
+        풀어 줄 future 가 없다. 이 프레임은 무엇을 물어서 오는 것이 아니라 관측이 스스로
+        보내는 통보다 — `PULSE` 와 같은 자리이고, `correlationId` 도 안 실려 온다.
+        """
+        self.scene.screen_map.apply(
+            ScreenSelectorProposalPayload.model_validate(raw.get("payload") or {})
+        )
+
     def on_screen_selector_result(self, raw: dict) -> None:
         """목록을 고친 답을, 무엇을 물었는지와 맞대 보고 넘긴다 (ARTEL-657).
 

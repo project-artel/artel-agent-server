@@ -1,13 +1,16 @@
 # 2026-08-28 — 화면 제안을 판정하는 agent 를 따로 띄운다
 
 - Date: 2026-08-28
-- Jira: ARTEL-656
+- Jira: ARTEL-656 (`SCREEN_SETTLED` 배선은 ARTEL-668)
 - Status: Implemented
 
 ## Goal
 
 `SCREEN_SELECTOR_PROPOSAL` 이 오면 QA agent 와 **분리된** 짧게 사는 agent 가 그것을 읽고
 `SCREEN_SELECTOR_VERDICT` 로 답한다. 답은 개별 화면 판정이 아니라 whitelist 항목 배열이다.
+
+`SCREEN_SETTLED` 도 함께 붙인다 (ARTEL-668). 같은 파일 셋을 건드리고, 두 작업이 나뉘면
+서로의 diff 를 밟는다.
 
 ## Non-goals
 
@@ -56,12 +59,17 @@
       `SCREEN_SELECTOR_PROPOSAL` 을 그리로 넘긴다. `app/qa/channel.py` 는 답을 실어 보내는
       `answer_screen_selector_proposal` 하나만 늘어난다 (봉투 `sequence` 가 한 곳에서 나야
       하므로)
+- [x] **Step 4b: `SCREEN_SETTLED`** (ARTEL-668) — 타입 하나, 라우터 한 줄, 핸들러 하나.
+      payload 모델은 `ScreenSelectorProposalPayload` 를 그대로 쓴다 — 저쪽이 세 필드를
+      같은 철자로 싣기로 정했다. 제안이 유일한 화면 통로라고 말하던 주석들을 고쳤다
 - [x] **Step 5: Tests** — `tests/test_qa_screen_verdict.py`
   - 기계 규칙 셋이 깨진 자리를 픽스처로 만든다 — 이름에 카운터가 붙는 경우, 이름이 같은
     형제 컨트롤 둘, 조작 없이 넘어가는 로딩 화면
   - 지어내기 금지: 후보에 없는 pattern, 정규식 모양, 잘못된 match, 사유 없음
   - 형식 위반은 항목 없는 실패로 답한다
   - QA 런 격리: 판정이 느리거나 터져도 `deliver` 가 즉시 돌아오고 QA 채널이 안 멈춘다
+  - `SCREEN_SETTLED`: 제안이 한 장도 안 오는 런에서도 화면이 보인다 / 빈 `discriminator`
+    가 사실로 그려진다 / 판정기로 안 넘어간다 / 다른 scene 의 것은 안 그린다
 
 ## Validation
 

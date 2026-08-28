@@ -1,6 +1,6 @@
-"""화면 제안을 판정하는 agent 를 따로 띄운다 (ARTEL-656).
+"""화면 제안을 판정하는 agent 를 따로 띄운다 (ARTEL-656) — 그리고 `SCREEN_SETTLED` (ARTEL-668).
 
-네 가지를 못박는다. 넷은 서로 다른 방식으로 깨진다:
+다섯 가지를 못박는다. 다섯은 서로 다른 방식으로 깨진다:
 
 - **QA 런이 판정을 모르는가** — 인입 frame 을 읽는 loop 가 판정을 기다리면 그동안 `PULSE`
   도 `ACTION_RESULT` 도 안 들어온다. 판정이 걸려 있어도, 터져도, 시간을 넘겨도 `deliver`
@@ -13,6 +13,10 @@
   화면. 셋 다 판정이 살아남아야 하고, prompt 는 특정 게임의 관례를 말하지 않아야 한다.
 - **계약대로 나가는가** — `SCREEN_SELECTOR_VERDICT`, `correlationId` 는 제안의
   `messageId`, `match` 는 셋뿐, `pattern` 은 정확 문자열.
+- **제안이 한 장도 안 오는 런에서도 화면이 보이는가** — 제안은 `(scene, selector)` 마다
+  평생 한 번만 나가므로 이미 한 번 플레이한 빌드에서는 안 온다. `SCREEN_SETTLED` 가 그
+  구멍을 메우고, 빈 `discriminator` 는 빠진 값이 아니라 "이 `scene` 이 화면 한 행이다" 라는
+  사실로 그려져야 한다.
 """
 
 import asyncio
@@ -762,3 +766,123 @@ def test_too_many_verdicts_at_once_are_dropped_rather_than_queued() -> None:
         return running
 
     assert asyncio.run(scenario()) == 2
+
+
+# --- SCREEN_SETTLED (ARTEL-668) ----------------------------------------------
+#
+# 제안은 `(scene, selector)` 마다 평생 한 번만 나간다. 이미 한 번 플레이한 빌드에서는 한
+# 장도 안 오고, 그때 QA agent 는 자기가 어느 `screen` 에 있는지 못 본다 — 목록을 고치는
+# tool 둘이 부를 계기를 잃는 상태다. 이 프레임이 그 구멍을 메운다.
+
+
+def settled(
+    scene: str = "Field",
+    screen_id: str = "11",
+    previous_screen_id: str | None = "10",
+    discriminator: list[dict] | None = None,
+) -> dict:
+    """`SCREEN_SETTLED` 한 장. payload 철자가 제안과 같다."""
+    entries = (
+        discriminator
+        if discriminator is not None
+        else [{"selector": "hud/menu(0)", "active": True}]
+    )
+    return {
+        "type": "SCREEN_SETTLED",
+        "messageId": "settled-1",
+        "correlationId": None,
+        "payload": {
+            "scene": {"scene_id": "3", "name": scene},
+            "previous_screen": (
+                None
+                if previous_screen_id is None
+                else _screen(previous_screen_id, [])
+            ),
+            "current_screen": _screen(screen_id, entries),
+        },
+    }
+
+
+def _service_with_channel():
+    store = InMemoryQaSessionStore()
+    service = QaExecutionService(store)
+    channel, sent = _channel()
+    service._channels["s"] = channel
+    return service, channel, sent
+
+
+def test_the_agent_knows_its_screen_in_a_run_with_no_proposal_at_all() -> None:
+    """이 프레임이 존재하는 이유. 제안이 한 장도 안 오는 런에서도 화면이 보여야 한다."""
+    service, channel, _sent = _service_with_channel()
+
+    assert service.deliver("s", settled()) is True
+    channel.on_pulse({"payload": {"schema": 2, "reading": 1, "scene": "Field"}})
+
+    block = channel.scene.screen_map_block()
+    assert block is not None
+    assert "you are on screen 11 of Field" in block
+    assert "reached from screen 10" in block
+    assert "told apart by: hud/menu(0) on" in block
+
+
+def test_a_settled_frame_is_not_sent_to_the_adjudicator() -> None:
+    """이 프레임은 아무것도 안 물어보고 후보도 안 싣는다."""
+
+    async def scenario():
+        service, _channel_, _sent = _service_with_channel()
+        stub = _StubAgent()
+        service._adjudicators["s"] = ScreenSelectorAdjudicator(agent=stub)
+        accepted = service.deliver("s", settled())
+        await asyncio.sleep(0)
+        return accepted, stub
+
+    accepted, stub = asyncio.run(scenario())
+
+    assert accepted is True
+    assert stub.calls == 0
+
+
+def test_an_empty_discriminator_is_reported_as_the_state_it_is() -> None:
+    """빠진 값이 아니라 사실이다 — 그 `scene` 의 모든 관측이 화면 한 행에 앉아 있다."""
+    service, channel, _sent = _service_with_channel()
+
+    service.deliver("s", settled(discriminator=[]))
+    channel.on_pulse({"payload": {"schema": 2, "reading": 1, "scene": "Field"}})
+
+    block = channel.scene.screen_map_block()
+    assert block is not None
+    assert "told apart by: nothing" in block
+    assert "every observation in this scene lands on this one screen row" in block
+
+
+def test_a_later_settled_frame_replaces_the_earlier_one() -> None:
+    service, channel, _sent = _service_with_channel()
+
+    service.deliver("s", settled(screen_id="11", previous_screen_id="10"))
+    service.deliver("s", settled(screen_id="12", previous_screen_id="11"))
+    channel.on_pulse({"payload": {"schema": 2, "reading": 1, "scene": "Field"}})
+
+    block = channel.scene.screen_map_block()
+    assert "you are on screen 12 of Field" in block
+    assert "reached from screen 11" in block
+
+
+def test_another_scenes_settled_frame_is_not_drawn_as_the_current_screen() -> None:
+    service, channel, _sent = _service_with_channel()
+
+    service.deliver("s", settled(scene="Field", screen_id="11"))
+    channel.on_pulse({"payload": {"schema": 2, "reading": 1, "scene": "shop_popup"}})
+
+    assert channel.scene.screen_map_block() is None
+
+
+def test_an_unreadable_settled_frame_does_not_end_the_run() -> None:
+    service, channel, _sent = _service_with_channel()
+    service.deliver("s", settled(screen_id="11"))
+    broken = settled()
+    broken["payload"]["current_screen"] = {"discriminator": "not a list"}
+
+    assert service.deliver("s", broken) is False
+    channel.on_pulse({"payload": {"schema": 2, "reading": 1, "scene": "Field"}})
+    # 종전 판정이 살아 있다. 못 읽은 한 장이 이미 아는 것을 지우면 안 된다.
+    assert "you are on screen 11 of Field" in channel.scene.screen_map_block()

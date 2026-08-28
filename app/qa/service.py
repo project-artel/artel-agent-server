@@ -271,14 +271,17 @@ class QaExecutionService:
                 # (ARTEL-657), 질문 자체에 답하는 것은 판정기다(ARTEL-656).
                 #
                 # 그래도 반드시 받아야 한다. 모르는 타입은 `False` 로 떨어져 "unsupported
-                # inbound frame" 으로 답하는데, 이 프레임은 QA agent 에게 화면 판정을 싣고
-                # 오는 유일한 통로다 — 거절하면 화면이 영영 안 보인다.
+                # inbound frame" 으로 답하는데, 그 답은 저쪽에 프로토콜 오류로 읽힌다.
                 channel.on_screen_selector_proposal(raw)
                 # **아무것도 기다리지 않는다.** 이 loop 가 판정 하나를 기다리면 그동안
                 # `PULSE` 도 `ACTION_RESULT` 도 안 들어오고, 그것이 곧 런이 서는 것이다.
                 adjudicator = self._adjudicators.get(session_id)
                 if adjudicator is not None:
                     adjudicator.answer_later(channel, raw)
+            elif message_type == MessageType.SCREEN_SETTLED:
+                # 화면이 바뀔 때마다 온다 (ARTEL-668). 판정기에 안 넘긴다 — 이 프레임은
+                # 아무것도 안 물어보고 후보도 안 싣는다.
+                channel.on_screen_settled(raw)
             elif message_type == MessageType.SCREEN_SELECTOR_RESULT:
                 channel.on_screen_selector_result(raw)
             elif message_type == MessageType.ERROR:

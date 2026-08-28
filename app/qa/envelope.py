@@ -120,6 +120,20 @@ class MessageType(StrEnum):
     # QA agent 가 보내지 않는다. 게임을 하고 있는 agent 를 세워 판정시키면 기다리는 동안
     # 게임이 흘러가고, 그 런의 문맥과 예산이 자기 시나리오와 무관한 질문에 쓰인다.
     SCREEN_SELECTOR_VERDICT = "SCREEN_SELECTOR_VERDICT"
+    # Orchestration -> Agent
+    #
+    # 관측이 화면을 확정했다는 통보 (ARTEL-668). 답이 없고 `correlationId` 도 없다.
+    #
+    # [SCREEN_SELECTOR_PROPOSAL] 과 겸하지 않는 이유는 둘이 나가는 조건이 다르기
+    # 때문이다. 질문은 물어볼 것이 새로 생겼을 때 `(scene, selector)` 마다 **평생 한 번**
+    # 나가고, 사실은 그 사실이 달라질 때마다 나간다. 겸하게 두면 드문 쪽의 조건이 이겨서,
+    # 이미 한 번 플레이한 빌드에서는 제안이 한 장도 안 나가고 QA agent 가 런 내내 자기가
+    # 어느 `screen` 에 있는지 못 본다 — 목록을 고치는 tool 둘(ARTEL-657)이 부를 계기를
+    # 잃는 상태다.
+    #
+    # payload 는 `scene` · `previous_screen` · `current_screen` 이고 철자가 제안과 같다.
+    # 그래서 모델도 [ScreenSelectorProposalPayload] 를 그대로 쓴다.
+    SCREEN_SETTLED = "SCREEN_SETTLED"
     # [SCREEN_SELECTOR_RULE] 의 답. 요청의 `messageId` 가 `correlationId` 로 돌아온다.
     #
     # `KNOWLEDGE_WRITE_RESULT` 와 같은 구조다 — 한 타입이 여러 쓰기에 답하고, 무엇의
@@ -732,6 +746,10 @@ class KnowledgeUnlinkPayload(BaseModel):
 # (ARTEL-657), `SCREEN_SELECTOR_VERDICT` 는 QA 런 밖에서 도는 판정 agent 가 보낸다
 # (ARTEL-656). `SCREEN_SELECTOR_RESULT` 는 그 둘 모두에 답하므로 payload 의 `type` 을
 # 봐야 무엇의 답인지 알 수 있다.
+#
+# 다섯째로 `SCREEN_SETTLED` 가 붙었다(ARTEL-668). 목록을 묻지도 고치지도 않고, 그 목록이
+# 만들어 낸 결과 — 지금 어느 `screen` 인가 — 만 알린다. payload 모델을 따로 두지 않는
+# 이유는 [ScreenSelectorProposalPayload] 에 적었다.
 
 
 class ScreenDiscriminatorEntry(BaseModel):
@@ -759,11 +777,16 @@ class ScreenSelectorSceneRef(BaseModel):
 
 
 class ScreenSelectorScreenRef(BaseModel):
-    """제안에 실린 `screen` 하나.
+    """제안이나 통보에 실린 `screen` 하나.
 
-    필드가 전부 기본값을 갖는다. 이 프레임은 무엇을 물어보러 오는 것이지 런이 기다리는
-    답이 아니라, 한 칸이 비었다고 프레임을 통째로 버리면 화면 판정을 실을 유일한 통로가
-    막힌다.
+    필드가 전부 기본값을 갖는다. 둘 다 런이 기다리는 답이 아니라 저쪽이 스스로 보내는
+    프레임이라, 한 칸이 비었다고 프레임을 통째로 버리면 그 화면을 볼 기회가 그대로
+    사라진다.
+
+    **빈 `discriminator` 는 빠진 값이 아니라 사실이다.** 그 `scene` 의 목록에 오른
+    selector 가 하나도 안 나타났다는 뜻이고, 그러면 그 `scene` 의 모든 관측이 화면 한
+    행에 앉는다 — QA agent 가 알아채고 tool 로 고쳐야 하는 상태가 정확히 그것이다
+    (`app/qa/screen.py` 의 `_told_apart_by`).
 
     `capture_url` 은 서명된 단기 주소다. QA agent 는 이것을 안 읽는다 — 자기 눈으로 게임을
     보고 있다. 이 주소를 실제로 여는 것은 제안에 답하는 판정 agent 뿐이고(ARTEL-656), 그
@@ -820,7 +843,12 @@ class ScreenSelectorCandidate(BaseModel):
 
 
 class ScreenSelectorProposalPayload(BaseModel):
-    """`SCREEN_SELECTOR_PROPOSAL` 의 payload.
+    """`SCREEN_SELECTOR_PROPOSAL` 의 payload, 그리고 `SCREEN_SETTLED` 의 payload.
+
+    한 모델이 두 프레임을 받는다. 저쪽이 `scene` · `previous_screen` · `current_screen`
+    을 **글자 그대로 같은 철자로** 싣기로 정했기 때문이다(ARTEL-668) — 같은 값의 두 번째
+    모델을 두면 한쪽만 필드가 늘고 그것이 조용하다. `SCREEN_SETTLED` 는 `reason` ·
+    `changes` · `candidates` 를 안 싣고, 셋 다 기본값이 있어 그대로 읽힌다.
 
     두 쪽이 이 하나를 읽고 서로 다른 것을 본다. QA 런은 `current_screen` 만 본다 —
     지도가 지금 어느 `screen` 이라고 말하는가(`app/qa/screen.py`). 판정 agent 는 전부
@@ -828,12 +856,12 @@ class ScreenSelectorProposalPayload(BaseModel):
     관례를 프롬프트에 적으면 그 게임에서만 맞는 판정기가 되므로, 판단에 필요한 것이 전부
     여기 실려야 한다.
 
-    **QA agent 에게 이 프레임이 유일한 화면 판정 통로다.** 그리고 이것은 관측마다 오지
-    않는다 — 저쪽은 `(scene, selector)` 마다 평생 한 번만 물어보므로, 이미 다 물어본
-    빌드에서는 한 장도 안 온다. 그래서 이 값을 그릴 때는 반드시 어느 `scene` 의 판정인지
-    함께 봐야 한다(`app/qa/screen.py`).
+    제안은 드물게 온다 — 저쪽은 `(scene, selector)` 마다 평생 한 번만 물어보므로, 이미
+    다 물어본 빌드에서는 한 장도 안 온다. **그래서 화면을 그리는 쪽이 기대는 것은 제안이
+    아니라 `SCREEN_SETTLED` 다.** 그쪽은 화면이 바뀔 때마다 오고, 후보가 하나도 없어도
+    온다.
 
-    `reason` 은 `unknown-selector`(목록 밖 selector 가 상태를 바꿨다) 또는
+    `reason` 은 제안에만 있고 `unknown-selector`(목록 밖 selector 가 상태를 바꿨다) 또는
     `scene-screen-cap`(이 `scene` 이 화면 상한에 닿았다 — 그때 후보는 지금 화면을 가르고
     있는 것들이고 답은 **뺄** 항목이다) 이다.
     """
