@@ -78,6 +78,58 @@ Prefer:
 - action-oriented function names
 - explicit variable meaning
 
+### Variables
+
+A variable name says what the value is, in whole words, so a reader who lands on
+the line never has to go back to the declaration to find out. Length is the
+cheap part. The expensive part is a name that costs a lookup every time it
+appears.
+
+**Write the word out.** `response`, not `res`. `index`, not `idx`. `request`,
+not `req`. `configuration`, not `cfg`. `message`, not `msg`. `temporary`, not
+`tmp`. The exception is an abbreviation the domain already reads as a word of
+its own — `id`, `url`, `http`, `json`, `sql`, `qa`, `sdk` — where expanding it
+reads worse than leaving it alone.
+
+**Name the value, not its container or its position.** `expiredSessions`, not
+`list2`. `sceneCount`, not `count`. `pendingRunIds`, not `arr`. The type is
+already on the line; what the reader cannot see is which of the many possible
+collections this one is.
+
+**Let the name's shape match the value's shape.** A collection reads as a
+plural. A boolean reads as a claim that is true or false — `hasAnchor`,
+`isExpired`, `shouldRetry` — never `flag` or `check`. A number that carries a
+unit names the unit: `timeoutMilliseconds`, not `timeout`.
+
+**A longer name is not a worse name.** `anchorsMissingScreen` beats `filtered`
+at three times the width, because it still means something when quoted in a
+review comment or a stack trace. Shorten a name by narrowing the concept behind
+it, never by dropping letters out of the words.
+
+Single letters are for a loop index over a numeric range and for a lambda
+parameter whose entire scope is one line. Anywhere else they are a defect.
+
+Casing follows the language's own convention. This rule is about which words a
+name contains, not how they are cased.
+
+**Rename what you touch.** Much of this codebase predates this rule and reads
+that way. That backlog is not a sweep to schedule; it is work to do in passing.
+When you change a function, rename the badly named variables inside it in the
+same commit. A name you had to decode in order to make your change is exactly
+the name to fix while you still have it decoded.
+
+This is not the unrelated cleanup that `## Refactoring` below and `commit.md`
+warn against. The rename is inside the change, not beside it. The test is
+whether the diff would have opened that region anyway.
+
+Stop at the edge of the change. A rename that reaches into callers, alters a
+public signature, or opens a file the change had no other reason to open is a
+separate commit and usually a separate issue — say so instead of widening the
+diff. And leave a name alone when it is load-bearing outside the code: a
+serialized field, a database column, a wire contract, or a name that a log
+query, dashboard, or saved search matches on. Renaming those is a behavior
+change wearing a rename's clothes.
+
 ## Comments
 
 ### Language
