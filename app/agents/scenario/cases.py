@@ -250,6 +250,13 @@ takes, or what they are called. Call this before writing the steps for a case wh
 operation you would otherwise have to guess — and instead of restating the case title as
 a step.
 
+**Do not call it for a case whose `step` already names the operation.** `Return 키를
+누른다`, `아무 키나 누른다`, `Canvas/MapSceneButton 을(를) 클릭한다` — there is nothing
+left to look up there, and the answer would only repeat what you are already holding.
+Measured on a real project the agent called this for all 42 cases in one turn and spent
+the whole turn deadline on it, while every one of those cases already named its key or
+its click. Call it for the ones that read like a title rather than an action.
+
 You get back:
 
   operations   The operations the spec attributes to this case: `input` (`key:Return`,
