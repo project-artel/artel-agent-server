@@ -54,6 +54,9 @@ MAX_READING_LOG = 10
 #
 # 세는 것과 이름 대는 것을 가른다. 몇 개가 움직였나는 언제나 정확하고, 어느 것인지는 여기까지다.
 MAX_CHANGED_NAMED = 8
+# `gone`·`deactive` 를 한 줄에 몇 개까지 이름 대나. scene 이 헐리는 순간에는 수십이 한꺼번에
+# 꺼지는데, 그때 필요한 것은 명단이 아니라 "많이 꺼졌다" 는 사실이다.
+MAX_NAMED_OFF = 12
 
 PULSE_VIEW_START = "<<pulse>>"
 PULSE_VIEW_END = "<<end pulse>>"
@@ -302,6 +305,10 @@ class PulseMemory(BaseModel):
     # 안 되는데, 도구 결과는 대화에 그대로 남으므로 읽는 쪽은 옛 화면에서 그 객체를 여전히
     # 본다 — 실제로 파괴된 카드의 좌표로 두 번 드래그했다(ARTEL-663).
     gone_at: dict[str, int] = Field(default_factory=dict)
+    # `deactive` 로 온 객체와 그것이 꺼진 `reading`. `gone` 과 같은 이유로 남긴다 — `render` 가
+    # 꺼진 것을 안 그리므로(누를 수 없어 조준 후보가 아니다) 꺼짐도 침묵으로만 표현됐고, 침묵은
+    # 소식 없음과 구분이 안 된다. 조합 zone 이 닫힌 줄 모르고 없는 칸에 카드를 끌었다(ARTEL-665).
+    off_at: dict[str, int] = Field(default_factory=dict)
     # 마지막으로 그린 판독 번호. 이 장부를 여기 두는 이유는 "무엇까지 보여줬나" 가 이 메모리
     # 자신의 사정이기 때문이다 — 부르는 쪽마다 따로 세면 둘이 어긋날 자리가 생긴다.
     drawn: int = 0
@@ -315,6 +322,22 @@ class PulseMemory(BaseModel):
     @property
     def seen(self) -> bool:
         return self.readings > 0
+
+    def clock(self) -> int:
+        """`window` 를 재는 자. **`reading` 번호**다.
+
+        둘을 섞고 있었다. 값에 찍는 것은 `self.readings`(적용 횟수, 한 자리~수백)였는데
+        `window` 의 시작점을 주는 `after_frame` 은 **`reading` 번호**(1,000·4,283 …)를
+        돌려준다. 그래서 `at > since` 가 `3 > 1010` 이 되어 늘 거짓이었다 — 행위 직후
+        `render` 에서 값이 한 줄도 안 나오고, `gone` 된 객체도 조용히 없어졌다(ARTEL-665).
+
+        `reading` 번호를 쓴다. `ReadingLog.reading` 과 `after_frame` 이 이미 그것을 쓰고,
+        그 셋이 같은 자를 써야 `window` 가 뜻을 갖는다.
+
+        번호를 안 주는 옛 SDK 에서는 적용 횟수로 떨어진다. 그때는 `after_frame` 도 `None` 을
+        돌려주므로 `window` 가 `drawn` 으로 가고, 그 안에서 다시 자가 하나로 맞는다.
+        """
+        return self.reading if self.reading is not None else self.readings
 
     def after_frame(self, frame: int | None) -> int | None:
         """그 프레임보다 뒤에 잡힌 판독만 남기는 창의 시작점. 모르면 `None`.
@@ -361,6 +384,7 @@ class PulseMemory(BaseModel):
             # 전량 판독은 쥔 것을 통째로 갈아치운다. 그 앞에서 무엇이 사라졌다는 말은 새
             # 화면에 대고 할 말이 아니다.
             self.gone_at = {}
+            self.off_at = {}
             self.page_due = True
 
         if reading.scene is not None:
@@ -369,6 +393,9 @@ class PulseMemory(BaseModel):
             value = getattr(reading, field)
             if value is not None:
                 setattr(self, field, value)
+
+        # 이 `reading` 의 번호. 값에 찍는 것과 `window` 를 재는 것이 같은 자를 쓰게 한다.
+        now = self.clock()
 
         for key in reading.changed:
             self.moves[key] = self.moves.get(key, 0) + 1
@@ -394,7 +421,7 @@ class PulseMemory(BaseModel):
 
         for entry in reading.statics:
             self.statics[entry.key] = entry
-            self.static_at[entry.key] = self.readings
+            self.static_at[entry.key] = now
 
         # Which list an object arrives in is what says whether it is on. It is
         # not a field on the object, so it cannot disagree with itself.
@@ -420,8 +447,15 @@ class PulseMemory(BaseModel):
                 held.shown = dict(was.shown) if was else {}
                 for member in obj.members:
                     held.members[member.key] = member
-                    held.at[member.key] = self.readings
+                    held.at[member.key] = now
                 self.held[obj.key] = held
+
+                # 켜져 있던 것이 꺼진 **순간**만 적는다. 처음 보는데 이미 꺼져 있는 것은
+                # 소식이 아니라 사정이고, 그것은 `whole` 페이지가 한 번에 센다.
+                if not live and was is not None and was.live:
+                    self.off_at[obj.key] = now
+                elif live:
+                    self.off_at.pop(obj.key, None)
 
         # 사라졌다고 한 것을 놓는다. 꺼진 것과 달리 **지운다** — 꺼진 것은 다시 켜지면 판독이
         # `active` 통에 넣어 보내지만, 파괴된 것은 영영 안 온다.
@@ -431,20 +465,22 @@ class PulseMemory(BaseModel):
         # 생겼다(ARTEL-651).
         for key in reading.gone:
             self.held.pop(key, None)
+            # 꺼진 채로 파괴된 것이다. 두 번 말하지 않는다 — `gone` 이 더 센 말이다.
+            self.off_at.pop(key, None)
             # 지운 것으로 끝내지 않는다. 렌더가 이것을 말한다 — 지우기만 하면 읽는 쪽은
             # 대화에 남은 옛 화면에서 그 객체를 계속 본다.
-            self.gone_at[key] = self.readings
+            self.gone_at[key] = now
             # 이동 횟수도 함께 놓는다. selector 는 자리 번호라 다음 카드가 같은 이름으로
             # 태어날 수 있고, 그러면 새 객체가 죽은 객체의 "일곱 판독에서 움직였다"를 물려받는다.
             for tracked in [name for name in self.moves if name.startswith(f"{key}|")]:
                 del self.moves[tracked]
 
-        if len(self.gone_at) > MAX_TRACKED_KEYS:
-            # 오래된 것부터 버린다. 이미 말한 사라짐은 대화에 남아 있다.
-            for key in sorted(self.gone_at, key=self.gone_at.get)[
-                : len(self.gone_at) - MAX_TRACKED_KEYS
-            ]:
-                del self.gone_at[key]
+        # 오래된 것부터 버린다. 이미 말한 것은 대화에 남아 있다.
+        for ledger in (self.gone_at, self.off_at):
+            if len(ledger) <= MAX_TRACKED_KEYS:
+                continue
+            for key in sorted(ledger, key=ledger.get)[: len(ledger) - MAX_TRACKED_KEYS]:
+                del ledger[key]
 
     def render(
         self,
@@ -485,7 +521,7 @@ class PulseMemory(BaseModel):
         if news_since is None:
             news_since = since
         if advance:
-            self.drawn = self.readings
+            self.drawn = self.clock()
 
         lines = [PULSE_VIEW_START]
         head = f"reading {self.reading}"
@@ -533,7 +569,26 @@ class PulseMemory(BaseModel):
         # 것을 다르게 말하면 읽는 쪽이 둘을 다른 사실로 읽는다.
         gone = [key for key, at in self.gone_at.items() if at > since]
         if gone:
-            lines.append(f"gone from the scene: {', '.join(sorted(self._named(k) for k in gone))}")
+            lines.append(f"gone from the scene: {self._roll(gone)}")
+
+        # `deactive` 도 같은 이유로 말한다. `render` 가 꺼진 객체를 안 그리므로(누를 수 없어
+        # 조준 후보가 아니다) 꺼짐 역시 침묵으로만 표현됐고, 침묵은 소식 없음과 구분이 안 된다.
+        # 조합 zone 이 닫힌 줄 모르고 없는 칸에 카드를 끌었다.
+        #
+        # `gone` 과 다른 말이다. 꺼진 것은 다시 켜지면 `pulse` 가 `active` 통에 넣어 보내므로
+        # 저절로 돌아온다 — 그래서 "없어졌다" 가 아니라 "지금은 꺼져 있다" 다.
+        off = [key for key, at in self.off_at.items() if at > since]
+        if off:
+            lines.append(f"switched off: {self._roll(off)}")
+
+        # `whole` 페이지는 **지금 꺼져 있는 것 전부**를 한 번 센다. 페이지는 켜진 것만 그리므로,
+        # scene 에 막 들어온 독자는 무엇이 있는데 꺼져 있는지를 알 길이 없다. 이름만이고 값은
+        # 없다 — 꺼진 동안의 값은 `pulse` 도 안 보낸다.
+        dark = [k for k, held in self.held.items() if not held.live] if since == 0 else []
+        if dark:
+            lines.append(f"here but switched off: {self._roll(dark)}")
+
+        if gone or off or dark:
             lines.append("")
 
         # statics 는 **매번 전부** 그린다. 이 절만 창(window)을 따르지 않는다.
@@ -617,7 +672,7 @@ class PulseMemory(BaseModel):
                 earlier = "  (changed earlier)" if member_key in owed else ""
                 lines.append(f"  {name} = {member.value!r}{asked}{news}{earlier}{moved}")
                 if advance:
-                    obj.shown[member_key] = self.readings
+                    obj.shown[member_key] = self.clock()
 
         lines.append(PULSE_VIEW_END)
         return "\n".join(lines)
@@ -761,6 +816,18 @@ class PulseMemory(BaseModel):
         named = ", ".join(entry.changed)
         rest = entry.moved - len(entry.changed)
         return f"delta — {named}" + (f", +{rest} more" if rest > 0 else "")
+
+    def _roll(self, keys: list[str]) -> str:
+        """이름 몇 개, 그리고 몇 개가 더 있는지. 명단이 아니라 사실을 준다.
+
+        scene 이 헐리는 순간에는 수십이 한꺼번에 꺼진다. 그것을 다 적으면 그 한 줄이 `render`
+        전체보다 길어지는데, 읽는 쪽에 필요한 것은 "무엇이 꺼졌나" 몇 개와 "많이 꺼졌다" 는
+        사실이다.
+        """
+        named = sorted(self._named(k) for k in keys)
+        if len(named) <= MAX_NAMED_OFF:
+            return ", ".join(named)
+        return ", ".join(named[:MAX_NAMED_OFF]) + f", +{len(named) - MAX_NAMED_OFF} more"
 
     def _named(self, key: str) -> str:
         """객체를 부르는 이름. 화면의 머리줄과 같은 모양으로.
