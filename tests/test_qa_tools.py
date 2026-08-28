@@ -1390,3 +1390,55 @@ def test_화면은_한_번만_실린다() -> None:
         assert acted.count("<<pulse>>") == 1, acted
 
     asyncio.run(run())
+
+
+def test_마지막_스텝_판정에_지식을_남기라고_말한다() -> None:
+    """도구는 있는데 안 쓴다 — 실측으로 83턴 런에서 `record_knowledge` 0회였다.
+
+    기록은 이번 런의 판정에 아무것도 안 보태므로 비용만 있는 행동이고, 무엇보다 적을 순간이
+    흐름 안에 없었다. 마지막 스텝을 판정한 자리가 그 순간이다 — 런 전체가 아직 앞에 있고
+    판정은 끝났다(ARTEL-667).
+    """
+
+    async def run() -> None:
+        _channel, _state, tools, _sent = make()
+
+        answered = await tools["report_step"].ainvoke(
+            {"step": 1, "passed": True, "message": "확인함", "thought": "판정"}
+        )
+
+        assert "That was the last step" in answered, answered
+        assert "record_knowledge" in answered
+
+    asyncio.run(run())
+
+
+def test_이미_남긴_런에게는_다시_말하지_않는다() -> None:
+    async def run() -> None:
+        _channel, state, tools, _sent = make()
+        state.knowledge_records_attempted = 1
+
+        answered = await tools["report_step"].ainvoke(
+            {"step": 1, "passed": True, "message": "확인함", "thought": "판정"}
+        )
+
+        assert "That was the last step" in answered
+        assert "record_knowledge" not in answered
+
+    asyncio.run(run())
+
+
+def test_중간_스텝에서는_말하지_않는다() -> None:
+    """말할 자리는 마지막 판정 하나다. 매 스텝마다 붙이면 표가 뜻을 잃는다."""
+
+    async def run() -> None:
+        _channel, _state, tools, _sent = make(total_steps=3)
+
+        answered = await tools["report_step"].ainvoke(
+            {"step": 1, "passed": True, "message": "확인함", "thought": "판정"}
+        )
+
+        assert "step(s) left" in answered, answered
+        assert "record_knowledge" not in answered
+
+    asyncio.run(run())
