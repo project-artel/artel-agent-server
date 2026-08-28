@@ -940,7 +940,10 @@ def test_사라졌다고_한_객체는_지운다():
     )
 
     assert [held.selector for held in memory.held.values()] == ["Word[12]"]
-    assert "Card(Clone)[16]" not in memory.render()
+    # 객체로는 안 그려진다. 이름은 "사라졌다" 는 말에만 남는다(ARTEL-663).
+    view = memory.render()
+    assert "Card(Clone)[16]  [" not in view, view
+    assert "gone from the scene: Card(Clone)[16]" in view
 
 
 def test_사라진_객체는_물어도_없다():
@@ -986,3 +989,63 @@ def test_같은_이름으로_다시_태어난_객체가_옛_이동_횟수를_안
     )
 
     assert "moved in" not in memory.render()
+
+
+def test_사라진_것을_말한다():
+    """지우기만 하면 읽는 쪽은 대화에 남은 옛 화면에서 그 객체를 계속 본다.
+
+    없음은 추론이고 사라짐은 진술이다 — 델타에서 안 적힌 것은 "이번에 소식이 없다" 와
+    구분이 안 된다. 실제 런에서 파괴된 카드의 좌표로 두 번 드래그했다(ARTEL-663).
+    """
+    memory = fold(
+        reading(active=[obj(selector="Card(Clone)[16]"), obj(selector="Word[12]")]),
+        reading(reading=2, whole=False, gone=["TurnBattleScene/Card(Clone)[16]"]),
+    )
+
+    view = memory.render()
+    assert "gone from the scene: Card(Clone)[16]" in view, view
+    # 화면의 머리줄과 같은 이름으로 부른다. 지금 씬은 이름을 안 단다.
+    assert "TurnBattleScene/Card(Clone)[16]" not in view
+
+
+def test_사라졌다는_말은_한_번만_한다():
+    """창을 탄다. 매 턴 반복하면 그것이 새 소식인 줄 알고 다시 확인하러 간다."""
+    memory = fold(
+        reading(active=[obj(selector="Card(Clone)[16]")]),
+        reading(reading=2, whole=False, gone=["TurnBattleScene/Card(Clone)[16]"]),
+    )
+
+    assert "gone from the scene" in memory.render()
+    memory.apply(PulseReading.model_validate(reading(reading=3, whole=False)))
+    assert "gone from the scene" not in memory.render()
+
+
+def test_사라진_것이_없으면_그_줄이_없다():
+    memory = fold(reading(active=[obj(selector="Word[12]")]))
+
+    assert "gone from the scene" not in memory.render()
+
+
+def test_전량_판독은_그_앞의_사라짐을_말하지_않는다():
+    """쥔 것을 통째로 갈아치우는 판독이다. 그 앞에서 무엇이 없어졌다는 말은 새 화면에 대고
+    할 말이 아니다."""
+    memory = fold(
+        reading(active=[obj(selector="Card(Clone)[16]")]),
+        reading(reading=2, whole=False, gone=["TurnBattleScene/Card(Clone)[16]"]),
+        reading(reading=3, whole=True, scene="Lobby", active=[obj(selector="A", scene="Lobby")]),
+    )
+
+    assert "gone from the scene" not in memory.render()
+
+
+def test_다른_씬의_것은_씬을_달고_불린다():
+    """DontDestroyOnLoad 처럼 다른 씬에 사는 객체다. 이름에서 씬을 떼면 지금 씬의 객체와
+    구분이 안 된다."""
+    memory = fold(
+        reading(
+            active=[obj(selector="TutorialController[3]", scene="DontDestroyOnLoad")],
+        ),
+        reading(reading=2, whole=False, gone=["DontDestroyOnLoad/TutorialController[3]"]),
+    )
+
+    assert "gone from the scene: DontDestroyOnLoad/TutorialController[3]" in memory.render()
