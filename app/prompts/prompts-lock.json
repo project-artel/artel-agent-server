@@ -37,6 +37,8 @@
     "qa_run/v9/vision_directive": "ecbb2b16e3a929b6b85ca9aa93123454e0636fd0e11f503b588b92ae7e3a3495",
     "scenario/v1/human": "03128a4111d41e4a9e048dfd59b00d44a30442b710b7b3773ccc10c55154e5ea",
     "scenario/v1/system": "bcd90c8a87a31172b364a7093c199cbaeb094b9cf585c92627e0225225b7a436",
+    "scenario/v10/human": "abc987c42401ae04f5636d9a5e011b3a6c9c69728b44ca22c904d94fe142806e",
+    "scenario/v10/system": "470200ff5dc6380f95e4160e5529bbdbd1d2d5f57aae973f27566f187e35e25d",
     "scenario/v2/human": "61d0c1733f83b6d84f315ca99aff4099281a63d6150be1dff43790f4e8faa2d7",
     "scenario/v2/system": "f01ed4a32e15ef81d0f3ed9a2f5e01eaaf0d62c6b5d9a54cbfaa2f651cc92023",
     "scenario/v3/human": "fe150effe00619beeb3e08319744b4392ead2e2393e8761febc8bcef0dc739ff",
