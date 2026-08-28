@@ -15,6 +15,7 @@ from typing import Any
 from app.qa.envelope import (
     ActionPayload,
     ActionResultPayload,
+    CapturedImage,
     ChatPayload,
     GameState,
     JsonRpcAction,
@@ -26,6 +27,8 @@ from app.qa.envelope import (
     LogCategory,
     LogPayload,
     MessageType,
+    ScreenCapturePayload,
+    ScreenCreatedPayload,
     ToolCallPayload,
     ToolResultPayload,
     outbound_envelope,
@@ -136,8 +139,14 @@ class QaRunChannel:
         # out the real one would pay it on every write it exercises.
         self._write_timeout = write_timeout
         self._sequence = 0
-        self._action_waiter: asyncio.Future[ActionResultPayload] | None = None
-        self._pending_action_id: str | None = None
+        # 나간 ACTION frame 의 messageId → 그 답을 기다리는 future.
+        #
+        # 필드 하나가 아니라 map 인 것은 이 채널에 action 을 내는 곳이 둘이 되었기
+        # 때문이다(ARTEL-595): 모델이 부르는 도구와, 새 screen 을 찍는 자동 capture. 필드 하나로
+        # 들고 있으면 뒤에 나간 것이 앞의 것을 덮어써서, 앞의 action 은 자기 답이 도착해도
+        # 못 받고 타임아웃까지 앉아 있다가 "게임이 답하지 않았다"가 된다 — 도구가 방금 누른
+        # 버튼이 안 먹혔다고 읽는 자리다.
+        self._action_waiters: dict[str, asyncio.Future[ActionResultPayload]] = {}
         # Knowledge requests waiting on an answer, keyed by the messageId
         # Orchestration echoes back as `correlationId`.
         #
@@ -188,6 +197,20 @@ class QaRunChannel:
         # Unbounded, and bounded in practice by the run's own deadline: an operator
         # cannot type enough in 600 seconds for the restated block to matter.
         self.operator_instructions: list[str] = []
+        # 새 screen 을 찍는 중인 백그라운드 task 들(ARTEL-595). 참조를 들고 있는 것은
+        # asyncio 가 아무도 안 붙든 task 를 도중에 거둬 갈 수 있기 때문이고, 시나리오가
+        # 끝날 때 `close` 가 이 집합을 끊는다.
+        self._capture_tasks: set[asyncio.Task] = set()
+        # 자동 capture 끼리 한 줄로 세운다. screen 이 빠르게 갈리면 `SCREEN_CREATED` 가 연달아
+        # 오는데, 그때마다 배치를 동시에 밀면 게임 쪽에 몇 개가 떠 있는지 아무도 모른다.
+        # 도구의 action 과는 나누지 않는다 — 그쪽을 이 락 뒤로 넣으면 지도의 곁일이 런의
+        # 판단을 기다리게 만든다.
+        self._capture_lock = asyncio.Lock()
+        # 게임이 이 action 자체를 모른다고 답했다. 그 뒤로는 새 screen 마다 같은 거절을 사러
+        # 가지 않는다 — 도구가 모델에게 "이 런에서 다시 찍지 마라" 고 말하는 것과 같은
+        # 판단이다. 무응답에는 세우지 않는다. 그것은 이번에 늦었다는 뜻이지 못 한다는
+        # 뜻이 아니다.
+        self._capture_unsupported = False
 
     @property
     def qa_try_id(self) -> int:
@@ -373,20 +396,19 @@ class QaRunChannel:
         self._raise_if_cancelled()
         loop = asyncio.get_running_loop()
         waiter: asyncio.Future[ActionResultPayload] = loop.create_future()
-        self._action_waiter = waiter
 
         frame = self._frame(
             MessageType.ACTION, ActionPayload(message=message, step=step, actions=actions)
         )
-        self._pending_action_id = frame["messageId"]
+        message_id = frame["messageId"]
+        self._action_waiters[message_id] = waiter
         await self._send(frame)
         try:
             return await asyncio.wait_for(waiter, timeout=self._action_timeout)
         except asyncio.TimeoutError:
             return None
         finally:
-            self._action_waiter = None
-            self._pending_action_id = None
+            self._action_waiters.pop(message_id, None)
 
     async def search_knowledge(
         self, query: str, tag: str | None, limit: int, step: int | None = None
@@ -499,19 +521,52 @@ class QaRunChannel:
         # 액션 뒤에 다음 배치를 기다리는 쪽을 깨운다(ARTEL-516).
         self._reading_arrived.set()
 
-    def on_action_result(self, raw: dict) -> None:
-        correlation = raw.get("correlationId")
-        # Orchestration echoes the ACTION's messageId as the result's correlation.
-        # A mismatch means this answers something we are no longer waiting on.
-        if (
-            self._pending_action_id is not None
-            and correlation is not None
-            and correlation != self._pending_action_id
-        ):
+    def on_screen_created(self, raw: dict) -> None:
+        """orchestration 이 처음 보는 screen 을 하나 만들었다(ARTEL-595). 그 자리에서 찍는다.
+
+        **여기서 기다리지 않는다.** 이 함수는 소켓을 읽는 쪽의 동기 콜백이라, capture 왕복을
+        여기서 기다리면 그동안 pulse 도 action 결과도 채널에 못 들어온다. 백그라운드 task 로
+        띄우고 곧바로 돌려준다.
+
+        답을 correlation 으로 묶기 위해 이 frame 의 messageId 를 들고 간다. screen id 도 함께
+        싣지만, correlation 이 있는 쪽이 중계 한 겹을 더 견딘다.
+        """
+        payload = ScreenCreatedPayload.model_validate(raw.get("payload") or {})
+        if self.cancelled or self._capture_unsupported:
             return
+        correlation = raw.get("messageId")
+        task = asyncio.create_task(
+            self.capture_new_screen(
+                payload, correlation if isinstance(correlation, str) else None
+            )
+        )
+        self._capture_tasks.add(task)
+        task.add_done_callback(self._capture_tasks.discard)
+
+    def on_action_result(self, raw: dict) -> None:
+        # 검증이 라우팅보다 먼저다. 읽을 수 없는 frame 은 기다리는 것이 있든 없든
+        # `deliver` 까지 올라가 "이 frame 은 못 읽었다" 로 답해야 한다 — 그 판단을 하는
+        # 자리가 여기서 나가는 ValidationError 하나뿐이다.
         payload = ActionResultPayload.model_validate(raw.get("payload") or {})
-        if self._action_waiter is not None and not self._action_waiter.done():
-            self._action_waiter.set_result(payload)
+        waiter = self._action_waiter_for(raw.get("correlationId"))
+        if waiter is not None and not waiter.done():
+            waiter.set_result(payload)
+
+    def _action_waiter_for(self, correlation: Any) -> asyncio.Future | None:
+        """이 답이 풀어 줄 future. 없으면 `None`.
+
+        Orchestration 은 ACTION 의 messageId 를 답의 correlation 으로 되돌려 준다. 그것으로
+        찾지 못하면 이미 타임아웃으로 버린 요청의 늦은 답이므로 버린다.
+
+        correlation 이 없는 답은 그 필드를 안 싣는 옛 orchestration 이다. 기다리는 것이
+        **하나뿐일 때만** 그것으로 친다 — 둘이 떠 있는데 짐작으로 고르면 도구가 자동 capture 의
+        답을 자기 action 의 결과로 읽는다.
+        """
+        if isinstance(correlation, str):
+            return self._action_waiters.get(correlation)
+        if len(self._action_waiters) == 1:
+            return next(iter(self._action_waiters.values()))
+        return None
 
     def on_knowledge_search_result(self, raw: dict) -> None:
         self._resolve(raw, KnowledgeSearchResultPayload.model_validate(raw.get("payload") or {}))
@@ -587,8 +642,9 @@ class QaRunChannel:
 
     def on_cancel(self) -> None:
         self.cancelled = True
-        if self._action_waiter is not None and not self._action_waiter.done():
-            self._action_waiter.cancel()
+        for waiter in self._action_waiters.values():
+            if not waiter.done():
+                waiter.cancel()
         # Same for any knowledge request in flight: left alone it would hold the
         # run open for the rest of its timeout after the operator already ended it.
         #
@@ -602,6 +658,111 @@ class QaRunChannel:
         # A tool parked on the operator has no action to cancel, so wake it and
         # let it find the cancellation itself.
         self._operator_arrived.set()
+        self.close()
+
+    # --- 새 screen capture (ARTEL-595) ---------------------------------------------
+
+    async def capture_new_screen(
+        self, screen: ScreenCreatedPayload, correlation_id: str | None = None
+    ) -> None:
+        """새로 생긴 screen 하나를 찍어 그 주소를 orchestration 에 돌려준다(ARTEL-595).
+
+        **도구가 아니다.** 모델이 부르지 않고 `arch.max_captures_per_run` 도 쓰지 않는다 —
+        어느 screen 에 그림이 붙는지가 런의 판단에 좌우되면, 같은 빌드의 지도가 런마다 다른
+        screen 에만 그림을 갖는다. 이 경로가 `QaRunState` 를 손에 쥐지 않는 것으로 그 예산과의
+        관계가 구조적으로 끊긴다.
+
+        **찍은 그림을 모델에게 보이지 않는다.** 이것은 지도가 screen 행에 붙일 그림이지 스텝의
+        근거가 아니다. 컨텍스트에 밀어 넣으면 모델이 부르지도 않은 이미지가 매 턴 값을
+        치르고, 지도의 사정이 런의 판단을 바꾼다.
+
+        **어떤 실패도 밖으로 내지 않는다.** screen 행은 orchestration 이 이미 만들었고, 그림
+        없는 screen 행이 screen 없는 지도보다 낫다.
+        """
+        try:
+            async with self._capture_lock:
+                if self.cancelled or self._capture_unsupported:
+                    return
+                await self._capture_new_screen(screen, correlation_id)
+        except asyncio.CancelledError:
+            # 협조적 취소는 그대로 올린다. `close` 가 끊은 것이 이 자리다.
+            raise
+        except QaCancelled:
+            # 운영자가 런을 끊었다. 곁일이 낼 소리가 아니다.
+            return
+        except Exception:
+            logger.warning(
+                "[QA] 새 screen %s 의 capture 가 실패했다. screen 은 그대로 남는다",
+                screen.screenId,
+                exc_info=True,
+            )
+
+    async def _capture_new_screen(
+        self, screen: ScreenCreatedPayload, correlation_id: str | None
+    ) -> None:
+        where = f"screen {screen.screenId}"
+        if screen.sceneName:
+            where = f"{where} in {screen.sceneName}"
+
+        result = await self.dispatch_actions(
+            [JsonRpcAction(id=1, method="capture_screen", params=[])],
+            f"Capturing new {where}",
+        )
+        if result is None or not result.results:
+            await self.note(
+                f"The game did not answer the capture of new {where}; "
+                "it stays on the map without a picture.",
+                LogCategory.SYSTEM,
+            )
+            return
+
+        item = result.results[0]
+        if not item.success:
+            # 이 action 을 모르는 빌드는 새 screen 마다 같은 거절을 답한다. 한 번 듣고 그만둔다 —
+            # 도구가 모델에게 "이 런에서 다시 찍지 마라" 고 말하는 것과 같은 판단이다.
+            self._capture_unsupported = True
+            await self.note(
+                f"New {where} could not be captured — {item.error or 'no reason given'}. "
+                "No screen will be captured for the rest of this run.",
+                LogCategory.SYSTEM,
+            )
+            return
+
+        image = CapturedImage.model_validate(item.returnValue or {})
+        if not image.url or not image.captureId:
+            # 주소도 id 도 없으면 묶을 것이 없다. 반쪽짜리 frame 을 보내는 것보다 낫다.
+            await self.note(
+                f"The game reported a capture of new {where} with no image to bind.",
+                LogCategory.SYSTEM,
+            )
+            return
+
+        await self.emit(
+            MessageType.SCREEN_CAPTURE,
+            ScreenCapturePayload(
+                message=f"Captured new {where}",
+                screenId=screen.screenId,
+                captureId=image.captureId,
+                url=image.url,
+                mimeType=image.mimeType,
+            ),
+            correlation_id,
+        )
+        # 타임라인에도 남긴다. 지도에 그림이 안 붙었을 때 사람이 "찍기는 했나" 를 볼 자리다.
+        await self.note(f"Captured new {where}: {image.url}", LogCategory.OBSERVATION)
+
+    def close(self) -> None:
+        """런이 이 채널을 놓을 때 남은 곁일을 끊는다.
+
+        끝난 try 로 frame 을 보내면 orchestration 이 그것을 거절하고, 그 거절이 소켓을 닫아
+        런 전체를 실패로 만든다. 자동 capture 는 백그라운드 task 라 런이 끝나도 스스로 멈추지
+        않으므로, 그 끝을 여기서 말해 준다.
+        """
+        # 참조는 그대로 둔다. task 를 취소만 하고 놓아 버리면 아직 시작도 못 한 것이
+        # 그대로 수거돼 "Task was destroyed but it is pending" 이 뜬다. 각자 끝나면서
+        # done callback 이 이 집합에서 자기를 지운다.
+        for task in list(self._capture_tasks):
+            task.cancel()
 
     # --- operator ------------------------------------------------------------
 

@@ -165,6 +165,10 @@ class QaExecutionService:
                 state, failure = await runner.run_with_deadline(channel, item.scenario)
             finally:
                 self._channels.pop(session_id, None)
+                # 새 screen capture 는 런너와 다른 task 에서 돈다(ARTEL-595). 시나리오가 끝나면
+                # 그 try 는 곧 닫히고, 닫힌 try 로 frame 을 보내면 orchestration 이 그것을
+                # 거절하며 소켓을 닫는다 — 다음 시나리오까지 함께 죽는 자리다.
+                channel.close()
 
             if channel.cancelled:
                 await self._send_terminal(
@@ -223,6 +227,8 @@ class QaExecutionService:
                 channel.on_action_result(raw)
             elif message_type == MessageType.PULSE:
                 channel.on_pulse(raw)
+            elif message_type == MessageType.SCREEN_CREATED:
+                channel.on_screen_created(raw)
             elif message_type == MessageType.KNOWLEDGE_SEARCH_RESULT:
                 channel.on_knowledge_search_result(raw)
             elif message_type == MessageType.KNOWLEDGE_EXPAND_RESULT:

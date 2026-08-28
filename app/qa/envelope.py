@@ -30,6 +30,15 @@ class MessageType(StrEnum):
     # `type`. Orchestration chose a single type so that the next write inherits the
     # contract instead of deciding again whether it has an answer at all.
     KNOWLEDGE_WRITE_RESULT = "KNOWLEDGE_WRITE_RESULT"
+    # orchestration 이 `pulse` 에서 **처음 보는 screen**을 갈라 screen 행을 만든 그 순간 온다
+    # (ARTEL-595). screen 당 정확히 한 번이고, 재방문에는 오지 않는다.
+    #
+    # 이 frame 은 답을 요구한다 — `SCREEN_CAPTURE` 아래를 보라. 지금까지 답을 기다리는
+    # 쪽은 늘 agent 였으므로, 이것이 **orchestration 이 물어 오는 첫 frame**이다.
+    #
+    # ARTEL-595 가 정의했고 아직 보내는 쪽이 없다. 오지 않으면 이 경로는 한 줄도 돌지
+    # 않으므로, 먼저 붙어도 런에 아무 영향이 없다.
+    SCREEN_CREATED = "SCREEN_CREATED"
     # Agent -> Orchestration
     LOG = "LOG"
     ACTION = "ACTION"
@@ -98,6 +107,20 @@ class MessageType(StrEnum):
     # may wait for an answer, and `report_issue` validates severity itself
     # precisely because a typo would otherwise look like a successful report.
     ISSUE = "ISSUE"
+    # 새 screen 하나를 찍은 결과. `SCREEN_CREATED` 의 messageId 를 correlation 으로 싣는다
+    # (ARTEL-595).
+    #
+    # 도구가 내지 않는다. `capture_screen` 도구가 찍은 그림은 모델이 스텝을 판정하려고
+    # 본 것이고, 이것은 지도가 screen 행에 붙일 것이다 — 어느 screen 에 그림이 붙는지가 런의
+    # 판단에 좌우되면 같은 빌드의 지도가 런마다 달라진다.
+    #
+    # payload 에 표시용 `message` 를 싣는다. orchestration 의 라우터는 따로 분기하지 않는
+    # 타입에 대해 `payload.message` non-blank 를 요구하고, 그 가드를 못 지나면 frame 이
+    # 통째로 거절된다.
+    #
+    # 받는 쪽은 ARTEL-456 이다. 그 전까지 orchestration 은 이 타입을 모르는 타입으로
+    # 거절하고, 그 거절은 correlation 이 풀 것이 없어 로그로만 남는다.
+    SCREEN_CAPTURE = "SCREEN_CAPTURE"
     # Bidirectional
     ERROR = "ERROR"
     # Bidirectional. The operator talking to the Agent mid-run, and its reply.
@@ -278,6 +301,29 @@ class ActionResultItem(BaseModel):
         return ActionItemStatus.SUCCEEDED if self.success else ActionItemStatus.FAILED
 
 
+class CapturedImage(BaseModel):
+    """`capture_screen` 이 `returnValue` 에 실어 주는 것.
+
+    이미지 자체는 이 소켓을 지나지 않는다. SDK 가 스토리지에 올리고 그 주소만 온다.
+
+    필드가 전부 선택인 것은 이 값을 내는 SDK 가 한 벌이 아니기 때문이다 — 이 action 을 모르는
+    빌드는 오류로 답하고, 아는 빌드 중에도 `captureId` 를 안 싣는 것이 있다. 읽는 쪽이
+    "url 이 있나"를 보고 갈라야 하므로, 여기서 필수로 만들면 그 판단이 ValidationError 로
+    바뀌어 부르는 쪽에 닿지 않는다.
+
+    `extra="allow"`: `width`·`height`·`expiresAt` 처럼 지금 읽지 않는 칸이 더 온다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    captureId: str | None = None
+    url: str | None = None
+    mimeType: str = "image/jpeg"
+    # 요청한 것의 일부가 screen 밖으로 잘렸다. 잘린 그림을 전부로 읽으면 그것 자체가 오판이라,
+    # 도구는 이 값을 캡션에 적어 모델에게 말해 준다.
+    clipped: bool = False
+
+
 class ActionResultPayload(BaseModel):
     message: str | None = None
     batchId: int | None = None
@@ -445,6 +491,23 @@ class KnowledgeSearchResultPayload(BaseModel):
     # embedding configuration.
     model: str = ""
     results: list[KnowledgeSearchHit] = Field(default_factory=list)
+
+
+class ScreenCreatedPayload(BaseModel):
+    """orchestration 이 처음 보는 screen 을 하나 만들었다 (ARTEL-595).
+
+    `screenId` 가 문자열인 것은 이 경계를 지나는 다른 모든 id 와 같은 이유다 — JSON 숫자는
+    큰 값에서 정밀도를 잃고, 그 손실은 조용하다. 그래도 숫자로 온 것을 거절하지는 않는다.
+    보내는 쪽이 아직 없는 계약이라 첫 구현이 `12` 를 보낼 수 있고, 그때 잃는 것이 screen 하나의
+    그림이다 — 계약을 가르치는 값은 그보다 싸다.
+
+    `sceneName` 은 타임라인 문구에만 쓴다. 없어도 capture 는 나간다.
+    """
+
+    model_config = ConfigDict(extra="allow", coerce_numbers_to_str=True)
+
+    screenId: str
+    sceneName: str | None = None
 
 
 class CancelPayload(BaseModel):
@@ -723,6 +786,26 @@ class StatusPayload(BaseModel):
     # itself a comparison between models — discarded in silence, that signal is
     # gone, and a model that invents ids scores exactly like one that does not.
     rejected_knowledge_id_count: int = 0
+
+
+class ScreenCapturePayload(BaseModel):
+    """새로 생긴 screen 하나를 찍은 결과 (ARTEL-595).
+
+    `SCREEN_CREATED` 의 messageId 를 correlation 으로 달고 나간다. 그것만으로도 어느 screen 인지
+    알 수 있지만 `screenId` 를 그대로 다시 싣는다 — 받는 쪽이 correlation 을 잃어도(중계 한 겹만
+    끼어도 그렇게 된다) 묶을 대상이 payload 안에 남아 있어야 한다.
+
+    capture 가 실패하면 이 frame 은 나가지 않는다. 묶을 것이 없는 frame 대신 타임라인에 이유를
+    남긴다.
+    """
+
+    # 타임라인에 뜨는 문구. orchestration 의 라우터가 따로 분기하지 않는 타입에 대해
+    # non-blank 를 요구하므로, 이것이 비면 frame 이 통째로 거절된다.
+    message: str
+    screenId: str
+    captureId: str
+    url: str
+    mimeType: str = "image/jpeg"
 
 
 class IssueSeverity(StrEnum):

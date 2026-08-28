@@ -170,6 +170,47 @@ def test_an_inbound_error_is_accepted_even_when_it_answers_nothing() -> None:
     asyncio.run(run())
 
 
+def test_a_screen_created_frame_reaches_the_channel() -> None:
+    """orchestration 이 처음 보는 screen 을 만들었다고 알려 오는 frame(ARTEL-595).
+
+    라우팅이 없으면 이 frame 은 "unsupported inbound frame" 으로 되돌아가고, 그때 screen 은
+    영영 그림 없이 남는다.
+    """
+
+    async def run() -> None:
+        service, session_id, task = await _running_service()
+        try:
+            handled = service.deliver(
+                session_id,
+                {
+                    "type": "SCREEN_CREATED",
+                    "messageId": "screen-frame-1",
+                    "payload": {"screenId": "12", "sceneName": "TitleScene"},
+                },
+            )
+            assert handled is True
+        finally:
+            task.cancel()
+
+    asyncio.run(run())
+
+
+def test_a_screen_created_frame_without_an_id_is_dropped() -> None:
+    """`screenId` 는 이 frame 이 없이는 아무것도 아닌 값이다."""
+
+    async def run() -> None:
+        service, session_id, task = await _running_service()
+        try:
+            handled = service.deliver(
+                session_id, {"type": "SCREEN_CREATED", "payload": {"sceneName": "Lobby"}}
+            )
+            assert handled is False
+        finally:
+            task.cancel()
+
+    asyncio.run(run())
+
+
 def test_an_unknown_type_is_still_rejected() -> None:
     async def run() -> None:
         service, session_id, task = await _running_service()

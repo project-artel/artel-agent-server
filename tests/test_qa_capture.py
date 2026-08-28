@@ -25,7 +25,7 @@ from app.agents.qa.vision import (
 )
 from app.llm.models import LLMModel, get_model_spec
 from app.qa.channel import QaRunChannel
-from app.qa.envelope import LogCategory, MessageType
+from app.qa.envelope import LogCategory, MessageType, ScreenCreatedPayload
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake image body"
 
@@ -283,6 +283,181 @@ def test_every_catalogued_model_is_marked_as_seeing() -> None:
     """
     for model in LLMModel:
         assert get_model_spec(model).supports_vision is True, model
+
+
+# --- the new-screen capture (ARTEL-595) ---
+#
+# 도구가 아니라 pulse 를 다루는 쪽이 낸다. orchestration 이 처음 보는 screen 을 만들었다고
+# 알려 오면(`SCREEN_CREATED`) 그 자리에서 한 번 찍고, 주소를 `SCREEN_CAPTURE` 로 돌려준다.
+
+NEW_SCREEN = ScreenCreatedPayload(screenId="12", sceneName="TitleScene")
+
+
+def screen_created(message_id: str = "screen-frame-1", **payload) -> dict:
+    return {
+        "type": MessageType.SCREEN_CREATED.value,
+        "messageId": message_id,
+        "payload": {"screenId": "12", "sceneName": "TitleScene", **payload},
+    }
+
+
+def screen_captures(sent: list[dict]) -> list[dict]:
+    return [frame for frame in sent if frame["type"] == MessageType.SCREEN_CAPTURE.value]
+
+
+async def capture_a_new_screen(channel, sent, results) -> None:
+    """Let the game answer the capture that a new screen triggers."""
+    answer(channel, sent, results)
+    await channel.capture_new_screen(NEW_SCREEN, "screen-frame-1")
+
+
+def test_a_new_screen_is_captured_and_the_url_rides_back() -> None:
+    """The whole point: the screen row gets a picture of itself as it was born."""
+
+    async def run() -> None:
+        channel, _, _, sent = make()
+
+        await capture_a_new_screen(channel, sent, [capture_result()])
+
+        assert actions(sent)[0]["payload"]["actions"] == [
+            {"id": 1, "jsonrpc": "2.0", "method": "capture_screen", "params": []}
+        ]
+        [frame] = screen_captures(sent)
+        # Correlated to the frame that asked, so Orchestration can bind it even if
+        # the payload's own screenId were to go missing on the way.
+        assert frame["correlationId"] == "screen-frame-1"
+        assert frame["payload"]["screenId"] == "12"
+        assert frame["payload"]["captureId"] == "capture-1"
+        assert frame["payload"]["url"].endswith("capture-1.jpg")
+        # Orchestration's router drops a frame whose payload.message is blank.
+        assert frame["payload"]["message"]
+
+    asyncio.run(run())
+
+
+def test_the_new_screen_capture_does_not_spend_the_agent_budget() -> None:
+    """A tool call would make the map's pictures depend on the run's mood."""
+
+    async def run() -> None:
+        channel, state, tools, sent = make()
+
+        await capture_a_new_screen(channel, sent, [capture_result()])
+
+        assert screen_captures(sent)
+        assert state.captures_attempted == 0
+        # And the image is not pushed at the model: this is the map's picture, not
+        # evidence the agent asked to see.
+        assert state.take_pending_captures() == []
+        assert "capture_screen" in tools
+
+    asyncio.run(run())
+
+
+def test_a_refused_new_screen_capture_leaves_the_screen_alone() -> None:
+    """A screen row without a picture beats a map without the screen."""
+
+    async def run() -> None:
+        channel, _, _, sent = make()
+
+        await capture_a_new_screen(
+            channel,
+            sent,
+            [{"id": 1, "success": False, "error": "Unsupported method: capture_screen"}],
+        )
+
+        assert screen_captures(sent) == []
+        # Said on the timeline rather than swallowed, so the missing picture has a
+        # reason someone can read.
+        assert any(
+            "could not be captured" in frame["payload"]["message"] for frame in logs(sent)
+        )
+
+    asyncio.run(run())
+
+
+def test_a_game_without_the_action_is_only_asked_once() -> None:
+    """Otherwise every new screen buys the same refusal for the rest of the run."""
+
+    async def run() -> None:
+        channel, _, _, sent = make()
+
+        await capture_a_new_screen(
+            channel, sent, [{"id": 1, "success": False, "error": "Unsupported method"}]
+        )
+        # 두 번째 screen 에는 답을 준비하지 않는다. 물으러 가지 않는 것이 이 테스트의 주장이다.
+        await channel.capture_new_screen(NEW_SCREEN, "screen-frame-2")
+        channel.on_screen_created(screen_created(message_id="screen-frame-3"))
+
+        assert len(actions(sent)) == 1
+        assert screen_captures(sent) == []
+        assert channel._capture_tasks == set()
+
+    asyncio.run(run())
+
+
+def test_a_silent_game_does_not_end_the_run() -> None:
+    async def run() -> None:
+        channel, _, _, sent = make()
+
+        await channel.capture_new_screen(NEW_SCREEN, "screen-frame-1")
+
+        assert screen_captures(sent) == []
+        assert any("did not answer" in frame["payload"]["message"] for frame in logs(sent))
+
+    asyncio.run(run())
+
+
+def test_a_capture_with_no_id_to_bind_is_not_reported() -> None:
+    """Half a binding is worse than none: Orchestration would store an image it
+    cannot match back to an object."""
+
+    async def run() -> None:
+        channel, _, _, sent = make()
+
+        await capture_a_new_screen(channel, sent, [capture_result(captureId=None)])
+
+        assert screen_captures(sent) == []
+
+    asyncio.run(run())
+
+
+def test_the_screen_frame_does_not_hold_up_the_socket() -> None:
+    """`on_screen_created` 는 소켓을 읽는 쪽의 동기 콜백이다.
+
+    capture 왕복을 거기서 기다리면 그동안 pulse 도 action 결과도 채널에 못 들어온다. 곧바로
+    돌려주고 백그라운드에서 찍는다.
+    """
+
+    async def run() -> None:
+        channel, _, _, sent = make()
+
+        answer(channel, sent, [capture_result()])
+        channel.on_screen_created(screen_created())
+        # 돌아온 시점에는 아직 아무것도 안 나갔다.
+        assert sent == []
+
+        for task in list(channel._capture_tasks):
+            await task
+        assert len(screen_captures(sent)) == 1
+
+    asyncio.run(run())
+
+
+def test_closing_the_channel_stops_a_capture_in_flight() -> None:
+    """A frame sent for a finished try is rejected, and that rejection kills the
+    socket — which fails the whole run."""
+
+    async def run() -> None:
+        channel, _, _, sent = make()
+
+        channel.on_screen_created(screen_created())
+        await asyncio.sleep(0)
+        channel.close()
+        await asyncio.sleep(0)
+
+        assert screen_captures(sent) == []
+
+    asyncio.run(run())
 
 
 # --- fetching ---

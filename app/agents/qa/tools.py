@@ -38,6 +38,7 @@ from app.qa.channel import (
     with_operator_messages,
 )
 from app.qa.envelope import (
+    CapturedImage,
     IssuePayload,
     IssueSeverity,
     JsonRpcAction,
@@ -476,9 +477,10 @@ def build_tools(
                 messages,
             )
 
-        captured = item.returnValue or {}
-        url = captured.get("url")
-        if not url:
+        # 새 screen 자동 capture(ARTEL-595)와 같은 모델로 읽는다. 같은 SDK action 이 답한 같은
+        # 문서를 두 곳이 각자 dict 로 더듬으면, 한쪽만 고친 필드가 다른 쪽에서 조용히 빈다.
+        captured = CapturedImage.model_validate(item.returnValue or {})
+        if not captured.url:
             return _answer(
                 "The game reported a capture but no image to read. Judge from the "
                 "scene text.",
@@ -486,21 +488,21 @@ def build_tools(
             )
 
         caption = f"This is {what} right now."
-        if captured.get("clipped"):
+        if captured.clipped:
             # Worth saying out loud: a cropped-off element is itself a finding, and
             # the agent would otherwise read the partial image as the whole thing.
             caption += " Part of it is off the edge of the screen."
 
         state.add_pending_capture(
             PendingCapture(
-                capture_id=str(captured.get("captureId") or ""),
-                url=url,
-                mime_type=str(captured.get("mimeType") or "image/jpeg"),
+                capture_id=captured.captureId or "",
+                url=captured.url,
+                mime_type=captured.mimeType,
                 caption=caption,
             )
         )
         # On the timeline so a reviewer can open exactly what the agent looked at.
-        await channel.note(f"Captured {what}: {url}", LogCategory.OBSERVATION, step)
+        await channel.note(f"Captured {what}: {captured.url}", LogCategory.OBSERVATION, step)
 
         return _answer(f"Captured {what}. The image follows.", messages)
 

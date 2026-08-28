@@ -148,6 +148,81 @@ def test_action_result_matching_the_pending_action_resolves() -> None:
     asyncio.run(run())
 
 
+def test_two_actions_in_flight_each_get_their_own_answer() -> None:
+    """action 을 내는 곳이 둘이다 — 도구와 새 screen 자동 capture(ARTEL-595).
+
+    종전에는 나간 ACTION 하나의 future 를 필드로 들고 있어서, 뒤의 것이 앞의 것을 덮어썼다.
+    그러면 앞의 action 은 자기 답이 도착해도 못 받고 타임아웃까지 앉아 있다가 "게임이 답하지
+    않았다" 가 된다 — 도구가 방금 누른 버튼이 안 먹혔다고 읽는 자리다.
+    """
+
+    async def run() -> None:
+        channel, sent = make_channel(timeout=1.0)
+
+        first = asyncio.create_task(
+            channel.dispatch_actions([JsonRpcAction(id=1, method="button_click", params=[1])], "tap")
+        )
+        await asyncio.sleep(0)
+        second = asyncio.create_task(
+            channel.dispatch_actions([JsonRpcAction(id=1, method="capture_screen", params=[])], "shot")
+        )
+        await asyncio.sleep(0)
+
+        # 나중에 나간 것이 먼저 답한다. 순서가 아니라 correlation 이 짝을 정한다.
+        channel.on_action_result(
+            {"correlationId": sent[1]["messageId"], "payload": {"results": [{"id": 2}]}}
+        )
+        channel.on_action_result(
+            {"correlationId": sent[0]["messageId"], "payload": {"results": [{"id": 1}]}}
+        )
+
+        assert (await first).results[0].id == 1
+        assert (await second).results[0].id == 2
+
+    asyncio.run(run())
+
+
+def test_an_uncorrelated_answer_is_dropped_when_two_are_waiting() -> None:
+    """옛 orchestration 은 correlation 을 안 싣는다. 하나뿐일 때만 그것으로 친다.
+
+    둘이 떠 있는데 짐작으로 고르면 도구가 자동 capture 의 답을 자기 action 의 결과로 읽는다.
+    """
+
+    async def run() -> None:
+        channel, _ = make_channel(timeout=0.05)
+
+        first = asyncio.create_task(
+            channel.dispatch_actions([JsonRpcAction(id=1, method="button_click", params=[1])], "tap")
+        )
+        await asyncio.sleep(0)
+        second = asyncio.create_task(
+            channel.dispatch_actions([JsonRpcAction(id=1, method="capture_screen", params=[])], "shot")
+        )
+        await asyncio.sleep(0)
+
+        channel.on_action_result({"payload": {"results": [{"id": 1}]}})
+
+        assert await first is None
+        assert await second is None
+
+    asyncio.run(run())
+
+
+def test_an_uncorrelated_answer_still_resolves_a_lone_action() -> None:
+    async def run() -> None:
+        channel, _ = make_channel(timeout=1.0)
+
+        pending = asyncio.create_task(
+            channel.dispatch_actions([JsonRpcAction(id=1, method="button_click", params=[1])], "tap")
+        )
+        await asyncio.sleep(0)
+        channel.on_action_result({"payload": {"results": [{"id": 1}]}})
+
+        assert (await pending).results[0].id == 1
+
+    asyncio.run(run())
+
+
 def test_cancel_stops_the_next_tool() -> None:
     async def run() -> None:
         channel, _ = make_channel()
