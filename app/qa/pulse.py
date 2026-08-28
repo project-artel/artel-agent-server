@@ -256,6 +256,14 @@ class _HeldObject(BaseModel):
     # 판독 번호를 쓰는 이유: 판독은 이미 델타라 도착했다는 것 자체가 움직였다는 뜻이다.
     # 도구가 언제 화면을 봤는지와는 무관하게 셀 수 있다.
     at: dict[str, int] = Field(default_factory=dict)
+    # 멤버마다 그 값을 **마지막으로 그린** 판독 번호. `at` 과 짝이고 묻는 질문이 다르다 —
+    # `at` 은 "언제 변했나", 이것은 "언제 말했나" 다.
+    #
+    # 종전에는 창(`since`) 하나가 둘을 겸했다. 창의 경계는 마지막 **행위**라(ARTEL-621),
+    # 행위 전에 변한 값은 탈락하고 아무도 다시 말해 주지 않아 영원히 탈락했다. 실측으로
+    # 159턴 런에서 판독이 움직였다고 이름 댄 멤버 53종 중 23종이 한 번도 값을 못 냈고,
+    # 거기 `Enemy::Hp` 와 `CombineZone::spellCards` 가 있었다(ARTEL-662).
+    shown: dict[str, int] = Field(default_factory=dict)
 
 
 class PulseMemory(BaseModel):
@@ -408,6 +416,8 @@ class PulseMemory(BaseModel):
                     members=dict(was.members) if was else {},
                 )
                 held.at = dict(was.at) if was else {}
+                # 말한 기록도 이어받는다. 여기서 잃으면 이미 말한 값을 매 턴 다시 말한다.
+                held.shown = dict(was.shown) if was else {}
                 for member in obj.members:
                     held.members[member.key] = member
                     held.at[member.key] = self.readings
@@ -567,13 +577,23 @@ class PulseMemory(BaseModel):
                 continue
 
             fresh = [k for k in sorted(obj.members) if obj.at.get(k, 0) > since]
+            # 창 밖에서 움직였는데 아직 한 번도 안 말한 값. 창의 경계는 마지막 **행위**이고
+            # 이것은 **내가 무엇을 말했나** 라, 둘은 다른 질문이다(ARTEL-662).
+            owed = [
+                k
+                for k in sorted(obj.members)
+                if k not in fresh and obj.at.get(k, 0) > obj.shown.get(k, 0)
+            ]
             # 조작할 수 있다는 것은 **무엇을 할지 아는 것**이다. id 는 거의 모든 객체에
             # 실리므로 그것으로 가르면 아무것도 안 걸러진다 — offers 가 그 선이다.
             actionable = bool(obj.offers)
 
-            # 이번 창에 아무 말도 없고 누를 수도 없는 객체는 건너뛴다. 독자가 이미 아는
-            # 것을 다시 적는 자리다.
-            if not fresh and not actionable:
+            # 이번 창에 아무 말도 없고, 갚을 빚도 없고, 누를 수도 없는 객체는 건너뛴다.
+            # 독자가 이미 아는 것을 다시 적는 자리다.
+            #
+            # 빚이 여기 있어야 `TutorialController` 처럼 누를 것이 없는 객체가 보인다. 그것이
+            # 안 보여서 에이전트가 대사창이 떠 있는지도 모르고 진행했다.
+            if not fresh and not owed and not actionable:
                 continue
 
             where = obj.selector or obj.path or key
@@ -581,7 +601,7 @@ class PulseMemory(BaseModel):
             offered = self._offered(obj)
             if offered:
                 lines.append(f"  {offered}")
-            for member_key in fresh:
+            for member_key in fresh + owed:
                 member = obj.members[member_key]
                 name = f"{(member.on or '').split('.')[-1]}.{member.member}"
                 asked = "" if member.asked is not False else " (unasked)"
@@ -592,7 +612,12 @@ class PulseMemory(BaseModel):
                     if marking and obj.at.get(member_key, 0) > news_since
                     else ""
                 )
-                lines.append(f"  {name} = {member.value!r}{asked}{news}{moved}")
+                # 빚으로 낸 값은 표를 단다. 창의 뜻이 "이 행위가 만든 것" 이므로, 옛 값을
+                # 표 없이 섞으면 읽는 쪽이 그것을 방금 일어난 일로 읽는다.
+                earlier = "  (changed earlier)" if member_key in owed else ""
+                lines.append(f"  {name} = {member.value!r}{asked}{news}{earlier}{moved}")
+                if advance:
+                    obj.shown[member_key] = self.readings
 
         lines.append(PULSE_VIEW_END)
         return "\n".join(lines)

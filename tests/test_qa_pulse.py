@@ -1049,3 +1049,78 @@ def test_다른_씬의_것은_씬을_달고_불린다():
     )
 
     assert "gone from the scene: DontDestroyOnLoad/TutorialController[3]" in memory.render()
+
+
+def test_행위_전에_움직인_값도_한_번은_나온다():
+    """창의 경계는 마지막 **행위**다. 그 전에 변한 값은 창 밖이고, 아무도 다시 말해 주지
+    않으면 영원히 창 밖이다.
+
+    실측으로 159턴 런에서 판독이 움직였다고 이름 댄 멤버 53종 중 23종이 한 번도 값을 못
+    냈다 — 거기 `Enemy::Hp` 와 `CombineZone::spellCards` 가 있었다(ARTEL-662).
+    """
+    memory = fold(reading(active=[obj(selector="Enemy[9]")]))
+    memory.render()  # 여기까지는 말했다
+
+    memory.apply(
+        PulseReading.model_validate(
+            reading(
+                reading=2,
+                whole=False,
+                active=[obj(selector="Enemy[9]", members=[
+                    {"on": "Combat.Enemies.Enemy", "member": "Hp", "value": 12, "asked": True}
+                ])],
+            )
+        )
+    )
+
+    # 행위가 판독 2 뒤에 끝났다 = 이 값은 창 밖이다.
+    view = memory.render(since=2)
+    assert "Enemy.Hp = 12" in view, view
+    assert "(changed earlier)" in view
+
+
+def test_한_번_말한_값은_다시_안_말한다():
+    memory = fold(reading(active=[obj(selector="Enemy[9]")]))
+    memory.render()
+
+    assert "TurnBattleSystem.turn" not in memory.render(since=1)
+
+
+def test_빚만_있는_객체도_그린다():
+    """`TutorialController` 처럼 누를 것이 없는 객체다. 이것이 안 보여서 에이전트가 대사창이
+    떠 있는지도 모르고 진행했다."""
+    memory = fold(
+        reading(
+            active=[
+                {
+                    "scene": "TurnBattleScene",
+                    "id": 36492,
+                    "path": "TutorialController",
+                    "selector": "TutorialController[3]",
+                    "members": [
+                        {
+                            "on": "Tutorial.TutorialController",
+                            "member": "waitingForAcknowledge",
+                            "value": True,
+                            "asked": True,
+                        }
+                    ],
+                }
+            ]
+        )
+    )
+
+    view = memory.render(since=1)
+    assert "TutorialController[3]" in view, view
+    assert "TutorialController.waitingForAcknowledge = True" in view
+
+
+def test_갚을_것이_없으면_종전과_같다():
+    """빚이 없으면 렌더가 한 글자도 안 달라진다."""
+    memory = fold(reading(active=[obj(selector="Enemy[9]")]))
+    memory.render()
+
+    first = memory.render(since=1)
+    second = memory.render(since=1)
+    assert first == second
+    assert "(changed earlier)" not in first
