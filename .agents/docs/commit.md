@@ -6,6 +6,12 @@ Each commit should explain one coherent change and remain safe to review or reve
 
 ## Format
 
+Write the commit title and body in Korean. Keep the Conventional Commit type
+and optional scope in English.
+
+Keep verbatim in English regardless: code identifiers, file paths, commands,
+log output, error strings, API names, and technical terminology.
+
 Use Conventional Commits:
 
 ```text
