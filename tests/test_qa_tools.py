@@ -331,6 +331,49 @@ def test_a_drag_goes_out_as_one_batch_in_order() -> None:
     asyncio.run(run())
 
 
+def test_a_click_goes_out_as_one_batch_in_order() -> None:
+    """세 턴으로 쪼개면 그 사이에 게임이 돈다 — 누른 채로 다른 판단이 끼어들고, 실패하면
+    눌린 채로 남는다.
+
+    누르기는 좌표를 안 받으므로 배치가 옮기는 것으로 시작해야 한다. 안 그러면 포인터가
+    마지막으로 있던 자리에서 눌린다.
+    """
+
+    async def run() -> None:
+        _, _, tools, sent = make()
+        await tools["click_at"].ainvoke(
+            {"step": 1, "x": 409, "y": 500, "thought": "조합 칸을 누른다"}
+        )
+
+        assert len(actions(sent)) == 1
+        assert actions(sent)[0]["payload"]["actions"] == [
+            {"id": 1, "jsonrpc": "2.0", "method": "move_mouse", "params": [409, 500]},
+            {"id": 2, "jsonrpc": "2.0", "method": "mouse_down", "params": [0]},
+            {"id": 3, "jsonrpc": "2.0", "method": "mouse_up", "params": [0]},
+        ]
+
+    asyncio.run(run())
+
+
+def test_a_click_takes_the_button_it_is_given() -> None:
+    """오른쪽·가운데 버튼도 같은 배치로 나간다. 누른 것과 뗀 것이 다르면 눌린 채로 남는다."""
+
+    async def run() -> None:
+        _, _, tools, sent = make()
+        await tools["click_at"].ainvoke(
+            {"step": 1, "x": 10, "y": 20, "thought": "오른쪽 클릭", "button": 1}
+        )
+
+        methods = [(a["method"], a["params"]) for a in actions(sent)[0]["payload"]["actions"]]
+        assert methods == [
+            ("move_mouse", [10, 20]),
+            ("mouse_down", [1]),
+            ("mouse_up", [1]),
+        ]
+
+    asyncio.run(run())
+
+
 def test_pausing_and_resuming_go_out_as_the_time_actions() -> None:
     """멈추는 것도 다른 액션과 같은 액션이다. 배치에 실려 나가는 것은 그것 하나다.
 
@@ -939,6 +982,7 @@ def test_the_agent_is_offered_exactly_these_tools() -> None:
         "enter_text",
         "press_key",
         "move_pointer",
+        "click_at",
         "hold_mouse_button",
         "release_mouse_button",
         "hold_key",

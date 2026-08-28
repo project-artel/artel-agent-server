@@ -1220,15 +1220,46 @@ def build_tools(
         )
 
     @tool
+    async def click_at(step: int, x: float, y: float, thought: str, button: int = 0) -> str:
+        """Click a point on the screen, for something the scene gives no id for.
+
+        Coordinates are screen pixels, taken from the scene unchanged, as with
+        `move_pointer`. `button` is 0 for left, 1 for right, 2 for middle.
+
+        Prefer this over pressing and releasing yourself: the move, the press and
+        the release go to the game as ONE batch, which the game runs strictly in
+        order, so the click cannot be interrupted or left with the button down.
+
+        `click_button` is the one to use when the scene DOES give an id — it
+        presses what the game wired the button to, rather than a point that may
+        be covered by something else.
+        """
+        return await _run(
+            [
+                # 누르기는 좌표를 안 받는다. 포인터가 있는 자리에 떨어지므로 먼저 옮긴다 —
+                # `drag_pointer` 가 같은 이유로 같은 순서를 쓴다.
+                JsonRpcAction(id=1, method="move_mouse", params=[x, y]),
+                JsonRpcAction(id=2, method="mouse_down", params=[button]),
+                JsonRpcAction(id=3, method="mouse_up", params=[button]),
+            ],
+            f"Clicking at ({x}, {y})",
+            step,
+        )
+
+    @tool
     async def hold_mouse_button(step: int, thought: str, button: int = 0) -> str:
         """Press a mouse button and keep it down, at wherever the pointer now is.
 
         `button` is 0 for left, 1 for right, 2 for middle. The press happens at
         the current pointer position — move there first with `move_pointer`.
 
+        This is for input the game reads as HELD — charging, a long press,
+        anything behind `Input.GetMouseButton`. For a plain click use `click_at`,
+        and for a plain drag `drag_pointer`: both ride one batch and cannot be
+        left half-done.
+
         Nothing releases this for you. Call `release_mouse_button` before you
-        judge the step, or every later step runs with the button still down. For
-        a plain drag, use `drag_pointer` instead — it cannot be left half-done.
+        judge the step, or every later step runs with the button still down.
         """
         return await _run(
             [JsonRpcAction(id=1, method="mouse_down", params=[button])],
@@ -1683,6 +1714,7 @@ def build_tools(
         enter_text,
         press_key,
         move_pointer,
+        click_at,
         hold_mouse_button,
         release_mouse_button,
         hold_key,
