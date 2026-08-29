@@ -12,6 +12,12 @@ and optional scope in English.
 Keep verbatim in English regardless: code identifiers, file paths, commands,
 log output, error strings, API names, and technical terminology.
 
+Which words to reach for is settled by `## Word Choice` in
+[`coding-style.md`](coding-style.md), and that rule covers commit text as much
+as comments: never invent a Korean word for a technical meaning, pick the word
+that is correct rather than the one that sounds considered, and name the thing
+and the number instead of reaching for a figure of speech.
+
 Use Conventional Commits:
 
 ```text
