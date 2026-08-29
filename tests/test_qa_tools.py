@@ -1553,7 +1553,52 @@ def test_적을_것이_없다는_것도_답이라고_말한다() -> None:
         )
 
         assert "Nothing to write is an answer" in answered, answered
-        assert "finish the run" in answered
+        assert "call `finish_run` yourself" in answered
+
+    asyncio.run(run())
+
+
+def test_마지막_판정_후에도_agent_가_finish_run_을_부를_때까지_런이_살아_있다() -> None:
+    """Scenario report 는 판정이지 terminal signal 이 아니다(ARTEL-648).
+
+    마지막 판정 뒤에도 agent 가 issue 를 남길 수 있고, `finish_run` 이
+    `result` 를 실은 유일한 STATUS 여야 한다.
+    """
+
+    async def run() -> None:
+        _channel, state, tools, sent = make()
+
+        answered = await tools["report_step"].ainvoke(
+            {"step": 1, "passed": False, "message": "안 열렸다", "thought": "판정"}
+        )
+
+        assert "does not close the run" in answered
+        assert not state.finished
+        assert not [frame for frame in sent if frame["payload"].get("result")]
+
+        await tools["report_issue"].ainvoke(
+            {
+                "step": 1,
+                "severity": "MAJOR",
+                "title": "상점이 열리지 않는다",
+                "expected": "상점이 열린다",
+                "actual": "버튼을 눌러도 화면이 그대로다",
+                "reproduction": ["상점 버튼을 누른다"],
+                "thought": "결함을 남긴다",
+            }
+        )
+
+        assert not state.finished
+        assert [frame for frame in sent if frame["type"] == MessageType.ISSUE.value]
+
+        await tools["finish_run"].ainvoke(
+            {"passed": False, "summary": "상점 스텝 실패", "thought": "종료"}
+        )
+
+        assert state.finished
+        terminal = [frame for frame in sent if frame["payload"].get("result")]
+        assert len(terminal) == 1
+        assert terminal[0]["payload"]["result"] == "FAILED"
 
     asyncio.run(run())
 

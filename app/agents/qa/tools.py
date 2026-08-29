@@ -1814,8 +1814,9 @@ def build_tools(
             # 말하는 것은 그 자리가 여기라는 것뿐이다 — 매 스텝마다 붙이면 표가 뜻을 잃고,
             # `finish_run` 은 이미 닫는 쪽으로 기운 뒤다.
             return _answer(
-                "Recorded. That was the last step — finish the run. Before you "
-                f"do:{render_closing_asks(state)}{note}",
+                "Recorded. This step report does not close the run. That was the "
+                "last step — when you are done with the follow-up work below, "
+                f"call `finish_run` yourself:{render_closing_asks(state)}{note}",
                 channel.drain_operator_messages(),
             )
         # The verdict is recorded either way; what differs is the pull to keep
