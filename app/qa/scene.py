@@ -337,6 +337,17 @@ class SceneMemory(BaseModel):
             if at > watermark
         ]
 
+    def current_scene(self) -> str:
+        """지금 쥔 것 전부. `render` 가 주는 창 뷰와 달리 청했을 때만 나간다(ARTEL-673)."""
+        if self.scene is None:
+            page = self.pulse.current_scene()
+            if page is None:
+                return "No scene has been received yet."
+            return self._with_scene_context(page)
+
+        # GAME_STATE 갈래에서는 창의 시작이 곧 전량이다.
+        return self.render(0)
+
     def render(self, watermark: int, since_action: int | None = None) -> str:
         """The Agent-facing view: what changed since it last looked.
 

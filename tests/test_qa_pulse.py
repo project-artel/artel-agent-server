@@ -1217,3 +1217,51 @@ def test_수십이_한꺼번에_꺼져도_한_줄이_짧다():
     line = [l for l in memory.render().splitlines() if l.startswith("switched off:")][0]
     assert "+18 more" in line, line
     assert len(line) < 300, line
+
+
+def test_current_scene_은_쥔_것을_전부_그린다():
+    """창 뷰는 마지막 행위 이후 달라진 것만 준다. 한 번 말하고 가만히 있는 값은 안 나오고,
+    그려지지 않은 객체는 `selector` 를 알 길이 없어 `inspect_object` 로도 못 묻는다 —
+    실제 런에서 `Card(Clone)` 을 찍어서 묻고 없다는 답을 받았다(ARTEL-673)."""
+    memory = fold(reading(active=[obj(selector="Enemy[9]"), obj(selector="Word[12]")]))
+    memory.render()  # 여기까지 말했다
+
+    assert "Enemy[9]" not in memory.render(since=memory.clock()), "창 뷰에는 안 나온다"
+
+    page = memory.current_scene()
+    assert "Enemy[9]" in page, page
+    assert "Word[12]" in page
+    assert "TurnBattleSystem.turn = 2" in page, "값이 안 변했어도 나온다"
+
+
+def test_current_scene_이_새_것에만_표를_단다():
+    """전부 그리면서 표까지 없으면 읽는 쪽이 무엇이 소식인지 스스로 찾아야 한다."""
+    memory = fold(reading(active=[obj(selector="Enemy[9]")]))
+    memory.render()
+    memory.apply(
+        PulseReading.model_validate(
+            reading(
+                reading=2,
+                whole=False,
+                active=[obj(selector="Enemy[9]", members=[
+                    {"on": "Combat.Enemies.Enemy", "member": "Hp", "value": 7, "asked": True}
+                ])],
+            )
+        )
+    )
+
+    page = memory.current_scene()
+    assert "Enemy.Hp = 7  (changed)" in page, page
+    # 안 변한 값은 그려지되 소식이 아니다.
+    assert "TurnBattleSystem.turn = 2" in page
+    assert "TurnBattleSystem.turn = 2  (changed)" not in page
+
+
+def test_current_scene_은_예약된_페이지를_안_먹는다():
+    """scene 전환이 예약한 페이지는 새 화면을 한 덩어리로 주기로 한 약속이다. 여기서 먹으면
+    그 약속이 조용히 사라진다."""
+    memory = fold(reading(active=[obj(selector="Enemy[9]")]))
+
+    memory.current_scene()
+
+    assert memory.page_due is True

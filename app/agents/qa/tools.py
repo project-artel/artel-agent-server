@@ -336,11 +336,21 @@ def build_tools(
         return with_operator_messages(body, messages)
 
     @tool
-    async def observe_scene(step: int, thought: str, wait_seconds: float = 0.0) -> str:
+    async def observe_scene(
+        step: int, thought: str, wait_seconds: float = 0.0, current_scene: bool = False
+    ) -> str:
         """Look at the game screen. Returns what changed since your last look.
 
         Use `wait_seconds` when the screen needs time first — a loading screen, an
         animation, a countdown. Always look before acting.
+
+        `current_scene` asks for the whole scene instead: every object being held
+        and every value known, with `(changed)` on the ones that moved since your
+        last look. Reach for it when the ordinary view cannot answer you — when a
+        value you need has not moved since it was last shown, or when you want to
+        act on something the view has not been printing and so have no address
+        for. It is several times the size of the ordinary view, so ask for it
+        when you need it, not every turn.
 
         `step` is the scenario step you are working on and `thought` is why you
         are looking; both go on the timeline.
@@ -358,7 +368,17 @@ def build_tools(
         #
         # 그 경계를 `_answer` 가 들고 있으므로 여기서 따로 그리지 않는다. 이 도구는 화면이
         # 곧 답이라 몸통이 비어 있고, 화면은 `_answer` 에서 붙는다.
-        return _answer("", messages)
+        if not current_scene:
+            return _answer("", messages)
+
+        # 전량은 창을 안 탄다. 그래서 `_answer` 의 창 뷰를 끄고 여기서 그린다 — 둘 다 내면
+        # 같은 화면이 두 번 실린다(ARTEL-635 에서 이미 한 번 그랬다).
+        #
+        # 행위 경계(`state.last_action_frame`)는 **안 건드린다.** 관측은 행위가 아니고,
+        # 전량을 봤다고 해서 그 사이 무엇이 쌓였는지를 잊어도 되는 것이 아니다.
+        view = channel.scene.current_scene()
+        state.watermark = channel.scene.updates
+        return _answer(view, messages, screen=False)
 
     async def _run(actions: list[JsonRpcAction], summary: str, step: int) -> str:
         """Every acting tool goes through here: act, then look at what it did.
