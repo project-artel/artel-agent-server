@@ -138,6 +138,15 @@ def render_test_case_list(entries: list[TestCaseListItem]) -> str:
             if guard.raised_in:
                 needs += f"  ← moves in {', '.join(guard.raised_in)}"
             lines.append(needs)
+            # And HOW it moves (ARTEL-646). The screen name alone reads as "drop by and
+            # come back"; what separates one arrow key from winning a fight is whether
+            # there is a button at all, and under what condition it fires.
+            for move in guard.moves:
+                how = move.how or "NOT INSTRUCTABLE — it happens on its own"
+                line = f"        moved in {move.scene} by {move.by or '?'} ({how})"
+                if move.when:
+                    line += f" when {move.when}"
+                lines.append(line)
         if entry.state_after:
             leaves = ", ".join(f"{k} {v}" for k, v in entry.state_after.items())
             lines.append(f"    leaves: {leaves}")

@@ -61,6 +61,24 @@ class CaseGuard(BaseModel):
     # and `StagePosition >= 1` read the same — but the first is one arrow key and the
     # second means winning a fight. Empty when the map does not say.
     raised_in: list[str] = Field(default_factory=list)
+    # How that value moves, not just where (ARTEL-646). The screen name alone reads as
+    # "drop by and come back" — measured (run 203), authoring entered the battle screen
+    # and never wrote the step that wins it. The map knew winning was required.
+    moves: list["ValueMove"] = Field(default_factory=list)
+
+
+class ValueMove(BaseModel):
+    """One place a value changes.
+
+    ``how`` is empty when there is no button for it: the player has to make ``when``
+    come true by playing, and that takes its own step. That single distinction is what
+    separates `position == 0` (one arrow key) from `StagePosition >= 1` (win a fight).
+    """
+
+    scene: str
+    by: str | None = None
+    how: str | None = None
+    when: str | None = None
 
 
 class SceneExit(BaseModel):
