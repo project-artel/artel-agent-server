@@ -259,8 +259,8 @@ def test_system_prompt_uses_requested_language_directive() -> None:
     assert LANGUAGE_DIRECTIVES[OutputLanguage.en] in en_body
     assert "한국어" in ko_body
     assert "English" in en_body
-    # v10 is the newest scenario prompt version and the default.
-    assert version == "v10"
+    # v11 is the newest scenario prompt version and the default (ARTEL-647).
+    assert version == "v11"
 
 
 def test_first_message_carries_the_run_goal_and_context() -> None:
