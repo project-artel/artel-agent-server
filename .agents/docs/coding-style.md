@@ -162,6 +162,10 @@ write a comment: a thing the code names keeps the name the code gave it, in
 backticks, even inside a Korean sentence. That rule is wider than this one — it
 also covers plan documents and pull request bodies.
 
+That scope is about which language a comment is written in. Which words it
+reaches for is settled by `## Word Choice` below, and that rule does reach
+commit messages, issue bodies, and pull request bodies.
+
 Existing English comments are not a defect. Rewrite one only when you are
 already changing that code; a comment-language sweep is unrelated churn.
 
@@ -172,6 +176,58 @@ alternative, the failure mode being prevented, the invariant a caller has to
 hold. Do not restate what the code already says.
 
 Delete commented-out code instead of parking it. Git history holds it.
+
+## Word Choice
+
+This section is about the words you pick when you write about this code: the
+verbs, and the nouns for things the code never named. A thing the code does
+name keeps the name the code gave it — `pulse`, `screen`, `capability`,
+`anchor` — in backticks, even inside a Korean sentence.
+
+It applies wherever that writing lands: line and block comments, KDoc and
+docstrings, SQL comments, test names, commit messages, and issue and pull
+request bodies.
+
+**Never invent a Korean word to carry a technical meaning.** Verbs count as
+much as nouns. The test is not whether a Korean rendering is possible. It is
+whether a Korean speaker who has not read the code would use that word for
+this. `발화하다` for `fire` fails it: nobody who has not read the file knows
+what it means.
+
+Where the ordinary Korean word is exact, use it. Merging two duplicate `screen`
+rows really is `합친다` — `접는다` was reached for because it sounded closer to
+the code, and it left the sentence harder to read and no more precise. Where
+reaching for a Korean word produces something you had to make up, write the
+English word instead. English is a safe answer. A made-up word never is.
+
+**Pick the word that is correct, not the word that sounds considered.** Test a
+word by asking whether it actually means this, not whether it sounds right in
+the sentence. `capture 를 청구한다` is wrong because `청구` is the word for
+collecting money; asking the SDK to take a screen capture is `요청`. Commonness
+only breaks a tie: when two words are both correct, take the one the reader
+already knows — `만들어낸 말` over `조어`. Never take a vague common word over
+an exact one. A sentence that reads smoothly and says nothing is the worse
+failure of the two.
+
+**Prefer the precise term over the short ambiguous one**, especially where the
+short one already means something else nearby. In prose write `screen capture`,
+not `capture`: `content_map` also has a `capture` field whose values are
+`editor`, `editor-play`, and `player`, and a reader cannot tell which one a
+bare `capture` meant. Identifiers keep the names they have; this is about the
+prose around them.
+
+**Write concretely.** Name the thing, say what happens, give the number.
+`재시도는 3회까지` beats `적절히 재시도한다`. Figurative or grand phrasing hides
+whether the sentence is even true, and a reviewer cannot check a metaphor. A
+short plain sentence with a number in it beats a well-turned one.
+
+None of this asks for more Korean. It asks you to stop making words up. Leave
+English where English reads naturally.
+
+Existing text is not a defect to sweep. Words like these are already spread
+through comments, documents, and branch names here; that is history, not a
+standard. Fix the wording in text you are already writing, and leave the file
+around it alone.
 
 ## Refactoring
 

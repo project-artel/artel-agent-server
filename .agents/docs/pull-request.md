@@ -22,6 +22,13 @@ Keep verbatim in English regardless: code identifiers, file paths, commands,
 log output, error strings, API names, technical terminology, and the section
 headings from the body template below.
 
+Which words to reach for is settled by `## Word Choice` in
+[`coding-style.md`](coding-style.md), and that rule covers pull request and
+issue bodies as much as comments: never invent a Korean word for a technical
+meaning, pick the word that is correct rather than the one that sounds
+considered, and name the thing and the number instead of reaching for a figure
+of speech.
+
 ## Title
 
 Use Conventional Commit format, with the summary in Korean:
