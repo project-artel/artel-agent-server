@@ -298,7 +298,9 @@ def _entry_lines(entry: SceneContextEntry) -> list[str]:
         # that only the prompt bounded would be read as complete by any run whose
         # prompt was compacted away.
         "what is already known about this scene, and ONLY about this scene. "
-        "Rules that hold across the game are not here — search_knowledge reaches those.",
+        "Rules that hold across the game are not here — search_knowledge reaches those. "
+        "The scene view above outranks this block: that is this build as it stands, "
+        "and this is a record of an earlier one.",
     ]
     if entry.scene_summary:
         lines.append(f"the map describes it as: {_clip(entry.scene_summary)}")
@@ -332,6 +334,26 @@ def _entry_lines(entry: SceneContextEntry) -> list[str]:
             "  (a path is where the map found the control, not something to aim at — "
             "take ids and coordinates from the scene view above)"
         )
+        # Said under every list, cut or whole. The map records what it could
+        # record, and there are whole kinds of input it has no way to express —
+        # no build lists a drag on any scene, while the view reports one plainly
+        # as `can do — pointer: OnBeginDrag, ...`. An agent that reads this list
+        # as the set of things it may do here stops at the edge of what the map
+        # happened to write down.
+        lines.append(
+            "  (not a limit on what you can do here — the map cannot record every "
+            "kind of input, dragging among them, and the scene view above reports "
+            "every control and key actually offered)"
+        )
+        if len(shown) < len(entry.capabilities):
+            # Where the rest is, said beside the count that admits they are
+            # missing. `_cut_note` alone leaves an agent knowing a list was
+            # shortened and not knowing what to do about it, and what it does
+            # instead is treat the part it can see as the whole.
+            lines.append(
+                "  (the ones not shown are not gone — the scene view above is not "
+                "cut, and it is what to read instead of taking these as all there is)"
+            )
 
     lines.append("")
     if not entry.knowledge:
