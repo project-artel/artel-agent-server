@@ -1267,6 +1267,33 @@ def build_tools(
         )
 
     @tool
+    async def double_click_at(
+        step: int, x: float, y: float, thought: str, button: int = 0
+    ) -> str:
+        """Double-click a point, for something that only a double-click does.
+
+        Coordinates and `button` are as in `click_at`. Both presses ride ONE
+        batch, which the game runs strictly in order, so nothing lands between
+        them — two separate `click_at` calls are two turns apart and the game
+        reads them as two single clicks.
+
+        Use `click_at` twice when the game wants two clicks. This one is for the
+        gesture a game treats as its own: opening an item, equipping from a list.
+        """
+        return await _run(
+            [
+                # 누르기는 좌표를 안 받는다. 포인터가 있는 자리에 떨어지므로 먼저 옮긴다.
+                JsonRpcAction(id=1, method="move_mouse", params=[x, y]),
+                JsonRpcAction(id=2, method="mouse_down", params=[button]),
+                JsonRpcAction(id=3, method="mouse_up", params=[button]),
+                JsonRpcAction(id=4, method="mouse_down", params=[button]),
+                JsonRpcAction(id=5, method="mouse_up", params=[button]),
+            ],
+            f"Double-clicking at ({x}, {y})",
+            step,
+        )
+
+    @tool
     async def hold_mouse_button(step: int, thought: str, button: int = 0) -> str:
         """Press a mouse button and keep it down, at wherever the pointer now is.
 
@@ -1760,6 +1787,7 @@ def build_tools(
         press_key,
         move_pointer,
         click_at,
+        double_click_at,
         hold_mouse_button,
         release_mouse_button,
         hold_key,
