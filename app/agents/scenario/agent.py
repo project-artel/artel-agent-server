@@ -56,6 +56,13 @@ logger = logging.getLogger(__name__)
 # structured output before the limit — and if it doesn't, we fail gracefully below.
 RECURSION_LIMIT = (MAX_SEARCHES_PER_RUN + 8) * 2
 
+# How many flows one turn may rewrite for order (ARTEL-648). Each is another model
+# turn, and the session on the far side calls a turn dead after five minutes of
+# silence — a result with many faults would otherwise multiply one turn into many and
+# be reported as stalled. Three covers what the measured runs actually produce; past
+# that the answer is wrong in a way one more rewrite is not going to settle.
+MAX_REWRITES_PER_TURN = 3
+
 # Injectable so tests can hand back a canned runnable instead of reaching a real
 # model. The runnable is invoked with {"messages": [...]} and must return a state
 # dict carrying "structured_response".
@@ -179,8 +186,11 @@ class ScenarioAgent:
             {result.scenarios[i].title: [c.describe() for c in cs] for i, cs in problems.items()},
         )
         scenarios = list(result.scenarios)
-        for index, climbs in problems.items():
-            fixed = await self._rewrite_one(scenarios[index], climbs, agent, config)
+        # **A bound on the worst case.** Each rewrite is another model turn, and the
+        # session has a liveness deadline on the far side; a result with many faults
+        # would otherwise multiply one turn into many and be reported as dead.
+        for index, climbs in list(problems.items())[:MAX_REWRITES_PER_TURN]:
+            fixed = await self._rewrite_one(scenarios[index], climbs, request, config)
             if fixed is not None:
                 scenarios[index] = fixed
         return result.model_copy(update={"scenarios": scenarios})
@@ -189,10 +199,27 @@ class ScenarioAgent:
         self,
         scenario: ScenarioPlan,
         climbs: list[UnreachableClimb],
-        agent: Runnable,
+        request: ScenarioAgentRequest,
         config: dict,
     ) -> ScenarioPlan | None:
-        """One flow, rewritten with its own fault named. None when it could not be."""
+        """One flow, rewritten with its own fault named. None when it could not be.
+
+        **Its own agent, holding only this flow's cases.** The first pass needs the
+        whole list — you cannot judge forty-two cases in or out against a population
+        you cannot see. Ordering needs the opposite: measured, the same model given
+        one journey's four-to-seven cases settled the order in 70-100 seconds, and the
+        same question asked of the turn's own agent — still carrying all forty-two —
+        ran eight minutes and came back empty, past the session's liveness deadline.
+
+        No tools either. There is nothing to look up: the cases are in front of it and
+        the fault is named.
+        """
+        mine = {step.case_id for step in scenario.steps if step.case_id is not None}
+        narrowed = request.model_copy(
+            update={"test_case_list": [c for c in request.test_case_list if c.id in mine]}
+        )
+        prompt, _ = build_system_prompt(narrowed)
+        agent = self._agent_factory(model=request.model, tools=[], system_prompt=prompt)
         told = "\n".join(f"- {climb.describe()}" for climb in climbs)
         ask = (
             f"방금 낸 시나리오 「{scenario.title}」 하나만 다시 씁니다. 실행되지 않는 자리가 "
