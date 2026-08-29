@@ -1021,6 +1021,8 @@ def test_the_agent_is_offered_exactly_these_tools() -> None:
         "link_knowledge",
         "unlink_knowledge",
         "expand_knowledge",
+        "include_screen_selector",
+        "exclude_screen_selector",
         "click_button",
         "enter_text",
         "press_key",
