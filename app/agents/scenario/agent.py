@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
+from langchain_core.messages import HumanMessage
 from langchain_core.runnables import Runnable
 
 from langgraph.errors import GraphRecursionError
@@ -30,7 +31,12 @@ from app.agents.scenario.cases import MAX_SEARCHES_PER_RUN, TestCaseSearchState
 from app.agents.scenario.errors import ScenarioGenerationError
 from app.agents.scenario.progress import ProgressCallback
 from app.agents.scenario.prompt import build_messages, build_system_prompt
-from app.agents.scenario.schemas import ScenarioAgentRequest, ScenarioAgentResult
+from app.agents.scenario.ordering import UnreachableClimb, unreachable_climbs
+from app.agents.scenario.schemas import (
+    ScenarioAgentRequest,
+    ScenarioAgentResult,
+    ScenarioPlan,
+)
 from app.agents.scenario.tools import build_tools
 from app.llm.chat_model import build_chat_model
 from app.llm.models import LLMModel
@@ -140,4 +146,74 @@ class ScenarioAgent:
             raise ScenarioGenerationError(
                 "Scenario agent did not return a structured multi-scenario result."
             )
-        return structured
+        return await self._settle_order(structured, request, agent, config)
+
+    async def _settle_order(
+        self,
+        result: ScenarioAgentResult,
+        request: ScenarioAgentRequest,
+        agent: Runnable,
+        config: dict,
+    ) -> ScenarioAgentResult:
+        """Ask again for the one flow that climbs without paying for it (ARTEL-648).
+
+        The turn checks its own work. A flow that requires `StagePosition >= 1` and
+        later `>= 2`, with nothing in between that raises it, never runs past the
+        second check — and the model writes those even with the rule in front of it
+        (run 208: eight of them). Grouping is a judgement about one case; ordering
+        asks it to hold the whole list at once, and that is the part that slips.
+
+        **Only the wrong flows are rewritten**, one at a time, with the reason named.
+        Everything else is left exactly as authored — a turn that reshuffles work the
+        model got right trades one problem for another.
+
+        Failing here is not fatal. The unordered result is what we had a moment ago,
+        and orchestration still sees it; a repair that errors should not lose the turn.
+        """
+        problems = unreachable_climbs(result.scenarios, request.test_case_list)
+        if not problems:
+            return result
+
+        logger.info(
+            "[scenario] climbs nothing pays for — asking again\n  scenarios=%s",
+            {result.scenarios[i].title: [c.describe() for c in cs] for i, cs in problems.items()},
+        )
+        scenarios = list(result.scenarios)
+        for index, climbs in problems.items():
+            fixed = await self._rewrite_one(scenarios[index], climbs, agent, config)
+            if fixed is not None:
+                scenarios[index] = fixed
+        return result.model_copy(update={"scenarios": scenarios})
+
+    async def _rewrite_one(
+        self,
+        scenario: ScenarioPlan,
+        climbs: list[UnreachableClimb],
+        agent: Runnable,
+        config: dict,
+    ) -> ScenarioPlan | None:
+        """One flow, rewritten with its own fault named. None when it could not be."""
+        told = "\n".join(f"- {climb.describe()}" for climb in climbs)
+        ask = (
+            f"방금 낸 시나리오 「{scenario.title}」 하나만 다시 씁니다. 실행되지 않는 자리가 "
+            f"있습니다:\n\n{told}\n\n"
+            "그 값을 올리는 화면을 지나는 스텝을 **그 사이에** 넣어 주세요. `case_id` 없는 "
+            "연결 스텝이면 됩니다 — 예를 들어 그 화면에 들어가 조건을 만드는 동작입니다. "
+            "케이스를 빼거나 다른 시나리오로 옮기지 말고, 스텝 순서와 사이만 고칩니다.\n\n"
+            "`scenarios` 에는 이 시나리오 **하나만** 담고, 제목은 그대로 두세요. "
+            "`reviewed` 는 비워 두세요 — 판정은 앞 턴 것을 씁니다."
+        )
+        try:
+            state = await agent.ainvoke({"messages": [HumanMessage(content=ask)]}, config)
+        except Exception as error:  # noqa: BLE001 — a failed repair must not lose the turn
+            logger.warning("[scenario] rewrite failed, keeping the original: %s", error)
+            return None
+        answer = state.get("structured_response") if isinstance(state, dict) else None
+        if not isinstance(answer, ScenarioAgentResult) or not answer.scenarios:
+            logger.warning("[scenario] rewrite returned nothing, keeping the original")
+            return None
+        # Keep the identity we already had. A rewrite that renames or re-points the
+        # scenario would land as a different row on the other side.
+        return answer.scenarios[0].model_copy(
+            update={"scenario_id": scenario.scenario_id, "title": scenario.title}
+        )
