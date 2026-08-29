@@ -305,6 +305,73 @@ You may file {limit} of these in one run. One defect, one call — do not file t
 same broken screen again on the next step."""
 
 
+def render_closing_asks(state: QaRunState) -> str:
+    """마지막 스텝을 판정한 자리에서, 이 런이 무엇을 남기고 닫을지 묻는 문구.
+
+    런 전체가 아직 앞에 있고 판정은 끝나서, 무엇이 값진 앎이었고 무엇이 결함이었는지
+    되짚을 수 있는 마지막 순간이다.
+
+    도구는 있는데 안 쓴다 — 실측으로 83턴 성공 런에서 `record_knowledge` 0회,
+    `report_issue` 0회였다. 시스템 프롬프트가 시키는데도 그렇다. 기록은 이번 런의 판정에
+    아무것도 안 보태므로(`report_step` 도 `finish_run` 도 그것 없이 통과한다) 비용만 있고
+    돌아오는 것이 없는 행동이고, 무엇보다 **적을 순간이 흐름 안에 없었다**.
+
+    되돌려 보내지 않는다. `finish_run` 에서 한 번 물리는 것도 해 봤는데, 런을 닫는 테스트
+    열여덟 개가 걸렸다 — 앞으로 만드는 모든 런 테스트가 그 왕복을 치러야 한다는 뜻이고, 그
+    값은 이 문구가 하는 일보다 크다(ARTEL-667).
+
+    무엇을 어디에 적을지는 안 정해 준다. `record_knowledge` 가 anchor 를 부르는 쪽에
+    맡기는 이유가 그대로 걸린다 — 어디서나 참인 규칙을 지금 서 있는 화면 아래 넣으면 다음
+    화면의 런이 그것을 못 찾는다.
+
+    결함을 묻는 근거는 **이 런이 실패로 판정한 스텝**이다. 실패한 스텝이 하나도 없으면
+    결함은 묻지 않는다 — 근거 없이 물으면 agent 가 무엇에 대해 답할지 모르고, 그래도
+    답하려고 아무거나 적으면 다음 런에 도움이 안 되는 줄만 쌓인다. 같은 이유로 마지막 줄이
+    적을 것이 없다는 것도 답이라고 말한다.
+
+    이미 적은 런에게도 말한다. 한 줄 적은 것과 그 런이 알아낸 것을 다 적은 것은 다르다.
+    대신 문구가 다르다 — 시키는 대신 지금까지 몇 개를 남겼는지 세어 주고 나머지를 되짚게
+    한다.
+    """
+    asks: list[str] = []
+    failed = [result.step for result in state.step_results if not result.passed]
+    if failed:
+        steps = ", ".join(str(step) for step in failed)
+        if not state.issues_attempted:
+            asks.append(
+                f"Steps judged failed this run: {steps}. Issues filed: none, so "
+                "what failed and why is nowhere but this transcript. A failure "
+                "that is a defect in the game goes in with `report_issue`; a step "
+                "that failed because the scenario asked for the wrong thing, or "
+                "because the run itself went wrong, is not one."
+            )
+        else:
+            asks.append(
+                f"Steps judged failed this run: {steps}. Issues filed: "
+                f"{state.issues_attempted}. If a failure that is a defect in the "
+                "game is not among them, `report_issue` still takes it."
+            )
+    if not state.knowledge_records_attempted:
+        asks.append(
+            "If this run worked anything out that a later run would otherwise "
+            "work out again — how an input is read, what a control actually does, "
+            "what a rule costs — write it down with `record_knowledge`."
+        )
+    else:
+        asks.append(
+            f"Knowledge entries recorded this run: {state.knowledge_records_attempted}. "
+            "That is not the same as everything this run worked out. Read back "
+            "over the rest of it: what else would a later run otherwise work out "
+            "again? That goes in with `record_knowledge` too."
+        )
+    listed = "\n".join(f"- {ask}" for ask in asks)
+    closer = (
+        "Nothing to write is an answer. If there is nothing a later run would "
+        "use, write nothing and close the run."
+    )
+    return f"\n{listed}\n{closer}"
+
+
 def build_tools(
     channel: QaRunChannel, state: QaRunState, arch: ResolvedArch | None = None
 ) -> list[BaseTool]:
@@ -1742,33 +1809,12 @@ def build_tools(
             )
         )
         if remaining <= 0:
-            # 마지막 스텝을 판정한 자리다. 런 전체가 아직 앞에 있고 판정은 끝나서, 무엇이
-            # 값진 앎이었는지 되짚을 수 있는 마지막 순간이다.
-            #
-            # 도구는 있는데 안 쓴다 — 실측으로 83턴 런에서 `record_knowledge` 0회였다.
-            # 시스템 프롬프트가 시키는데도 그렇다. 기록은 이번 런의 판정에 아무것도 안
-            # 보태므로(`report_step` 도 `finish_run` 도 그것 없이 통과한다) 비용만 있고
-            # 돌아오는 것이 없는 행동이고, 무엇보다 **적을 순간이 흐름 안에 없었다**.
-            #
-            # 되돌려 보내지 않는다. `finish_run` 에서 한 번 물리는 것도 해 봤는데, 런을
-            # 닫는 테스트 열여덟 개가 걸렸다 — 앞으로 만드는 모든 런 테스트가 그 왕복을
-            # 치러야 한다는 뜻이고, 그 값은 이 한 줄이 하는 일보다 크다.
-            #
-            # 무엇을 어디에 적을지는 안 정해 준다. `record_knowledge` 가 앵커를 부르는 쪽에
-            # 맡기는 이유가 그대로 걸린다 — 어디서나 참인 규칙을 지금 서 있는 화면 아래
-            # 넣으면 다음 화면의 런이 그것을 못 찾는다.
-            ask = (
-                ""
-                if state.knowledge_records_attempted
-                else (
-                    " Before you do: if this run worked anything out that a later "
-                    "run would otherwise work out again — how an input is read, "
-                    "what a control actually does, what a rule costs — write it "
-                    "down with `record_knowledge` first."
-                )
-            )
+            # 무엇을 남길지 묻는 자리이자 이유는 `render_closing_asks` 가 들고 있다. 여기서
+            # 말하는 것은 그 자리가 여기라는 것뿐이다 — 매 스텝마다 붙이면 표가 뜻을 잃고,
+            # `finish_run` 은 이미 닫는 쪽으로 기운 뒤다.
             return _answer(
-                f"Recorded. That was the last step — finish the run.{ask}{note}",
+                "Recorded. That was the last step — finish the run. Before you "
+                f"do:{render_closing_asks(state)}{note}",
                 channel.drain_operator_messages(),
             )
         # The verdict is recorded either way; what differs is the pull to keep
