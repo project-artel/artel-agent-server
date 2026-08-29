@@ -1486,3 +1486,39 @@ def test_중간_스텝에서는_말하지_않는다() -> None:
         assert "record_knowledge" not in answered
 
     asyncio.run(run())
+
+
+def test_current_scene_을_청하면_전량이_온다() -> None:
+    """주소를 모르면 `inspect_object` 로도 못 묻는다. 실제 런에서 `Card(Clone)` 을 찍어서
+    묻고 없다는 답을 받았다(ARTEL-673)."""
+
+    async def run() -> None:
+        _channel, _state, tools, _sent = _with_a_screen()
+        await tools["observe_scene"].ainvoke({"step": 1, "thought": "본다"})
+
+        again = await tools["observe_scene"].ainvoke({"step": 1, "thought": "또 본다"})
+        assert "Card(Clone)[16]" not in again, again
+
+        page = await tools["observe_scene"].ainvoke(
+            {"step": 1, "thought": "전부 본다", "current_scene": True}
+        )
+        assert "Card(Clone)[16]" in page, page
+        assert page.count("<<pulse>>") == 1, "화면이 두 번 실리면 안 된다"
+
+    asyncio.run(run())
+
+
+def test_current_scene_이_행위_경계를_안_옮긴다() -> None:
+    """관측은 행위가 아니다. 전량을 봤다고 그 사이 무엇이 쌓였는지를 잊어도 되는 것이 아니다."""
+
+    async def run() -> None:
+        _channel, state, tools, _sent = _with_a_screen()
+        state.last_action_frame = 99
+
+        await tools["observe_scene"].ainvoke(
+            {"step": 1, "thought": "전부 본다", "current_scene": True}
+        )
+
+        assert state.last_action_frame == 99
+
+    asyncio.run(run())
