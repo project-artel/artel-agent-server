@@ -1475,7 +1475,8 @@ def test_이미_남긴_런에게는_무엇을_남겼는지_되짚게_한다() ->
         )
 
         assert "That was the last step" in answered
-        assert "Knowledge entries recorded this run: 1" in answered, answered
+        assert "Knowledge recording attempts this run: 1" in answered, answered
+        assert "Check whether each one succeeded" in answered
         assert "record_knowledge" in answered
 
     asyncio.run(run())
@@ -1497,7 +1498,7 @@ def test_실패한_스텝이_있는데_issue_가_없으면_그것을_짚는다()
         )
 
         assert "Steps judged failed this run: 1" in answered, answered
-        assert "Issues filed: none" in answered
+        assert "Issue reports sent: none" in answered
         assert "report_issue" in answered
 
     asyncio.run(run())
@@ -1534,7 +1535,7 @@ def test_이미_낸_issue_가_있어도_남은_실패를_되짚게_한다() -> N
         )
 
         assert "Steps judged failed this run: 1" in answered, answered
-        assert "Issues filed: 1" in answered
+        assert "Issue reports sent: 1" in answered
         assert "report_issue" in answered
 
     asyncio.run(run())

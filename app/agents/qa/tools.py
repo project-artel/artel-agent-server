@@ -329,9 +329,9 @@ def render_closing_asks(state: QaRunState) -> str:
     답하려고 아무거나 적으면 다음 런에 도움이 안 되는 줄만 쌓인다. 같은 이유로 마지막 줄이
     적을 것이 없다는 것도 답이라고 말한다.
 
-    이미 적은 런에게도 말한다. 한 줄 적은 것과 그 런이 알아낸 것을 다 적은 것은 다르다.
-    대신 문구가 다르다 — 시키는 대신 지금까지 몇 개를 남겼는지 세어 주고 나머지를 되짚게
-    한다.
+    이미 시도한 런에게도 말한다. 한 번 시도한 것과 그 런이 알아낸 것을 다 적은 것은
+    다르다. 대신 문구가 다르다 — 시키는 대신 지금까지 몇 번 시도했는지 세어 주고
+    각 시도의 성공 여부와 나머지를 되짚게 한다. 이 counter 둘은 성공 건수가 아니다.
     """
     asks: list[str] = []
     failed = [result.step for result in state.step_results if not result.passed]
@@ -339,7 +339,7 @@ def render_closing_asks(state: QaRunState) -> str:
         steps = ", ".join(str(step) for step in failed)
         if not state.issues_attempted:
             asks.append(
-                f"Steps judged failed this run: {steps}. Issues filed: none, so "
+                f"Steps judged failed this run: {steps}. Issue reports sent: none, so "
                 "what failed and why is nowhere but this transcript. A failure "
                 "that is a defect in the game goes in with `report_issue`; a step "
                 "that failed because the scenario asked for the wrong thing, or "
@@ -347,7 +347,7 @@ def render_closing_asks(state: QaRunState) -> str:
             )
         else:
             asks.append(
-                f"Steps judged failed this run: {steps}. Issues filed: "
+                f"Steps judged failed this run: {steps}. Issue reports sent: "
                 f"{state.issues_attempted}. If a failure that is a defect in the "
                 "game is not among them, `report_issue` still takes it."
             )
@@ -359,10 +359,11 @@ def render_closing_asks(state: QaRunState) -> str:
         )
     else:
         asks.append(
-            f"Knowledge entries recorded this run: {state.knowledge_records_attempted}. "
-            "That is not the same as everything this run worked out. Read back "
-            "over the rest of it: what else would a later run otherwise work out "
-            "again? That goes in with `record_knowledge` too."
+            f"Knowledge recording attempts this run: {state.knowledge_records_attempted}. "
+            "Check whether each one succeeded. An attempt is not the same as "
+            "everything this run worked out. Read back over the rest of it: what "
+            "else would a later run otherwise work out again? That goes in with "
+            "`record_knowledge` too."
         )
     listed = "\n".join(f"- {ask}" for ask in asks)
     closer = (
