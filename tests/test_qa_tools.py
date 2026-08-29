@@ -374,6 +374,49 @@ def test_a_click_takes_the_button_it_is_given() -> None:
     asyncio.run(run())
 
 
+def test_a_double_click_rides_one_batch() -> None:
+    """`click_at` 두 번은 두 턴이고 실측으로 한 턴이 4초쯤이다. 게임이 더블클릭으로 치는
+    간격은 0.3~0.5초라 절대 못 들어가고, 싱글클릭 두 번이 된다(ARTEL-675).
+
+    그리고 실패가 조용하다 — 액션은 둘 다 ok 로 답하므로 화면이 안 바뀐 것만 남고, 그것은
+    게임 결함과 구분이 안 된다.
+    """
+
+    async def run() -> None:
+        _, _, tools, sent = make()
+        await tools["double_click_at"].ainvoke(
+            {"step": 1, "x": 300, "y": 400, "thought": "아이템을 더블클릭해 장착한다"}
+        )
+
+        assert len(actions(sent)) == 1
+        assert actions(sent)[0]["payload"]["actions"] == [
+            {"id": 1, "jsonrpc": "2.0", "method": "move_mouse", "params": [300, 400]},
+            {"id": 2, "jsonrpc": "2.0", "method": "mouse_down", "params": [0]},
+            {"id": 3, "jsonrpc": "2.0", "method": "mouse_up", "params": [0]},
+            {"id": 4, "jsonrpc": "2.0", "method": "mouse_down", "params": [0]},
+            {"id": 5, "jsonrpc": "2.0", "method": "mouse_up", "params": [0]},
+        ]
+
+    asyncio.run(run())
+
+
+def test_a_double_click_takes_the_button_it_is_given() -> None:
+    async def run() -> None:
+        _, _, tools, sent = make()
+        await tools["double_click_at"].ainvoke(
+            {"step": 1, "x": 1, "y": 2, "thought": "오른쪽 더블클릭", "button": 1}
+        )
+
+        buttons = {
+            tuple(a["params"])
+            for a in actions(sent)[0]["payload"]["actions"]
+            if a["method"] != "move_mouse"
+        }
+        assert buttons == {(1,)}, "누른 버튼과 뗀 버튼이 다르면 눌린 채로 남는다"
+
+    asyncio.run(run())
+
+
 def test_pausing_and_resuming_go_out_as_the_time_actions() -> None:
     """멈추는 것도 다른 액션과 같은 액션이다. 배치에 실려 나가는 것은 그것 하나다.
 
@@ -983,6 +1026,7 @@ def test_the_agent_is_offered_exactly_these_tools() -> None:
         "press_key",
         "move_pointer",
         "click_at",
+        "double_click_at",
         "hold_mouse_button",
         "release_mouse_button",
         "hold_key",
