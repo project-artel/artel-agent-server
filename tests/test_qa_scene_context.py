@@ -136,7 +136,9 @@ def test_a_scene_with_capabilities_and_knowledge_gets_both() -> None:
     assert block == (
         f"{SCENE_CONTEXT_START}\n"
         "what is already known about this scene, and ONLY about this scene. "
-        "Rules that hold across the game are not here — search_knowledge reaches those.\n"
+        "Rules that hold across the game are not here — search_knowledge reaches those. "
+        "The scene view above outranks this block: that is this build as it stands, "
+        "and this is a record of an earlier one.\n"
         "the map describes it as: 적과 싸우는 씬\n"
         "\n"
         "the content map says this can be done here (2 known):\n"
@@ -145,7 +147,9 @@ def test_a_scene_with_capabilities_and_knowledge_gets_both() -> None:
         "  press_key Escape — ESC 로 일시정지 메뉴를 연다 "
         "[needs-probe, contradicted, repeat until done]\n"
         "  (a path is where the map found the control, not something to aim at — "
-        "take ids and coordinates from the scene view above)\n"
+        "take ids and coordinates from the scene view above)\n"        "  (not a limit on what you can do here — the map cannot record every "
+        "kind of input, dragging among them, and the scene view above reports "
+        "every control and key actually offered)\n"
         "\n"
         "knowledge anchored to this scene, id and summary only:\n"
         "  [41] 전투 중 ESC 는 아무것도 하지 않는다\n"
@@ -248,6 +252,30 @@ def test_a_long_capability_list_is_cut_and_says_so() -> None:
     )
     assert "[cap-0]" in block
     assert f"[cap-{MAX_CAPABILITIES_IN_SCENE_CONTEXT}]" not in block
+
+    # 잘렸다는 말만으로는 부족했다 (ARTEL-679). 스테이지에서 Map_scene 이 16 개 중
+    # 여덟 줄로 잘렸고 그 여덟이 전부 방향키였다. `Return` 두 줄이 잘린 쪽에 있었고,
+    # 에이전트는 그것을 한 번도 누르지 않았다 — scene view 는 그 키를 제공하고 있었다.
+    # 남은 것을 어디서 찾는지 같은 자리에서 말하지 않으면, 보이는 부분이 전부가 된다.
+    assert "the ones not shown are not gone" in block
+    assert "the scene view above is not cut" in block
+
+
+def test_the_block_does_not_read_as_the_limit_of_what_can_be_done() -> None:
+    """목록에 없다는 것은 못 한다는 뜻이 아니다 (ARTEL-679).
+
+    content map 은 어떤 종류의 입력은 기록할 수단이 없다. 드래그가 그렇다 — 어느
+    빌드의 어느 씬도 그것을 목록에 싣지 못하는데, scene view 는 `can do — pointer:
+    OnBeginDrag, ...` 로 평범하게 말한다. 잘리지 않은 목록도 마찬가지다: 스테이지의
+    TurnBattleScene 은 여덟 줄이 전부 실렸고 전부 `click` 이었으며, 정작 그 씬에서
+    해야 할 일은 카드를 존으로 끄는 것이었다.
+
+    그래서 잘렸을 때만이 아니라 목록이 있을 때마다 말한다.
+    """
+    block = context().render("BattleScene")
+
+    assert "not a limit on what you can do here" in block
+    assert "dragging among them" in block
 
 
 def test_a_long_knowledge_list_is_cut_and_says_so() -> None:

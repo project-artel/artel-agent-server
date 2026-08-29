@@ -255,7 +255,7 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v13() -> None:
+def test_the_default_qa_version_is_v14() -> None:
     """A run that names no version has to get the newest prompt.
 
     This is also the trap in adding a version: `resolve_version` returns the
@@ -265,7 +265,7 @@ def test_the_default_qa_version_is_v13() -> None:
     `set_input_axis` before the tool exists teaches the agent to reach for
     something that is not there.
     """
-    assert resolve_version("qa_run") == "v13"
+    assert resolve_version("qa_run") == "v14"
 
 
 def test_v12_drops_the_screen_map_and_says_what_a_screen_anchors() -> None:
@@ -343,6 +343,51 @@ def test_v13_teaches_the_scene_context_block_and_keeps_the_rest_of_v12() -> None
             assert paragraph not in v13, "고쳐 쓴다고 해 놓고 옛 문단이 남아 있다"
             continue
         assert paragraph in v13
+
+
+V14_REWRITES_FROM_V13 = (
+    "A capability line is what the map recorded, not what is on the screen in front of you.",
+)
+
+
+def test_v14_puts_the_scene_view_above_the_block_and_keeps_the_rest_of_v13() -> None:
+    """잘린 목록이 관측을 이겼다. v14 는 순서를 문단 끝에서 절 앞으로 옮긴다 (ARTEL-679).
+
+    v13 도 같은 말을 하기는 했다 — `Treat the list as where to look first, and the
+    scene as what is true.` 가 문단의 마지막 문장으로 있었다. 그런데 블록 자신의
+    제목은 `the content map says this can be done here` 라는 단정형이고, 스테이지에서
+    둘이 부딪혔을 때 단정형이 이겼다. 같은 시나리오를 도는 두 런 중 블록이 붙지 않은
+    쪽은 scene view 가 제공하는 `Return` 을 찾아 썼고, 잘린 목록 여덟 줄이 전부
+    방향키였던 쪽은 `Return` 을 한 번도 누르지 않았다.
+
+    그래서 두 가지를 더 말한다. 순서를 먼저 말하고, 목록에 없다는 것이 못 한다는
+    뜻이 아님을 말한다 — 후자가 필요한 이유는 content map 이 드래그를 표현할 수단이
+    아예 없어서다. 어느 빌드의 어느 씬도 드래그를 목록에 싣지 못하는데, scene view 는
+    그것을 `can do — pointer:` 로 평범하게 말한다.
+
+    블록 자신도 같은 말을 한다(`tests/test_qa_scene_context.py`). 두 곳에 두는 이유는
+    v13 이 경계를 두 번 그은 이유와 같다 — 프롬프트는 압축에, 블록은 빈 조회에 각각
+    사라질 수 있다.
+    """
+    v13 = load_prompt("qa_run", "system", "v13").body
+    v14 = load_prompt("qa_run", "system", "v14").body
+
+    # 순서, 그리고 목록의 침묵이 뜻하지 않는 것.
+    assert "**The scene view outranks that block, always.**" in v14
+    assert "**A capability missing from that block does not mean you cannot do it.**" in v14
+    assert "dragging, in particular, appears in no scene's list on any build" in v14
+
+    # v13 이 이미 하던 말은 그대로 남는다. 이것을 지우고 새 문장으로 갈음하면,
+    # 같은 말을 두 번 하지 않게 된 대신 한 번도 안 하게 될 위험이 생긴다.
+    assert "Treat the list as where to look first, and the scene as what is true." in v14
+    assert "not something to aim at" in v14
+
+    # 고쳐 쓴 한 문단 말고는 v13 그대로다.
+    for paragraph in v13.split("\n\n"):
+        if paragraph.startswith(V14_REWRITES_FROM_V13):
+            assert paragraph not in v14, "고쳐 쓴다고 해 놓고 옛 문단이 남아 있다"
+            continue
+        assert paragraph in v14
 
 
 def test_v13_stops_teaching_the_live_view_ARTEL_621_deleted() -> None:
