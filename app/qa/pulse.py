@@ -722,6 +722,25 @@ class PulseMemory(BaseModel):
             lines.append(f"({len(hits) - MAX_INSPECTED} more objects match; name one more exactly)")
         return "\n".join(lines)
 
+    def current_scene(self) -> str | None:
+        """지금 쥔 것 전부. 청했을 때만 그린다.
+
+        `since_action` 이 주는 것은 **마지막 행위 이후 달라진 것**이라, 한 번 말하고 가만히
+        있는 값은 안 나온다. 그래서 부르는 쪽이 값을 다시 보려면 `inspect_object` 로 물어야
+        하는데 그것은 `selector` 를 받는다 — **그려지지 않은 객체는 주소를 알 길이 없다.**
+        실제 런에서 `Card(Clone)` 을 찍어서 묻고 없다는 답을 받았다(ARTEL-673).
+
+        `since=0` 이라 모든 값이 그려지고, `news_since` 가 그중 새 것에만 표를 단다. 전부
+        그리면서 표까지 없으면 읽는 쪽이 무엇이 소식인지 스스로 찾아야 한다.
+
+        scene 전환이 예약한 페이지(`page_due`)는 **소진하지 않는다.** 그것은 새 화면을 한
+        덩어리로 주기로 한 약속이고, 여기서 먹으면 그 약속이 조용히 사라진다.
+
+        게임에 아무것도 안 묻는다. SDK 의 `whole` 은 "게임이 전부 보냈다" 이고 이것은 "내가
+        아는 전부를 그린다" 라, 같은 말을 쓰면 새로 청하는 것으로 읽힌다.
+        """
+        return self.render(since=0, news_since=self.drawn)
+
     def since_action(self, frame: int | None) -> str | None:
         """행위 하나가 무엇을 남겼나. 씬이 바뀌었으면 전량 한 페이지로.
 
