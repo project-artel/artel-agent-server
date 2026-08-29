@@ -153,13 +153,13 @@ class ScenarioAgent:
             raise ScenarioGenerationError(
                 "Scenario agent did not return a structured multi-scenario result."
             )
-        return await self._settle_order(structured, request, agent, config)
+        return await self._settle_order(structured, request, tools, config)
 
     async def _settle_order(
         self,
         result: ScenarioAgentResult,
         request: ScenarioAgentRequest,
-        agent: Runnable,
+        tools: list,
         config: dict,
     ) -> ScenarioAgentResult:
         """Ask again for the one flow that climbs without paying for it (ARTEL-648).
@@ -190,7 +190,7 @@ class ScenarioAgent:
         # session has a liveness deadline on the far side; a result with many faults
         # would otherwise multiply one turn into many and be reported as dead.
         for index, climbs in list(problems.items())[:MAX_REWRITES_PER_TURN]:
-            fixed = await self._rewrite_one(scenarios[index], climbs, request, config)
+            fixed = await self._rewrite_one(scenarios[index], climbs, request, tools, config)
             if fixed is not None:
                 scenarios[index] = fixed
         return result.model_copy(update={"scenarios": scenarios})
@@ -200,6 +200,7 @@ class ScenarioAgent:
         scenario: ScenarioPlan,
         climbs: list[UnreachableClimb],
         request: ScenarioAgentRequest,
+        tools: list,
         config: dict,
     ) -> ScenarioPlan | None:
         """One flow, rewritten with its own fault named. None when it could not be.
@@ -211,15 +212,17 @@ class ScenarioAgent:
         same question asked of the turn's own agent — still carrying all forty-two —
         ran eight minutes and came back empty, past the session's liveness deadline.
 
-        No tools either. There is nothing to look up: the cases are in front of it and
-        the fault is named.
+        The tools ride along unchanged. The structured answer itself arrives as a tool
+        call (`ToolStrategy`), and a factory handed an empty list returned no structured
+        response at all — measured, seven seconds and nothing (run 210). What this pass
+        narrows is the prompt, not the loop.
         """
         mine = {step.case_id for step in scenario.steps if step.case_id is not None}
         narrowed = request.model_copy(
             update={"test_case_list": [c for c in request.test_case_list if c.id in mine]}
         )
         prompt, _ = build_system_prompt(narrowed)
-        agent = self._agent_factory(model=request.model, tools=[], system_prompt=prompt)
+        agent = self._agent_factory(model=request.model, tools=tools, system_prompt=prompt)
         told = "\n".join(f"- {climb.describe()}" for climb in climbs)
         ask = (
             f"방금 낸 시나리오 「{scenario.title}」 하나만 다시 씁니다. 실행되지 않는 자리가 "
@@ -237,7 +240,17 @@ class ScenarioAgent:
             return None
         answer = state.get("structured_response") if isinstance(state, dict) else None
         if not isinstance(answer, ScenarioAgentResult) or not answer.scenarios:
-            logger.warning("[scenario] rewrite returned nothing, keeping the original")
+            # **무엇이 돌아왔는지 적는다.** 건수만 남기면 "안 됐다"와 "왜 안 됐다"가 같아 보이고,
+            # 그러면 다음 판이 또 추측이 된다 — 오케가 거절 사유를 안 찍어 하루를 잃은 것과 같다
+            # (ARTEL-641). 모델이 말은 했는데 시나리오를 안 담은 것인지, 구조화 답이 아예 안 온
+            # 것인지가 갈린다.
+            logger.warning(
+                "[scenario] rewrite gave nothing to use, keeping the original\n"
+                "  structured=%s scenarios=%d message=%s",
+                type(answer).__name__,
+                len(answer.scenarios) if isinstance(answer, ScenarioAgentResult) else -1,
+                (answer.message[:300] if isinstance(answer, ScenarioAgentResult) else None),
+            )
             return None
         # Keep the identity we already had. A rewrite that renames or re-points the
         # scenario would land as a different row on the other side.
