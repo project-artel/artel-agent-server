@@ -29,6 +29,7 @@ from app.qa.envelope import (
     ScreenSelectorProposalPayload,
     ScreenSelectorResultPayload,
     ScreenSelectorRulePayload,
+    ScreenSelectorVerdictPayload,
     ToolCallPayload,
     ToolResultPayload,
     outbound_envelope,
@@ -506,6 +507,30 @@ class QaRunChannel:
             MessageType.SCREEN_SELECTOR_RULE, payload, self._screen_selector_timeout
         )
 
+    async def answer_screen_selector_proposal(
+        self, payload: ScreenSelectorVerdictPayload, correlation_id: str
+    ) -> None:
+        """제안 하나에 대한 답을 실어 보낸다 (ARTEL-656). 아무것도 기다리지 않는다.
+
+        `note` · `say` 와 같은 자리다 — future 도 타임아웃도 없다. 저쪽은 이 답에도
+        `SCREEN_SELECTOR_RESULT` 로 응답하지만 그것을 기다리는 사람이 이쪽에 없다.
+        답을 부른 것이 tool 이 아니라 프레임이고, 그 프레임은 이미 지나갔다.
+
+        **부르는 쪽이 QA 런이 아니다.** 판정은 런과 떨어진 task 에서 나고, 이 메서드는
+        그 task 가 소켓에 닿는 유일한 지점이다. 여기를 지나게 하는 이유는 봉투의
+        `sequence` 다 — 한 세션의 프레임 번호는 한 곳에서 나야 하고, 판정기가 제 카운터를
+        들면 같은 번호가 두 번 나간다.
+
+        `_raise_if_cancelled` 를 안 부른다. 취소는 QA 런의 사정이고 이 답은 런의 일이
+        아니다 — 다만 소켓이 이미 닫히는 중이면 보낼 곳이 없으므로, 부르는 쪽이
+        `cancelled` 를 보고 건너뛴다(`app/qa/screen_verdict.py`).
+        """
+        await self._send(
+            self._frame(
+                MessageType.SCREEN_SELECTOR_VERDICT, payload, correlation_id=correlation_id
+            )
+        )
+
     async def _request(self, message_type: MessageType, payload, timeout: float) -> Any:
         """Send one frame and park until its answer arrives. `None` means none did.
 
@@ -611,12 +636,32 @@ class QaRunChannel:
     def on_screen_selector_proposal(self, raw: dict) -> None:
         """제안 하나에 실려 온 화면 판정을 씬 메모리에 얹는다 (ARTEL-657).
 
-        **답하지 않는다.** 이 프레임은 "이 selector 가 화면을 가르는가" 를 물어보는 것이고,
-        답하는 것은 따로 띄우는 판정 agent 다(ARTEL-656). 여기서 읽는 것은 그 질문에 곁들여
-        실려 오는 `current_screen` 뿐이다.
+        **여기서 답하지 않는다.** 이 프레임은 "이 selector 가 화면을 가르는가" 를 물어보는
+        것이고, 답하는 것은 QA 런 밖에서 도는 판정 agent 다(ARTEL-656,
+        `app/qa/screen_verdict.py`). 여기서 읽는 것은 그 질문에 곁들여 실려 오는
+        `current_screen` 뿐이다.
 
         풀어 줄 future 도 없다. 이 프레임은 QA agent 가 무엇을 물어서 오는 것이 아니라 저쪽이
         관측 중에 스스로 보내는 것이다 — `PULSE` 와 같은 자리다.
+        """
+        self.scene.screen_map.apply(
+            ScreenSelectorProposalPayload.model_validate(raw.get("payload") or {})
+        )
+
+    def on_screen_settled(self, raw: dict) -> None:
+        """관측이 확정한 화면을 씬 메모리에 얹는다 (ARTEL-668).
+
+        **QA agent 가 화면을 보는 통로가 이것이다.** 제안(`on_screen_selector_proposal`)도
+        같은 값을 곁들여 싣지만 그쪽은 `(scene, selector)` 마다 평생 한 번만 나가므로,
+        이미 한 번 플레이한 빌드에서는 한 장도 안 온다. 이 프레임은 화면이 바뀔 때마다
+        오고, 그 `scene` 의 목록이 비어 있어도 온다.
+
+        payload 를 `ScreenSelectorProposalPayload` 로 읽는다. 저쪽이 세 필드를 글자 그대로
+        같은 철자로 싣기로 정했고, 같은 값의 두 번째 모델을 두면 한쪽만 필드가 늘어도
+        아무도 모른다.
+
+        풀어 줄 future 가 없다. 이 프레임은 무엇을 물어서 오는 것이 아니라 관측이 스스로
+        보내는 통보다 — `PULSE` 와 같은 자리이고, `correlationId` 도 안 실려 온다.
         """
         self.scene.screen_map.apply(
             ScreenSelectorProposalPayload.model_validate(raw.get("payload") or {})
@@ -642,7 +687,23 @@ class QaRunChannel:
                 correlation,
             )
             return
-        self._resolve(raw, payload)
+        if self._resolve(raw, payload):
+            return
+        # 짝이 없는 답. 판정 agent 가 보낸 `SCREEN_SELECTOR_VERDICT` 의 답이 늘 여기로 온다 —
+        # 그 프레임은 답을 기다리지 않으므로 `_pending` 에 없다(ARTEL-656).
+        #
+        # 그래도 흘려보내지 않고 남긴다. 저쪽이 무엇을 받아들이고 무엇을 왜 거절했는지가
+        # 이 줄에만 있고, 그것이 없으면 판정이 계속 거절당해도 이쪽에서 알 방법이 없다.
+        if payload.type == MessageType.SCREEN_SELECTOR_VERDICT:
+            logger.info(
+                "[screen-verdict] orchestration took %d entry/entries and refused %d%s",
+                len(payload.accepted),
+                len(payload.rejected),
+                "".join(
+                    f"; refused {entry.match} `{entry.pattern}`: {entry.reason}"
+                    for entry in payload.rejected
+                ),
+            )
 
     def on_error(self, raw: dict) -> bool:
         """An inbound ERROR. True when it was the answer to something we asked.

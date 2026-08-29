@@ -243,12 +243,13 @@ class SceneMemory(BaseModel):
     # 없으면 `None` 이고, 그때 이 클래스는 종전과 한 글자도 다르지 않게 그린다.
     scene_context: SceneContext | None = None
     # 지도가 마지막으로 말한 `screen` (ARTEL-657). 여기서 아무것도 조회하지 않는다 —
-    # 채우는 것은 `SCREEN_SELECTOR_PROPOSAL` 을 받는 `QaRunChannel` 이다.
+    # 채우는 것은 `SCREEN_SETTLED` 와 `SCREEN_SELECTOR_PROPOSAL` 을 받는 `QaRunChannel`
+    # 이다(ARTEL-668).
     #
     # 씬이 바뀌어도 안 비운다. 판정은 자기 `scene` 이름을 들고 있고 `render` 가 그 이름을
     # 맞대 보므로, 다른 `scene` 에서는 그리지 않으면서 되돌아왔을 때는 살아 있다. 여기서
-    # 비우면 `scene` 을 한 번 나갔다 온 것만으로 판정이 영영 사라진다 — 저쪽이 같은
-    # `(scene, selector)` 를 다시 물어보지 않기 때문이다.
+    # 비우면 `scene` 을 한 번 나갔다 온 것만으로 판정이 영영 사라진다 — 저쪽은 화면이
+    # 바뀔 때만 알리므로, 되돌아온 것이 화면 변화가 아니면 다음 통보가 안 온다.
     screen_map: ScreenMap = Field(default_factory=ScreenMap)
     # 맥락 블록을 마지막으로 그린 씬 이름. 씬이 바뀐 뒤 첫 렌더에만 그리게 하는 장부다.
     #

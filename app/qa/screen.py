@@ -9,21 +9,28 @@ ARTEL-654). 목록 밖 selector 는 무시되므로 목록이 얇으면 서로 �
 agent 가 그 불일치를 **볼 수 있게** 하는 절반이고, 나머지 절반인 고치는 tool 은
 `app/agents/qa/tools.py` 에 있다.
 
-## 어디서 오는가, 그리고 왜 늘 최신이 아닌가
+## 어디서 오는가
 
-판정을 싣고 오는 프레임은 `SCREEN_SELECTOR_PROPOSAL` 하나뿐이다(ARTEL-655). 그 프레임의
-본래 용도는 "이 selector 가 화면을 가르는가" 를 물어보는 것이고, 답하는 것은 따로 띄우는
-판정 agent 다(ARTEL-656). 여기서 읽는 것은 그 질문에 곁들여 실려 오는 `current_screen` ·
-`previous_screen` 뿐이다.
+프레임 둘이 같은 값을 싣는다.
 
-그래서 **판정은 관측마다 오지 않는다.** 저쪽은 `(scene, selector)` 마다 평생 한 번만
-물어보므로, 이미 다 물어본 빌드에서는 제안이 한 장도 안 온다. 그때 이 블록은 그 런 내내
-비어 있고, 그것이 지금 계약이 줄 수 있는 전부다.
+- `SCREEN_SETTLED` — 관측이 화면을 확정했고 그것이 직전과 다를 때마다(ARTEL-668).
+  **여기가 이 블록이 기대는 통로다.**
+- `SCREEN_SELECTOR_PROPOSAL` — "이 selector 가 화면을 가르는가" 를 물어보면서 곁들여
+  싣는다(ARTEL-655). 답하는 것은 따로 띄우는 판정 agent 다(ARTEL-656)
 
-여기서 두 가지로 막는다. 판정을 그 판정이 가리키는 `scene` 이름과 함께 들고 있다가 agent
-가 그 `scene` 에 서 있을 때만 그리고, 그릴 때 그것이 **지도가 마지막으로 한 말**이지 지금
-읽은 값이 아니라고 블록 자신이 말한다. 다른 `scene` 의 판정을 지금 화면인 척 그리는 것이
-이 블록이 낼 수 있는 최악의 오류라, 그 경우는 아예 안 그린다.
+둘째만 있던 시절이 `SCREEN_SETTLED` 가 생긴 이유다. 제안은 `(scene, selector)` 마다 평생
+한 번만 나가므로 이미 한 번 플레이한 빌드에서는 한 장도 안 오고, 그때 이 블록은 런 내내
+비어 있었다 — 목록을 고치는 tool 둘이 부를 계기를 잃는 상태다.
+
+## 왜 그래도 "지금 읽은 값" 이 아닌가
+
+`SCREEN_SETTLED` 도 화면이 **바뀔 때** 나가지 관측마다 나가지 않는다. 그래서 이 블록이
+말하는 것은 지금 화면의 실황이 아니라 지도가 그 `scene` 에 대해 마지막으로 한 말이다.
+
+두 가지로 막는다. 판정을 그 판정이 가리키는 `scene` 이름과 함께 들고 있다가 agent 가 그
+`scene` 에 서 있을 때만 그리고, 그릴 때 그것이 **지도가 마지막으로 한 말**이지 지금 읽은
+값이 아니라고 블록 자신이 말한다. 다른 `scene` 의 판정을 지금 화면인 척 그리는 것이 이
+블록이 낼 수 있는 최악의 오류라, 그 경우는 아예 안 그린다.
 """
 
 from pydantic import BaseModel, Field
@@ -44,9 +51,9 @@ MAX_DISCRIMINATOR_SHOWN = 12
 class ScreenVerdict(BaseModel):
     """지도가 마지막으로 말한 `screen` 하나.
 
-    `scene` 을 함께 든다. 이것이 이 모델의 요점이다 — 판정은 드물게 오므로 agent 가 다른
-    `scene` 으로 넘어간 뒤에도 값이 남아 있고, `scene` 을 안 들면 그 값을 지금 화면으로
-    그리게 된다.
+    `scene` 을 함께 든다. 이것이 이 모델의 요점이다 — 판정은 화면이 바뀔 때만 오므로
+    agent 가 다른 `scene` 으로 넘어간 뒤에도 값이 남아 있고, `scene` 을 안 들면 그 값을
+    지금 화면으로 그리게 된다.
     """
 
     scene: str
@@ -68,10 +75,14 @@ class ScreenMap(BaseModel):
     verdict: ScreenVerdict | None = None
 
     def apply(self, payload: ScreenSelectorProposalPayload) -> None:
-        """제안 하나에 실려 온 화면 판정을 받아 둔다.
+        """프레임 하나에 실려 온 화면 판정을 받아 둔다.
 
-        `current_screen` 이 없으면 아무것도 안 바꾼다. 아직 어떤 화면도 굳지 않은
-        시점에서 오는 정상적인 모양이고, 그때 판정을 비우면 직전에 받아 둔 멀쩡한 값이
+        `SCREEN_SETTLED` 와 `SCREEN_SELECTOR_PROPOSAL` 이 같은 세 필드를 같은 철자로
+        싣는다. 그래서 이 메서드가 둘 다 받고, 어느 쪽에서 왔는지는 여기서 안 본다 —
+        받아 두는 값이 글자 하나 다르지 않기 때문이다.
+
+        `current_screen` 이 없으면 아무것도 안 바꾼다. 제안에서는 아직 어떤 화면도 굳지
+        않은 시점의 정상적인 모양이고, 그때 판정을 비우면 직전에 받아 둔 멀쩡한 값이
         사라진다.
         """
         current = payload.current_screen
