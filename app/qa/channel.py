@@ -136,8 +136,13 @@ class QaRunChannel:
         # out the real one would pay it on every write it exercises.
         self._write_timeout = write_timeout
         self._sequence = 0
-        self._action_waiter: asyncio.Future[ActionResultPayload] | None = None
-        self._pending_action_id: str | None = None
+        # 나간 ACTION `frame` 의 messageId → 그 답을 기다리는 `future` (ARTEL-664).
+        #
+        # 칸 하나가 아니라 map 인 것은, `action` 이 둘 동시에 나가면 뒤의 것이 앞의 것의
+        # `future` 를 덮어썼기 때문이다. 그러면 앞의 `action` 은 게임이 답을 보냈는데도
+        # 풀어 줄 것이 없어 `timeout` 까지 앉아 있다가 "게임이 답하지 않았다" 가 된다 —
+        # 에이전트가 방금 누른 버튼이 안 먹혔다고 읽는 자리다.
+        self._action_waiters: dict[str, asyncio.Future[ActionResultPayload]] = {}
         # Knowledge requests waiting on an answer, keyed by the messageId
         # Orchestration echoes back as `correlationId`.
         #
@@ -148,10 +153,10 @@ class QaRunChannel:
         # rules that out by construction instead, and it scales: writes are the
         # third kind to need it and would have been a third pair of fields.
         #
-        # The ACTION waiter above stays separate on purpose. Its timeout, its
-        # cancellation and its late-answer rule are the game's, not the knowledge
-        # base's, and folding it in here would spread this change across a path
-        # this issue does not touch.
+        # The ACTION waiters above stay in their own map on purpose. Their timeout,
+        # their cancellation and their late-answer rule are the game's, not the
+        # knowledge base's, and folding them in here would spread this change across
+        # a path this issue does not touch.
         self._pending: dict[str, _PendingRequest] = {}
         # tool_call_id -> 그 호출을 실은 TOOL 프레임의 messageId (ARTEL-609).
         #
@@ -369,24 +374,30 @@ class QaRunChannel:
     async def dispatch_actions(
         self, actions: list[JsonRpcAction], message: str, step: int | None = None
     ) -> ActionResultPayload | None:
-        """Run actions on the game. `None` means no result came back."""
+        """Run actions on the game. `None` means no result came back.
+
+        The waiter is filed under this frame's own messageId, so a second batch
+        going out while this one is still in flight cannot take its place. The
+        entry is removed in `finally` — a timeout, a cancellation or a failed send
+        all leave through it, and an entry left behind would be a waiter nobody
+        will ever resolve.
+        """
         self._raise_if_cancelled()
         loop = asyncio.get_running_loop()
         waiter: asyncio.Future[ActionResultPayload] = loop.create_future()
-        self._action_waiter = waiter
 
         frame = self._frame(
             MessageType.ACTION, ActionPayload(message=message, step=step, actions=actions)
         )
-        self._pending_action_id = frame["messageId"]
-        await self._send(frame)
+        message_id = frame["messageId"]
+        self._action_waiters[message_id] = waiter
         try:
+            await self._send(frame)
             return await asyncio.wait_for(waiter, timeout=self._action_timeout)
         except asyncio.TimeoutError:
             return None
         finally:
-            self._action_waiter = None
-            self._pending_action_id = None
+            self._action_waiters.pop(message_id, None)
 
     async def search_knowledge(
         self, query: str, tag: str | None, limit: int, step: int | None = None
@@ -500,18 +511,27 @@ class QaRunChannel:
         self._reading_arrived.set()
 
     def on_action_result(self, raw: dict) -> None:
-        correlation = raw.get("correlationId")
-        # Orchestration echoes the ACTION's messageId as the result's correlation.
-        # A mismatch means this answers something we are no longer waiting on.
-        if (
-            self._pending_action_id is not None
-            and correlation is not None
-            and correlation != self._pending_action_id
-        ):
-            return
         payload = ActionResultPayload.model_validate(raw.get("payload") or {})
-        if self._action_waiter is not None and not self._action_waiter.done():
-            self._action_waiter.set_result(payload)
+        waiter = self._action_waiter_for(raw.get("correlationId"))
+        if waiter is not None and not waiter.done():
+            waiter.set_result(payload)
+
+    def _action_waiter_for(self, correlation: Any) -> asyncio.Future[ActionResultPayload] | None:
+        """이 답이 풀어 줄 `future`. 짝이 없으면 `None`.
+
+        Orchestration 은 ACTION 의 messageId 를 답의 `correlation` 으로 되돌려 준다. 그것으로
+        못 찾으면 이미 `timeout` 으로 버린 요청의 늦은 답이므로 버린다.
+
+        `correlation` 이 없는 답은 그 필드를 안 싣는 옛 orchestration 이다. 기다리는 것이
+        **하나뿐일 때만** 그것으로 친다 — 그때는 짝이 확실하다. 둘 이상 떠 있는데 짐작으로
+        고르면 한 `action` 이 다른 `action` 의 답을 자기 결과로 읽으므로, 그때는 아무것도
+        풀지 않는다.
+        """
+        if isinstance(correlation, str):
+            return self._action_waiters.get(correlation)
+        if len(self._action_waiters) == 1:
+            return next(iter(self._action_waiters.values()))
+        return None
 
     def on_knowledge_search_result(self, raw: dict) -> None:
         self._resolve(raw, KnowledgeSearchResultPayload.model_validate(raw.get("payload") or {}))
@@ -587,8 +607,9 @@ class QaRunChannel:
 
     def on_cancel(self) -> None:
         self.cancelled = True
-        if self._action_waiter is not None and not self._action_waiter.done():
-            self._action_waiter.cancel()
+        for waiter in self._action_waiters.values():
+            if not waiter.done():
+                waiter.cancel()
         # Same for any knowledge request in flight: left alone it would hold the
         # run open for the rest of its timeout after the operator already ended it.
         #
