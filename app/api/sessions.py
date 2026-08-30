@@ -13,6 +13,7 @@ from app.agents import (
     ScenarioDraft,
     ScenarioGenerationError,
     ScenarioPlan,
+    AuthoredFlow,
     TestCaseListItem,
 )
 from app.llm.models import DEFAULT_MODEL, LLMModel
@@ -33,6 +34,9 @@ class OpenSessionRequest(BaseModel):
     # above. Optional so an Orchestration that does not send one keeps working —
     # those sessions fall back to `search_test_cases`.
     test_case_list: list[TestCaseListItem] = Field(default_factory=list)
+    # Walkable flows worked out by orchestration (ARTEL-658). Empty from an older
+    # deployment or a failed calculation; the turn then groups on its own.
+    flows: list[AuthoredFlow] = Field(default_factory=list)
     user_input: str
     model: LLMModel = DEFAULT_MODEL
     # Applies to the whole session, including the first turn (run from the stored
@@ -103,6 +107,7 @@ async def open_session(
         unity_context=payload.unity_context,
         game_context=payload.game_context,
         test_case_list=payload.test_case_list,
+        flows=payload.flows,
         user_input=payload.user_input,
         model=payload.model,
         locale=payload.locale,

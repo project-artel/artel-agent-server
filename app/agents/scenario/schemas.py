@@ -164,6 +164,34 @@ class ScenarioAgentRequest(BaseModel):
     # the prompt the model saw plus its raw answer are the only two things that
     # never reach it. Without the id they cannot be filed with the rest.
     run_id: int | None = None
+    # Walkable flows, worked out by orchestration before the turn starts (ARTEL-658).
+    #
+    # Which cases belong in one scenario and in what order is what decides whether the
+    # result can actually be run, and holding forty-two cases at once is the part the
+    # model is weakest at — measured, a plain list gave 26 scenarios with 9 unreachable
+    # climbs, one journey at a time gave 9 with 1. So that judgement moved to the
+    # calculation and arrives here already made.
+    #
+    # Empty means orchestration sent none — an older deployment, or the calculation
+    # failed. The turn then groups and orders on its own, exactly as before; that
+    # fallback is also the rollback.
+    flows: list["AuthoredFlow"] = Field(default_factory=list)
+
+
+class AuthoredFlow(BaseModel):
+    """One walkable flow: which cases, in what order, and what it costs to run.
+
+    **A constraint, not a script.** The order is what makes it walkable; reordering it
+    or inserting other cases breaks the guarantee. Cutting is safe — the front part of
+    a walkable flow is still walkable.
+    """
+
+    case_ids: list[int]
+    # What has to be true before step one. The flow cannot produce these itself.
+    opening: list[str] = Field(default_factory=list)
+    # How many places along the way cannot be instructed — someone has to play through
+    # them (win a fight, sit through a cutscene). Each one is a stop for whoever runs it.
+    gaps: int = 0
 
 
 class AuthoredStep(BaseModel):

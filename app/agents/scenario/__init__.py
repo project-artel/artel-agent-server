@@ -11,6 +11,7 @@ from app.agents.scenario.schemas import (
     ScenarioDraft,
     ScenarioPlan,
     ScenarioStep,
+    AuthoredFlow,
     TestCaseListItem,
 )
 
@@ -25,5 +26,6 @@ __all__ = [
     "ScenarioGenerationError",
     "ScenarioPlan",
     "ScenarioStep",
+    "AuthoredFlow",
     "TestCaseListItem",
 ]
