@@ -140,6 +140,25 @@ class MessageType(StrEnum):
     # 답인지는 payload 의 `type` 이 말한다. 저쪽은 제안에 대한 답(`SCREEN_SELECTOR_VERDICT`)
     # 에도 이 타입으로 답하므로, 그 `type` 을 확인하지 않으면 남의 답을 제 것으로 읽는다.
     SCREEN_SELECTOR_RESULT = "SCREEN_SELECTOR_RESULT"
+    # Agent -> Orchestration
+    #
+    # 이 런이 capability 하나에 대해 배운 것을 지도에 적는다 (ARTEL-644).
+    #
+    # 철자와 payload 는 orchestration 의 `contentmap/observe/CapabilityWriteFrames.kt` 와
+    # 그 저장소의 `docs/capability-write-frames.md` 가 정한 것 그대로다. **여기서 지어내지
+    # 않는다** — PR 135 는 없는 frame 을 이 저장소가 정의했다가 통째로 닫혔다.
+    #
+    # [CAPABILITY_VERDICT] 는 지도에 이미 있는 행이 되더라 / 안 되더라, [CAPABILITY_DISCOVERED]
+    # 는 근거에 없던 것을 새로 적는 것이다.
+    CAPABILITY_VERDICT = "CAPABILITY_VERDICT"
+    CAPABILITY_DISCOVERED = "CAPABILITY_DISCOVERED"
+    # Orchestration -> Agent
+    #
+    # 위의 두 쓰기에 대한 답. `KNOWLEDGE_WRITE_RESULT` 와 같은 구조로, 한 타입이 둘 모두에
+    # 답하고 무엇의 답인지는 payload 의 `type` 이 말한다. 거절은 요청의 `correlationId` 를 문
+    # `ERROR` 다 — 지식 쓰기(ARTEL-331)와 화면 판정 목록(ARTEL-657)이 이미 그 짝이라 이쪽에
+    # 새로 나눠 볼 것이 생기지 않는다.
+    CAPABILITY_WRITE_RESULT = "CAPABILITY_WRITE_RESULT"
     # Bidirectional
     ERROR = "ERROR"
     # Bidirectional. The operator talking to the Agent mid-run, and its reply.
@@ -973,6 +992,127 @@ class ScreenSelectorResultPayload(BaseModel):
     accepted: list[ScreenSelectorAcceptedEntry] = Field(default_factory=list)
     rejected: list[ScreenSelectorRejectedEntry] = Field(default_factory=list)
     folded_screens: int = 0
+
+
+
+# --- capability write frames (ARTEL-644 의 계약) -------------------------------
+#
+# 프레임 셋이 전부 여기 있다. 계약 원본은 orchestration 의
+# `contentmap/observe/CapabilityWriteFrames.kt` 이고 산문 설명은 그 저장소의
+# `docs/capability-write-frames.md` 다. **둘이 어긋나면 Kotlin 파일이 맞다.**
+#
+# 실측이 이 프레임을 부른다. `artel_integration` 의 capability 472 행 중
+# `verification = 'confirmed'` 이 2 행이고, 418 행은 `interaction = 'none'` 이라 누를 수가
+# 없어 action 전후의 `pulse` 를 비교하는 기계 검증이 아무 말도 못 한다. 일어났는지는 화면을
+# 본 쪽 — 이 agent — 이 안다.
+
+
+class CapabilityActionRecord(BaseModel):
+    """verdict 를 만든 조작. **재현이 읽히는 자리가 content_map 이 아니라 이 기록이다.**
+
+    전부 선택이다. 실측 472 행 중 418 행이 `interaction = 'none'` 이라 보낼 메서드가 애초에
+    없다.
+
+    `params` 가 리스트인 것은 SDK 프로토콜의 인자가 위치 인자이기 때문이다
+    ([JsonRpcAction.params] 와 같은 값). 저쪽은 이 값을 읽지 않고 `action_params` jsonb 로
+    그대로 넘기므로, 우리가 실제로 보낸 모양 그대로 싣는 것이 가장 정직하다.
+
+    `attempts` 를 안 싣는다. 그 칸은 "첫 메서드가 거절당해 바꿔 성공한 횟수" 인데, 이 런이
+    보낸 dispatch 중 무엇이 이 capability 의 재시도였는지 가릴 방법이 이쪽에 없다. 근거 없는
+    수를 적는 것보다 저쪽 기본값 1 이 낫다.
+    """
+
+    method: str | None = None
+    params: list[Any] | None = None
+    attempts: int | None = None
+
+
+class CapabilityVerdictPayload(BaseModel):
+    """`CAPABILITY_VERDICT` 의 payload. 지도에 **이미 있는** 행에 대한 판단이다.
+
+    `capability_key` 와 `capability_id` 중 **정확히 하나**를 싣는다. 둘 다거나 둘 다 아니면
+    거절이다. 키가 기본이고 — 재적재를 넘어 살아남으므로 — id 는 키가 없는 행,
+    즉 방금 `CAPABILITY_DISCOVERED` 로 만든 행을 지목할 때 쓴다. observed · inferred 출신은
+    `capability_key` 가 NULL 이다.
+
+    `scene` 이 필수인 것이 거절 규칙의 축이다. agent 가 서 있지 않은 `scene` 의 capability 에
+    verdict 를 찍으면 그 verdict 는 이 런이 실제로 본 것이 아니다.
+
+    id 는 전부 문자열이다. 64비트 값이 JSON 숫자로 오가면 정밀도가 깎인다 — 이 소켓의 다른
+    id 가 전부 같은 이유로 문자열이다.
+    """
+
+    scene: str
+    verdict: str
+    rationale: str
+    capability_key: str | None = None
+    capability_id: str | None = None
+    capture_id: str | None = None
+    screen_id: str | None = None
+    action: CapabilityActionRecord | None = None
+
+
+class CapabilityDiscoveredPayload(BaseModel):
+    """`CAPABILITY_DISCOVERED` 의 payload. 근거가 말한 적 없는 capability 다.
+
+    `origin` 은 `observed` 또는 `inferred` 만 받는다. `evidence` 를 받으면 agent 가 정적
+    분석의 옷을 입은 행을 만들 수 있고, 그 순간 "이 행이 어디서 왔나" 가 답할 수 없는 질문이
+    된다.
+
+    `verdict` 는 `observed` 에 **필수**이고 `inferred` 에는 실을 수 없다. `observed` 가 곧
+    "눌러 보고 결과를 봤다" 는 뜻이라 verdict 가 따라오는 것이 그 뜻이고, 그것이 `rationale`
+    이 실제로 어딘가에 앉게 하는 유일한 길이기도 하다.
+
+    `based_on` 은 `inferred` 일 때 딛고 선 `capability_observation` 의 id 목록이고 이 런의
+    것이어야 한다. 비면 거절이다 — 근거를 밝히지 않은 추론은 그럴듯한 거짓말이다.
+    """
+
+    scene: str
+    origin: str
+    summary: str
+    interaction: str
+    rationale: str
+    given_text: str | None = None
+    input_key: str | None = None
+    input_phase: str | None = None
+    control_path: str | None = None
+    control_label: str | None = None
+    capture_id: str | None = None
+    screen_id: str | None = None
+    verdict: str | None = None
+    action: CapabilityActionRecord | None = None
+    based_on: list[str] = Field(default_factory=list)
+
+
+class CapabilityWriteResultPayload(BaseModel):
+    """`CAPABILITY_WRITE_RESULT` 의 payload. 쓰기 둘에 이 한 타입이 답한다.
+
+    `type` 은 무엇의 답인가다. 확인하지 않으면 남의 답으로 tool 을 풀어 준다 —
+    `KnowledgeWriteResultPayload` 와 같은 검사이고 같은 이유다.
+
+    `capability_id` 를 **기억해 둔다.** `observed` · `inferred` 로 만든 행은 `capability_key`
+    가 없어서, 그 행에 나중에 verdict 를 찍는 길이 이 id 뿐이다.
+
+    `observation_id` 는 이 프레임이 쓴 `capability_observation` 행이고, verdict 를 안 실은
+    discovery 에서는 null 이다. `inferred` 를 적을 때 `based_on` 에 넣을 수 있는 id 가 이것뿐
+    이므로, 부르는 쪽이 이 값을 모아 둔다.
+
+    `created` 는 `CAPABILITY_DISCOVERED` 가 행을 **새로** 넣었을 때만 true 다. false 는
+    재전송이 흡수됐거나 이 답이 verdict 의 답이라는 뜻이다.
+
+    전부 기본값이 있다. 필드를 하나 더한 orchestration 이 기다리는 tool 을 풀지 못하게 만들면
+    안 된다 — `KnowledgeWriteResultPayload` 와 같은 판단이다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str = ""
+    capability_id: str = ""
+    capability_key: str | None = None
+    scene_id: str = ""
+    verification: str = ""
+    observation_id: str | None = None
+    created: bool = False
 
 
 class StatusPayload(BaseModel):
