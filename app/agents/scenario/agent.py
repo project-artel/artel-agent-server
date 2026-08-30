@@ -32,6 +32,7 @@ from app.agents.scenario.errors import ScenarioGenerationError
 from app.agents.scenario.progress import ProgressCallback
 from app.agents.scenario.prompt import build_messages, build_system_prompt
 from app.agents.scenario.ordering import UnreachableClimb, unreachable_climbs
+from app.agents.scenario import trace
 from app.agents.scenario.schemas import (
     ScenarioAgentRequest,
     ScenarioAgentResult,
@@ -117,6 +118,16 @@ class ScenarioAgent:
             [tool.name for tool in tools],
         )
 
+        # The prompt is the one thing orchestration cannot see — it composes the
+        # pieces but never the assembled text, and "what did the model actually
+        # read" is the first question every wrong answer raises (ARTEL-650).
+        trace.record(
+            request.run_id,
+            "  · 모델에 보낸다",
+            f"프롬프트 {version} {trace.blob(request.run_id, 'prompt.md', system_prompt)}\n"
+            f"도구: {[tool.name for tool in tools]}",
+        )
+
         agent = self._agent_factory(
             model=request.model, tools=tools, system_prompt=system_prompt
         )
@@ -179,7 +190,16 @@ class ScenarioAgent:
         """
         problems = unreachable_climbs(result.scenarios, request.test_case_list)
         if not problems:
+            trace.record(request.run_id, "  · 스스로 되짚었다", "못 가는 오름 없음")
             return result
+        trace.record(
+            request.run_id,
+            "  · 스스로 되짚었다",
+            "\n".join(
+                f"{result.scenarios[i].title}: " + " / ".join(c.describe() for c in cs)
+                for i, cs in problems.items()
+            ),
+        )
 
         logger.info(
             "[scenario] climbs nothing pays for — asking again\n  scenarios=%s",

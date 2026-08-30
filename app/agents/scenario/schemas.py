@@ -159,6 +159,11 @@ class ScenarioAgentRequest(BaseModel):
     model: LLMModel = DEFAULT_MODEL
     # Locale for the natural-language output (message + scenario text).
     locale: OutputLanguage = DEFAULT_LANGUAGE
+    # Which run this turn belongs to (ARTEL-650). Carried for one reason: the
+    # per-run record of the authoring session lives on the orchestration side, and
+    # the prompt the model saw plus its raw answer are the only two things that
+    # never reach it. Without the id they cannot be filed with the rest.
+    run_id: int | None = None
 
 
 class AuthoredStep(BaseModel):

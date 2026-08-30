@@ -140,6 +140,7 @@ class SessionService:
             current_scenarios=record.current_scenarios,
             model=record.model,
             locale=record.locale,
+            run_id=record.run_id,
         )
         result = await self._agent.run(
             request, AgentContext(session_id=session_id), channel
