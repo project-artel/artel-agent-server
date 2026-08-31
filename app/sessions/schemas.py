@@ -32,6 +32,9 @@ class SessionRecord(BaseModel):
     # Walkable flows for this session (ARTEL-658). A snapshot like the case list —
     # both come from the same map read when the session opens.
     flows: list[AuthoredFlow] = Field(default_factory=list)
+    # The screen the game boots into (ARTEL-670). Frozen with the rest — it is one
+    # more thing the same map read already knows.
+    entry_scene: str | None = None
     # Full conversation turns; windowed for prompt reconstruction by the service.
     history: list[HistoryTurn] = Field(default_factory=list)
     # First user input, consumed when the WS connects to run the first turn.

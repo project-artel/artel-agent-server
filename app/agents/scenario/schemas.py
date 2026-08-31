@@ -176,6 +176,12 @@ class ScenarioAgentRequest(BaseModel):
     # failed. The turn then groups and orders on its own, exactly as before; that
     # fallback is also the rollback.
     flows: list["AuthoredFlow"] = Field(default_factory=list)
+    # Which screen the game boots into (ARTEL-670). The screen graph is cyclic —
+    # every screen reaches every other — so nothing in the structure says where a
+    # player starts. The build says it, orchestration reads it, and until now it
+    # was used only inside orchestration's own calculation and never told to the
+    # model. Absent means "not sent", which the shape block prints as such.
+    entry_scene: str | None = None
 
 
 class AuthoredFlow(BaseModel):
