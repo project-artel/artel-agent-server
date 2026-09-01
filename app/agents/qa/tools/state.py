@@ -6,7 +6,9 @@
 """
 
 from dataclasses import dataclass
+from typing import Any
 
+from app.qa.envelope import JsonRpcAction
 from app.qa.schemas import QaStepResult
 
 
@@ -91,6 +93,24 @@ class QaRunState:
         self.knowledge_links_attempted = 0
         self.knowledge_unlinks_attempted = 0
         self.knowledge_expands_attempted = 0
+        # 이 런이 content map 에 적어 만든 `capability_observation` 의 id → 무엇에 대한
+        # 문장이었나 (ARTEL-644).
+        #
+        # `inferred` 를 적을 때 `based_on` 에 실을 수 있는 값이 이것뿐이고, 저쪽은 **이 런의**
+        # observation 이 아니면 거절한다. 그래서 이 표가 없으면 모델이 지어낸 id 를 싣고 왕복
+        # 하나를 거절로 쓴다 — `knowledge_seen` 이 있는 이유와 같다.
+        self.capability_observations: dict[str, str] = {}
+        # 이 런이 `record_new_capability` 로 만든 행의 id → 그 요약.
+        #
+        # 그 행들은 `capability_key` 가 NULL 이라(키의 산식에 넣을 `entry_id` 가 없다) 나중에
+        # verdict 를 찍는 유일한 길이 id 다.
+        self.capability_rows_written: dict[str, str] = {}
+        # 이 런이 실제로 보낸 조작. method → 마지막으로 보낸 인자.
+        #
+        # `capability_observation.action_params` 에 재현이 앉는 자리이고, 그 값을 모델에게
+        # 받아 적으면 안 된다 — JSON-RPC 인자는 모델이 지어내기 쉬운 모양이고 저쪽은 그것을
+        # 읽지 않고 그대로 저장한다. 모델은 "무엇으로 눌렀나" 만 말하고 인자는 이 표가 낸다.
+        self.dispatched_action_params: dict[str, list[Any]] = {}
         # Handed to the vision middleware on the next model call. The tool cannot
         # return the image itself — an image block on a tool result is rejected by
         # the chat/completions API every model here is reached through.
@@ -116,6 +136,16 @@ class QaRunState:
         for neighbour in neighbours:
             if neighbour.id:
                 self.knowledge_glimpsed[neighbour.id] = neighbour.summary
+
+    def remember_dispatch(self, actions: list[JsonRpcAction]) -> None:
+        """이 런이 게임에 보낸 조작을 method 별로 마지막 것만 남긴다.
+
+        마지막 것만인 이유는 이 값이 쓰이는 자리 때문이다 — verdict 를 적는 tool 이
+        "`button_click` 으로 눌렀다" 는 모델의 말에 인자를 채워 주는 것이고, 그 말이 가리키는
+        것은 방금 보낸 것이다. 전부 쌓아 두면 어느 것이 그 말의 대상인지 이쪽이 못 고른다.
+        """
+        for action in actions:
+            self.dispatched_action_params[action.method] = list(action.params)
 
     def knows_of(self, knowledge_id: str) -> bool:
         """Whether this run has been shown this entry at all, in full or as a line."""

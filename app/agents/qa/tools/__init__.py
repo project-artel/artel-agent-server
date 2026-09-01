@@ -17,6 +17,7 @@ from langchain_core.tools import BaseTool
 
 from app.agents.qa.arch import ResolvedArch, default_resolved_arch
 from app.agents.qa.tools.action_tools import build_action_tools
+from app.agents.qa.tools.capability_tools import build_capability_tools
 from app.agents.qa.tools.knowledge_tools import build_knowledge_tools
 from app.agents.qa.tools.observation_tools import build_capture_tool, build_observation_tools
 from app.agents.qa.tools.reporting_tools import build_reporting_tools
@@ -37,6 +38,7 @@ def build_tools(
         *build_observation_tools(ctx),
         *build_knowledge_tools(ctx),
         *build_screen_selector_tools(ctx),
+        *build_capability_tools(ctx),
         *build_action_tools(ctx),
         *build_reporting_tools(ctx),
     ]

@@ -2,13 +2,17 @@
 
 - Date: 2026-09-01
 - Jira: ARTEL-688
-- Status: Reviewed (fast·medium 1차, heavy 2차 반영)
+- Status: Reviewed (fast·medium 1차, heavy 2차, pair review 반영). `f82c597` 로 rebase 완료
 
 ## Goal
 
-`app/agents/qa/tools.py` 1979 줄을 `app/agents/qa/tools/` package 로 바꾸고, `build_tools`
-한 함수(376-1979 줄, 1604 줄) 안에 중첩돼 있는 tool 33 개를 주제별 모듈로 옮긴다. 옮기기만
+`app/agents/qa/tools.py` 2347 줄을 `app/agents/qa/tools/` package 로 바꾸고, `build_tools`
+한 함수(421-2347 줄, 1927 줄) 안에 중첩돼 있는 tool 36 개를 주제별 모듈로 옮긴다. 옮기기만
 한다. tool 이름, 인자 schema, description, 본문, 조립 순서를 하나도 바꾸지 않는다.
+
+줄 번호와 개수는 base `f82c597` 기준이다. 작업 도중 develop 이 움직였고(#151 이 capability
+tool 셋과 `app/agents/qa/capability.py` 를 넣었다), 거기로 rebase 하면서 주제가 다섯에서
+여섯으로 늘었다. 아래 `## Rebase` 참고.
 
 ## Non-goals
 
@@ -24,27 +28,26 @@
 
 `build_tools(channel, state, arch)` 안에 전부 들어 있다. 파일 안의 순서가 이미 주제별이다.
 
-| 덩어리 | 줄 | 줄 수 | tool |
-| --- | --- | --- | --- |
-| 공통 헬퍼 `_answer`, 화면 관찰 `observe_scene`, 공통 헬퍼 `_run`, `inspect_object`, `capture_screen` | 381-604 | 224 | 3 |
-| 지식 `search_knowledge`~`expand_knowledge` | 605-1268 | 664 | 7 |
-| screen selector `_write_screen_selector_rule`, `include_screen_selector`, `exclude_screen_selector` | 1269-1372 | 104 | 2 |
-| 게임 입력 `click_button`~`reset_game` | 1373-1698 | 326 | 16 |
-| 보고와 운영자 `wait_for_operator`~`reply_to_operator` | 1699-1936 | 238 | 5 |
-| 조립과 `arch.vision` 분기 | 1937-1979 | 43 | — |
+| 덩어리 | 줄 | tool |
+| --- | --- | --- |
+| 공통 헬퍼 `_answer` `_run`, 화면 관찰 `observe_scene` `inspect_object` `capture_screen` | 426-651 | 3 |
+| 지식 `search_knowledge`~`expand_knowledge` | 653-1315 | 7 |
+| screen selector `_write_screen_selector_rule`, `include_screen_selector`, `exclude_screen_selector` | 1317-1419 | 2 |
+| capability `_standing_scene`~`list_scene_capabilities` | 1421-1736 | 3 |
+| 게임 입력 `click_button`~`reset_game` | 1738-2062 | 16 |
+| 보고와 운영자 `wait_for_operator`~`reply_to_operator` | 2064-2297 | 5 |
+| 조립과 `arch.vision` 분기 | 2299-2347 | — |
 
-모듈 수준에는 `PendingCapture` 68-77, `QaRunState` 78-262, `CAPTURE_SCREEN_DESCRIPTION`
-268-280 (앞 주석 264-267), `REPORT_ISSUE_DESCRIPTION` 285-305 (앞 주석 283-284),
-`render_closing_asks` 308-373 이 있다.
+모듈 수준에는 `PendingCapture` 86-92, `QaRunState` 95-306, `CAPTURE_SCREEN_DESCRIPTION`
+313-325, `REPORT_ISSUE_DESCRIPTION` 330-350, `render_closing_asks` 353-418 이 있다.
 
-tool 안에 또 중첩된 헬퍼도 함께 간다. `update_knowledge` 안의 `refused` 848 줄이 그것이다.
-본문을 통째로 옮기므로 따로 손댈 일은 없지만, 옮긴 뒤 이름이 남아 있는지 확인한다.
+tool 안에 또 중첩된 헬퍼도 함께 간다. `update_knowledge` 안의 `refused` 가 그것이다.
 
 ### 나누지 못하게 잡고 있는 것
 
-1. tool 33 개가 전부 `channel`, `state`, `arch` 를 closure 로 잡는다.
+1. tool 36 개가 전부 `channel`, `state`, `arch` 를 closure 로 잡는다.
 2. `_answer` 는 화면과 운영자의 말을 붙이는 유일한 자리다. `state.watermark` 를 옮긴다.
-   다섯 덩어리 중 네 덩어리가 부른다.
+   여섯 덩어리 중 네 덩어리가 부른다.
 3. `_run` 은 acting tool 전부가 지나간다. `state.last_action_frame` 을 옮기고 `_answer` 를
    부른다.
 4. `app/agents/qa/arch.py` 의 `structure_of` 가 `_ThrowawayChannel` 로 `build_tools` 를 불러
@@ -63,17 +66,19 @@ tool 안에 또 중첩된 헬퍼도 함께 간다. `update_knowledge` 안의 `re
 
 ### 기준선
 
-refactor 전 `structure_of(default_resolved_arch())` 값. 실제로 찍어서 확인했다.
+refactor 전 `structure_of(default_resolved_arch())` 값. base `f82c597` 를 따로 checkout 해서
+찍었다.
 
-- fingerprint `27f13c92130c`
+- fingerprint `e8e1d4764809`
 - middleware `compaction`, `fold_scene_views`, `fold_knowledge_neighbours`, `capture_vision`,
   `log_token_usage`
-- 이름 34 개, 이 순서 그대로 (tool 33 개와 compaction middleware 의 `compact_context`):
+- 이름 37 개, 이 순서 그대로 (tool 36 개와 compaction middleware 의 `compact_context`):
 
 ```
 observe_scene, inspect_object, search_knowledge, record_knowledge, update_knowledge,
 forget_knowledge, link_knowledge, unlink_knowledge, expand_knowledge,
-include_screen_selector, exclude_screen_selector, click_button, enter_text, press_key,
+include_screen_selector, exclude_screen_selector, list_scene_capabilities,
+record_capability_verdict, record_new_capability, click_button, enter_text, press_key,
 move_pointer, click_at, double_click_at, hold_mouse_button, release_mouse_button,
 hold_key, release_key, set_input_axis, set_input_button, drag_pointer, pause_game_time,
 resume_game_time, reset_game, wait_for_operator, report_step, report_issue, finish_run,
@@ -84,14 +89,15 @@ reply_to_operator, capture_screen, compact_context
 라서, 목록을 통째로 뒤집어도 digest 는 같다. 테스트에도 순서를 고정하는 곳이 없다. 그래서
 순서는 위 34 개를 문자열로 대조해서만 지킬 수 있다. 2 차 리뷰에서 나온 지적이다.
 
-여기에 함정이 하나 더 있다. **정의 순서와 조립 순서가 원래부터 다르다.** `tools.py` 의
-정의 순서는 `hold_key`(1514) → `set_input_axis`(1531) → `set_input_button`(1554) →
-`release_key`(1577) 인데, 조립 목록은 `hold_key`, `release_key`, `set_input_axis`,
-`set_input_button` 이다. 새 모듈에서 "파일에 보이는 순서대로" 돌려주면 `release_key` 가 세
+여기에 함정이 하나 더 있다. **정의 순서와 조립 순서가 원래부터 다르다.** 두 군데다.
+입력 tool 은 정의가 `hold_key` → `set_input_axis` → `set_input_button` → `release_key` 인데
+조립은 `hold_key`, `release_key`, `set_input_axis`, `set_input_button` 이고, capability tool
+은 정의가 `record_capability_verdict` → `record_new_capability` → `list_scene_capabilities`
+인데 조립은 `list_scene_capabilities` 가 먼저다. 새 모듈에서 "파일에 보이는 순서대로" 돌려주면 `release_key` 가 세
 칸 밀리고, fingerprint 도 테스트도 그것을 잡지 못한다. 각 builder 의 `return` 목록은 정의
 순서가 아니라 **원래 조립 목록** 을 그대로 옮긴다.
 
-테스트 기준선도 같은 commit 에서 찍었다: `1 failed, 827 passed` (201s). 실패는
+테스트 기준선도 같은 commit 에서 찍었다: `1 failed, 860 passed`. 실패는
 `tests/test_config.py::test_settings_can_load_from_env_file` 하나이고, 작업 트리의 실제
 `.env` 가 `_env_file` 을 이겨서 나는 기존 실패다.
 
@@ -124,13 +130,14 @@ reply_to_operator, capture_screen, compact_context
 
   | 모듈 | 줄 | tool | 되묶는 이름 |
   | --- | --- | --- | --- |
-  | `observation_tools.py` | 189 | 3 | `channel`, `state`, `_answer` (`build_capture_tool` 은 `arch` 도) |
-  | `knowledge_read_tools.py` | 158 | 2 | `channel`, `state`, `arch` |
-  | `knowledge_write_tools.py` | 586 | 5 | `channel`, `state`, `arch` |
+  | `observation_tools.py` | 185 | 3 | `channel`, `state`, `_answer` (`build_capture_tool` 은 `arch` 도) |
+  | `knowledge_read_tools.py` | 160 | 2 | `channel`, `state`, `arch` |
+  | `knowledge_write_tools.py` | 585 | 5 | `channel`, `state`, `arch` |
   | `knowledge_tools.py` | 17 | — | 없음. 읽기와 쓰기를 순서대로 합치기만 한다 |
-  | `screen_tools.py` | 132 | 2 | `channel` |
-  | `action_tools.py` | 365 | 16 | `_run` |
-  | `reporting_tools.py` | 364 | 5 | `channel`, `state`, `arch`, `_answer` |
+  | `screen_tools.py` | 129 | 2 | `channel` |
+  | `capability_tools.py` | 361 | 3 | `channel`, `state` |
+  | `action_tools.py` | 362 | 16 | `_run` |
+  | `reporting_tools.py` | 363 | 5 | `channel`, `state`, `arch`, `_answer` |
 
   `observation_tools.py` 는 `build_capture_tool` 을 따로 낸다. `capture_screen` 은
   `arch.vision` 이 켜졌을 때만, 그것도 목록 맨 뒤에 붙기 때문이다.
@@ -155,13 +162,14 @@ worktree 에는 `.venv` 가 없다. 본 체크아웃의 인터프리터를 쓰�
 
 | 확인 | 결과 |
 | --- | --- |
-| `LANGSMITH_TRACING=false PYTHONPATH=. .venv/bin/python -m pytest -q` | `1 failed, 827 passed` — 기준선과 같음. 실패는 기존 `test_settings_can_load_from_env_file` 하나 |
-| fingerprint | `27f13c92130c` — 기준선과 같음 |
-| 이름 34 개를 순서까지 문자열 대조 | 일치 |
+| `LANGSMITH_TRACING=false PYTHONPATH=. .venv/bin/python -m pytest -q` | `1 failed, 860 passed` — 기준선과 같음. 실패는 기존 `test_settings_can_load_from_env_file` 하나 |
+| fingerprint | `e8e1d4764809` — 기준선과 같음 |
+| 이름 37 개를 순서까지 문자열 대조 | 일치 |
 | middleware 다섯 | 일치 |
 | `git diff --stat origin/develop -- tests` | 비어 있음. 테스트 파일은 한 줄도 안 건드렸다 |
-| `wc -l app/agents/qa/tools/*.py` | 가장 큰 파일이 `knowledge_write_tools.py` 586 줄 |
+| `wc -l app/agents/qa/tools/*.py` | 가장 큰 파일이 `knowledge_write_tools.py` 585 줄 |
 | 모듈별 자유 이름 해결 여부 | 전부 해결됨 |
+| 원본 블록이 새 모듈에 바이트 단위로 있는지 | 2347 줄 중 2184 줄 일치 |
 
 마지막 항목은 2 차 리뷰가 요구한 기계적 점검이고, 실제로 버그를 하나 잡았다. `ast` 로 각
 모듈의 Load 이름에서 그 모듈 안에서 묶이는 이름을 빼면 밖에서 와야 하는 것만 남는다.
@@ -222,6 +230,25 @@ return [search_knowledge, *build_knowledge_write_tools(ctx), expand_knowledge]
 했다"를 눈으로 확인할 수 있다는 이 작업의 유일한 안전장치를 잃는다. 되묶기 줄은 그 아래
 tool 이 무엇을 closure 로 잡는지 먼저 말해 주는 머리말로도 읽힌다. 2 차 리뷰의 지적대로
 모듈마다 쓰는 이름만 적으므로 죽은 이름은 없다.
+
+## Rebase
+
+작업 도중 develop 이 `836081f` 에서 `f82c597` 로 움직였다. #151 이 `app/agents/qa/capability.py`
+를 새로 넣고 `tools.py` 에 368 줄을 더했다 — capability tool 셋(`record_capability_verdict`,
+`record_new_capability`, `list_scene_capabilities`)과 그 헬퍼 다섯, `QaRunState` 의 새 필드
+셋과 `remember_dispatch`, 그리고 `_run` 이 보낸 조작을 기록하는 세 줄이다.
+
+rebase 는 `tools.py` 에서 modify/delete 로 충돌했고, 삭제를 유지한 뒤 #151 의 delta 를 새
+package 로 나눠 넣었다.
+
+- `QaRunState` 의 새 필드 셋과 `remember_dispatch` → `state.py`
+- `_run` 의 `state.remember_dispatch(actions)` 세 줄 → `ToolContext.run`
+- capability 블록 316 줄 → 새 모듈 `capability_tools.py`
+- 조립 목록의 세 자리 → `__init__.py`, `build_screen_selector_tools` 와 `build_action_tools`
+  사이
+
+그래서 주제가 다섯에서 여섯으로 늘었다. rebase 후 fingerprint `e8e1d4764809` 와 이름 37 개
+순서가 새 기준선과 일치한다.
 
 ## Open Questions
 

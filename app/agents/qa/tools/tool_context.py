@@ -73,6 +73,9 @@ class ToolContext:
         """
         channel, state = self.channel, self.state
         _answer = self.answer
+        # 무엇을 어떤 인자로 보냈는지 남긴다. capability 에 verdict 를 적을 때 재현이
+        # 여기서 나온다 — 모델은 method 이름만 말하고 인자는 이 기록이 낸다(ARTEL-644).
+        state.remember_dispatch(actions)
         result, looked = await channel.act_and_look(actions, summary, step)
         messages = channel.drain_operator_messages()
 
