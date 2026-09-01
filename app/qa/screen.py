@@ -7,7 +7,7 @@ ARTEL-654). 목록 밖 selector 는 무시되므로 목록이 얇으면 서로 �
 그것을 알아챌 수 있는 자리는 게임을 하고 있는 QA agent 하나뿐이다. 화면이 눈에 띄게
 바뀌었는데 지도가 같은 화면이라고 하면 그 불일치를 본 것은 그 agent 다. 이 모듈은 그
 agent 가 그 불일치를 **볼 수 있게** 하는 절반이고, 나머지 절반인 고치는 tool 은
-`app/agents/qa/tools.py` 에 있다.
+`app/agents/qa/tools/screen_tools.py` 에 있다.
 
 ## 어디서 오는가
 

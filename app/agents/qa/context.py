@@ -3,7 +3,8 @@
 Every QA tool result carries a full scene view (`SceneMemory.render` in
 `app/qa/scene.py`), and every tool message stays in the conversation forever —
 `observe_scene` puts one there directly, and every acting tool does too, by way
-of the shared `_run` in `app/agents/qa/tools.py`. A run of even a handful of
+of the shared `ToolContext.run` in `app/agents/qa/tools/tool_context.py`. A run of
+even a handful of
 steps ends up with dozens of near-identical dumps in context by the time it
 matters most: late in the run, with the least room left to reason.
 
@@ -101,14 +102,15 @@ def fold_stale_scenes(
     call: a mix of `HumanMessage`, `AIMessage`, and `ToolMessage`, in
     chronological order. Only `ToolMessage.content` is ever inspected — a
     scene view can only appear there, since it comes from `SceneMemory.render`
-    by way of `observe_scene`/`_run` in `app/agents/qa/tools.py`. Every other
+    by way of `observe_scene` (`app/agents/qa/tools/observation_tools.py`) and
+    `ToolContext.run` (`app/agents/qa/tools/tool_context.py`). Every other
     message, and every `ToolMessage` that carries no view (a failed action, an
     unanswered look), is returned unchanged.
 
     A "view" is the exact span between the markers `SceneMemory.render` puts
     around its own output — never a guess at where `scene: ...` text starts or
     ends. That guarantees a fold either removes a whole view or none of it, and
-    it means the action-outcome lines `_run` writes above the view and the
+    it means the action-outcome lines `ToolContext.run` writes above the view and the
     operator block `with_operator_messages` (see `app/qa/channel.py`) appends
     below it are untouched: the fold only ever replaces the marked span.
 
