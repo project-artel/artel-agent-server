@@ -1265,3 +1265,121 @@ def test_current_scene_은_예약된_페이지를_안_먹는다():
     memory.current_scene()
 
     assert memory.page_due is True
+
+
+# --- 화면의 글자 (ARTEL-690) ---------------------------------------------------
+
+
+def label(said: str | None = "전투를 시작하려면 Space", **over) -> dict:
+    """멤버도 offer 도 없이 글자만 든 객체. 라벨이 실제로 이 모양으로 온다."""
+    base = {
+        "scene": "TurnBattleScene",
+        "id": 31182,
+        "path": "Canvas/Dialogue",
+        "selector": "Canvas[2]/Dialogue[0]",
+        "members": [],
+    }
+    if said is not None:
+        base["text"] = said
+    base.update(over)
+    return base
+
+
+def test_글자만_든_라벨이_화면에_나온다():
+    """이것이 없으면 라벨은 파싱까지 되고 렌더에서 사라진다.
+
+    가지치기(ARTEL-662)가 신선한 값도, 빚진 값도, 누를 것도 없으면 건너뛰는데 라벨은
+    셋 다 비어 있다. 판독에 글자를 실어 보내기 시작한 첫날 스테이지 렌더에 라벨이 한 줄도
+    나오지 않은 이유가 이것이었다.
+    """
+    memory = fold(reading(active=[label()]))
+
+    view = memory.render(since=0)
+
+    assert "Canvas[2]/Dialogue[0]" in view
+    assert "says '전투를 시작하려면 Space'" in view
+
+
+def test_글자가_바뀌면_변화로_보인다():
+    """읽는 것만큼 바뀌는 것을 아는 게 중요하다.
+
+    누른 뒤 값이 바뀌면 넘어간 것이고, 그대로면 입력이 안 먹은 것이다. 지금은 그 둘을
+    가릴 수단이 없어 `Space` 를 네 번 눌러 보는 것 말고 할 수 있는 일이 없었다.
+    """
+    memory = fold(
+        reading(active=[label("첫 줄")]),
+        reading(reading=2, whole=False, active=[label("둘째 줄")]),
+    )
+
+    view = memory.render(since=1)
+
+    assert "says '둘째 줄'" in view
+
+
+def test_안_바뀐_글자는_창에_다시_안_적는다():
+    """델타에 안 실린 글자는 이번 창의 소식이 아니다.
+
+    SDK 가 장부에 얹어 보내므로 안 바뀐 글자는 애초에 오지 않는다. 그것을 매 턴 다시
+    적으면 독자가 이미 아는 것으로 창이 찬다.
+    """
+    memory = fold(reading(active=[label("그대로")]))
+    memory.render(since=0, advance=True)
+
+    later = memory.render(since=memory.clock())
+
+    assert "says" not in later
+
+
+def test_말한_적_없는_글자는_창_밖에서_와도_적는다():
+    """`owed` 가 멤버에 하는 일을 글자에도 한다 (ARTEL-662 와 같은 이유).
+
+    창의 경계는 마지막 행위이고 "내가 무엇을 말했나" 는 다른 질문이다. 행위 전에 도착한
+    글자를 창으로만 가르면 영영 탈락한다.
+    """
+    memory = fold(reading(active=[label("행위 전에 도착한 대사")]))
+
+    # 창이 판독보다 뒤에 있어도 — 아직 한 번도 안 말했으므로 나온다.
+    view = memory.render(since=memory.clock())
+
+    assert "says '행위 전에 도착한 대사'" in view
+    assert "(changed earlier)" in view
+
+
+def test_글자를_안_실은_델타가_들고_있던_글자를_지우지_않는다():
+    """델타는 움직인 것만 나른다. 안 실렸다는 것은 "없다" 가 아니라 "안 바뀌었다" 다.
+
+    전량은 반대다 — 그쪽은 held 를 통째로 갈아치우고 SDK 가 볼 수 있는 것을 다 보내므로,
+    전량에 글자가 없으면 그 객체는 정말로 글자가 없는 것이다. `tag` 도 같은 규칙을 탄다.
+    """
+    memory = fold(
+        reading(active=[label("들고 있어야 하는 대사")]),
+        reading(reading=2, whole=False, active=[label(said=None)]),
+    )
+
+    held = next(iter(memory.held.values()))
+
+    assert held.text == "들고 있어야 하는 대사"
+
+
+def test_꺼진_객체의_글자는_화면에_안_나온다():
+    """화면에 없는 글자를 읽게 하면 안 된다.
+
+    SDK 는 꺼진 객체에도 글자를 싣는다 — `silent` 이 멤버 값에만 걸리기 때문이다. 거르는
+    것은 이쪽 몫이고, 이미 `live` 로 거르고 있다. 그 보장을 글자에도 못 박는다.
+    """
+    memory = fold(
+        reading(active=[label("보이지 않는 대사")]),
+        reading(reading=2, whole=True, active=[], deactive=[label("보이지 않는 대사")]),
+    )
+
+    view = memory.render(since=0)
+
+    assert "보이지 않는 대사" not in view
+
+
+def test_물으면_이미_말한_글자도_답한다():
+    """`inspect` 는 창과 무관하게 지금 아는 것을 다 적는 자리다."""
+    memory = fold(reading(active=[label("이미 말한 대사")]))
+    memory.render(since=0, advance=True)
+
+    assert "says '이미 말한 대사'" in memory.inspect("Dialogue")

@@ -131,6 +131,12 @@ class PulseObject(BaseModel):
     #
     # `Untagged` 는 SDK 가 안 보낸다. 여기서 `None` 은 "태그가 없다" 이지 "모른다" 가 아니다.
     tag: str | None = None
+    # 이 객체가 화면에 띄우고 있는 글자(ARTEL-678). 라벨은 멤버도 offer 도 없어서, 이 값이
+    # 없으면 판독에 실려 와도 그릴 것이 없는 객체가 된다.
+    #
+    # SDK 가 장부에 얹어 보내므로 델타에는 **바뀐 것만** 실린다. 그래서 이 필드가 실려
+    # 왔다는 사실 자체가 "이번에 바뀌었다" 이고, 아래 `text_at` 이 그것을 적는다.
+    text: str | None = None
     offers: dict[str, Any] | None = None
     members: list[PulseMember] = Field(default_factory=list)
     # 컴포넌트별로 묶인 멤버. `on` 을 멤버마다 되풀이하지 않으려고 SDK 가 이렇게 낸다
@@ -249,6 +255,8 @@ class _HeldObject(BaseModel):
     rect: dict[str, Any] | None = None
     # 게임이 이 객체를 무엇으로 분류해 두었는가(ARTEL-631).
     tag: str | None = None
+    # 이 객체가 화면에 띄우고 있는 글자(ARTEL-678).
+    text: str | None = None
     offers: dict[str, Any] | None = None
     # True when the object last arrived under `active`.
     live: bool = True
@@ -267,6 +275,13 @@ class _HeldObject(BaseModel):
     # 159턴 런에서 판독이 움직였다고 이름 댄 멤버 53종 중 23종이 한 번도 값을 못 냈고,
     # 거기 `Enemy::Hp` 와 `CombineZone::spellCards` 가 있었다(ARTEL-662).
     shown: dict[str, int] = Field(default_factory=dict)
+    # 글자가 마지막으로 **도착한** 판독 번호와 마지막으로 **그린** 판독 번호. 멤버의
+    # `at`/`shown` 과 같은 짝이고 같은 질문에 답한다.
+    #
+    # 글자가 멤버가 아니라 객체 속성이라 그 두 사전에 못 들어간다. 억지로 넣으면 `on.member`
+    # 모양의 이름을 지어내야 하고, 그 이름은 어느 컴포넌트에서도 오지 않은 것이 된다.
+    text_at: int = 0
+    text_shown: int = 0
 
 
 class PulseMemory(BaseModel):
@@ -438,13 +453,18 @@ class PulseMemory(BaseModel):
                     world=obj.world or (was.world if was else None),
                     rect=obj.rect or (was.rect if was else None),
                     tag=obj.tag or (was.tag if was else None),
+                    text=obj.text if obj.text is not None else (was.text if was else None),
                     offers=obj.offers or (was.offers if was else None),
                     live=live,
                     members=dict(was.members) if was else {},
                 )
                 held.at = dict(was.at) if was else {}
+                # 실려 왔다는 것이 곧 바뀌었다는 뜻이다 — SDK 가 장부에 얹어 보내므로
+                # 안 바뀐 글자는 델타에 없다. 안 실려 왔으면 옛 시각을 그대로 이어받는다.
+                held.text_at = now if obj.text is not None else (was.text_at if was else 0)
                 # 말한 기록도 이어받는다. 여기서 잃으면 이미 말한 값을 매 턴 다시 말한다.
                 held.shown = dict(was.shown) if was else {}
+                held.text_shown = was.text_shown if was else 0
                 for member in obj.members:
                     held.members[member.key] = member
                     held.at[member.key] = now
@@ -628,7 +648,8 @@ class PulseMemory(BaseModel):
                 continue
             # 멤버가 없어도 쓴다. 판독이 유일한 출처일 때, 조준값과 무엇을 할 수 있는지만
             # 들고 오는 객체가 대다수다 — 그것을 버리면 누를 것이 화면에서 사라진다.
-            if not obj.members and not obj.offers and obj.id is None:
+            # 글자만 든 라벨도 같은 이유로 남긴다(ARTEL-690).
+            if not obj.members and not obj.offers and obj.id is None and obj.text is None:
                 continue
 
             fresh = [k for k in sorted(obj.members) if obj.at.get(k, 0) > since]
@@ -642,17 +663,40 @@ class PulseMemory(BaseModel):
             # 조작할 수 있다는 것은 **무엇을 할지 아는 것**이다. id 는 거의 모든 객체에
             # 실리므로 그것으로 가르면 아무것도 안 걸러진다 — offers 가 그 선이다.
             actionable = bool(obj.offers)
+            # 글자도 `fresh`/`owed` 와 같은 두 질문을 받는다(ARTEL-690). 이것이 없으면
+            # 라벨은 파싱까지 되고 여기서 사라진다 — 멤버도 offer 도 없어 셋 다 비기 때문이다.
+            # 실제로 그래서 판독에 글자를 실어 보내기 시작한 첫날 렌더에 라벨이 한 줄도
+            # 나오지 않았다.
+            said_now = obj.text is not None and obj.text_at > since
+            said_owed = (
+                obj.text is not None
+                and not said_now
+                and obj.text_at > obj.text_shown
+            )
 
             # 이번 창에 아무 말도 없고, 아직 안 말한 값도 없고, 누를 수도 없는 객체는
             # 건너뛴다. 독자가 이미 아는 것을 다시 적는 자리다.
             #
             # `owed` 가 여기 있어야 `TutorialController` 처럼 누를 것이 없는 객체가 보인다.
             # 그것이 안 보여서 에이전트가 대사창이 떠 있는지도 모르고 진행했다.
-            if not fresh and not owed and not actionable:
+            if not fresh and not owed and not actionable and not said_now and not said_owed:
                 continue
 
             where = obj.selector or obj.path or key
             lines.append(f"{where}{self._aim(obj)}:")
+            # 헤더 바로 아래, offer 보다 먼저. 화면의 글자는 이 객체가 무엇인지 말하는 것이라
+            # 무엇을 할 수 있는지보다 앞이다. `tag` 처럼 헤더 대괄호에 넣지 않는 것은 길이
+            # 때문이다 — SDK 가 200 자까지 싣는다.
+            if said_now or said_owed:
+                news = (
+                    "  (changed)"
+                    if marking and obj.text_at > news_since
+                    else ""
+                )
+                earlier = "  (changed earlier)" if said_owed else ""
+                lines.append(f"  says {obj.text!r}{news}{earlier}")
+                if advance:
+                    obj.text_shown = self.clock()
             offered = self._offered(obj)
             if offered:
                 lines.append(f"  {offered}")
@@ -707,6 +751,10 @@ class PulseMemory(BaseModel):
             where = obj.selector or obj.path or key
             state = "" if obj.live else "  (switched off)"
             lines.append(f"{where}{self._aim(obj)}{state}:")
+            # 물으면 답한다 — 창과 무관하게 지금 아는 것을 다 적는 자리라, 이미 말한
+            # 글자라도 여기서는 다시 낸다(ARTEL-690).
+            if obj.text is not None:
+                lines.append(f"  says {obj.text!r}")
             offered = self._offered(obj)
             if offered:
                 lines.append(f"  {offered}")
