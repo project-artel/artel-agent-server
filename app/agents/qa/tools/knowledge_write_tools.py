@@ -1,8 +1,10 @@
 """지식창고를 고치는 도구 다섯 개.
 
-읽기와 갈라 둔 이유는 예산이다. 쓰기는 런마다 횟수가 정해져 있고, 지우기는 그중 가장
-적은 몫을 받는다. 고치는 것이 지우고 다시 쓰는 것보다 나은 이유는
-`app/agents/qa/knowledge.py` 의 모듈 설명에 적혀 있다(ARTEL-257).
+읽기와 갈라 둔 이유는 크기다. 한 파일에 두면 718 줄이 된다. 가르는 선은 지식창고를
+바꾸느냐다 — 읽기 둘은 안 바꾸고, 여기 다섯은 전부 바꾼다.
+
+고치는 것이 지우고 다시 쓰는 것보다 나은 이유는 `app/agents/qa/knowledge.py` 의 모듈
+설명에 적혀 있다(ARTEL-257).
 """
 
 from langchain_core.tools import BaseTool, tool
@@ -32,9 +34,7 @@ from app.qa.envelope import (
 
 
 def build_knowledge_write_tools(ctx: ToolContext) -> list[BaseTool]:
-    # ctx 가 든 것을 여기서 되묶는다. 아래 tool 은 `build_tools` 한 함수 안에 있던 것을
-    # 그대로 옮긴 것이라, 이 줄이 있어야 본문이 한 글자도 바뀌지 않는다. 읽는 쪽에는
-    # 아래 tool 이 무엇을 closure 로 잡는지 먼저 말해 주는 머리말이기도 하다.
+    # 아래 tool 이 closure 로 잡는 것. 되묶는 이유는 `tool_context.py` 에 있다.
     channel, state, arch = ctx.channel, ctx.state, ctx.arch
 
     @tool(

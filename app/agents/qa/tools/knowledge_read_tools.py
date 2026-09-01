@@ -24,9 +24,12 @@ from app.qa.channel import KnowledgeRequestFailed, with_operator_messages
 
 
 def build_knowledge_read_tools(ctx: ToolContext) -> list[BaseTool]:
-    # ctx 가 든 것을 여기서 되묶는다. 아래 tool 은 `build_tools` 한 함수 안에 있던 것을
-    # 그대로 옮긴 것이라, 이 줄이 있어야 본문이 한 글자도 바뀌지 않는다. 읽는 쪽에는
-    # 아래 tool 이 무엇을 closure 로 잡는지 먼저 말해 주는 머리말이기도 하다.
+    """`search_knowledge` 와 `expand_knowledge` 를 이 순서로 낸다.
+
+    `knowledge_tools.py` 가 이 둘을 이름으로 풀어 쓰기 도구 사이에 끼워 넣는다. 여기에
+    도구를 더 넣으려면 그쪽 조립도 함께 고쳐야 한다.
+    """
+    # 아래 tool 이 closure 로 잡는 것. 되묶는 이유는 `tool_context.py` 에 있다.
     channel, state, arch = ctx.channel, ctx.state, ctx.arch
 
     @tool(

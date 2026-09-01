@@ -33,9 +33,7 @@ The picture arrives right after this result, as its own message."""
 
 
 def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
-    # ctx 가 든 것을 여기서 되묶는다. 아래 tool 은 `build_tools` 한 함수 안에 있던 것을
-    # 그대로 옮긴 것이라, 이 줄이 있어야 본문이 한 글자도 바뀌지 않는다. 읽는 쪽에는
-    # 아래 tool 이 무엇을 closure 로 잡는지 먼저 말해 주는 머리말이기도 하다.
+    # 아래 tool 이 closure 로 잡는 것. 되묶는 이유는 `tool_context.py` 에 있다.
     channel, state = ctx.channel, ctx.state
     _answer = ctx.answer
 
@@ -109,9 +107,7 @@ def build_capture_tool(ctx: ToolContext) -> BaseTool:
     `arch.vision` 이 켜진 런에만, 그것도 목록 맨 뒤에 붙는다. 그 조건이 조립하는 자리에서
     보여야 해서 다른 관찰 도구와 따로 낸다.
     """
-    # ctx 가 든 것을 여기서 되묶는다. 아래 tool 은 `build_tools` 한 함수 안에 있던 것을
-    # 그대로 옮긴 것이라, 이 줄이 있어야 본문이 한 글자도 바뀌지 않는다. 읽는 쪽에는
-    # 아래 tool 이 무엇을 closure 로 잡는지 먼저 말해 주는 머리말이기도 하다.
+    # 아래 tool 이 closure 로 잡는 것. 되묶는 이유는 `tool_context.py` 에 있다.
     channel, state, arch = ctx.channel, ctx.state, ctx.arch
     _answer = ctx.answer
 

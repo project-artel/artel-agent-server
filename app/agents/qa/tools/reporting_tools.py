@@ -20,8 +20,9 @@ from app.qa.envelope import (
 from app.qa.schemas import QaStepResult
 
 
-# Interpolated for the same reason as the capture description above: the cap is
-# the part the agent has to ration, and a docstring cannot name it.
+# Interpolated for the same reason as CAPTURE_SCREEN_DESCRIPTION in
+# app/agents/qa/tools/observation_tools.py: the cap is the part the agent has to
+# ration, and a docstring cannot name it.
 REPORT_ISSUE_DESCRIPTION = """File a defect you found in the GAME, with the evidence for it.
 
 This is not the step verdict — `report_step` is. Use this when what you saw is
@@ -114,9 +115,7 @@ def render_closing_asks(state: QaRunState) -> str:
 
 
 def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
-    # ctx 가 든 것을 여기서 되묶는다. 아래 tool 은 `build_tools` 한 함수 안에 있던 것을
-    # 그대로 옮긴 것이라, 이 줄이 있어야 본문이 한 글자도 바뀌지 않는다. 읽는 쪽에는
-    # 아래 tool 이 무엇을 closure 로 잡는지 먼저 말해 주는 머리말이기도 하다.
+    # 아래 tool 이 closure 로 잡는 것. 되묶는 이유는 `tool_context.py` 에 있다.
     channel, state, arch = ctx.channel, ctx.state, ctx.arch
     _answer = ctx.answer
 

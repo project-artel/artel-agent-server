@@ -6,6 +6,10 @@
 `answer` 와 `run` 이 여기 있는 이유는 여러 주제의 도구가 함께 쓰기 때문이다. `answer`
 는 화면과 오퍼레이터의 말을 붙이는 유일한 자리이고, `run` 은 게임을 실제로 움직이는
 도구가 전부 지나가는 자리다.
+
+주제별 builder 는 첫 줄에서 여기 든 것을 지역 이름으로 되묶는다. 도구 본문이 `ctx.`
+접두 없이 읽히게 하려는 것이고, 되묶는 이름은 모듈마다 자기가 쓰는 것뿐이다. 아래
+`answer` 와 `run` 도 같은 이유로 `self.` 를 첫 줄에서 한 번만 푼다.
 """
 
 from dataclasses import dataclass
@@ -50,7 +54,6 @@ class ToolContext:
         그 논거가 지금도 산다: 델타가 "마지막 행위 이후"라, 검색을 두 번 하면 두 번째가 첫
         번째와 같은 것을 반복한다. 화면이 필요하면 `observe_scene` 이 있다.
         """
-        # 아래는 `build_tools` 안의 `_answer` 를 그대로 옮긴 것이다. 이름만 되묶는다.
         channel, state = self.channel, self.state
         if screen and (channel.scene.pulse.seen or channel.scene.frames > 0):
             view = channel.scene.render(state.watermark, since_action=state.last_action_frame)
@@ -68,7 +71,6 @@ class ToolContext:
         batch — the SDK runs a batch strictly in order, so nothing can slip
         between the press and the release.
         """
-        # 아래는 `build_tools` 안의 `_run` 을 그대로 옮긴 것이다. 이름만 되묶는다.
         channel, state = self.channel, self.state
         _answer = self.answer
         result, looked = await channel.act_and_look(actions, summary, step)

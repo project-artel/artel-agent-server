@@ -7,6 +7,10 @@
 주제별로 나뉘어 있고, 이 파일은 그것을 한 목록으로 조립한다. 목록의 **순서가 곧 계약**
 이다. `app/qa/run_config.py` 가 이 순서를 run config 에 저장하고, 모델도 이 순서로 도구를
 받는다.
+
+각 builder 의 `return` 목록에 적히는 것은 데코레이터가 붙은 도구 그 자체이지 함수가
+아니다. `@tool` 이 이름을 함수에서 가져가므로, 도구가 자기 이름과 어긋난 문자열 아래
+등록될 일이 없다.
 """
 
 from langchain_core.tools import BaseTool

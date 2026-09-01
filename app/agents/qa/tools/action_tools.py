@@ -13,9 +13,7 @@ from app.qa.envelope import JsonRpcAction
 
 
 def build_action_tools(ctx: ToolContext) -> list[BaseTool]:
-    # ctx 가 든 것을 여기서 되묶는다. 아래 tool 은 `build_tools` 한 함수 안에 있던 것을
-    # 그대로 옮긴 것이라, 이 줄이 있어야 본문이 한 글자도 바뀌지 않는다. 읽는 쪽에는
-    # 아래 tool 이 무엇을 closure 로 잡는지 먼저 말해 주는 머리말이기도 하다.
+    # 아래 tool 이 closure 로 잡는 것. 되묶는 이유는 `tool_context.py` 에 있다.
     _run = ctx.run
 
     @tool

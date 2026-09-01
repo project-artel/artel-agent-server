@@ -3,7 +3,7 @@
 A tool call looks synchronous — ask for the scene, get the scene. The transport
 is not: the request goes out on the socket and the answer arrives later as a
 separate inbound message. This module holds the futures that make one look like
-the other, so `app/agents/qa/tools.py` can simply `await`.
+the other, so the tools in `app/agents/qa/tools/` can simply `await`.
 """
 
 import asyncio
@@ -482,7 +482,8 @@ class QaRunChannel:
 
         A caller that reports `None` as a failure makes the model write the same
         fact again, which is the duplicate this whole contract exists to stop.
-        `app/agents/qa/tools.py` says "sent, not confirmed, do not send it again"
+        `app/agents/qa/tools/knowledge_write_tools.py` says "sent, not confirmed,
+        do not send it again"
         for exactly that reason.
         """
         return await self._request(message_type, payload, self._write_timeout)

@@ -1,7 +1,8 @@
 """The tools the scenario authoring agent drives its search with.
 
 Two tools, handed over on different conditions. `search_test_cases` It mirrors the QA agent's `search_knowledge`
-wrapper (`app/agents/qa/tools.py`) — a per-turn budget, and the three search
+wrapper (`app/agents/qa/tools/knowledge_read_tools.py`) — a per-turn budget, and the
+three search
 outcomes formatted for the model to act on — over the scenario session's own
 channel rather than the QA envelope.
 
