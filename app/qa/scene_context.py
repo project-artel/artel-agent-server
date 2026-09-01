@@ -66,6 +66,20 @@ logger = logging.getLogger(__name__)
 MAX_CAPABILITIES_IN_SCENE_CONTEXT = 8
 MAX_KNOWLEDGE_IN_SCENE_CONTEXT = 6
 
+# `not-a-step` 줄은 몇 개나 그리는가 (ARTEL-680 이 그 목록을 열었다).
+#
+# 이 칸이 열리기 전 agent 는 472 행 중 54 행만 봤다. 이제 469 행이 오는데, 실측
+# `artel_integration` 의 씬별 분포가 이렇다 — `TurnBattleScene` 이 누를 수 있는 것 8 개와
+# `not-a-step` 224 개, `DontDestroyOnLoad` 가 0 개와 64 개, `EndingScene` · `StoryScene` 이
+# 각각 2 개와 46 개.
+#
+# 그래서 이 블록에 다 그릴 수 없다. 블록은 씬에 처음 들어갈 때 한 번 그려지고 그 뒤로 런이
+# 끝날 때까지 문맥에 앉아 있으므로, 224 줄이면 판정을 읽어 낼 화면과 자리를 다투는 것이
+# 35KB 다. 여기서는 그런 목록이 **있다는 것**과 그것이 무엇인지만 보이고, 나머지는
+# `list_scene_capabilities` 가 당겨 온다 — agent 가 실제로 하는 일은 224 줄을 훑는 것이
+# 아니라 방금 본 것에 해당하는 줄을 찾는 것이라, 검색이 그 일에 맞는 모양이다.
+MAX_NOT_A_STEP_IN_SCENE_CONTEXT = 6
+
 # Per free-text field. A summary is written as one line, but nothing enforces
 # that on the way in, and one pathological entry must not be able to double the
 # block. Clipped rather than dropped, and the clip is visible, so the agent can
@@ -174,7 +188,23 @@ class SceneContextEntry(_Payload):
     known_to_content_map: bool = False
     scene_summary: str | None = None
     capabilities: list[SceneCapability] = Field(default_factory=list)
+    # `status = 'not-a-step'` 인 행 (ARTEL-680). 같은 표에서 오고 줄 모양도 같지만, 누를 수
+    # 없고 **일어나는** 것이다 — "적을 처치하면 보상을 받는다" 처럼. 시도할 목록이 아니라
+    # 알아볼 목록이라 칸이 갈려 있고, 이쪽이 지도의 대부분이다.
+    #
+    # 이 칸을 모르는 orchestration 에서는 빈 리스트다. `capabilities` 는 이름도 내용도 안
+    # 바뀌었으므로 그때도 종전과 똑같이 읽힌다.
+    not_a_step_capabilities: list[SceneCapability] = Field(default_factory=list)
     knowledge: list[SceneKnowledge] = Field(default_factory=list)
+
+    def all_capabilities(self) -> list[SceneCapability]:
+        """두 목록을 합친 것. `list_scene_capabilities` 가 뒤지는 대상이다.
+
+        누를 수 있는 것이 먼저다. 순서는 orchestration 이 고정한 것을 두 목록 안에서 그대로
+        받은 것이고, 여기서 다시 정렬하지 않는다 — 조회마다 줄 순서가 흔들리면 이 목록을
+        싣는 프롬프트의 캐시가 통째로 깨진다.
+        """
+        return [*self.capabilities, *self.not_a_step_capabilities]
 
 
 class SceneContext(_Payload):
@@ -290,6 +320,39 @@ def _cut_note(shown: int, total: int, what: str) -> str:
     return f"showing {shown} of {total} {what}; {total - shown} cut for space"
 
 
+def _not_a_step_lines(entry: SceneContextEntry) -> list[str]:
+    """누를 수 없고 일어나는 것들 (ARTEL-680 이 이 목록을 열었다).
+
+    **빈 목록에는 아무 줄도 안 낸다.** 이 칸을 모르는 orchestration 에서는 늘 비고, 그때
+    "여기서 일어나는 일이 하나도 없다" 는 문장은 사실이 아니라 배포 상태를 말한 것이다.
+
+    맛보기만 그린다. 실측 `TurnBattleScene` 이 224 행이라 다 그리면 그 씬에 머무는 내내
+    화면과 자리를 다투고, 이 목록을 실제로 쓰는 방식은 훑는 것이 아니라 방금 본 것을 찾는
+    것이다. 그래서 **자른 수를 말하고 어디서 나머지를 찾는지를 함께 말한다** — 조용히 자른
+    목록은 전부인 것으로 읽히고, 그렇게 읽은 agent 는 잘린 218 행에 대해 아무것도 안 적는다.
+    """
+    if not entry.not_a_step_capabilities:
+        return []
+
+    total = len(entry.not_a_step_capabilities)
+    shown = entry.not_a_step_capabilities[:MAX_NOT_A_STEP_IN_SCENE_CONTEXT]
+    lines = [""]
+    heading = (
+        "things the map says HAPPEN here — not controls to press, results to watch for "
+        f"({total} known"
+    )
+    if len(shown) < total:
+        heading = f"{heading}, {_cut_note(len(shown), total, 'lines')}"
+    lines.append(f"{heading}):")
+    lines.extend(_capability_line(capability) for capability in shown)
+    lines.append(
+        "  (nobody has watched most of these. When one of them happens in front of you, "
+        "record_capability_verdict on its key is what tells the project it is real — and "
+        "list_scene_capabilities reaches every one of them, not just these)"
+    )
+    return lines
+
+
 def _entry_lines(entry: SceneContextEntry) -> list[str]:
     lines = [
         # The boundary, first and in the heading itself. What is here is anchored
@@ -354,6 +417,8 @@ def _entry_lines(entry: SceneContextEntry) -> list[str]:
                 "  (the ones not shown are not gone — the scene view above is not "
                 "cut, and it is what to read instead of taking these as all there is)"
             )
+
+    lines.extend(_not_a_step_lines(entry))
 
     lines.append("")
     if not entry.knowledge:

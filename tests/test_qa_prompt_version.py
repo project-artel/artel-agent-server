@@ -255,7 +255,7 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v14() -> None:
+def test_the_default_qa_version_is_v15() -> None:
     """A run that names no version has to get the newest prompt.
 
     This is also the trap in adding a version: `resolve_version` returns the
@@ -265,7 +265,7 @@ def test_the_default_qa_version_is_v14() -> None:
     `set_input_axis` before the tool exists teaches the agent to reach for
     something that is not there.
     """
-    assert resolve_version("qa_run") == "v14"
+    assert resolve_version("qa_run") == "v15"
 
 
 def test_v12_drops_the_screen_map_and_says_what_a_screen_anchors() -> None:
@@ -388,6 +388,52 @@ def test_v14_puts_the_scene_view_above_the_block_and_keeps_the_rest_of_v13() -> 
             assert paragraph not in v14, "고쳐 쓴다고 해 놓고 옛 문단이 남아 있다"
             continue
         assert paragraph in v14
+
+
+def test_v15_teaches_writing_the_map_and_keeps_all_of_v14() -> None:
+    """v15 는 v14 에 절 하나와 문단 하나를 더한 것이고, 고쳐 쓴 문단은 하나도 없다.
+
+    실측이 이 절을 부른다 — `artel_integration` 의 capability 472 행 중
+    `verification = 'confirmed'` 이 2 행이다. 지도는 정적 분석이 읽어 낸 것을 담고, 그것이
+    참인지는 거의 아무도 안 봤다.
+
+    절이 지는 것은 tool 설명 셋이 각자 말할 수 없는 것이다. 무엇을 적고 무엇을 적지 않는가,
+    `observed` 와 `inferred` 를 가르는 선이 무엇인가, 기능 하나의 입도가 무엇인가, 그리고
+    **적는 것이 런의 목적이 아니라는 것.** 마지막이 특히 프롬프트의 몫인데, 어느 tool 설명도
+    "이 tool 을 덜 불러라" 를 자기 자리에서 말할 수 없기 때문이다.
+    """
+    v14 = load_prompt("qa_run", "system", "v14").body
+    v15 = load_prompt("qa_run", "system", "v15").body
+
+    # 절이 있고, 네 가지를 말한다.
+    assert "## The content map, and writing what you learned into it" in v15
+    assert "it is filled first — you are not there to copy it out again" in v15
+    assert "**Confirming beats discovering.**" in v15
+    assert (
+        "**`observed` means you pressed it and watched the result. Nothing else does.**"
+        in v15
+    )
+    assert "an `inferred` write has to name the observations it stands on" in v15
+    assert "**One capability is one test-case line**" in v15
+    assert '"Plays the game" is not a capability' in v15
+    assert "**And none of this is what the run is for.**" in v15
+    assert "A run that goes looking for map rows to fill has stopped testing" in v15
+
+    # 씬 문맥 블록에 목록이 둘이 됐다는 것 (ARTEL-680).
+    assert "That block carries TWO lists, and they are for different things." in v15
+    assert "list_scene_capabilities" in v15
+
+    # v14 는 한 문단도 안 지워지고 한 글자도 안 바뀐다. 이번 판은 순수한 추가다.
+    for paragraph in v14.split("\n\n"):
+        assert paragraph in v15
+
+
+def test_v15_defines_the_same_roles_as_v14() -> None:
+    """화면을 읽는 법은 안 바뀌었으므로 vision 쪽도 안 바뀐다."""
+    assert roles_in("qa_run", "v15") == roles_in("qa_run", "v14")
+    assert load_prompt("qa_run", "vision_directive", "v15").body == (
+        load_prompt("qa_run", "vision_directive", "v14").body
+    )
 
 
 def test_v13_stops_teaching_the_live_view_ARTEL_621_deleted() -> None:

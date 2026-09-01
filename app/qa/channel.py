@@ -15,6 +15,7 @@ from typing import Any
 from app.qa.envelope import (
     ActionPayload,
     ActionResultPayload,
+    CapabilityWriteResultPayload,
     ChatPayload,
     GameState,
     JsonRpcAction,
@@ -507,6 +508,27 @@ class QaRunChannel:
             MessageType.SCREEN_SELECTOR_RULE, payload, self._screen_selector_timeout
         )
 
+    async def write_capability(
+        self, message_type: MessageType, payload
+    ) -> CapabilityWriteResultPayload | KnowledgeRequestFailed | None:
+        """이 런이 capability 하나에 대해 배운 것을 지도에 적는다 (ARTEL-644).
+
+        지식 쓰기와 같은 결과 셋이고, 세 번째의 뜻도 같다:
+
+        - payload — 저쪽이 적었다. 어느 행에 적혔고 `verification` 이 어디로 갔는지가 그
+          안에 있다
+        - `KnowledgeRequestFailed` — 거절당했다. **안 적혔다**
+        - `None` — 답이 안 왔다. 적혔는지 아닌지 이쪽에서 알 수 없다
+
+        `None` 을 실패로 옮겨 적으면 안 된다. 이 프레임을 모르는 orchestration 은 라우터에서
+        프레임을 통째로 떨어뜨리고 그 거절이 이 소켓으로 안 돌아오는데, 그때 모델에게
+        "안 됐다" 고 하면 같은 문장을 계속 다시 보낸다.
+
+        타임아웃이 반드시 이쪽에 있어야 한다. 저쪽 라우터 앞의 검사 둘 — `messageId` 가
+        UUID 가 아니다, `qaTryId` 가 모르는 try 다 — 은 아무 답도 없이 프레임을 버린다.
+        """
+        return await self._request(message_type, payload, self._write_timeout)
+
     async def answer_screen_selector_proposal(
         self, payload: ScreenSelectorVerdictPayload, correlation_id: str
     ) -> None:
@@ -704,6 +726,31 @@ class QaRunChannel:
                     for entry in payload.rejected
                 ),
             )
+
+    def on_capability_write_result(self, raw: dict) -> None:
+        """지도 쓰기의 답을, 무엇을 물었는지와 맞대 보고 넘긴다 (ARTEL-644).
+
+        `on_knowledge_write_result` 와 같은 검사다. 한 타입이 `CAPABILITY_VERDICT` 와
+        `CAPABILITY_DISCOVERED` 양쪽에 답하므로, `type` 을 안 보면 남의 답이 이 tool 을 풀어
+        준다. 그러면 verdict 를 보낸 tool 이 방금 만든 행의 id 를 자기 것으로 읽고, 그 id 가
+        `based_on` 으로 다시 나간다 — 조용히 틀리는 자리다.
+
+        어긋난 답은 실패로 옮기지 않고 버린다. 저쪽의 프로토콜 오류이지 런이 할 수 있는 일이
+        아니고, 실패로 옮기면 모델이 이미 적혔을지도 모르는 문장을 다시 쓴다. tool 은
+        타임아웃으로 "확인할 수 없다" 에 도달하는데, 그것이 실제 상황이다.
+        """
+        payload = CapabilityWriteResultPayload.model_validate(raw.get("payload") or {})
+        correlation = raw.get("correlationId")
+        pending = self._pending.get(correlation) if isinstance(correlation, str) else None
+        if pending is not None and payload.type and payload.type != pending.request_type:
+            logger.warning(
+                "[QA] a %s answer arrived for a %s request (correlation %s); dropped",
+                payload.type,
+                pending.request_type,
+                correlation,
+            )
+            return
+        self._resolve(raw, payload)
 
     def on_error(self, raw: dict) -> bool:
         """An inbound ERROR. True when it was the answer to something we asked.
