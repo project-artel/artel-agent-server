@@ -6,9 +6,20 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class LLMProvider(StrEnum):
+    """Values are the author segment of an OpenRouter slug.
+
+    Kept identical to the slug prefix so a spec's provider can be checked
+    against the slug sitting next to it in `MODEL_SPECS` by reading, and so
+    `build_chat_model`'s Anthropic-only cache branch cannot drift.
+    """
+
     openai = "openai"
     anthropic = "anthropic"
     google = "google"
+    xai = "x-ai"
+    moonshotai = "moonshotai"
+    zai = "z-ai"
+    qwen = "qwen"
 
 
 class LLMModel(StrEnum):
@@ -24,12 +35,17 @@ class LLMModel(StrEnum):
     """
 
     gpt_5_6_luna = "openai/gpt-5.6-luna"
-    gpt_4o = "openai/gpt-4o"
+    gpt_5_6_sol = "openai/gpt-5.6-sol"
+    gpt_chat_latest = "openai/gpt-chat-latest"
     claude_sonnet_5 = "anthropic/claude-sonnet-5"
-    claude_opus_4_8 = "anthropic/claude-opus-4.8"
-    gemini_2_5_flash = "google/gemini-2.5-flash"
+    claude_opus_5 = "anthropic/claude-opus-5"
+    gemini_3_7_flash = "google/gemini-3.7-flash"
     gemini_2_5_pro = "google/gemini-2.5-pro"
     gemma_4_free = "google/gemma-4-31b-it:free"
+    grok_4_6 = "x-ai/grok-4.6"
+    kimi_k3 = "moonshotai/kimi-k3"
+    glm_5_3_flash = "z-ai/glm-5.3-flash"
+    qwen3_8_max = "qwen/qwen3.8-max"
 
 
 class ReasoningKind(StrEnum):
@@ -97,6 +113,12 @@ class ModelSpec:
     input_modalities: tuple[str, ...] = ("text", "image")
     # Verified against the live catalog's `reasoning` object. None means the
     # model must not receive OpenRouter's reasoning parameter.
+    #
+    # `reasoning_efforts` is the whole set the model accepts, and
+    # `validate_reasoning` rejects anything outside it. Most of the catalog
+    # takes fewer than all five: Gemini 3.7 Flash has no `max` or `xhigh`, and
+    # asking for one is a provider 400 several turns into a run, not a
+    # degradation to the nearest supported effort.
     reasoning: ReasoningKind | None = None
     reasoning_efforts: tuple[ReasoningEffort, ...] | None = None
     reasoning_min_tokens: int | None = None
@@ -120,11 +142,25 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         reasoning=ReasoningKind.effort,
         reasoning_efforts=tuple(ReasoningEffort),
     ),
-    LLMModel.gpt_4o: ModelSpec(
+    LLMModel.gpt_5_6_sol: ModelSpec(
         provider=LLMProvider.openai,
         supports_strict_json=True,
-        label="GPT-4o",
-        max_input_tokens=111_616,
+        label="GPT-5.6 Sol",
+        max_input_tokens=922_000,
+        input_modalities=("text", "image", "file"),
+        # Six efforts like Luna, the unmodelled `none` included.
+        reasoning=ReasoningKind.effort,
+        reasoning_efforts=tuple(ReasoningEffort),
+    ),
+    # The one entry that does not reason, which is why it is here: `reasoning`
+    # left None is a state the request validator and the catalog API both have
+    # to keep answering for. The slug tracks whatever ChatGPT currently serves,
+    # so its window is the one most worth re-checking against the catalog.
+    LLMModel.gpt_chat_latest: ModelSpec(
+        provider=LLMProvider.openai,
+        supports_strict_json=True,
+        label="GPT Chat Latest",
+        max_input_tokens=272_000,
         input_modalities=("text", "image", "file"),
     ),
     LLMModel.claude_sonnet_5: ModelSpec(
@@ -136,25 +172,31 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         reasoning=ReasoningKind.effort,
         reasoning_efforts=tuple(ReasoningEffort),
     ),
-    LLMModel.claude_opus_4_8: ModelSpec(
+    LLMModel.claude_opus_5: ModelSpec(
         provider=LLMProvider.anthropic,
         supports_strict_json=True,
-        label="Claude Opus 4.8",
+        label="Claude Opus 5",
         max_input_tokens=872_000,
         input_modalities=("text", "image", "file"),
         reasoning=ReasoningKind.effort,
         reasoning_efforts=tuple(ReasoningEffort),
     ),
-    LLMModel.gemini_2_5_flash: ModelSpec(
+    LLMModel.gemini_3_7_flash: ModelSpec(
         provider=LLMProvider.google,
         supports_strict_json=True,
-        label="Gemini 2.5 Flash",
-        max_input_tokens=983_041,
+        label="Gemini 3.7 Flash",
+        max_input_tokens=983_040,
         input_modalities=("text", "image", "file", "audio", "video"),
-        reasoning=ReasoningKind.max_tokens,
-        reasoning_min_tokens=0,
-        reasoning_max_tokens=24576,
-        reasoning_step=128,
+        # An effort, where 2.5 Pro below takes a token budget: 3.x Flash
+        # advertises `reasoning_effort` and three named efforts, and reasoning
+        # is mandatory, so the run reasons at the provider's `medium` whenever
+        # the request leaves it out.
+        reasoning=ReasoningKind.effort,
+        reasoning_efforts=(
+            ReasoningEffort.high,
+            ReasoningEffort.medium,
+            ReasoningEffort.low,
+        ),
     ),
     LLMModel.gemini_2_5_pro: ModelSpec(
         provider=LLMProvider.google,
@@ -174,6 +216,68 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         label="Gemma 4 (free)",
         max_input_tokens=229_376,
         input_modalities=("text", "image", "video"),
+    ),
+    LLMModel.grok_4_6: ModelSpec(
+        provider=LLMProvider.xai,
+        supports_strict_json=True,
+        label="Grok 4.6",
+        # 50k out of a 500k window, because the top provider reserves 450k of
+        # it for the completion. That is by far the smallest budget in the
+        # catalog — an eighteenth of Luna's — so a QA run on this model
+        # compacts many times where the others never trigger.
+        max_input_tokens=50_000,
+        input_modalities=("text", "image", "file"),
+        reasoning=ReasoningKind.effort,
+        reasoning_efforts=(
+            ReasoningEffort.xhigh,
+            ReasoningEffort.high,
+            ReasoningEffort.medium,
+            ReasoningEffort.low,
+        ),
+    ),
+    LLMModel.kimi_k3: ModelSpec(
+        provider=LLMProvider.moonshotai,
+        supports_strict_json=True,
+        label="Kimi K3",
+        # The same reservation story as Grok: a 1,048,576 window with 943,718
+        # of it held for the completion.
+        max_input_tokens=104_858,
+        input_modalities=("text", "image", "video"),
+        reasoning=ReasoningKind.effort,
+        reasoning_efforts=(
+            ReasoningEffort.max,
+            ReasoningEffort.high,
+            ReasoningEffort.low,
+        ),
+    ),
+    LLMModel.glm_5_3_flash: ModelSpec(
+        provider=LLMProvider.zai,
+        supports_strict_json=True,
+        label="GLM-5.3 Flash",
+        max_input_tokens=1_179_648,
+        input_modalities=("text", "image", "video"),
+        reasoning=ReasoningKind.effort,
+        reasoning_efforts=(
+            ReasoningEffort.max,
+            ReasoningEffort.high,
+            ReasoningEffort.low,
+        ),
+    ),
+    LLMModel.qwen3_8_max: ModelSpec(
+        provider=LLMProvider.qwen,
+        supports_strict_json=True,
+        label="Qwen3.8 Max",
+        max_input_tokens=868_928,
+        input_modalities=("text", "image", "video"),
+        # The catalog lists a fifth effort, `minimal`, which `ReasoningEffort`
+        # does not model; the four below are what a request may ask for.
+        reasoning=ReasoningKind.effort,
+        reasoning_efforts=(
+            ReasoningEffort.xhigh,
+            ReasoningEffort.high,
+            ReasoningEffort.medium,
+            ReasoningEffort.low,
+        ),
     ),
 }
 
@@ -207,6 +311,14 @@ def validate_reasoning(
             f"Model '{model}' requires reasoning.{supported.value}, "
             f"not reasoning.{requested.value}."
         )
+    if reasoning.effort is not None:
+        allowed = get_model_spec(model).reasoning_efforts
+        if allowed is not None and reasoning.effort not in allowed:
+            names = ", ".join(effort.value for effort in allowed)
+            raise ValueError(
+                f"Model '{model}' does not support reasoning.effort "
+                f"'{reasoning.effort.value}'. Supported: {names}."
+            )
     if reasoning.max_tokens is not None:
         minimum = get_model_spec(model).reasoning_min_tokens
         maximum = get_model_spec(model).reasoning_max_tokens
