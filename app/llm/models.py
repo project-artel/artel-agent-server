@@ -30,6 +30,11 @@ class LLMModel(StrEnum):
     gemini_2_5_flash = "google/gemini-2.5-flash"
     gemini_2_5_pro = "google/gemini-2.5-pro"
     gemma_4_free = "google/gemma-4-31b-it:free"
+    # OpenRouter 슬러그가 아니다. Bedrock 추론 프로파일 ID 를 `bedrock/` 로 접두한
+    # LiteLLM 표기이고, `openrouter_base_url` 이 Bedrock 을 아는 게이트웨이를 가리킬 때만
+    # 뜻이 통한다. 값에 리전 접두(`us.`)와 판(`-v1:0`)까지 적는 것은, 어느 프로파일로
+    # 청구되는지가 이 문자열 하나로 결정되기 때문이다.
+    claude_haiku_4_5_bedrock = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
 class ReasoningKind(StrEnum):
@@ -103,12 +108,33 @@ class ModelSpec:
     reasoning_max_tokens: int | None = None
     reasoning_step: int | None = None
 
+    # 이 모델을 쓰는 배치에서 지식창고를 **읽을 수 있나.**
+    #
+    # 모델의 능력이 아니라 그 모델이 사는 경로의 사실이다. Bedrock 에는
+    # `text-embedding-3-large` 가 없고, 다른 임베딩으로 바꾸면 차원은 맞아도
+    # (`vector(1024)`) 벡터 공간이 달라 기존 항목과의 비교가 **에러 없이** 틀린 답을
+    # 낸다. 검색이 조용히 엉뚱한 것을 돌려주는 것은 검색이 없는 것보다 나쁘다.
+    #
+    # False 면 `resolve_arch` 가 지식 관련 한도를 전부 0 으로 눕힌다.
+    knowledge_search: bool = True
+
     @property
     def supports_vision(self) -> bool:
         return "image" in self.input_modalities
 
 
 MODEL_SPECS: dict[LLMModel, ModelSpec] = {
+    LLMModel.claude_haiku_4_5_bedrock: ModelSpec(
+        provider=LLMProvider.anthropic,
+        supports_strict_json=True,
+        label="Claude Haiku 4.5 (AWS Bedrock)",
+        # Anthropic 이 공표한 200k 창에서 출력 64k 를 뺀 값이다. 다른 항목과 같은 규칙으로
+        # 이미 빼서 적는다 — 압축이 이 수를 기준으로 발동하므로 높게 적는 쪽이 위험하다.
+        max_input_tokens=136_000,
+        input_modalities=("text", "image"),
+        # 임베딩을 같은 공간에서 못 구한다. 위 `knowledge_search` 주석에 이유가 있다.
+        knowledge_search=False,
+    ),
     LLMModel.gpt_5_6_luna: ModelSpec(
         provider=LLMProvider.openai,
         supports_strict_json=True,
@@ -231,6 +257,7 @@ def list_models() -> list[dict[str, Any]]:
             "supports_strict_json": spec.supports_strict_json,
             "max_input_tokens": spec.max_input_tokens,
             "supports_vision": spec.supports_vision,
+            "knowledge_search": spec.knowledge_search,
             "input_modalities": list(spec.input_modalities),
             "multimodal": len(spec.input_modalities) > 1,
             "reasoning": (
