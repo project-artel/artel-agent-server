@@ -7,7 +7,7 @@ project's knowledge base, extracted from its design documents. Without a way to
 ask, a step whose `expected` depends on a rule is judged on a guess. And without
 a way to write, everything a run works out for itself dies with the run.
 
-These things are kept here rather than in `app/agents/qa/tools.py`, for the same
+These things are kept here rather than in `app/agents/qa/tools/`, for the same
 reason `vision.py` keeps the capture budget and image handling: they are these
 tools' own subject matter, and the numbers, the vocabulary and the wording that
 teaches the agent to ration them all have to move together.

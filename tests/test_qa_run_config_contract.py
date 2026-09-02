@@ -73,7 +73,7 @@ def test_a_model_without_reasoning_says_so_rather_than_going_quiet() -> None:
     """`reasoning: null` alone has two meanings — not asked for, and not
     offered. A comparison that cannot tell them apart reads a model's missing
     capability as a choice nobody made."""
-    config = open_session(model=LLMModel.gpt_4o.value)["run_config"]
+    config = open_session(model=LLMModel.gpt_chat_latest.value)["run_config"]
 
     assert config["reasoning"] is None
     assert config["reasoning_supported"] is False
