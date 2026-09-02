@@ -19,6 +19,7 @@ from app.sessions import (
     SessionExpired,
     SessionService,
 )
+from app.llm.usage import _scope
 from app.sessions.schemas import SessionRecord
 
 
@@ -421,3 +422,46 @@ def test_ws_turn_rejects_unknown_locale() -> None:
         event = ws.receive_json()
         assert event["type"] == "error"
         assert event["code"] == "bad_request"
+
+
+def test_a_scenario_turn_books_its_spend_against_the_run() -> None:
+    """The run, not the scenario — and never nothing.
+
+    Orchestration opens this session from a run and sends `project_id`/`run_id`
+    only (ARTEL-206 Step 6); it never sends `test_scenario_id`. Booking against
+    that field therefore recorded a null reference on every scenario call, and
+    the spend became money nothing could account for. `test_run.id` is also what
+    the receiving side reads `SCENARIO` as (`LlmUsageServiceType`).
+    """
+    seen: list[object] = []
+
+    class ScopeReadingAgent(ScenarioAgent):
+        """Reads the scope where a real model call would read it.
+
+        The scope rides the asyncio task, so it cannot be read after
+        `asyncio.run` returns — that context is gone. Reading it from inside the
+        agent is also the only place that proves the scope is set *before* the
+        call, which is the whole point of it.
+        """
+
+        def __init__(self) -> None:
+            def factory(*, model, tools, system_prompt):
+                def run(_inputs):
+                    seen.append(_scope.get())
+                    return {"messages": [], "structured_response": _result()}
+
+                return RunnableLambda(run)
+
+            super().__init__(agent_factory=factory)
+
+    store = InMemorySessionStore()
+    service = SessionService(store=store, agent=ScopeReadingAgent())
+    session_id = asyncio.run(service.open({}, {}, "start", run_id=31, project_id=4))
+
+    asyncio.run(service.start_first_turn(session_id, _channel()))
+
+    assert len(seen) == 1
+    scope = seen[0]
+    assert scope is not None
+    assert scope.service == "SCENARIO"
+    assert scope.reference_id == 31
