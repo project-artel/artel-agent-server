@@ -56,9 +56,9 @@ def build_embedding_model(
     return OpenAIEmbeddings(
         model=model,
         dimensions=dimensions,
-        openai_api_base=settings.embedding_base_url or settings.openrouter_base_url,
+        openai_api_base=settings.embedding_base_url or settings.llm_base_url,
         openai_api_key=(
-            settings.embedding_api_key or settings.openrouter_api_key or "missing"
+            settings.embedding_api_key or settings.llm_api_key or "missing"
         ),
         default_headers=headers or None,
         # Left on, LangChain re-encodes every input with tiktoken, splits it at

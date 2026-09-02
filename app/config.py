@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,8 +14,21 @@ class Settings(BaseSettings):
     app_name: str = "Artel Agent Server"
     app_version: str = "0.1.0"
     environment: str = Field(default="local", validation_alias="APP_ENV")
-    openrouter_api_key: str | None = None
-    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    # 채팅이 말을 거는 곳. **provider 이름을 달지 않는다** — 이 값은 OpenRouter 를
+    # 가리킬 수도, 여러 provider 를 함께 서빙하는 gateway 를 가리킬 수도 있다.
+    # 이름에 provider 를 박아 두면 다른 곳을 가리키는 순간 그 이름이 거짓이 되고,
+    # 읽는 사람은 설정이 아니라 이름을 믿는다.
+    #
+    # `OPENROUTER_*` 를 함께 받는 것은 하위호환이다. 이 필드를 옮기는 배포와
+    # 옮기지 않은 배포가 같은 이미지로 돌 수 있어야 한다. 새 이름이 우선한다.
+    llm_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("LLM_API_KEY", "OPENROUTER_API_KEY"),
+    )
+    llm_base_url: str = Field(
+        default="https://openrouter.ai/api/v1",
+        validation_alias=AliasChoices("LLM_BASE_URL", "OPENROUTER_BASE_URL"),
+    )
     openrouter_site_url: str | None = None
     openrouter_app_title: str = "Artel Agent Server"
     # Per-request ceiling on a model call, and how many times the client retries.
@@ -149,6 +162,10 @@ class Settings(BaseSettings):
     #
     # Unset, both fall back to the chat credentials, so nothing changes for a
     # deployment that has not split them.
+    # Bedrock 호출이 갈 리전. 모델 값의 `us.` 접두가 inference profile 을 정하고,
+    # 이 값은 어느 엔드포인트에 말을 거는지를 정한다. 둘은 다른 축이다.
+    bedrock_region: str = "us-west-2"
+
     embedding_base_url: str | None = None
     embedding_api_key: str | None = None
     embedding_dimensions: int = 1024

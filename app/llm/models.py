@@ -31,7 +31,7 @@ class LLMModel(StrEnum):
     gemini_2_5_pro = "google/gemini-2.5-pro"
     gemma_4_free = "google/gemma-4-31b-it:free"
     # OpenRouter 슬러그가 아니다. Bedrock 추론 프로파일 ID 를 `bedrock/` 로 접두한
-    # LiteLLM 표기이고, `openrouter_base_url` 이 Bedrock 을 아는 게이트웨이를 가리킬 때만
+    # LiteLLM 표기이고, `llm_base_url` 이 Bedrock 을 아는 gateway 를 가리킬 때만
     # 뜻이 통한다. 값에 리전 접두(`us.`)와 판(`-v1:0`)까지 적는 것은, 어느 프로파일로
     # 청구되는지가 이 문자열 하나로 결정되기 때문이다.
     claude_haiku_4_5_bedrock = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
