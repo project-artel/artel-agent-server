@@ -23,7 +23,7 @@ class LLMProvider(StrEnum):
 
 
 class LLMModel(StrEnum):
-    """Selectable models. Values are OpenRouter model slugs.
+    """Selectable models. Values are OpenRouter model slugs, except where noted.
 
     Slugs and the capability flags below reflect the live
     ``GET https://openrouter.ai/api/v1/models`` catalog: a model advertises
@@ -46,6 +46,12 @@ class LLMModel(StrEnum):
     kimi_k3 = "moonshotai/kimi-k3"
     glm_5_3_flash = "z-ai/glm-5.3-flash"
     qwen3_8_max = "qwen/qwen3.8-max"
+
+    # 여기부터는 OpenRouter slug 가 아니다. `bedrock/` 접두를 뗀 나머지가 그대로
+    # Bedrock 의 inference profile ID 이고, `build_chat_model` 이 그 접두를 보고
+    # `ChatBedrockConverse` 로 간다. 리전 접두(`us.`)와 판(`-v1:0`)까지 적는 것은
+    # 어느 프로파일로 청구되는지가 이 문자열 하나로 정해지기 때문이다.
+    claude_haiku_4_5_bedrock = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
 class ReasoningKind(StrEnum):
@@ -131,6 +137,15 @@ class ModelSpec:
 
 
 MODEL_SPECS: dict[LLMModel, ModelSpec] = {
+    LLMModel.claude_haiku_4_5_bedrock: ModelSpec(
+        provider=LLMProvider.anthropic,
+        supports_strict_json=True,
+        label="Claude Haiku 4.5 (AWS Bedrock)",
+        # Anthropic 이 공표한 200k 창에서 출력 64k 를 뺀 값이다. 다른 항목과 같은 규칙으로
+        # 이미 빼서 적는다 — 압축이 이 수를 기준으로 발동하므로 높게 적는 쪽이 위험하다.
+        max_input_tokens=136_000,
+        input_modalities=("text", "image"),
+    ),
     LLMModel.gpt_5_6_luna: ModelSpec(
         provider=LLMProvider.openai,
         supports_strict_json=True,
