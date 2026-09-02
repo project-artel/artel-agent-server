@@ -129,7 +129,13 @@ class SessionService:
         draft: ScenarioDraft | None,
         channel: ScenarioChannel,
     ) -> ScenarioAgentResult:
-        set_usage_scope("SCENARIO", record.test_scenario_id)
+        # `run_id`, not `test_scenario_id`: Orchestration opens this session from a
+        # run and sends `project_id`/`run_id` only (ARTEL-206 Step 6), so
+        # `test_scenario_id` is always None here and every scenario call was
+        # landing with a null reference — spend nothing could account for.
+        # `test_run.id` is also what the receiving side reads `SCENARIO` as
+        # (`LlmUsageServiceType`).
+        set_usage_scope("SCENARIO", record.run_id)
         request = ScenarioAgentRequest(
             user_input=user_input,
             unity_context=record.unity_context,
