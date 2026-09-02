@@ -133,6 +133,14 @@ KNOWLEDGE_TAGS = ("CONTROL", "RULE", "OBJECTIVE", "UI", "MISC")
 # filled from play, and a second copy built by the agent only gave later runs two
 # maps that disagreed. Reading is a separate matter: `_REVERSED` still knows the
 # relation, because the edges written before this are still in the graph.
+#
+# `PART_OF` 는 이 튜플에 아예 들어가지 않는다. `LEADS_TO` 와는 다른 이유다.
+# agent 가 한 번 주장했다가 나중에 그 권한을 잃은 관계가 아니라, 지식 항목을
+# 그 출처인 문서 node 에서 뽑아내는 순간 적재 경로가 만드는 구조 관계이기
+# 때문이다(ARTEL-748). 여기에는 `link_knowledge` 가 판단할 실행 시점의 여지가
+# 없으므로 agent 가 주장할 것도 없다. 읽는 쪽은 다시 별개다 — `_REVERSED` 는
+# 이 표기를 알고 있어서, `expand_knowledge` 가 한 번도 쓴 적 없는 edge 의
+# 방향을 그대로 보여줄 수 있다(ARTEL-749).
 KNOWLEDGE_RELATIONS = ("CONTRADICTS", "REFINES", "DEPENDS_ON", "REPLACES")
 
 # The label a vector neighbour is printed under. Never sent: Orchestration's CHECK
@@ -415,6 +423,7 @@ _REVERSED = {
     "REFINES": "refined by",
     "DEPENDS_ON": "required by",
     "REPLACES": "replaced by",
+    "PART_OF": "contains",
 }
 
 
