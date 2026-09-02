@@ -35,6 +35,42 @@ Run tests:
 python -m pytest
 ```
 
+## Local Testing with Claude Subscription
+
+When your OpenRouter API key has no credit, you can run the server against a Claude
+subscription instead. The Claude Agent SDK reuses the `claude` CLI credentials already on
+this machine, so no API key is involved; the calls draw on your own Claude plan's monthly
+credit and its five-hour rate-limit window.
+
+First, confirm the `claude` CLI is signed in:
+
+```powershell
+claude auth status
+```
+
+If it is not, sign in:
+
+```powershell
+claude auth login
+```
+
+Install the dev dependencies:
+
+```powershell
+python -m pip install -e ".[dev]"
+```
+
+In `.env`, set `LLM_BACKEND` to `claude_subscription` and (optionally) override
+`CLAUDE_SUBSCRIPTION_FALLBACK_MODEL` if the default Claude model does not suit your test:
+
+```dotenv
+LLM_BACKEND="claude_subscription"
+CLAUDE_SUBSCRIPTION_FALLBACK_MODEL="claude-sonnet-5"
+```
+
+**Warning:** This is a local testing path only. Never set these values in a deployed
+environment.
+
 ## LangSmith Tracing
 
 Tracing is off by default. To turn it on, set in `.env`:
