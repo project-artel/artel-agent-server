@@ -80,7 +80,9 @@ def _bedrock(model: LLMModel, cache_prompt: bool) -> ChatBedrockConverse:
         model=model.value.removeprefix(BEDROCK_PREFIX),
         region_name=settings.bedrock_region,
         temperature=TEMPERATURE,
-        callbacks=[UsageCallback()],
+        # 카탈로그 값을 그대로 넘긴다. 응답은 `bedrock/` 을 뗀 이름으로 돌아오고,
+        # 그대로 두면 `provider` 가 모델 이름 전체가 된다.
+        callbacks=[UsageCallback(slug=model.value)],
     )
 
 
