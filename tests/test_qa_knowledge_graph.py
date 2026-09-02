@@ -622,6 +622,26 @@ def test_a_stored_route_still_reads_back_in_both_directions() -> None:
     assert "상단바의 상점 버튼" in expanded
 
 
+def test_a_part_of_edge_reads_differently_in_each_direction() -> None:
+    """`PART_OF` (ARTEL-748) points from an item to the document it came from.
+
+    Before `_REVERSED` knew this relation, both directions fell back to
+    `relation.lower()` and printed the same word — the line for "this item
+    belongs to that document" and the line for "this document contains that
+    item" read identically, and the direction of the edge was lost. Pinning the
+    exact word, not just that the two differ, catches a fix that swaps in a
+    still-wrong word for the incoming side.
+    """
+    outgoing = render_neighbour(neighbour(relation="PART_OF", direction="OUT"))
+    incoming = render_neighbour(neighbour(relation="PART_OF", direction="IN"))
+
+    assert "part_of" in outgoing
+    assert "contains" not in outgoing
+
+    assert "contains" in incoming
+    assert "part_of" not in incoming
+
+
 def test_the_neighbour_clip_is_small_enough_to_stay_a_handful_of_lines() -> None:
     """Eight neighbours at this width is the budget ARTEL-275 sized the caps for."""
     assert MAX_NEIGHBOUR_SUMMARY_CHARS <= 160
