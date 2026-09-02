@@ -37,7 +37,7 @@ from app.qa.run_config import resolve_run_config
 
 
 def resolved(**overrides) -> ResolvedArch:
-    return resolve_arch(QaArchSpec(**overrides), LLMModel.gpt_4o)
+    return resolve_arch(QaArchSpec(**overrides), LLMModel.gpt_chat_latest)
 
 
 # --- the fingerprint ----------------------------------------------------------
@@ -98,8 +98,8 @@ def test_the_fingerprint_ignores_the_model_and_the_prompt() -> None:
     not group "the same structure under two models" — the comparison this exists
     to make possible."""
     sonnet = resolve_run_config(model=LLMModel.claude_sonnet_5)
-    gpt = resolve_run_config(model=LLMModel.gpt_4o)
-    pinned = resolve_run_config(model=LLMModel.gpt_4o, prompt_version="v1")
+    gpt = resolve_run_config(model=LLMModel.gpt_chat_latest)
+    pinned = resolve_run_config(model=LLMModel.gpt_chat_latest, prompt_version="v1")
 
     assert sonnet.agent_fingerprint == gpt.agent_fingerprint == pinned.agent_fingerprint
     assert pinned.prompt_version != gpt.prompt_version
@@ -124,7 +124,7 @@ def test_a_relabelled_structure_keeps_its_fingerprint() -> None:
 
 def test_auto_follows_the_model() -> None:
     assert resolved(vision=VisionMode.auto).vision is get_model_spec(
-        LLMModel.gpt_4o
+        LLMModel.gpt_chat_latest
     ).supports_vision
 
 
@@ -135,14 +135,14 @@ def test_vision_on_is_refused_when_the_model_cannot_see(monkeypatch) -> None:
     is a wrong data point — and wrong is worse than absent, because nobody
     re-checks the rows that are there.
     """
-    blind = replace(get_model_spec(LLMModel.gpt_4o), input_modalities=("text",))
+    blind = replace(get_model_spec(LLMModel.gpt_chat_latest), input_modalities=("text",))
     monkeypatch.setattr(arch_module, "get_model_spec", lambda _model: blind)
 
     with pytest.raises(QaArchError, match="cannot read images"):
-        resolve_arch(QaArchSpec(vision=VisionMode.on), LLMModel.gpt_4o)
+        resolve_arch(QaArchSpec(vision=VisionMode.on), LLMModel.gpt_chat_latest)
 
     # `auto` still resolves, to the truth about the model.
-    assert resolve_arch(QaArchSpec(vision=VisionMode.auto), LLMModel.gpt_4o).vision is False
+    assert resolve_arch(QaArchSpec(vision=VisionMode.auto), LLMModel.gpt_chat_latest).vision is False
 
 
 def test_deleting_without_being_able_to_replace_is_refused() -> None:

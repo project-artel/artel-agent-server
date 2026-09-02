@@ -64,7 +64,16 @@ def test_models_api_exposes_reasoning_selection_capabilities() -> None:
         "max_tokens": None,
         "step": None,
     }
-    assert catalog[LLMModel.gpt_4o]["reasoning"] is None
+    assert catalog[LLMModel.gemini_3_7_flash]["reasoning"] == {
+        "kind": "effort",
+        # Three, not five. The picker has to offer what the model takes: an
+        # effort it never advertised is a 400 the user only sees mid-run.
+        "efforts": ["high", "medium", "low"],
+        "min_tokens": None,
+        "max_tokens": None,
+        "step": None,
+    }
+    assert catalog[LLMModel.gpt_chat_latest]["reasoning"] is None
 
 
 def test_request_accepts_each_supported_reasoning_shape() -> None:
@@ -88,9 +97,12 @@ def test_request_accepts_each_supported_reasoning_shape() -> None:
 @pytest.mark.parametrize(
     ("model", "reasoning"),
     [
-        (LLMModel.gpt_4o, {"effort": "low"}),
+        (LLMModel.gpt_chat_latest, {"effort": "low"}),
         (LLMModel.claude_sonnet_5, {"max_tokens": 2048}),
         (LLMModel.gemini_2_5_pro, {"effort": "high"}),
+        # The right kind, an effort the model does not offer.
+        (LLMModel.gemini_3_7_flash, {"effort": "max"}),
+        (LLMModel.kimi_k3, {"effort": "medium"}),
     ],
 )
 def test_request_rejects_unsupported_model_reasoning_combinations(
@@ -180,7 +192,7 @@ def test_service_rejects_invalid_reasoning_before_saving() -> None:
                 ],
                 # Named rather than left to DEFAULT_MODEL: the default now
                 # reasons, and this case needs a model that does not.
-                model=LLMModel.gpt_4o,
+                model=LLMModel.gpt_chat_latest,
                 reasoning=ReasoningConfig(effort=ReasoningEffort.low),
             )
 
@@ -281,9 +293,9 @@ def test_caching_is_opt_in_and_only_for_anthropic(monkeypatch) -> None:
     monkeypatch.setattr(chat_model, "ChatOpenAI", FakeChat)
     chat_model.build_chat_model.cache_clear()
     try:
-        chat_model.build_chat_model(LLMModel.claude_opus_4_8, cache_prompt=True)
-        chat_model.build_chat_model(LLMModel.claude_opus_4_8)
-        chat_model.build_chat_model(LLMModel.gpt_4o, cache_prompt=True)
+        chat_model.build_chat_model(LLMModel.claude_opus_5, cache_prompt=True)
+        chat_model.build_chat_model(LLMModel.claude_opus_5)
+        chat_model.build_chat_model(LLMModel.gpt_chat_latest, cache_prompt=True)
     finally:
         chat_model.build_chat_model.cache_clear()
 

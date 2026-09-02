@@ -520,7 +520,7 @@ def test_a_model_that_cannot_see_is_not_sent_a_capture(monkeypatch) -> None:
 
     asyncio.run(
         agent.run(
-            ScreenVerdictRequest(proposal=_payload(proposal), model=LLMModel.gpt_4o),
+            ScreenVerdictRequest(proposal=_payload(proposal), model=LLMModel.gpt_chat_latest),
             _CTX,
         )
     )
