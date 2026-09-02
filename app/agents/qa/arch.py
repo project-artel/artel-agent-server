@@ -239,7 +239,7 @@ class ResolvedArch(BaseModel):
         return base + self.tool_calls_per_step * max(steps, 1)
 
 
-def _resolved(spec: QaArchSpec, vision: bool, knowledge: bool = True) -> ResolvedArch:
+def _resolved(spec: QaArchSpec, vision: bool) -> ResolvedArch:
     """Fill in every field the spec left to the deployment.
 
     The compaction knobs default to `None` rather than to numbers because their
@@ -259,23 +259,6 @@ def _resolved(spec: QaArchSpec, vision: bool, knowledge: bool = True) -> Resolve
     for field, fallback in deferred.items():
         if chosen[field] is None:
             chosen[field] = fallback
-    if not knowledge:
-        # 지식창고를 못 읽는 배치다(`ModelSpec.knowledge_search`). 검색만 0 으로 두면
-        # `graph_tools_need_searches` 가 막던 상태 — 검색 없이 링크·확장만 열린 스펙 —
-        # 가 여기서 되살아난다. 그 도구들은 검색이 보여 준 id 만 받으므로 부를 수 있는
-        # 것이 하나도 없고, 런은 도구 호출 한도만 쓰고 아무것도 못 한다. 함께 눕힌다.
-        #
-        # 기록·삭제도 같이 내린다. 읽지 못하는 창고에 쓰는 것은 이번 런에 쓸모가 없고,
-        # 다음 런이 다른 임베딩으로 읽을 항목을 남기는 일이다.
-        for field in (
-            "max_searches_per_run",
-            "max_records_per_run",
-            "max_forgets_per_run",
-            "max_links_per_run",
-            "max_unlinks_per_run",
-            "max_expands_per_run",
-        ):
-            chosen[field] = 0
     return ResolvedArch(**{**chosen, "vision": vision})
 
 
@@ -304,7 +287,7 @@ def resolve_arch(spec: QaArchSpec, model: LLMModel) -> ResolvedArch:
             f"honoured. Use 'auto' to follow the model, or 'off' to state it."
         )
     vision = supports_vision if spec.vision is VisionMode.auto else spec.vision is VisionMode.on
-    return _resolved(spec, vision, get_model_spec(model).knowledge_search)
+    return _resolved(spec, vision)
 
 
 def arch_fingerprint(

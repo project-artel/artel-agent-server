@@ -40,7 +40,12 @@ class EmbeddingResult:
 def build_embedding_model(
     model: str, dimensions: int, batch_limit: int
 ) -> OpenAIEmbeddings:
-    """Build an embedding client for an OpenRouter slug."""
+    """Build an embedding client.
+
+    `embedding_base_url` / `embedding_api_key` win when set, so embeddings can
+    keep talking to the provider that owns their vector space while chat moves
+    elsewhere. See `Settings.embedding_base_url` for why that split has to exist.
+    """
     settings = get_settings()
     headers: dict[str, str] = {}
     if settings.openrouter_site_url:
@@ -51,8 +56,10 @@ def build_embedding_model(
     return OpenAIEmbeddings(
         model=model,
         dimensions=dimensions,
-        openai_api_base=settings.openrouter_base_url,
-        openai_api_key=settings.openrouter_api_key or "missing",
+        openai_api_base=settings.embedding_base_url or settings.openrouter_base_url,
+        openai_api_key=(
+            settings.embedding_api_key or settings.openrouter_api_key or "missing"
+        ),
         default_headers=headers or None,
         # Left on, LangChain re-encodes every input with tiktoken, splits it at
         # OpenAI's context length and averages the pieces back into one vector.

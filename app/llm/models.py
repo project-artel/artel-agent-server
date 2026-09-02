@@ -108,16 +108,6 @@ class ModelSpec:
     reasoning_max_tokens: int | None = None
     reasoning_step: int | None = None
 
-    # 이 모델을 쓰는 배치에서 지식창고를 **읽을 수 있나.**
-    #
-    # 모델의 능력이 아니라 그 모델이 사는 경로의 사실이다. Bedrock 에는
-    # `text-embedding-3-large` 가 없고, 다른 임베딩으로 바꾸면 차원은 맞아도
-    # (`vector(1024)`) 벡터 공간이 달라 기존 항목과의 비교가 **에러 없이** 틀린 답을
-    # 낸다. 검색이 조용히 엉뚱한 것을 돌려주는 것은 검색이 없는 것보다 나쁘다.
-    #
-    # False 면 `resolve_arch` 가 지식 관련 한도를 전부 0 으로 눕힌다.
-    knowledge_search: bool = True
-
     @property
     def supports_vision(self) -> bool:
         return "image" in self.input_modalities
@@ -132,8 +122,6 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         # 이미 빼서 적는다 — 압축이 이 수를 기준으로 발동하므로 높게 적는 쪽이 위험하다.
         max_input_tokens=136_000,
         input_modalities=("text", "image"),
-        # 임베딩을 같은 공간에서 못 구한다. 위 `knowledge_search` 주석에 이유가 있다.
-        knowledge_search=False,
     ),
     LLMModel.gpt_5_6_luna: ModelSpec(
         provider=LLMProvider.openai,
@@ -257,7 +245,6 @@ def list_models() -> list[dict[str, Any]]:
             "supports_strict_json": spec.supports_strict_json,
             "max_input_tokens": spec.max_input_tokens,
             "supports_vision": spec.supports_vision,
-            "knowledge_search": spec.knowledge_search,
             "input_modalities": list(spec.input_modalities),
             "multimodal": len(spec.input_modalities) > 1,
             "reasoning": (

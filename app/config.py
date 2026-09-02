@@ -139,6 +139,18 @@ class Settings(BaseSettings):
     # that set and keeps the vector under pgvector's 2000-dimension ceiling for
     # HNSW and IVFFlat indexes — 3072 would force halfvec on the storage side.
     embedding_model: str = "openai/text-embedding-3-large"
+    # Embeddings authenticate on their own. Chat can move to another gateway or
+    # provider for cost reasons — AWS Bedrock, a proxy, a second account — but
+    # the embedding model must not move with it: `embedding_dimensions` is
+    # pinned into Orchestration's vector(N) column, and a different model fills
+    # that column from a different vector space. The stored items and the new
+    # ones would then be compared without error and with wrong answers, which
+    # is worse than having no search at all.
+    #
+    # Unset, both fall back to the chat credentials, so nothing changes for a
+    # deployment that has not split them.
+    embedding_base_url: str | None = None
+    embedding_api_key: str | None = None
     embedding_dimensions: int = 1024
     # One request's worth of texts. LangChain still slices the batch into
     # chunks of this size, so raising it raises what one request carries.
