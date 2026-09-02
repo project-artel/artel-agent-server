@@ -233,8 +233,14 @@ class UsageCallback(AsyncCallbackHandler):
     accounting gap; an exception would be a failed QA run.
     """
 
-    def __init__(self, buffer: UsageBuffer | None = None) -> None:
+    def __init__(self, buffer: UsageBuffer | None = None, slug: str | None = None) -> None:
         self._buffer = buffer
+        # 카탈로그가 쓰는 이름. 응답이 vendor 접두를 잃고 돌아올 때 이것으로 되살린다.
+        # Bedrock 이 그렇다 — 클라이언트에는 `bedrock/` 을 뗀 profile ID 만 넘기므로
+        # 응답의 `model_name` 에 슬래시가 없고, 그러면 `provider` 가 모델 이름
+        # 전체가 되어 `provider VARCHAR(40)` 을 넘긴다. 같은 함정을 embedding 쪽이
+        # 먼저 밟았고(`_record_from_embedding`), 거기서 쓴 처방과 같다.
+        self._slug = slug
         # ponytail: a run that ends without either end or error callback leaves
         # its entry here. Bound it (TTL or deque) if that ever adds up — one
         # abandoned run costs a timestamp pair.
@@ -256,7 +262,7 @@ class UsageCallback(AsyncCallbackHandler):
     async def on_llm_end(self, response: LLMResult, *, run_id: UUID, **kwargs: Any) -> None:
         started = self._started.pop(run_id, None)
         try:
-            record = _record_from_response(response, started)
+            record = _record_from_response(response, started, self._slug)
             if record is not None:
                 await self._target.add(record)
         except Exception:  # noqa: BLE001 - accounting never propagates
@@ -264,7 +270,9 @@ class UsageCallback(AsyncCallbackHandler):
 
 
 def _record_from_response(
-    response: LLMResult, started: tuple[float, datetime] | None
+    response: LLMResult,
+    started: tuple[float, datetime] | None,
+    slug: str | None = None,
 ) -> dict[str, Any] | None:
     generations = response.generations[0] if response.generations else []
     message = getattr(generations[0], "message", None) if generations else None
@@ -281,6 +289,9 @@ def _record_from_response(
         or (message.response_metadata or {}).get("model_name")
         or ""
     )
+    # 슬래시가 없으면 vendor 를 잃은 이름이다. 카탈로그 값이 그것을 아직 갖고 있다.
+    if "/" not in model and slug:
+        model = slug
     cost = raw_usage.get("cost")
     now = time.monotonic()
 

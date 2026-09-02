@@ -307,3 +307,32 @@ def test_the_oldest_records_go_when_the_buffer_fills() -> None:
 
     (payload,) = sender.payloads
     assert [record["marker"] for record in payload["records"]] == [3, 4]
+
+
+def test_a_bedrock_model_keeps_its_vendor_in_provider() -> None:
+    """Bedrock 은 vendor 접두를 잃은 이름으로 답한다.
+
+    `build_chat_model` 이 `bedrock/` 을 떼고 profile ID 만 클라이언트에 넘기므로,
+    응답의 `model_name` 에는 슬래시가 없다. 그대로 두면 `provider` 가 모델 이름
+    전체(43자)가 되어 받는 쪽의 `VARCHAR(40)` 을 넘고, 그 런의 사용량이 통째로
+    버려진다 — 실제로 stage 에서 그렇게 됐다.
+
+    카탈로그 값을 들고 있으면 그것으로 되살릴 수 있다.
+    """
+    sender = RecordingSender()
+    buffer = _buffer(sender, flush_size=1)
+    profile = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+    async def scenario() -> None:
+        set_usage_scope("QA_RUN", 7)
+        await _feed_chat(
+            UsageCallback(buffer, slug=f"bedrock/{profile}"),
+            _chat_result(cost=None, model=profile),
+        )
+
+    asyncio.run(scenario())
+
+    (record,) = sender.payloads[0]["records"]
+    assert record["provider"] == "bedrock"
+    assert record["model"] == f"bedrock/{profile}"
+    assert len(record["provider"]) <= 40

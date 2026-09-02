@@ -27,8 +27,10 @@ def test_settings_can_load_from_env_file(tmp_path) -> None:
     assert settings.app_name == "Test Server"
     assert settings.app_version == "9.9.9"
     assert settings.environment == "test"
-    assert settings.openrouter_api_key == "test-key"
-    assert settings.openrouter_base_url == "https://openrouter.test/api/v1"
+    # 옛 이름으로 적힌 .env 가 그대로 읽힌다. 이 줄이 하위호환의 전부다 —
+    # 배포가 `LLM_*` 로 옮기기 전에도 같은 이미지가 돌아야 한다.
+    assert settings.llm_api_key == "test-key"
+    assert settings.llm_base_url == "https://openrouter.test/api/v1"
     assert settings.openrouter_site_url == "https://example.test"
     assert settings.openrouter_app_title == "Test Title"
 
@@ -84,3 +86,24 @@ def test_a_summarizer_outside_the_catalog_is_refused_at_startup() -> None:
     is what keeps a typo from surviving until the first QA run compacts."""
     with pytest.raises(ValidationError):
         Settings(_env_file=None, qa_compaction_model="openai/not-a-model")
+
+
+def test_the_new_name_wins_over_the_old_one(tmp_path) -> None:
+    """둘 다 있으면 `LLM_*` 가 이긴다.
+
+    옮기는 중인 배포는 두 이름이 한동안 함께 있는다. 그때 옛 값이 이기면 옮긴
+    사람은 바꾼 것이 안 먹는 이유를 찾느라 시간을 쓴다.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "OPENROUTER_BASE_URL=https://old.test/api/v1\n"
+        "OPENROUTER_API_KEY=old-key\n"
+        "LLM_BASE_URL=https://new.test/v1\n"
+        "LLM_API_KEY=new-key\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(_env_file=env_file)
+
+    assert settings.llm_base_url == "https://new.test/v1"
+    assert settings.llm_api_key == "new-key"
