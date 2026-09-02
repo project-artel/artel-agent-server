@@ -28,6 +28,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
+    # Floor is 0.2.151, the version the Claude subscription backend was verified against.
+    "claude-agent-sdk>=0.2.151",
 ]
 
 # Prompt bodies are data, not code, so the wheel drops them unless they are
