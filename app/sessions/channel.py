@@ -21,6 +21,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from app.agents.scenario.schemas import CaseGuard
+
 logger = logging.getLogger(__name__)
 
 # How long a case search waits before the agent is told nobody answered.
@@ -130,12 +132,6 @@ class CaseOperation(BaseModel):
     matched_by: str = Field(default="", alias="matchedBy")
 
     model_config = ConfigDict(populate_by_name=True)
-
-
-class CaseGuard(BaseModel):
-    variable: str
-    operator: str
-    value: str
 
 
 class CaseFacts(BaseModel):

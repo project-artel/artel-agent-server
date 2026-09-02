@@ -2,7 +2,7 @@ import json
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
-from app.agents.scenario.cases import render_test_case_list
+from app.agents.scenario.cases import render_game_shape, render_test_case_list
 from app.agents.scenario.schemas import OutputLanguage, ScenarioAgentRequest
 from app.prompts import PromptFile, load_prompt
 
@@ -26,6 +26,35 @@ LANGUAGE_DIRECTIVES: dict[OutputLanguage, str] = {
 }
 
 
+def render_flows(flows: list) -> str:
+    """The walkable flows, one block each (ARTEL-658).
+
+    Kept short on purpose. The case list right above already says what each case is;
+    repeating any of it here would double the block that the prompt cache pays for and
+    give the model two places to read the same fact from.
+
+    **The chain stays, and it was tested (ARTEL-671).** Printing the order reads as a
+    script — measured, the model reproduced six flows and 43 cases byte-identical and
+    asked about no other order. So it was replaced with an unordered set and the game's
+    shape above was made the ground for ordering. The model then did reorder: five of
+    six flows changed. It ordered worse. The scenario that had opened at the title
+    screen and walked title → map → story → battle now opened on the **ending screen**,
+    and the backwards-reading pairs went from four to five. Grounds were not what was
+    missing; it has the board now and still starts at the end.
+
+    Empty renders as a sentence rather than nothing, because "there are no flows" and
+    "the flows block is missing" have to look different to whoever reads the prompt back.
+    """
+    if not flows:
+        return "(none — group and order the cases yourself, by the rules below)"
+    lines = []
+    for index, flow in enumerate(flows, 1):
+        opening = ", ".join(flow.opening) if flow.opening else "nothing"
+        lines.append(f"flow {index} — starts with: {opening}, gaps: {flow.gaps}")
+        lines.append("  " + " → ".join(str(case_id) for case_id in flow.case_ids))
+    return "\n".join(lines)
+
+
 def build_system_prompt(request: ScenarioAgentRequest) -> tuple[str, str]:
     """The system prompt body and the resolved version it came from.
 
@@ -43,7 +72,9 @@ def build_system_prompt(request: ScenarioAgentRequest) -> tuple[str, str]:
     """
     system: PromptFile = load_prompt(PROMPT_AGENT, "system")
     body = system.body.format(
+        game_shape=render_game_shape(request.test_case_list, request.entry_scene),
         test_case_list=render_test_case_list(request.test_case_list),
+        flows=render_flows(request.flows),
         language_directive=LANGUAGE_DIRECTIVES[request.locale],
     )
     return body, system.version

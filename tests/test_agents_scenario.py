@@ -16,8 +16,10 @@ from app.agents import (
 from app.agents.scenario.cases import NO_TEST_CASE_LIST_NOTICE, render_test_case_list
 from app.agents.scenario.schemas import (
     AuthoredStep,
+    CaseGuard,
     ReviewedCases,
     ScenarioAgentResult,
+    SceneExit,
     TestCaseListItem,
 )
 from app.agents.scenario.prompt import (
@@ -257,8 +259,8 @@ def test_system_prompt_uses_requested_language_directive() -> None:
     assert LANGUAGE_DIRECTIVES[OutputLanguage.en] in en_body
     assert "한국어" in ko_body
     assert "English" in en_body
-    # v7 is the newest scenario prompt version and the default.
-    assert version == "v7"
+    # v13 is the newest scenario prompt version and the default (ARTEL-668).
+    assert version == "v14"
 
 
 def test_first_message_carries_the_run_goal_and_context() -> None:
@@ -346,6 +348,58 @@ def test_empty_test_case_list_keeps_the_search_path() -> None:
     # Not a blank section: an empty block reads as "this project has no cases",
     # and the agent would stop rather than search.
     assert NO_TEST_CASE_LIST_NOTICE in seen["system_prompt"]
+
+
+def test_render_test_case_list_carries_state_and_exits() -> None:
+    """The material for ordering has to reach the prompt, not just the wire.
+
+    These fields were being sent by orchestration and dropped here: the model had
+    no such fields, so pydantic discarded them while the prompt told the agent to
+    order by them. Ordering silently fell back to re-reading the sentence.
+    """
+    rendered = render_test_case_list(
+        [
+            TestCaseListItem(
+                id=7,
+                scene="Map_scene",
+                step="Return 키를 누른다",
+                precondition="Map_scene 화면인 상태",
+                expected_value="배경이 갱신된다",
+                verification_status="DRAFT",
+                state_before=[
+                    CaseGuard(variable="StagePosition", operator=">=", value="3")
+                ],
+                state_after={"position": "+1"},
+                exits=[SceneExit(scene="TurnBattleScene", by="Return")],
+            )
+        ]
+    )
+
+    assert "needs: StagePosition >= 3" in rendered
+    assert "leaves: position +1" in rendered
+    assert "to TurnBattleScene: Return" in rendered
+
+
+def test_render_test_case_list_says_when_nothing_is_pressed() -> None:
+    """"Nothing to press" and "not known" are different answers.
+
+    Half the map's edges are transitions the game makes by itself. Reading that as
+    "not known" sends whoever runs this hunting for a control that was never there.
+    """
+    rendered = render_test_case_list(
+        [
+            TestCaseListItem(
+                id=8,
+                scene="StoryScene",
+                step="아무 키나 누른다",
+                expected_value="대사가 넘어간다",
+                verification_status="DRAFT",
+                exits=[SceneExit(scene="Map_scene")],
+            )
+        ]
+    )
+
+    assert "to Map_scene: (goes on its own)" in rendered
 
 
 def test_render_test_case_list_preserves_arrival_order() -> None:

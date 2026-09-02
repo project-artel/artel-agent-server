@@ -11,6 +11,7 @@ from app.agents import (
     ScenarioAgentResult,
     ScenarioDraft,
     ScenarioPlan,
+    AuthoredFlow,
     TestCaseListItem,
 )
 from app.llm.models import DEFAULT_MODEL, LLMModel
@@ -38,6 +39,8 @@ class SessionService:
         game_context: dict,
         user_input: str,
         test_case_list: list[TestCaseListItem] | None = None,
+        flows: list[AuthoredFlow] | None = None,
+        entry_scene: str | None = None,
         model: LLMModel = DEFAULT_MODEL,
         locale: OutputLanguage = DEFAULT_LANGUAGE,
         test_scenario_id: int | None = None,
@@ -50,6 +53,8 @@ class SessionService:
             unity_context=unity_context,
             game_context=game_context,
             test_case_list=test_case_list or [],
+            flows=flows or [],
+            entry_scene=entry_scene,
             pending_user_input=user_input,
             model=model,
             locale=locale,
@@ -141,11 +146,14 @@ class SessionService:
             unity_context=record.unity_context,
             game_context=record.game_context,
             test_case_list=record.test_case_list,
+            flows=record.flows,
+            entry_scene=record.entry_scene,
             history=self._replay_messages(record),
             draft=draft,
             current_scenarios=record.current_scenarios,
             model=record.model,
             locale=record.locale,
+            run_id=record.run_id,
         )
         result = await self._agent.run(
             request, AgentContext(session_id=session_id), channel

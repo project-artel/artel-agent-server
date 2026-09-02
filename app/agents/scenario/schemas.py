@@ -46,6 +46,58 @@ class ScenarioDraft(BaseModel):
         return steps
 
 
+class CaseGuard(BaseModel):
+    """One comparison a case's precondition requires.
+
+    Read from the case's condition structure, so the whole name survives:
+    ``CombineButton.combineZone.activeSelf``, not ``activeSelf``. Rendering it to
+    a sentence and reading it back is what used to lose the owner.
+    """
+
+    variable: str
+    operator: str
+    value: str
+    # Where this value moves. Requirements all look alike on one line — `position == 0`
+    # and `StagePosition >= 1` read the same — but the first is one arrow key and the
+    # second means winning a fight. Empty when the map does not say.
+    raised_in: list[str] = Field(default_factory=list)
+    # How that value moves, not just where (ARTEL-646). The screen name alone reads as
+    # "drop by and come back" — measured (run 203), authoring entered the battle screen
+    # and never wrote the step that wins it. The map knew winning was required.
+    moves: list["ValueMove"] = Field(default_factory=list)
+
+
+class ValueMove(BaseModel):
+    """One place a value changes.
+
+    ``how`` is empty when there is no button for it: the player has to make ``when``
+    come true by playing, and that takes its own step. That single distinction is what
+    separates `position == 0` (one arrow key) from `StagePosition >= 1` (win a fight).
+    """
+
+    scene: str
+    by: str | None = None
+    how: str | None = None
+    when: str | None = None
+
+
+class SceneExit(BaseModel):
+    """One step from this screen to another.
+
+    ``by`` is what to press — a key, a control path. **Empty means the game goes
+    on its own**: nothing to press, so do not send whoever runs this looking for a
+    button. "Nothing to press" and "not known" are different answers and this field
+    keeps them apart.
+
+    Only one step out, never the full set of screens you could eventually reach:
+    measured on a real game, every screen reached every other, so the full set said
+    nothing. One step at a time is what you chain into a route.
+    """
+
+    scene: str
+    by: str | None = None
+
+
 class TestCaseListItem(BaseModel):
     """One TestCase as the session receives it, in the project's whole list.
 
@@ -66,6 +118,18 @@ class TestCaseListItem(BaseModel):
     precondition: str | None = None
     expected_value: str
     verification_status: str
+    # What the case needs, and what it leaves behind. Orchestration parses these
+    # from the case's own condition structure — not from the sentence — so both
+    # sides read one state instead of two readings of one sentence.
+    #
+    # **These were on the wire and dropped here.** The model had no such fields,
+    # so pydantic discarded them while the prompt went on telling the agent to
+    # order by them. Ordering silently fell back to re-reading the sentence.
+    state_before: list[CaseGuard] = Field(default_factory=list)
+    state_after: dict[str, str] = Field(default_factory=dict)
+    # Where this screen leads in one step, and what to press to get there.
+    # The map has known this all along; it was never sent.
+    exits: list["SceneExit"] = Field(default_factory=list)
 
 
 class ScenarioAgentRequest(BaseModel):
@@ -95,6 +159,45 @@ class ScenarioAgentRequest(BaseModel):
     model: LLMModel = DEFAULT_MODEL
     # Locale for the natural-language output (message + scenario text).
     locale: OutputLanguage = DEFAULT_LANGUAGE
+    # Which run this turn belongs to (ARTEL-650). Carried for one reason: the
+    # per-run record of the authoring session lives on the orchestration side, and
+    # the prompt the model saw plus its raw answer are the only two things that
+    # never reach it. Without the id they cannot be filed with the rest.
+    run_id: int | None = None
+    # Walkable flows, worked out by orchestration before the turn starts (ARTEL-658).
+    #
+    # Which cases belong in one scenario and in what order is what decides whether the
+    # result can actually be run, and holding forty-two cases at once is the part the
+    # model is weakest at — measured, a plain list gave 26 scenarios with 9 unreachable
+    # climbs, one journey at a time gave 9 with 1. So that judgement moved to the
+    # calculation and arrives here already made.
+    #
+    # Empty means orchestration sent none — an older deployment, or the calculation
+    # failed. The turn then groups and orders on its own, exactly as before; that
+    # fallback is also the rollback.
+    flows: list["AuthoredFlow"] = Field(default_factory=list)
+    # Which screen the game boots into (ARTEL-670). The screen graph is cyclic —
+    # every screen reaches every other — so nothing in the structure says where a
+    # player starts. The build says it, orchestration reads it, and until now it
+    # was used only inside orchestration's own calculation and never told to the
+    # model. Absent means "not sent", which the shape block prints as such.
+    entry_scene: str | None = None
+
+
+class AuthoredFlow(BaseModel):
+    """One walkable flow: which cases, in what order, and what it costs to run.
+
+    **A constraint, not a script.** The order is what makes it walkable; reordering it
+    or inserting other cases breaks the guarantee. Cutting is safe — the front part of
+    a walkable flow is still walkable.
+    """
+
+    case_ids: list[int]
+    # What has to be true before step one. The flow cannot produce these itself.
+    opening: list[str] = Field(default_factory=list)
+    # How many places along the way cannot be instructed — someone has to play through
+    # them (win a fight, sit through a cutscene). Each one is a stop for whoever runs it.
+    gaps: int = 0
 
 
 class AuthoredStep(BaseModel):
@@ -123,7 +226,11 @@ class AuthoredStep(BaseModel):
         default=None,
         description=(
             "Where this step came from. Set it on every step.\n"
-            "  CASE        this step verifies the case in case_id\n"
+            "  CASE        this step verifies the case in case_id. **Only when case_id is\n"
+            "              set** — a step with no case_id is not a CASE step, it is a bridge,\n"
+            "              and marking it CASE is the most common way this field goes wrong\n"
+            "              (measured: 22 of 70 steps in one turn, and the whole answer was\n"
+            "              rejected for it)\n"
             "  CAPABILITY  this step takes the route find_path gave you — put its id in\n"
             "              step_source_capability_id\n"
             "  UNKNOWN     no known route. Put what is blocking in step_unknown_reason,\n"

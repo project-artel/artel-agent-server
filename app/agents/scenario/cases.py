@@ -34,6 +34,7 @@ Nothing here creates a TestCase. Case *creation* is a separate concern
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import TYPE_CHECKING
 
 from app.agents.scenario.schemas import TestCaseListItem
@@ -102,6 +103,84 @@ your context. Use `search_test_cases` to find the ones each scenario needs. An
 empty search result means no case matches — not that something went wrong."""
 
 
+def render_game_shape(entries: list[TestCaseListItem], entry_scene: str | None = None) -> str:
+    """What the game looks like, in one block, before any case (ARTEL-670).
+
+    **The map was never given as a shape.** Every prompt version so far carried it
+    only as per-case fragments — which screen this case is on, where that value
+    moves — so the agent had 43 cards and no board. Measured on a real project, the
+    words that would name the board (`entry`, a screen list, the graph) appeared
+    zero times in 121,712 characters, while one screen name appeared 103 times
+    scattered inside case bodies.
+
+    Ordering is the judgement the agent is weakest at, and this is what a person
+    reads first when they order by hand: which screens exist, which one the game
+    boots into, what leads where, and which values are progress rather than
+    position. None of it is new data — it is the same map, folded.
+
+    Everything here is derived from the cases already on the wire, except
+    ``entry_scene``, which only orchestration can know: the screen graph is cyclic,
+    so no amount of structure says where the game starts. Absent, the block says so
+    rather than guessing — a wrong entry is worse than none.
+    """
+    if not entries:
+        return "(no cases, so nothing is known about this game's screens)"
+
+    scenes = sorted({entry.scene for entry in entries if entry.scene})
+    counts = Counter(entry.scene for entry in entries if entry.scene)
+
+    lines = [f"{len(scenes)} screens carry cases."]
+    lines.append(
+        f"The game boots into {entry_scene}."
+        if entry_scene
+        else "Which screen the game boots into was not sent."
+    )
+
+    # One step out of each screen, gathered from the cases standing on it. Same
+    # facts the cases carry; here they are a graph instead of 43 asides.
+    leads: dict[str, set[str]] = {}
+    for entry in entries:
+        for exit_ in entry.exits:
+            if exit_.scene and exit_.scene != entry.scene:
+                leads.setdefault(entry.scene, set()).add(exit_.scene)
+    if leads:
+        lines.append("")
+        lines.append("Where each screen leads in one step:")
+        for scene in sorted(leads):
+            lines.append(f"  {scene} → {', '.join(sorted(leads[scene]))}")
+
+    lines.append("")
+    lines.append(
+        "Cases per screen: "
+        + " · ".join(f"{scene} {counts[scene]}" for scene, _ in counts.most_common())
+    )
+
+    # **Each fact once.** Keyed by (screen, by, how, when) so the same write reached
+    # through five different cases prints one line. What separates progress from
+    # position lives here: a value only something else can raise is a value the
+    # scenario has to earn in order, and one an arrow key moves is not.
+    moves: dict[str, list[str]] = {}
+    for entry in entries:
+        for guard in entry.state_before:
+            seen = moves.setdefault(guard.variable, [])
+            for move in guard.moves:
+                how = move.how or "NOT INSTRUCTABLE — it happens on its own"
+                line = f"    {move.by or '?'} in {move.scene} ({how})"
+                if move.when:
+                    line += f" when {move.when}"
+                if line not in seen:
+                    seen.append(line)
+    moving = {name: found for name, found in moves.items() if found}
+    if moving:
+        lines.append("")
+        lines.append("How each value moves — every way the map knows, listed once:")
+        for name in sorted(moving):
+            lines.append(f"  {name}")
+            lines.extend(moving[name])
+
+    return "\n".join(lines)
+
+
 def render_test_case_list(entries: list[TestCaseListItem]) -> str:
     """Every case in the project, as the block the system prompt carries.
 
@@ -129,6 +208,25 @@ def render_test_case_list(entries: list[TestCaseListItem]) -> str:
         if entry.precondition:
             lines.append(f"    precondition: {entry.precondition}")
         lines.append(f"    expected: {entry.expected_value}")
+        # The state this case needs and leaves, parsed from its structure rather
+        # than from the sentence above. Ordering by these is why they are here.
+        for guard in entry.state_before:
+            needs = f"    needs: {guard.variable} {guard.operator} {guard.value}"
+            # Where that value moves — the screen names only. **How it moves is in the
+            # game's shape block, written once** (ARTEL-670). It used to be repeated
+            # under every requirement: measured on a real project, 676 such lines
+            # carried 57 distinct facts, one fact restated 11.9 times, and they were
+            # 79% of this whole block. The map was in the prompt all along, shredded.
+            if guard.raised_in:
+                needs += f"  ← moves in {', '.join(guard.raised_in)}"
+            lines.append(needs)
+        if entry.state_after:
+            leaves = ", ".join(f"{k} {v}" for k, v in entry.state_after.items())
+            lines.append(f"    leaves: {leaves}")
+        # One step out of this screen. Blank `by` is an answer: the game goes there
+        # by itself and there is nothing to press.
+        for exit_ in entry.exits:
+            lines.append(f"    to {exit_.scene}: {exit_.by or '(goes on its own)'}")
     return "\n".join(lines)
 
 
@@ -143,7 +241,13 @@ to lead an open-ended request toward a real gap. Do not guess at a count; this i
 where the number comes from.
 
 The answer gives ids. Their wording is in the case list you already hold — quote
-that rather than reciting numbers, which mean nothing to the person reading."""
+that rather than reciting numbers, which mean nothing to the person reading.
+
+**Answer with a journey, not a tally by screen.** "지도를 끝까지 돌아 보스까지 가면
+아홉 건이 덮입니다" tells someone what to go and play; "Map_scene 9건, StoryScene 4건"
+is a category count they still have to turn into a plan themselves. Use `to <screen>:`
+and each case's `needs:`/`leaves:` to see which uncovered cases sit on one run, and
+name that run. A screen with a large count is where to start looking, not the answer."""
 
 
 class TestCaseSearchState:
@@ -238,6 +342,13 @@ The case list tells you what to verify. It does not tell you how many operations
 takes, or what they are called. Call this before writing the steps for a case whose
 operation you would otherwise have to guess — and instead of restating the case title as
 a step.
+
+**Do not call it for a case whose `step` already names the operation.** `Return 키를
+누른다`, `아무 키나 누른다`, `Canvas/MapSceneButton 을(를) 클릭한다` — there is nothing
+left to look up there, and the answer would only repeat what you are already holding.
+Measured on a real project the agent called this for all 42 cases in one turn and spent
+the whole turn deadline on it, while every one of those cases already named its key or
+its click. Call it for the ones that read like a title rather than an action.
 
 You get back:
 
