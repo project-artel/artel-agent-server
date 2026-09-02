@@ -92,7 +92,9 @@ def _app_with_service(service: ExtractionService) -> FastAPI:
 
 
 def test_extract_route_returns_game_context() -> None:
-    result = GameContext(overview=Overview(title="WordVenture"))
+    # genre 를 함께 채운다 — title 만 있으면 description 이 전부 비어 항목이
+    # 걸러지고, 아래 단언이 빈 리스트를 통과시키는 공허한 검증이 된다.
+    result = GameContext(overview=Overview(title="WordVenture", genre="word puzzle"))
     service = ExtractionService(
         agent=_canned_agent(result),
         http_client=_client_returning(b"a design doc body"),
@@ -109,7 +111,11 @@ def test_extract_route_returns_game_context() -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["filename"] == "g.txt"
-    assert body["game_context"]["overview"]["title"] == "WordVenture"
+    # orchestration-server 의 AgentExtractClient 가 읽는 그대로: tag/summary/
+    # description 세 필드만 가진 항목의 배열 (ARTEL-745).
+    assert body["game_context"] == [
+        {"tag": "OBJECTIVE", "summary": "WordVenture", "description": "genre: word puzzle"}
+    ]
 
 
 def test_extract_route_maps_extraction_failure_to_422() -> None:
