@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -32,6 +33,29 @@ class Settings(BaseSettings):
     # accepts without being told something is wrong.
     openrouter_timeout_seconds: float = 180.0
     openrouter_max_retries: int = 1
+
+    # `build_chat_model` 이 매 chat model 호출을 어느 backend 로 보낼지 고른다
+    # (app/llm/chat_model.py). 기본값 `openrouter` 는 그대로 둔다.
+    #
+    # `claude_subscription` 은 이 머신에 로그인된 `claude` CLI credential 을 그대로
+    # 써서 API key 없이 개발자 개인 Claude 구독(Pro/Max/Team/Enterprise 의 월간
+    # credit, 5시간 rate-limit window)에서 사용량을 뺀다. 로컬 테스트 전용 경로다 —
+    # 배포 환경에서 켜면 서버 트래픽이 사람 한 명의 개인 구독 rate limit 을 나눠 쓰게
+    # 되므로 절대 켜서는 안 된다.
+    llm_backend: Literal["openrouter", "claude_subscription"] = "openrouter"
+    # `claude_subscription` backend 아래에서, 호출이 요청한 `LLMModel` 이 Anthropic
+    # slug 가 아닐 때 대신 쓰는 Claude 모델 이름이다. 장식이 아니다 — `DEFAULT_MODEL`
+    # 이 `openai/gpt-5.6-luna` 라서, 이 backend 에서는 대체가 예외가 아니라 대부분의
+    # 호출이 거치는 흔한 경로다.
+    #
+    # `LLMModel` catalog 의 OpenRouter slug (`anthropic/claude-sonnet-5`) 가 아니라
+    # Claude Agent SDK 가 그대로 받는 맨 모델 이름(`claude-sonnet-5`)이다. SDK 가
+    # 실제로 인식하는 이름의 목록은 `claude-agent-sdk` 안에만 있고, 그 패키지는
+    # dev-only dependency 라서 이 모듈에서 import 해 검증할 수 없다 — 여기서 억지로
+    # 만든 검증은 `claude-agent-sdk` 가 이미 하는 검사를 흉내만 내고 그 결과와
+    # 어긋날 수 있다. 그래서 이 필드는 `qa_compaction_model` 과 달리 validator 를
+    # 두지 않는다.
+    claude_subscription_fallback_model: str = "claude-sonnet-5"
 
     # LangSmith tracing. Disabled unless both the flag and the key are set, so
     # a deploy without credentials degrades to "no traces" instead of failing.

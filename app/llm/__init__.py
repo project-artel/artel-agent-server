@@ -1,4 +1,11 @@
-"""LLM configuration: model catalog, OpenRouter-backed chat and embedding models."""
+"""LLM configuration: model catalog, chat and embedding models.
+
+`build_chat_model` serves OpenRouter by default and, under
+`Settings.llm_backend == "claude_subscription"`, a local-only backend defined
+in `app.llm.claude_subscription`. That module is not imported here — it pulls
+in `claude-agent-sdk`, a dev-only dependency, so `app.llm.chat_model` imports it
+lazily inside the function instead of at module load time.
+"""
 
 from app.llm.chat_model import build_chat_model, select_structured_method
 from app.llm.embedding_model import (

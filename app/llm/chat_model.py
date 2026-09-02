@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 
 from app.config import get_settings
@@ -24,8 +25,13 @@ def build_chat_model(
     model: LLMModel,
     reasoning: ReasoningConfig | None = None,
     cache_prompt: bool = False,
-) -> ChatOpenAI:
-    """Build a chat model for an OpenRouter slug.
+) -> BaseChatModel:
+    """Build a chat model for `model`, dispatching on `Settings.llm_backend`.
+
+    `openrouter` (default) targets ChatOpenAI against OpenRouter — see below.
+    `claude_subscription` delegates to `app.llm.claude_subscription`, a local
+    testing path that uses the machine's `claude` CLI credentials instead of an
+    API key; see `Settings.llm_backend`.
 
     ChatOpenAI targets any OpenAI-compatible endpoint; pointed at OpenRouter it
     serves every provider (OpenAI/Anthropic/Google/...) via the model slug, so a
@@ -39,6 +45,14 @@ def build_chat_model(
     would pay the write premium on every request forever.
     """
     settings = get_settings()
+    if settings.llm_backend == "claude_subscription":
+        # claude-agent-sdk 는 dev-only dependency 라서 여기서만 import 한다. 모듈
+        # 최상단에서 import 하면, 그 패키지가 없는 배포 이미지에서 `app.llm` 을
+        # import 하는 것만으로 실패한다.
+        from app.llm.claude_subscription import build_claude_subscription_chat_model
+
+        return build_claude_subscription_chat_model(model, reasoning, cache_prompt)
+
     headers: dict[str, str] = {}
     if settings.openrouter_site_url:
         headers["HTTP-Referer"] = settings.openrouter_site_url
@@ -86,4 +100,9 @@ def build_chat_model(
 
 def select_structured_method(model: LLMModel) -> str:
     """Strict json_schema for capable models, json_mode as the fallback."""
+    if get_settings().llm_backend == "claude_subscription":
+        # 이 backend 아래에서는 모든 호출이 Claude 로 가고 strict `json_schema` 를
+        # 항상 받는다 — catalog 의 `supports_strict_json` flag 가 어쩌다 결정하게
+        # 두지 않고 명시한다.
+        return "json_schema"
     return "json_schema" if get_model_spec(model).supports_strict_json else "json_mode"

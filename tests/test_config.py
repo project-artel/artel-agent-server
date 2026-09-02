@@ -1,3 +1,6 @@
+import sys
+import types
+
 import pytest
 from pydantic import ValidationError
 
@@ -84,3 +87,59 @@ def test_a_summarizer_outside_the_catalog_is_refused_at_startup() -> None:
     is what keeps a typo from surviving until the first QA run compacts."""
     with pytest.raises(ValidationError):
         Settings(_env_file=None, qa_compaction_model="openai/not-a-model")
+
+
+def test_llm_backend_defaults_to_openrouter() -> None:
+    """A deploy that never sets `LLM_BACKEND` must keep calling OpenRouter — the
+    Claude subscription path is local-only and opt-in."""
+    settings = Settings(_env_file=None)
+
+    assert settings.llm_backend == "openrouter"
+
+
+def test_llm_backend_rejects_a_name_outside_the_two_accepted() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, llm_backend="anthropic_direct")
+
+
+def test_claude_subscription_fallback_model_defaults_to_sonnet_5() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.claude_subscription_fallback_model == "claude-sonnet-5"
+
+
+def test_build_chat_model_dispatches_to_the_claude_subscription_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`build_chat_model` must not need `claude-agent-sdk` installed to be tested —
+    this stands a fake module in for `app.llm.claude_subscription` in `sys.modules`
+    so the lazy `import` inside the function resolves to it, and asserts the call is
+    routed there instead of building a `ChatOpenAI`."""
+    from app.llm import chat_model as chat_model_module
+
+    calls: list[tuple[LLMModel, object, bool]] = []
+
+    class StubChatModel:
+        pass
+
+    def build_claude_subscription_chat_model(model, reasoning=None, cache_prompt=False):
+        calls.append((model, reasoning, cache_prompt))
+        return StubChatModel()
+
+    stub_module = types.ModuleType("app.llm.claude_subscription")
+    stub_module.build_claude_subscription_chat_model = build_claude_subscription_chat_model
+    monkeypatch.setitem(sys.modules, "app.llm.claude_subscription", stub_module)
+    monkeypatch.setattr(
+        chat_model_module,
+        "get_settings",
+        lambda: Settings(_env_file=None, llm_backend="claude_subscription"),
+    )
+
+    chat_model_module.build_chat_model.cache_clear()
+    try:
+        result = chat_model_module.build_chat_model(LLMModel.gpt_5_6_luna)
+    finally:
+        chat_model_module.build_chat_model.cache_clear()
+
+    assert isinstance(result, StubChatModel)
+    assert calls == [(LLMModel.gpt_5_6_luna, None, False)]
