@@ -130,6 +130,15 @@ class TestCaseListItem(BaseModel):
     # Where this screen leads in one step, and what to press to get there.
     # The map has known this all along; it was never sent.
     exits: list["SceneExit"] = Field(default_factory=list)
+    # What to put in this case's step `input` — `key:Return`, `click:Canvas/continue`.
+    # Empty means there is nothing to press: an observation, where the game acts on
+    # its own. "Nothing to press" and "not known" are different answers, and an
+    # empty string is the first of the two.
+    #
+    # **This used to cost a tool call.** `explain_case` answered scene, requires,
+    # leaves and this; measured over a real turn, this was the only one of the four
+    # the list did not already carry. Moving one field removes the round trip.
+    input: str = ""
 
 
 class ScenarioAgentRequest(BaseModel):

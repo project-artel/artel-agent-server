@@ -134,28 +134,6 @@ class CaseOperation(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
-class CaseFacts(BaseModel):
-    """The `explain_case_result` frame: what a case is actually made of.
-
-    The case list says what to verify. It does not say how many operations that
-    takes or what they are called, and that gap is why authored steps end up
-    restating the case title.
-
-    An empty `operations` is an ordinary answer, not a failure: the scene spec does
-    not know this case yet. Inventing an operation name there is worse than saying so.
-    """
-
-    test_case_id: int = Field(default=0, alias="testCaseId")
-    scene: str | None = None
-    state_before: list[CaseGuard] = Field(default_factory=list, alias="stateBefore")
-    state_after: dict[str, str] = Field(default_factory=dict, alias="stateAfter")
-    operations: list[CaseOperation] = Field(default_factory=list)
-    observable: bool | None = None
-    note: str = ""
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
 @dataclass(frozen=True)
 class TestCaseSearchFailed:
     """Orchestration answered the search with an `error` frame.
@@ -191,7 +169,6 @@ class ScenarioChannel:
         self._pending_uncovered_id: str | None = None
         self._path_waiter: asyncio.Future[ScenarioPath] | None = None
         self._pending_path_id: str | None = None
-        self._facts_waiter: asyncio.Future[CaseFacts] | None = None
         self._pending_facts_id: str | None = None
 
     # --- outbound -------------------------------------------------------------
@@ -245,31 +222,6 @@ class ScenarioChannel:
         finally:
             self._path_waiter = None
             self._pending_path_id = None
-
-    async def fetch_case_facts(self, test_case_id: int) -> CaseFacts | None:
-        """Ask what a case is made of. `None` when nobody answered.
-
-        Same shape as `fetch_path`, and for the same reason: the scene spec stays on
-        the far side and only computed answers cross the wire. Scope comes from the
-        session binding.
-        """
-        loop = asyncio.get_running_loop()
-        waiter: asyncio.Future[CaseFacts] = loop.create_future()
-        self._facts_waiter = waiter
-        message_id = str(uuid4())
-        self._pending_facts_id = message_id
-        await self._send({
-            "type": "explain_case",
-            "messageId": message_id,
-            "testCaseId": test_case_id,
-        })
-        try:
-            return await asyncio.wait_for(waiter, timeout=self._search_timeout)
-        except asyncio.TimeoutError:
-            return None
-        finally:
-            self._facts_waiter = None
-            self._pending_facts_id = None
 
     async def search_test_cases(
         self, query: str, category: str | None, limit: int
@@ -348,15 +300,6 @@ class ScenarioChannel:
                     and raw.get("correlationId") == self._pending_uncovered_id
                 ):
                     waiter.set_result(UncoveredCases.model_validate(raw))
-                return True
-            if message_type == "explain_case_result":
-                waiter = self._facts_waiter
-                if (
-                    waiter is not None
-                    and not waiter.done()
-                    and raw.get("correlationId") == self._pending_facts_id
-                ):
-                    waiter.set_result(CaseFacts.model_validate(raw))
                 return True
             if message_type == "find_path_result":
                 waiter = self._path_waiter

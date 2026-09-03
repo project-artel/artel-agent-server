@@ -30,7 +30,6 @@ from typing import TYPE_CHECKING
 from langchain_core.tools import BaseTool, tool
 
 from app.agents.scenario.cases import (
-    EXPLAIN_CASE_DESCRIPTION,
     FIND_PATH_DESCRIPTION,
     LIST_UNCOVERED_DESCRIPTION,
     MAX_SEARCHES_PER_RUN,
@@ -124,47 +123,8 @@ def build_tools(
             f"and ask the user how it is done.{reversed_note}"
         )
 
-    @tool(description=EXPLAIN_CASE_DESCRIPTION)
-    async def explain_case(case_id: int) -> str:
-        # What the agent reads is EXPLAIN_CASE_DESCRIPTION, not this.
-        facts = await channel.fetch_case_facts(case_id)
-        if facts is None:
-            return (
-                "The case lookup did not answer in time. Write the step from the case's own "
-                "wording rather than guessing an operation."
-            )
-        lines = [f"case {case_id} · scene {facts.scene or 'unknown'}"]
-        if facts.state_before:
-            lines.append(
-                "  requires: "
-                + ", ".join(f"{g.variable} {g.operator} {g.value}" for g in facts.state_before)
-            )
-        if facts.state_after:
-            lines.append(
-                "  leaves: " + ", ".join(f"{k}={v}" for k, v in facts.state_after.items())
-            )
-        if not facts.operations:
-            lines.append(f"  operations: none known — {facts.note}")
-            return "\n".join(lines)
-        lines.append(f"  operations ({len(facts.operations)}):")
-        for op in facts.operations:
-            detail = f"    {op.input}"
-            if op.label:
-                detail += f"  [{op.label}]"
-            detail += f"  capability:{op.capability_id}  via {op.matched_by}"
-            if op.status != "runnable":
-                detail += f"  ({op.status})"
-            lines.append(detail)
-            if op.given:
-                lines.append(f"      needs {op.given}")
-            if op.summary:
-                lines.append(f"      {op.summary}")
-        if facts.observable is False:
-            lines.append("  observable: no — the result cannot be read back during a run.")
-        return "\n".join(lines)
-
     if has_test_case_list:
-        return [list_uncovered_cases, find_path, explain_case]
+        return [list_uncovered_cases, find_path]
 
     @tool(description=SEARCH_TEST_CASES_DESCRIPTION.format(limit=MAX_SEARCHES_PER_RUN))
     async def search_test_cases(query: str, category: str | None = None) -> str:
@@ -196,4 +156,4 @@ def build_tools(
             )
         return render_results(answer, remaining)
 
-    return [list_uncovered_cases, search_test_cases, find_path, explain_case]
+    return [list_uncovered_cases, search_test_cases, find_path]

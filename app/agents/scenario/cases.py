@@ -223,6 +223,11 @@ def render_test_case_list(entries: list[TestCaseListItem]) -> str:
         if entry.state_after:
             leaves = ", ".join(f"{k} {v}" for k, v in entry.state_after.items())
             lines.append(f"    leaves: {leaves}")
+        # What to press for this case itself, ready to put in the step's `input`.
+        # Blank is an answer — an observation has nothing to press — so the line is
+        # written only when there is something.
+        if entry.input:
+            lines.append(f"    input: {entry.input}")
         # One step out of this screen. Blank `by` is an answer: the game goes there
         # by itself and there is nothing to press.
         for exit_ in entry.exits:
@@ -336,35 +341,3 @@ question about a named thing, not about a vague gap.
 Arguments are the two case ids, in the order you want them to run."""
 
 
-EXPLAIN_CASE_DESCRIPTION = """What a case is actually made of, from the scene spec.
-
-The case list tells you what to verify. It does not tell you how many operations that
-takes, or what they are called. Call this before writing the steps for a case whose
-operation you would otherwise have to guess — and instead of restating the case title as
-a step.
-
-**Do not call it for a case whose `step` already names the operation.** `Return 키를
-누른다`, `아무 키나 누른다`, `Canvas/MapSceneButton 을(를) 클릭한다` — there is nothing
-left to look up there, and the answer would only repeat what you are already holding.
-Measured on a real project the agent called this for all 42 cases in one turn and spent
-the whole turn deadline on it, while every one of those cases already named its key or
-its click. Call it for the ones that read like a title rather than an action.
-
-You get back:
-
-  operations   The operations the spec attributes to this case: `input` (`key:Return`,
-               `click:Canvas/StartButton`), a label, and what the operation itself
-               requires (`given`). Put `input` into the step's `input` field as-is.
-               `matched_by` is `evidence` when this is the code the case points at, and
-               `effect` when it is a capability that touches the same value — several may
-               come back for the latter, so pick by the label and summary.
-  state_before / state_after   The case's own state, already parsed.
-  observable   Whether the result can be read back while a run is in progress. False
-               means whoever runs it cannot judge that check by watching values; keep the
-               check, but do not promise a verdict that cannot be produced.
-
-**An empty `operations` is a normal answer.** It means the scene spec does not cover this
-case yet. Write the step from the case's own wording and do not invent an operation name —
-a made-up control is worse than a plainly worded step.
-
-The argument is one case id."""
