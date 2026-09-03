@@ -42,10 +42,10 @@ Use this pipeline when the work item is tracked in Jira and the user asks for
 end-to-end development. Jira access is described in `project.md`.
 
 1. **Create the issue.** `jira_create_issue` in project `ARTEL`, issue type
-   `작업` unless the work is an epic or a defect. Follow `issue.md` for the
-   body. Set the identifying fields explicitly; a summary alone leaves the
-   issue unassigned and unclassified, and it will not show up in the right
-   filters:
+   `작업` unless the work is an epic, a defect, or a deliverable that spans more
+   than one repository. Follow `issue.md` for the body. Set the identifying
+   fields explicitly; a summary alone leaves the issue unassigned and
+   unclassified, and it will not show up in the right filters:
    - `assignee`: the person who will do the work. Set their Jira `accountId`; never leave it empty or infer ownership from the branch/PR author.
    - `parent`: select the existing Epic that owns this repository and outcome. Every 일반 작업 must have this parent before branch creation.
    - `customfield_10080` (작업 유형): `feat`, `fix`, `chore`, `docs`,
@@ -60,8 +60,8 @@ end-to-end development. Jira access is described in `project.md`.
      creation and stamp them from the commit and PR dates as the work moves —
      see `## Issue Dates`.
 
-   When the deliverable changes more than one repository, this issue is the
-   umbrella and each repository gets its own issue — read
+   When the deliverable changes more than one repository, it is not a `작업` at
+   all. It becomes a `스토리` with one `Subtask` per repository under it — read
    `## Multi-Repository Work` below before setting the fields above.
 
 2. **Move to 진행 중.** Transition the issue. An automation watches this
@@ -106,6 +106,10 @@ end-to-end development. Jira access is described in `project.md`.
    the type label, fill in `Code Walkthrough` with one entry per changed unit,
    and end the body with a `Jira: <ISSUE KEY>` trailer so the issue links back.
 
+When this issue is blocked by another issue in this repository that has not
+merged yet, base its PR on that issue's branch rather than the default branch and
+stack the two — see `## Stacked Pull Requests` in `pull-request.md`.
+
 Move the issue to 검토 중 when the PR opens, and to 완료 only after merge and
 required validation pass.
 
@@ -122,47 +126,58 @@ read as the work's real span:
   several PRs carry the key, use the last merge.
 
 Write both as `YYYY-MM-DD` in `Asia/Seoul`, so a late-night commit lands on the
-day it was made locally. An umbrella issue takes the earliest 시작 날짜 and the
-latest 기한 among its children. Do not overwrite a date that is already set
-unless the Git history contradicts it.
+day it was made locally. A `스토리` takes the earliest 시작 날짜 and the latest
+기한 among the `Subtask` issues under it. Do not overwrite a date that is already
+set unless the Git history contradicts it.
 
 ## Multi-Repository Work
 
-One deliverable that changes more than one repository is filed as an umbrella
-issue plus one issue per repository, linked together. `issue.md` defines the
-structure, the link types, and the grouping label; this section covers the
-pipeline.
+One deliverable that changes more than one repository is filed as a `스토리` with
+one `Subtask` per repository under it. `issue.md` defines the structure and the
+link types; this section covers the pipeline.
 
-1. **Create the umbrella issue.** Issue type `작업`, 레포지토리 `없음`, parented
-   to the Epic that owns the outcome. Record the acceptance criteria for the
-   whole deliverable and the merge order — the repository that defines an API,
-   schema, or SDK surface merges before the ones that consume it. Give it the
-   `xrepo-<slug>` grouping label. The umbrella gets no branch and no PR.
+1. **Create the `스토리`.** Issue type `스토리`, parented to the Epic that owns the
+   outcome. Record the acceptance criteria for the whole deliverable and the
+   merge order — the repository that defines an API, schema, or SDK surface
+   merges before the ones that consume it. The `스토리` carries neither 작업 유형 nor
+   레포지토리, because the type has no such field and both are per-repository
+   facts that belong on each `Subtask`. It gets no branch and no PR.
 
-2. **Create one issue per repository.** Same `jira_create_issue` call as step 1
-   of `## Jira-Driven Development Flow`, with that repository's 레포지토리
-   option, its own 작업 유형, its own assignee accountId, its repository Epic as
-   `parent`, and the same `xrepo-<slug>` label. Then link it: `relates to` the
-   umbrella, plus `blocks` on the issue whose repository must merge first.
+2. **Create one `Subtask` per repository.** Issue type `Subtask` with the `스토리` as
+   `parent`, that repository's 레포지토리 option, its own 작업 유형, and its own
+   assignee accountId — the same fields step 1 of
+   `## Jira-Driven Development Flow` sets. The parent is what records membership,
+   so never also link a `Subtask` to its `스토리` with `relates to`. Add a `blocks`
+   link wherever merge order is real, and get its direction right —
+   `## Blocks Links` in `issue.md` carries the call and the read-back check.
 
 3. **Run steps 2–8 of `## Jira-Driven Development Flow` once per repository
-   issue**, in that repository's checkout or worktree, in merge order. A child
-   issue is developed exactly like a standalone one — its own branch from the
+   `Subtask`**, in that repository's checkout or worktree, in merge order. A
+   `Subtask` is developed exactly like a standalone `작업` — its own branch from the
    automation, plan, plan review, implementation, testing, pair review, and PR,
    with the same 진행 중 / 검토 중 / 완료 transitions. Nothing is skipped because
    the slice is small.
 
-4. **Keep the trail on the child issue.** The branch name, commit trailers, and
-   the PR `Jira:` trailer all carry the child issue key, never the umbrella key.
+   A `blocks` chain that crosses repositories cannot be stacked, because a stack
+   lives in one repository: merge the blocking repository's PR, then rebase and
+   open the next. Two `Subtask` issues that land in the same repository are
+   stacked like any other chain.
 
-5. **Report up as you go.** Whenever a child changes state, comment the rolled-up
-   status on the umbrella: which repositories are merged, which are waiting, and
-   any change to the merge order or the shared contract. Move the umbrella to
-   완료 last, after every child is merged and validated.
+4. **Keep the trail on the `Subtask`.** The branch name, commit trailers, and the
+   PR `Jira:` trailer all carry the `Subtask` key, never the `스토리` key.
 
-Do not file the children as `Subtask`. That issue type has neither 작업 유형 nor
-레포지토리, so its issues fall out of the repository filters and the branch
-automation has no prefix to derive a branch name from.
+5. **Report up as you go.** Whenever a `Subtask` changes state, comment the
+   rolled-up status on the `스토리`: which repositories are merged, which are
+   waiting, and any change to the merge order or the shared contract. Move the
+   `스토리` to 완료 last, after every `Subtask` is merged and validated.
+
+`Subtask` needs four fields the type does not carry by default: 작업 유형
+(`customfield_10080`), 레포지토리 (`customfield_10081`), 시작 날짜
+(`customfield_10015`), and 기한 (`duedate`). Without 작업 유형 the branch
+automation has no prefix to derive a branch name from, and without 레포지토리 the
+`Subtask` drops out of every repository filter. When a create call rejects one of
+them, stop and ask a Jira admin to put it on the `Subtask` type; do not file the
+work as a `작업` to work around it.
 
 ## Change Rules
 
