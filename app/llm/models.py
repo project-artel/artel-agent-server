@@ -89,6 +89,24 @@ class ReasoningConfig(BaseModel):
 
 
 @dataclass(frozen=True)
+class ModelPricing:
+    """백만 토큰당 달러. provider 가 청구액을 안 줄 때 비용을 되짚는 데만 쓴다.
+
+    적은 날짜와 출처를 함께 남긴다. **이 표는 스스로 낡는 것을 모른다** — provider 가
+    단가를 바꿔도 여기는 그대로이고, 그때 나오는 숫자는 틀렸는데 그럴듯하다. 값을
+    고칠 때 [as_of] 도 함께 고친다.
+    """
+
+    input_per_mtok: float
+    output_per_mtok: float
+    cache_write_per_mtok: float
+    cache_read_per_mtok: float
+    # 이 단가를 확인한 날과 어디서 봤는지. 숫자만 있으면 언제 것인지 알 수 없다.
+    as_of: str
+    source: str
+
+
+@dataclass(frozen=True)
 class ModelSpec:
     provider: LLMProvider
     # True when the model advertises `structured_outputs` (strict json_schema).
@@ -130,6 +148,19 @@ class ModelSpec:
     reasoning_min_tokens: int | None = None
     reasoning_max_tokens: int | None = None
     reasoning_step: int | None = None
+    # 백만 토큰당 달러. **provider 가 청구액을 안 알려주는 모델에만 채운다.**
+    #
+    # OpenRouter 는 응답에 `cost` 를 실어 주므로 여기 값이 필요 없고, 있으면 오히려
+    # 위험하다 — 청구액이 있는데 추정치로 덮으면 실제로 나간 돈을 잃는다.
+    # `usage.py` 가 provider 가 준 값을 항상 먼저 쓴다.
+    #
+    # **없으면 `cost_usd` 를 비운다. 추정하지 않는다.** 단가는 provider 가 언제든 바꾸고
+    # 이 표는 그것을 모른 채 그럴듯한 숫자를 계속 내놓는다. 빈 칸은 누구도 오해하지
+    # 않지만 낡은 숫자는 아무도 의심하지 않는다.
+    #
+    # `cache_write` 는 캐시에 처음 실을 때, `cache_read` 는 캐시에서 읽어 올 때의 단가다.
+    # 셋 다 input 계열이지만 배수가 달라 따로 적는다.
+    pricing: ModelPricing | None = None
     # 사용자가 고르지 않았을 때 켤 예산. **provider 기본값이 없는 모델에만 쓴다.**
     #
     # OpenRouter 의 GPT-5.6 은 파라미터를 생략하면 자기 기본값(medium)으로 추론한다.
@@ -167,6 +198,23 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         # Luna 의 medium 이 런당 1,500~5,000 추론 토큰을 썼다(실측 3,300 호출).
         # 그 중간이다 — 두 모델을 나란히 재려면 이 축이 비슷해야 한다.
         reasoning_default_tokens=4_096,
+        # Bedrock 은 응답에 청구액을 안 싣는다. 계정 단위 CloudWatch 로만 보이고 그것은
+        # 런에 안 붙어서, 이 표가 없으면 런 하나가 얼마였는지 영영 못 본다.
+        #
+        # **캐시 쓰기는 TTL 에 따라 단가가 다르다** — 5 분 $1.25, 1 시간 $2.00. 여기 값이
+        # 5 분인 것은 우리가 그 TTL 로 쓰고 있어서다(응답의 `ephemeral_5m_input_tokens`).
+        # 캐시 TTL 을 바꾸면 이 수도 함께 바꿔야 하고, 안 바꾸면 계산이 조용히 낮게 나온다.
+        #
+        # 배치 추론은 절반이다($0.50 / $2.50). 우리는 안 쓰므로 안 적는다 — 쓰게 되면
+        # 같은 호출에 단가가 둘이 되므로 이 자리가 아니라 호출 쪽이 골라야 한다.
+        pricing=ModelPricing(
+            input_per_mtok=1.00,
+            output_per_mtok=5.00,
+            cache_write_per_mtok=1.25,
+            cache_read_per_mtok=0.10,
+            as_of="2026-09-03",
+            source="AWS 콘솔, Claude Haiku 4.5 / us-west-2 / on-demand",
+        ),
     ),
     LLMModel.gpt_5_6_luna: ModelSpec(
         provider=LLMProvider.openai,
