@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import httpx
+import pytest
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 
@@ -52,7 +53,7 @@ def _chat_result(
             "input_tokens": 12043,
             "output_tokens": 318,
             "total_tokens": 12361,
-            "input_token_details": {"cache_read": 10240},
+            "input_token_details": {"cache_read": 10240, "cache_creation": 512},
             "output_token_details": {"reasoning": 64},
         },
     )
@@ -89,8 +90,11 @@ def test_chat_usage_becomes_one_record_in_the_wire_shape() -> None:
     assert record["inputTokens"] == 12043
     assert record["outputTokens"] == 318
     assert record["cachedInputTokens"] == 10240
+    assert record["cacheWriteTokens"] == 512
     assert record["reasoningTokens"] == 64
     assert record["costUsd"] == 0.021374
+    # provider 가 청구한 값이다. 계산으로 덮지 않는다.
+    assert record["costEstimated"] is False
     assert record["latencyMs"] >= 0
     assert record["calledAt"].endswith("Z")
 
@@ -108,7 +112,67 @@ def test_cost_is_omitted_when_openrouter_did_not_report_one() -> None:
     (record,) = sender.payloads[0]["records"]
     # Absent, not zero: zero would read as "the call was free".
     assert "costUsd" not in record
+    # 금액이 없으면 출처도 없다. 받는 쪽이 둘의 유무를 묶어 검사한다.
+    assert "costEstimated" not in record
     assert record["inputTokens"] == 12043
+
+
+def test_a_bedrock_call_is_priced_from_the_catalog_when_nobody_billed_it() -> None:
+    """Bedrock 은 청구액을 안 싣는다. 그 자리를 카탈로그 단가가 메운다.
+
+    `cached_input_tokens` 는 `input_tokens` 에 **포함된** 값이라 정가에서 빼고 캐시 단가로
+    다시 센다. 안 빼면 캐시로 아낀 만큼이 두 번 청구된 것으로 나온다.
+    """
+    sender = RecordingSender()
+    buffer = _buffer(sender, flush_size=1)
+
+    async def scenario() -> None:
+        set_usage_scope("QA_RUN", 5)
+        await _feed_chat(
+            UsageCallback(buffer),
+            _chat_result(
+                cost=None,
+                model="bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            ),
+        )
+
+    asyncio.run(scenario())
+
+    (record,) = sender.payloads[0]["records"]
+    # input 12,043 중 10,240 이 캐시 읽기, 정가 대상은 1,803. 캐시 쓰기 512, 출력 318.
+    expected = (
+        1_803 * 1.00 + 10_240 * 0.10 + 512 * 1.25 + 318 * 5.00
+    ) / 1_000_000
+    assert record["costUsd"] == pytest.approx(expected)
+    # 우리가 계산한 값이다. provider 가 청구한 값과 한 칸에 섞이면 안 된다.
+    assert record["costEstimated"] is True
+
+
+def test_an_unpriced_model_leaves_the_cost_empty_rather_than_guessing() -> None:
+    """단가를 모르는 모델은 빈 칸으로 남는다.
+
+    단가표는 자기가 낡은 것을 모른다. 모르는 모델에 아무 수나 세우면 그 숫자는
+    틀렸는데 그럴듯해서 아무도 의심하지 않는다. 빈 칸은 "아무도 말 안 했다" 로
+    정확히 읽힌다.
+    """
+    sender = RecordingSender()
+    buffer = _buffer(sender, flush_size=1)
+
+    async def scenario() -> None:
+        set_usage_scope("QA_RUN", 3)
+        await _feed_chat(
+            UsageCallback(buffer),
+            _chat_result(cost=None, model="vendor/a-model-nobody-priced"),
+        )
+
+    asyncio.run(scenario())
+
+    (record,) = sender.payloads[0]["records"]
+    assert "costUsd" not in record
+    assert "costEstimated" not in record
+    # 토큰은 그대로 남는다 — 값을 못 매긴 것이지 못 잰 것이 아니다.
+    assert record["inputTokens"] == 12043
+    assert record["cacheWriteTokens"] == 512
 
 
 # --- embedding hook ----------------------------------------------------------
