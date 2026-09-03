@@ -93,14 +93,27 @@ def build_tools(
                 "The route lookup did not answer in time. Do not invent the steps in "
                 "between — say in `message` that you could not check the route."
             )
-        reversed_note = (
-            "\nORDER — the other way round they chain directly: the second case's declared state "
-            "leads into the first's. This direction costs the bridge steps above. Games are not "
-            "always linear and going back may be exactly what was asked for — swap them only if "
-            "the request does not depend on this direction."
-            if answer.ordering == "REVERSED"
-            else ""
-        )
+        if answer.ordering == "REVERSED":
+            reversed_note = (
+                "\nORDER — the other way round they chain directly: the second case's declared "
+                "state leads into the first's. This direction costs the bridge steps above. Games "
+                "are not always linear and going back may be exactly what was asked for — swap "
+                "them only if the request does not depend on this direction."
+            )
+        elif answer.ordering == "CHAINED":
+            # Said out loud because silence used to mean two different things. Only
+            # `REVERSED` was ever written, so "this order is right" and "nothing can
+            # be said about the order" reached the agent as the same empty string,
+            # and it re-asked the same pair to settle what it had already been told.
+            reversed_note = (
+                "\nORDER — this order is right: the first case's declared state leads into the "
+                "second's. Nothing to reconsider here."
+            )
+        else:
+            reversed_note = (
+                "\nORDER — nothing can be said either way: the two cases name no state in common, "
+                "so neither order is implied. Asking again will not change this answer."
+            )
         if answer.result == "NOT_REQUIRED":
             return (
                 "NOT_REQUIRED — nothing goes in between. The two cases follow directly."
@@ -117,6 +130,17 @@ def build_tools(
                 f"{lines}{reversed_note}"
             )
         blocked = answer.blocked_by or "unknown"
+        if answer.playable:
+            # Not the same answer as "no route". The value moves by itself once
+            # someone is on that screen, so the run gets through by playing —
+            # asking the user how to press it would be asking for a button that
+            # does not exist.
+            return (
+                f"PLAYABLE — no operation can be instructed for {blocked}, but a person "
+                f"gets through it. {answer.note} Write a bridge step (case_id null) that "
+                "says what has to happen there, and do not invent a button to press."
+                f"{reversed_note}"
+            )
         return (
             f"UNKNOWN — the route is not in the scene spec. Blocking: {blocked}. "
             f"{answer.note} Do not invent steps. Say so in `message`, name what is blocking, "

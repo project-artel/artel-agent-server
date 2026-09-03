@@ -112,6 +112,13 @@ class ScenarioPath(BaseModel):
     # runs is not the same as one that verifies what the cases meant.
     ordering: str = "NO_OPINION"
     blocked_by: str | None = Field(default=None, alias="blockedBy")
+    # Whether a person can get through this even though no operation can be
+    # instructed. `UNKNOWN` covers two different situations and this tells them
+    # apart: a value that moves on its own once you are on that screen (win the
+    # fight, sit out the cutscene), and a value nothing anywhere changes. The
+    # first is a stop for whoever runs the scenario; the second is a question for
+    # the user. `note` says what moves where, in words to put beside the step.
+    playable: bool = False
     note: str = ""
 
     model_config = ConfigDict(populate_by_name=True)

@@ -318,10 +318,15 @@ def render_results(payload: TestCaseSearchResult, remaining: int) -> str:
     )
 
 
-FIND_PATH_DESCRIPTION = """What has to happen between two test cases.
+FIND_PATH_DESCRIPTION = """What has to happen between two test cases — for pairs the flows do not cover.
 
-Call this whenever the next case you want sits in a different situation from the last one —
-a different screen, or a different value of something their preconditions name. Do NOT guess
+**The flows already answer this for the order they give.** Every hop inside a flow is written
+out there: what goes in between, or that nothing does, or what blocks it. Read that line rather
+than asking again for the same pair — the answers were all computed before this turn began, and
+asking re-derives what you are already holding.
+
+Call this only when you leave that order: two cases from different flows, a pair the flows never
+put next to each other, or an order the user asked for that the flows do not have. Do NOT guess
 what goes in between; that is what this answers.
 
 It replies one of three ways.

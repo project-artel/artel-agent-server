@@ -49,13 +49,30 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Graph steps the loop may take: a model turn and a tool turn per search, the
-# structured-output turn, and headroom. recursion_limit counts graph steps, so
-# this bounds tool calls and model turns together (see the QA runner). Doubled to
-# cover the model turn that sits between each tool result. The headroom is generous
-# so a model that keeps probing after the search budget still lands on the
-# structured output before the limit — and if it doesn't, we fail gracefully below.
-RECURSION_LIMIT = (MAX_SEARCHES_PER_RUN + 8) * 2
+# Graph steps the loop may take: a model turn and a tool turn per lookup, the
+# structured-output turn, and headroom. recursion_limit counts graph steps, so this
+# bounds tool calls and model turns together (see the QA runner). Doubled to cover
+# the model turn that sits between each tool result.
+#
+# **Sized from the work, not from a number nobody can defend.** It used to be
+# `(MAX_SEARCHES_PER_RUN + 8) * 2` with that ceiling at a million, so the comment
+# said "a ceiling no real turn reaches" while nothing stopped a turn at all.
+# Measured: one turn spent 280 `find_path` round trips over 88 cases, 109 of them
+# repeats of a pair already answered, and ran fourteen minutes without finishing.
+#
+# What bounds the work is how many cases there are. Every case needs at most a
+# couple of lookups — the flows already carry the hops between them — so a turn
+# that has asked several times per case is not converging, and letting it run
+# costs the user minutes for an answer that is not coming.
+LOOKUPS_PER_CASE = 3
+
+# Floor for a turn with no list, and headroom for the structured output.
+BASE_LOOKUPS = 16
+
+
+def recursion_limit_for(case_count: int) -> int:
+    """Graph steps a turn may take, from how many cases it has to place."""
+    return (case_count * LOOKUPS_PER_CASE + BASE_LOOKUPS) * 2
 
 # How many flows one turn may rewrite for order (ARTEL-648). Each is another model
 # turn, and the session on the far side calls a turn dead after five minutes of
@@ -135,7 +152,7 @@ class ScenarioAgent:
         )
         config = {
             **context.trace_config("scenario-generation"),
-            "recursion_limit": RECURSION_LIMIT,
+            "recursion_limit": recursion_limit_for(len(request.test_case_list)),
             # The turn reports its own model turns (ARTEL-487). Orchestration sees
             # the tool frames but not the time between them, and that time is most
             # of the wait — see app/agents/scenario/progress.py.

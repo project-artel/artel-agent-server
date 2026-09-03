@@ -207,6 +207,32 @@ class AuthoredFlow(BaseModel):
     # How many places along the way cannot be instructed — someone has to play through
     # them (win a fight, sit through a cutscene). Each one is a stop for whoever runs it.
     gaps: int = 0
+    # What it takes to get from each case to the next one, in order: n cases give
+    # n-1 hops. Empty means an older orchestration that did not send them, and then
+    # the route between two cases has to be asked for.
+    #
+    # **This was computed and thrown away.** Choosing a flow requires the whole
+    # pair matrix, so every one of these answers already existed before the turn
+    # started; the flow carried only the order. Measured over one turn, the agent
+    # spent 280 `find_path` round trips re-deriving them, 109 of those repeats.
+    hops: list["FlowHop"] = Field(default_factory=list)
+
+
+class FlowHop(BaseModel):
+    """What goes between two cases that follow each other in a flow.
+
+    `link` is the answer's kind: `beside` (nothing goes in between), `by_operation`
+    (press what `actions` says), `by_play` (someone has to play through it) or
+    `blocked` (there is no route, and `blocked_by` names what stops it).
+    """
+
+    from_case_id: int = Field(alias="from_case_id")
+    to_case_id: int = Field(alias="to_case_id")
+    link: str
+    actions: list[str] = Field(default_factory=list)
+    blocked_by: str | None = None
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class AuthoredStep(BaseModel):
