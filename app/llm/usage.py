@@ -31,8 +31,13 @@ from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.outputs import LLMResult
 
 from app.config import get_settings
+from app.llm.models import MODEL_SPECS, LLMModel
 
 logger = logging.getLogger(__name__)
+
+# `LLMModel(model)` 은 모르는 값에 ValueError 를 던진다. 사용량 기록이 예외를 내면
+# 안 되므로(이 모듈 전체가 그 규율이다) 던지기 전에 걸러 낸다.
+_MODEL_VALUES = frozenset(item.value for item in LLMModel)
 
 USAGE_PATH = "/internal/llm-usage"
 
@@ -68,12 +73,46 @@ def _isoformat(moment: datetime) -> str:
     )
 
 
+def _estimate_cost(
+    model: str,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cached_input_tokens: int,
+    cache_write_tokens: int,
+) -> float | None:
+    """What this call cost, from the catalog's prices, or None when we cannot say.
+
+    Only reached when the provider did not price the call itself. **None is the
+    answer for any model the catalog has no price for**, and that is the point:
+    a price table cannot tell that it has gone stale, so a model nobody has
+    priced produces an empty column rather than a plausible wrong number. An
+    empty column is read as "nobody said"; a stale one is read as the truth.
+
+    `cached_input_tokens` is part of `input_tokens`, so it is subtracted out
+    before the full-price rate is applied — the same containment rule the
+    receiving side documents. `cache_write_tokens` is not, and is priced whole.
+    """
+    spec = MODEL_SPECS.get(LLMModel(model)) if model in _MODEL_VALUES else None
+    pricing = spec.pricing if spec else None
+    if pricing is None:
+        return None
+    full_input = max(input_tokens - cached_input_tokens, 0)
+    return (
+        full_input * pricing.input_per_mtok
+        + cached_input_tokens * pricing.cache_read_per_mtok
+        + cache_write_tokens * pricing.cache_write_per_mtok
+        + output_tokens * pricing.output_per_mtok
+    ) / 1_000_000
+
+
 def _build_record(
     model: str,
     *,
     input_tokens: int,
     output_tokens: int,
     cached_input_tokens: int = 0,
+    cache_write_tokens: int = 0,
     reasoning_tokens: int = 0,
     cost_usd: float | None = None,
     started_at: datetime,
@@ -99,14 +138,29 @@ def _build_record(
         "inputTokens": input_tokens,
         "outputTokens": output_tokens,
         "cachedInputTokens": cached_input_tokens,
+        "cacheWriteTokens": cache_write_tokens,
         "reasoningTokens": reasoning_tokens,
         "latencyMs": latency_ms,
         "calledAt": _isoformat(started_at),
     }
-    # Omitted rather than zeroed when the provider did not price the call: a 0
-    # would read as "this was free" instead of "nobody said".
+    # provider 가 청구액을 줬으면 그것이 답이다. 계산은 안 줄 때만 한다 — 실제로 나간
+    # 돈을 추정치로 덮으면 그 행은 영영 되돌릴 수 없다.
+    estimated = cost_usd is None
+    if estimated:
+        cost_usd = _estimate_cost(
+            model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_input_tokens=cached_input_tokens,
+            cache_write_tokens=cache_write_tokens,
+        )
+    # Omitted rather than zeroed when nobody could price the call: a 0 would read
+    # as "this was free" instead of "nobody said". `costEstimated` rides with it —
+    # the receiving side ties the two together, and a number whose origin is
+    # unknown is one nobody can trust later.
     if cost_usd is not None:
         record["costUsd"] = cost_usd
+        record["costEstimated"] = estimated
     return record
 
 
@@ -301,6 +355,12 @@ def _record_from_response(
         output_tokens=usage.get("output_tokens", 0),
         cached_input_tokens=(usage.get("input_token_details") or {}).get(
             "cache_read", 0
+        ),
+        # Bedrock 응답에 실제로 실려 오는 값이고(`{'cache_creation': 0, 'cache_read': …}`)
+        # 여기서 꺼내지 않아 버려지고 있었다. `cache_read` 와 달리 `input_tokens` 에
+        # 포함되지 않고 따로 청구된다.
+        cache_write_tokens=(usage.get("input_token_details") or {}).get(
+            "cache_creation", 0
         ),
         reasoning_tokens=(usage.get("output_token_details") or {}).get("reasoning", 0),
         cost_usd=float(cost) if isinstance(cost, (int, float)) else None,
