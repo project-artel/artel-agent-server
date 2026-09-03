@@ -255,7 +255,7 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v15() -> None:
+def test_the_default_qa_version_is_v16() -> None:
     """A run that names no version has to get the newest prompt.
 
     This is also the trap in adding a version: `resolve_version` returns the
@@ -265,7 +265,7 @@ def test_the_default_qa_version_is_v15() -> None:
     `set_input_axis` before the tool exists teaches the agent to reach for
     something that is not there.
     """
-    assert resolve_version("qa_run") == "v15"
+    assert resolve_version("qa_run") == "v16"
 
 
 def test_v12_drops_the_screen_map_and_says_what_a_screen_anchors() -> None:
@@ -426,6 +426,64 @@ def test_v15_teaches_writing_the_map_and_keeps_all_of_v14() -> None:
     # v14 는 한 문단도 안 지워지고 한 글자도 안 바뀐다. 이번 판은 순수한 추가다.
     for paragraph in v14.split("\n\n"):
         assert paragraph in v15
+
+
+V16_REWRITES_FROM_V15 = ("**And none of this is what the run is for.**",)
+
+
+def test_v16_binds_the_verdict_to_report_step_and_keeps_the_rest_of_v15() -> None:
+    """v15 는 절을 가르쳤는데 아무도 안 썼다. v16 은 그것을 이미 도는 자리에 붙인다 (ARTEL-790).
+
+    stage 에서 v15 로 돈 런 27 개의 도구 호출이 1,566 회인데 `record_capability_verdict` ·
+    `record_new_capability` · `list_scene_capabilities` 가 셋 다 0 회고
+    `capability_observation` 이 0 행이다. 배관 문제가 아니었다 — tool 셋은 매 런 bind 됐고,
+    씬 문맥 블록은 `capability_key` 까지 실려 찍혔고, agent 는 그 블록에만 있던 버튼 이름을
+    자기 발화에 나열하고 그것을 눌렀고, 거절당한 쓰기도 하나 없었다.
+
+    읽기 전용이라 위험이 0 인 `list_scene_capabilities` 조차 0 회인 것이 원인을 가른다.
+    조심해서 안 쓴 것이 아니라 후보로 떠오르지 않았다. v15 의 절은 쓰기를 가르치는 문단이
+    둘인데 블록을 믿지 말라는 문단이 넷이고(ARTEL-679, 각각 맞다), 마지막 문단이
+    **"이건 런의 목적이 아니다"** 로 끝난다. 지도를 캐러 다니지 말라는 규칙으로 쓴 문장인데
+    읽는 쪽에서는 안 적어도 된다는 허락이 됐다.
+
+    그래서 두 가지를 한다. 판정을 적을 **순간**을 이름으로 대고 — `report_step` 은 같은
+    구간에서 267 회 불렸고, step 하나를 보고하는 순간이 곧 무언가를 눌러 보고 결과를 본
+    순간이라 `works`/`fails` 의 답이 이미 나와 있다 — 마지막 문단을 갈라 캐러 다니는 것만
+    막는다.
+
+    ARTEL-679 의 네 문단은 한 글자도 안 건드린다. 그것을 무르면 잘린 목록이 관측을 이겼던
+    문제가 그대로 되돌아온다.
+    """
+    v15 = load_prompt("qa_run", "system", "v15").body
+    v16 = load_prompt("qa_run", "system", "v16").body
+
+    # 적을 순간을 이름으로 댄다.
+    assert "**The moment to do it is when you report the step.**" in v16
+    assert "send the verdict in the same breath" in v16
+
+    # 캐러 다니는 것을 막는 규칙은 남는다. 이것이 없으면 런이 지도 채우기로 샌다.
+    assert "**Do not go looking, and do not skip what is in front of you.**" in v16
+    assert (
+        "leaving the scenario to hunt for rows to confirm is a run that has stopped testing"
+        in v16
+    )
+    assert "A refused write is never a reason to stop or to retry" in v16
+
+    # 안 적어도 된다고 읽히던 문장은 사라진다.
+    assert "**And none of this is what the run is for.**" not in v16
+
+    # ARTEL-679 가 넣은 네 문단은 그대로다.
+    assert "**The scene view outranks that block, always.**" in v16
+    assert "**A capability missing from that block does not mean you cannot do it.**" in v16
+    assert "dragging, in particular, appears in no scene's list on any build" in v16
+    assert "Treat the list as where to look first, and the scene as what is true." in v16
+
+    # 고쳐 쓴 한 문단 말고는 v15 그대로다.
+    for paragraph in v15.split("\n\n"):
+        if paragraph.startswith(V16_REWRITES_FROM_V15):
+            assert paragraph not in v16, "고쳐 쓴다고 해 놓고 옛 문단이 남아 있다"
+            continue
+        assert paragraph in v16
 
 
 def test_v15_defines_the_same_roles_as_v14() -> None:
