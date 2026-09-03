@@ -130,6 +130,16 @@ class ModelSpec:
     reasoning_min_tokens: int | None = None
     reasoning_max_tokens: int | None = None
     reasoning_step: int | None = None
+    # 사용자가 고르지 않았을 때 켤 예산. **provider 기본값이 없는 모델에만 쓴다.**
+    #
+    # OpenRouter 의 GPT-5.6 은 파라미터를 생략하면 자기 기본값(medium)으로 추론한다.
+    # Bedrock 의 Anthropic 은 생략하면 아예 안 한다 — `budget_tokens` 가 필수이고
+    # 그것을 안 주면 `thinking` 을 켤 수 없다. 그래서 같은 "안 골랐다"가 두 모델에서
+    # 정반대로 작동했고, 한쪽만 추론하는 상태로 둘을 비교하고 있었다.
+    #
+    # 여기에 값이 있으면 고르지 않은 런도 그 예산으로 켠다. 없으면 provider 에게
+    # 맡긴다 — OpenRouter 쪽이 그 경우다.
+    reasoning_default_tokens: int | None = None
 
     @property
     def supports_vision(self) -> bool:
@@ -141,10 +151,22 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         provider=LLMProvider.anthropic,
         supports_strict_json=True,
         label="Claude Haiku 4.5 (AWS Bedrock)",
-        # Anthropic 이 공표한 200k 창에서 출력 64k 를 뺀 값이다. 다른 항목과 같은 규칙으로
-        # 이미 빼서 적는다 — 압축이 이 수를 기준으로 발동하므로 높게 적는 쪽이 위험하다.
-        max_input_tokens=136_000,
+        # 실측한 창은 200,000 이다(195,011 통과, 그 위 `prompt is too long`). 거기서
+        # 출력 예약 8,192 를 뺀다 — `max_tokens` 가 `budget_tokens` 보다 커야 해서
+        # 예산 4,096 이 그 예약분을 정한다.
+        #
+        # 앞서 136,000 으로 적었던 것은 근거 없는 수였다. 그 값이 압축 임계를 정하므로
+        # 200k 창을 68% 만 쓰고 있었다.
+        max_input_tokens=191_808,
         input_modalities=("text", "image"),
+        # Anthropic 은 `effort` 를 안 받는다. 토큰 예산으로만 켠다.
+        reasoning=ReasoningKind.max_tokens,
+        # Anthropic 최소치. 이보다 작으면 `thinking` 이 거절된다.
+        reasoning_min_tokens=1_024,
+        reasoning_max_tokens=32_000,
+        # Luna 의 medium 이 런당 1,500~5,000 추론 토큰을 썼다(실측 3,300 호출).
+        # 그 중간이다 — 두 모델을 나란히 재려면 이 축이 비슷해야 한다.
+        reasoning_default_tokens=4_096,
     ),
     LLMModel.gpt_5_6_luna: ModelSpec(
         provider=LLMProvider.openai,

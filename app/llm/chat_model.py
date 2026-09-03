@@ -29,6 +29,19 @@ BEDROCK_PREFIX = "bedrock/"
 # Converse API 가 캐시 경계를 읽는 표기. 이 block 까지가 되읽을 수 있는 prefix 다.
 CACHE_POINT: dict[str, Any] = {"cachePoint": {"type": "default"}}
 
+# Anthropic 은 thinking 이 켜진 호출의 temperature 를 1 로만 받는다. 실측:
+# `temperature may only be set to 1 when thinking is enabled`.
+#
+# 그래서 추론을 켜면 `TEMPERATURE` 를 못 쓴다. 그 값이 "두 모델의 비교가 비교이려면
+# 샘플링이 같아야 한다"는 이유로 고정돼 있으므로, 바꾸는 것이 아니라 **추론을 켠 호출은
+# 다른 샘플링이었다**는 사실로 남긴다. 비교할 때 이 축이 함께 움직인 것을 알아야 한다.
+THINKING_TEMPERATURE = 1.0
+
+# 추론 예산 위에 답이 설 자리. `max_tokens` 는 예산보다 커야 하고, 그 합이
+# `ModelSpec.max_input_tokens` 이 창에서 빼 둔 출력 예약분과 같아야 한다 — 두 수가
+# 어긋나면 압축이 도는 임계와 provider 가 거절하는 지점이 어긋난다.
+OUTPUT_RESERVE = 4_096
+
 
 class _CachingChatBedrockConverse(ChatBedrockConverse):
     """프롬프트 끝에 캐시 경계를 찍고 부른다.
@@ -68,18 +81,46 @@ class _CachingChatBedrockConverse(ChatBedrockConverse):
         yield from super()._stream(self._with_cache_point(messages), stop, run_manager, **kwargs)
 
 
-def _bedrock(model: LLMModel, cache_prompt: bool) -> ChatBedrockConverse:
+def _bedrock(
+    model: LLMModel, reasoning: ReasoningConfig | None, cache_prompt: bool
+) -> ChatBedrockConverse:
     """Bedrock 경로. 인증은 표준 AWS 자격증명 사슬을 그대로 쓴다.
 
     `LLMModel` 값에서 `bedrock/` 접두만 떼면 inference profile ID 가 된다. 그
     문자열이 리전 접두와 판을 담고 있어 어느 요율로 청구되는지까지 정한다.
+
+    추론은 OpenRouter 와 다른 이름으로 켠다. 거기서는 요청에 `reasoning` 을 싣지만
+    Bedrock 은 `additional_model_request_fields` 안의 `thinking` 을 받고, 예산도
+    `effort` 가 아니라 토큰 수다.
     """
     settings = get_settings()
+    spec = get_model_spec(model)
     factory = _CachingChatBedrockConverse if cache_prompt else ChatBedrockConverse
+    extra: dict[str, Any] = {}
+    temperature = TEMPERATURE
+    max_tokens = None
+
+    # 고르지 않았으면 카탈로그의 기본 예산으로 켠다. Bedrock 은 provider 기본값이
+    # 없어서, 안 정하면 추론이 아예 일어나지 않는다.
+    budget = (
+        reasoning.max_tokens
+        if reasoning is not None and reasoning.max_tokens is not None
+        else spec.reasoning_default_tokens
+    )
+    if budget is not None:
+        extra["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        # `max_tokens` 가 예산보다 커야 한다(실측: `max_tokens must be greater than
+        # thinking.budget_tokens`). 예산에 답할 자리를 더해 잡는다 — 이 값이 곧
+        # `max_input_tokens` 이 빼 둔 출력 예약분이다.
+        max_tokens = budget + OUTPUT_RESERVE
+        temperature = THINKING_TEMPERATURE
+
     return factory(
         model=model.value.removeprefix(BEDROCK_PREFIX),
         region_name=settings.bedrock_region,
-        temperature=TEMPERATURE,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        additional_model_request_fields=extra or None,
         # 카탈로그 값을 그대로 넘긴다. 응답은 `bedrock/` 을 뗀 이름으로 돌아오고,
         # 그대로 두면 `provider` 가 모델 이름 전체가 된다.
         callbacks=[UsageCallback(slug=model.value)],
@@ -109,10 +150,14 @@ def build_chat_model(
     conversation); a one-shot extraction over a fresh document does not, and
     would pay the write premium on every request forever.
     """
+    # 갈라지기 전에 검증한다. 분기 뒤에 두면 한쪽만 검증을 받고, 못 하는 추론을 요청한
+    # 호출이 그 경로에서만 조용히 통과한다.
+    reasoning = validate_reasoning(model, reasoning)
+
     if model.value.startswith(BEDROCK_PREFIX):
         # Bedrock 은 OpenAI 호환이 아니다(SigV4 + Converse). 아래 `extra_body` 는
         # 전부 OpenRouter 표기라 여기서 갈라지는 편이 옮기는 것보다 정직하다.
-        return _bedrock(model, cache_prompt)
+        return _bedrock(model, reasoning, cache_prompt)
 
     settings = get_settings()
     headers: dict[str, str] = {}
@@ -120,7 +165,6 @@ def build_chat_model(
         headers["HTTP-Referer"] = settings.openrouter_site_url
     if settings.openrouter_app_title:
         headers["X-Title"] = settings.openrouter_app_title
-    reasoning = validate_reasoning(model, reasoning)
 
     # OpenRouter prices the call itself and reports what it charged, but only
     # when asked — without usage.include the response carries token counts and

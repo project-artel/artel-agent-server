@@ -140,7 +140,13 @@ def resolve_run_config(
         ).body_sha256
 
     settings = get_settings()
-    compaction_model = settings.qa_compaction_model if resolved_arch.compaction else None
+    # 설정이 비어 있으면 런의 모델로 압축한다. 그래야 압축이 런과 같은 provider 를
+    # 쓰고, 한쪽 credit 이 없을 때 압축만 조용히 실패하는 일이 없다.
+    compaction_model = (
+        (settings.qa_compaction_model or model.value)
+        if resolved_arch.compaction
+        else None
+    )
     compaction_prompt = (
         load_prompt(
             COMPACTION_PROMPT_AGENT, COMPACTION_ROLE, settings.qa_compaction_prompt_version
