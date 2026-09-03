@@ -127,8 +127,8 @@ read as the work's real span:
 
 Write both as `YYYY-MM-DD` in `Asia/Seoul`, so a late-night commit lands on the
 day it was made locally. A `스토리` takes the earliest 시작 날짜 and the latest
-기한 among its Subtasks. Do not overwrite a date that is already set
-unless the Git history contradicts it.
+기한 among the `Subtask` issues under it. Do not overwrite a date that is already
+set unless the Git history contradicts it.
 
 ## Multi-Repository Work
 
@@ -136,46 +136,46 @@ One deliverable that changes more than one repository is filed as a `스토리` 
 one `Subtask` per repository under it. `issue.md` defines the structure and the
 link types; this section covers the pipeline.
 
-1. **Create the 스토리.** Issue type `스토리`, parented to the Epic that owns the
+1. **Create the `스토리`.** Issue type `스토리`, parented to the Epic that owns the
    outcome. Record the acceptance criteria for the whole deliverable and the
    merge order — the repository that defines an API, schema, or SDK surface
-   merges before the ones that consume it. The 스토리 carries neither 작업 유형 nor
+   merges before the ones that consume it. The `스토리` carries neither 작업 유형 nor
    레포지토리, because the type has no such field and both are per-repository
-   facts that belong on the Subtasks. It gets no branch and no PR.
+   facts that belong on each `Subtask`. It gets no branch and no PR.
 
-2. **Create one Subtask per repository.** Issue type `Subtask` with the 스토리 as
+2. **Create one `Subtask` per repository.** Issue type `Subtask` with the `스토리` as
    `parent`, that repository's 레포지토리 option, its own 작업 유형, and its own
    assignee accountId — the same fields step 1 of
    `## Jira-Driven Development Flow` sets. The parent is what records membership,
-   so never also link a Subtask to its 스토리 with `relates to`. Add a `blocks`
+   so never also link a `Subtask` to its `스토리` with `relates to`. Add a `blocks`
    link wherever merge order is real, and get its direction right —
    `## Blocks Links` in `issue.md` carries the call and the read-back check.
 
 3. **Run steps 2–8 of `## Jira-Driven Development Flow` once per repository
-   Subtask**, in that repository's checkout or worktree, in merge order. A
-   Subtask is developed exactly like a standalone `작업` — its own branch from the
+   `Subtask`**, in that repository's checkout or worktree, in merge order. A
+   `Subtask` is developed exactly like a standalone `작업` — its own branch from the
    automation, plan, plan review, implementation, testing, pair review, and PR,
    with the same 진행 중 / 검토 중 / 완료 transitions. Nothing is skipped because
    the slice is small.
 
    A `blocks` chain that crosses repositories cannot be stacked, because a stack
    lives in one repository: merge the blocking repository's PR, then rebase and
-   open the next. Two Subtasks that land in the same repository are stacked like
-   any other chain.
+   open the next. Two `Subtask` issues that land in the same repository are
+   stacked like any other chain.
 
-4. **Keep the trail on the Subtask.** The branch name, commit trailers, and the
-   PR `Jira:` trailer all carry the Subtask key, never the 스토리 key.
+4. **Keep the trail on the `Subtask`.** The branch name, commit trailers, and the
+   PR `Jira:` trailer all carry the `Subtask` key, never the `스토리` key.
 
-5. **Report up as you go.** Whenever a Subtask changes state, comment the
-   rolled-up status on the 스토리: which repositories are merged, which are
+5. **Report up as you go.** Whenever a `Subtask` changes state, comment the
+   rolled-up status on the `스토리`: which repositories are merged, which are
    waiting, and any change to the merge order or the shared contract. Move the
-   스토리 to 완료 last, after every Subtask is merged and validated.
+   `스토리` to 완료 last, after every `Subtask` is merged and validated.
 
 `Subtask` needs four fields the type does not carry by default: 작업 유형
 (`customfield_10080`), 레포지토리 (`customfield_10081`), 시작 날짜
 (`customfield_10015`), and 기한 (`duedate`). Without 작업 유형 the branch
 automation has no prefix to derive a branch name from, and without 레포지토리 the
-Subtask drops out of every repository filter. When a create call rejects one of
+`Subtask` drops out of every repository filter. When a create call rejects one of
 them, stop and ask a Jira admin to put it on the `Subtask` type; do not file the
 work as a `작업` to work around it.
 
