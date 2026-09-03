@@ -94,7 +94,13 @@ class ToolContext:
             # 배치에 없던 id 로 답하면 그것을 액션 결과인 척 옮기지 않는다.
             if item.id not in methods:
                 continue
-            outcome = "ok" if item.success else f"FAILED — {item.error or 'no reason given'}"
+            outcome = (
+                _press_outcome(item.returnValue)
+                if item.success and _is_press(item.returnValue)
+                else "ok"
+                if item.success
+                else f"FAILED — {item.error or 'no reason given'}"
+            )
             # Named, because a drag comes back as four lines and an unlabelled
             # failure would not say which part of it went wrong.
             lines.append(f"  {methods[item.id]}: {outcome}")
@@ -125,3 +131,35 @@ class ToolContext:
                 screen=False,
             )
         return _answer(body, messages)
+
+
+def _is_press(value: object) -> bool:
+    """누름 결과인가. `reached` 키를 갖는 것이 그 표시다."""
+    return isinstance(value, dict) and "reached" in value
+
+
+def _press_outcome(value: object) -> str:
+    """누름이 무엇에 닿았는지를 한 줄로.
+
+    SDK 는 데이터만 보낸다(`reached`, `pointerHeldByPerson`). 문장은 여기서 만든다 —
+    표현을 프로토콜에 실으면 그 말을 바꿀 때마다 게임 쪽 패키지를 다시 배포해야 하고,
+    실제로 한국어 문장을 실었다가 받는 쪽 계약을 깨뜨린 적이 있다(ARTEL-777).
+
+    **`ok` 는 "상태를 밀었다"는 뜻이지 "무언가 받았다"가 아니었다.** 그 하나로 세 가지가
+    구분되지 않아 에이전트가 헛손질을 하고도 몰랐다.
+    """
+    if not isinstance(value, dict):
+        return "ok"
+    if value.get("pointerHeldByPerson"):
+        return "전해지지 않음 — 포인터를 사람이 쥐고 있다"
+    reached = value.get("reached")
+    if not reached:
+        return "닿은 것 없음 — 그 자리에 누를 것이 없다"
+    # **결과가 아니라 보낸 일이다.** SDK 는 `SendMessage` 를 `DontRequireReceiver` 로
+    # 부르므로 받는 핸들러가 없어도 통과하고, 있어도 그것이 무엇을 했는지는 돌려주지
+    # 않는다. 게임이 지금 입력을 안 받는 상태여도 이 줄은 똑같이 나온다.
+    #
+    # 그래서 이름만 적으면 안 된다. 구체적인 이름이 붙은 한 줄은 `ok` 보다 더 확실한
+    # 성공처럼 읽혀서, 화면을 확인하지 않고 넘어가게 만든다 — 고치려던 것보다 나쁜
+    # 자리에 데려다 놓는 셈이다.
+    return f"{reached} 에 보냄 — 반응했는지는 화면으로 확인할 것"
