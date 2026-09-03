@@ -119,6 +119,36 @@ fixture, or a stubbed dependency demonstrates the shape, not the integration.
 State that in the section itself. A reviewer who assumes end-to-end evidence
 because none was disclaimed is a reviewer the pull request misled.
 
+## Stacked Pull Requests
+
+When two or more work items in this repository are chained by `blocks`, do not
+open their PRs side by side against `develop`. Each PR is based on the one before
+it, so a reviewer sees only that link's own diff and nothing needs a rebase after
+the PR below it merges.
+
+Use `gh stack`, the `github/gh-stack` extension, instead of setting base branches
+by hand:
+
+```bash
+gh stack init --base develop <bottom-branch>  # adopt or create the first branch
+gh stack add <next-branch>                    # each add sits on top of the previous one
+gh stack submit --auto                        # push every branch and open the PRs as drafts
+gh stack view --short                         # branches and PR status
+gh stack sync                                 # rebase the rest after one below merges
+```
+
+- Stack in `blocks` order, bottom first: the item that merges first is the bottom
+  of the stack.
+- `--auto` opens the PRs as drafts, which is what this repository requires
+  anyway. Drop it to write each title and body in the editor instead.
+- Every PR in the stack is still a full PR under this document — its own body,
+  its own validation, its own `Jira:` trailer. A stack reviews several work items
+  in order; it does not merge them into one review.
+- Run `gh stack sync` after any PR in the stack merges, and before asking for
+  review on the ones above it.
+- A `blocks` chain that crosses repositories cannot be stacked, because a stack
+  lives in one repository. There the link records merge order and nothing more.
+
 ## Review Rules
 
 - Keep PR focused on one coherent outcome.
