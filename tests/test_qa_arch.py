@@ -7,6 +7,7 @@ comparison that would have silently averaged two different agents.
 """
 
 from dataclasses import replace
+from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
@@ -270,7 +271,21 @@ def test_the_summarizer_is_recorded_apart_from_the_run_model() -> None:
     on = resolve_run_config(arch=QaArchSpec(compaction=True))
     off = resolve_run_config(arch=QaArchSpec(compaction=False))
 
-    assert on.compaction_model == get_settings().qa_compaction_model
+    # 설정을 비워 두면 런의 모델을 따른다. 그래도 축은 따로 남는다 — 아래가 그 자리다.
+    assert on.compaction_model == on.model.value
     assert on.prompt_hashes["summary"]
     assert off.compaction_model is None
     assert "summary" not in off.prompt_hashes
+
+
+def test_a_pinned_summarizer_stays_apart_from_the_run_model() -> None:
+    """고정하면 런 모델과 갈린다. 압축이 별개 축이라는 것이 이 갈림으로 드러난다."""
+    with patch.object(
+        get_settings(), "qa_compaction_model", LLMModel.gemma_4_free.value
+    ):
+        resolved = resolve_run_config(
+            arch=QaArchSpec(compaction=True), model=LLMModel.gpt_5_6_luna
+        )
+
+    assert resolved.compaction_model == LLMModel.gemma_4_free.value
+    assert resolved.model is LLMModel.gpt_5_6_luna

@@ -110,11 +110,24 @@ class Settings(BaseSettings):
     qa_compaction_keep_messages: int = 20
     qa_compaction_min_new_messages: int = 4
     qa_compaction_trim_tokens: int = 8000
-    qa_compaction_model: str = "openai/gpt-5.6-luna"
+    # 압축을 어느 모델로 하나. **비우면 그 런이 쓰는 모델을 따른다.**
+    #
+    # 예전에는 한 슬러그로 고정돼 있었다(`openai/gpt-5.6-luna`). 런은 Bedrock 으로
+    # 도는데 압축만 OpenRouter 로 나가는 상태가 되면, 그쪽 credit 이 없을 때 압축이
+    # **조용히 실패한다** — 실제로 그렇게 됐다. 압축은 컨텍스트가 창을 넘기 전에 접는
+    # 유일한 안전판이라, 그것이 안 도는 채로 도는 런은 길어지면 provider 가 거절해서
+    # 통째로 죽는다.
+    #
+    # 런의 모델을 따르면 그 의존이 사라진다. 값싼 모델로 고정하고 싶은 배치는 여전히
+    # 슬러그를 적으면 된다.
+    qa_compaction_model: str | None = None
 
     @field_validator("qa_compaction_model")
     @classmethod
-    def known_model(cls, value: str) -> str:
+    def known_model(cls, value: str | None) -> str | None:
+        if value is None or value == "":
+            return None
+
         from app.llm.models import LLMModel
 
         try:

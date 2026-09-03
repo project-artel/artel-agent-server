@@ -77,7 +77,10 @@ def test_compaction_defaults_are_safe_to_deploy_with() -> None:
     assert settings.qa_compaction_keep_messages == 20
     assert settings.qa_compaction_min_new_messages == 4
     assert settings.qa_compaction_trim_tokens == 8000
-    assert settings.qa_compaction_model == LLMModel.gpt_5_6_luna.value
+    # 비어 있는 것이 기본이고, 그것은 "런의 모델을 따른다"는 뜻이다. 한 슬러그로
+    # 고정해 두면 런이 다른 provider 로 도는 순간 압축만 그쪽에 매여, credit 이 없을 때
+    # 조용히 실패한다 — 실제로 그렇게 됐다(ARTEL-776).
+    assert settings.qa_compaction_model is None
 
 
 def test_a_summarizer_outside_the_catalog_is_refused_at_startup() -> None:
