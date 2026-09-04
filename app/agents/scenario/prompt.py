@@ -27,11 +27,10 @@ LANGUAGE_DIRECTIVES: dict[OutputLanguage, str] = {
 
 
 def _hop_text(hop) -> str:
-    """One hop as the sentence the agent acts on.
+    """hop 하나를 agent 가 그대로 따라 할 문장으로 옮긴다.
 
-    Each kind asks for something different: nothing, a bridge step, a person
-    playing, or a question back to the user. Flattening them into one wording
-    would put the agent back to guessing which of the four it is looking at.
+    네 종류가 각각 다른 것을 요구한다 — 아무것도 안 함, `bridge` 스텝, 사람이 플레이함,
+    사용자에게 되묻기. 한 문구로 뭉개면 agent 는 그 넷 중 어느 것인지 다시 짐작하게 된다.
     """
     if hop.link == "beside":
         return "nothing in between — write the next case straight after"
@@ -79,11 +78,10 @@ def render_flows(flows: list) -> str:
         if not flow.hops:
             lines.append("  " + " → ".join(str(case_id) for case_id in flow.case_ids))
             continue
-        # One line per hop, so what goes in between is read where the order is
-        # read. The arrow chain alone said only "these follow each other" and the
-        # agent asked `find_path` for every pair to learn the rest — 280 round
-        # trips in one measured turn, for answers that were computed before it
-        # began. Written out, there is nothing left to ask.
+        # hop 하나에 한 줄씩. 사이에 무엇이 들어가는지를 순서를 읽는 자리에서 함께 읽게
+        # 한다. 화살표만 있을 때는 "이것들이 이어진다"가 전부라, agent 가 나머지를 알려고
+        # 이웃마다 `find_path` 를 불렀다 — 실측 한 turn 에 280번 왕복했고, 그 답은 turn 이
+        # 시작되기 전에 이미 계산돼 있던 것이다. 적어 두면 물을 것이 남지 않는다.
         lines.append(f"  starts at case {flow.case_ids[0]}")
         for hop in flow.hops:
             lines.append(f"  {hop.from_case_id} → {hop.to_case_id}: {_hop_text(hop)}")

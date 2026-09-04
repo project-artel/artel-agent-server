@@ -223,9 +223,8 @@ def render_test_case_list(entries: list[TestCaseListItem]) -> str:
         if entry.state_after:
             leaves = ", ".join(f"{k} {v}" for k, v in entry.state_after.items())
             lines.append(f"    leaves: {leaves}")
-        # What to press for this case itself, ready to put in the step's `input`.
-        # Blank is an answer — an observation has nothing to press — so the line is
-        # written only when there is something.
+        # 이 케이스에서 무엇을 누르는지. 스텝의 `input` 에 그대로 넣을 수 있는 값이다.
+        # 비어 있는 것도 답이다 — 관측은 누를 것이 없다 — 그래서 있을 때만 줄을 쓴다.
         if entry.input:
             lines.append(f"    input: {entry.input}")
         # One step out of this screen. Blank `by` is an answer: the game goes there

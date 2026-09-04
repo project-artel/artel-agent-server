@@ -101,10 +101,10 @@ def build_tools(
                 "them only if the request does not depend on this direction."
             )
         elif answer.ordering == "CHAINED":
-            # Said out loud because silence used to mean two different things. Only
-            # `REVERSED` was ever written, so "this order is right" and "nothing can
-            # be said about the order" reached the agent as the same empty string,
-            # and it re-asked the same pair to settle what it had already been told.
+            # 말해 주는 이유는, 잠자코 있는 것이 서로 다른 두 가지를 뜻했기 때문이다. 적어
+            # 보내는 것이 `REVERSED` 뿐이라 "이 순서가 맞다"와 "순서에 대해 말할 것이 없다"가
+            # agent 에게는 똑같은 빈 문자열로 닿았고, 이미 들은 것을 확인하려고 같은 두
+            # 케이스를 다시 물었다.
             reversed_note = (
                 "\nORDER — this order is right: the first case's declared state leads into the "
                 "second's. Nothing to reconsider here."
@@ -131,10 +131,9 @@ def build_tools(
             )
         blocked = answer.blocked_by or "unknown"
         if answer.playable:
-            # Not the same answer as "no route". The value moves by itself once
-            # someone is on that screen, so the run gets through by playing —
-            # asking the user how to press it would be asking for a button that
-            # does not exist.
+            # "길이 없다"와 같은 답이 아니다. 그 화면에 서 있으면 값이 저절로 바뀌므로
+            # 플레이하면 지나간다 — 무엇을 누르냐고 사용자에게 물으면 있지도 않은 버튼을
+            # 물어보는 셈이다.
             return (
                 f"PLAYABLE — no operation can be instructed for {blocked}, but a person "
                 f"gets through it. {answer.note} Write a bridge step (case_id null) that "

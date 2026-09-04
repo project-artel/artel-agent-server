@@ -112,12 +112,11 @@ class ScenarioPath(BaseModel):
     # runs is not the same as one that verifies what the cases meant.
     ordering: str = "NO_OPINION"
     blocked_by: str | None = Field(default=None, alias="blockedBy")
-    # Whether a person can get through this even though no operation can be
-    # instructed. `UNKNOWN` covers two different situations and this tells them
-    # apart: a value that moves on its own once you are on that screen (win the
-    # fight, sit out the cutscene), and a value nothing anywhere changes. The
-    # first is a stop for whoever runs the scenario; the second is a question for
-    # the user. `note` says what moves where, in words to put beside the step.
+    # 조작으로 지시할 수는 없어도 사람은 지나갈 수 있는가. `UNKNOWN` 이 서로 다른 두 상황을
+    # 덮고 있어 이 칸이 그것을 가른다 — 그 화면에 서 있으면 저절로 바뀌는 값(전투를 이긴다,
+    # 컷신을 끝까지 본다)과, 아무 데서도 안 바뀌는 값이다. 앞엣것은 시나리오를 실행하는 사람이
+    # 멈춰 서는 자리이고, 뒤엣것은 사용자에게 물을 것이다. 무엇이 어디서 바뀌는지는 `note` 가
+    # 스텝 옆에 적을 문장으로 말해 준다.
     playable: bool = False
     note: str = ""
 
