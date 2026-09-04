@@ -1,6 +1,7 @@
 from functools import lru_cache
 from typing import Any
 
+from botocore.config import Config as BotocoreConfig
 from langchain_aws import ChatBedrockConverse
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
@@ -122,6 +123,18 @@ def _bedrock(
         temperature=temperature,
         max_tokens=max_tokens,
         additional_model_request_fields=extra or None,
+        # **답을 토막으로 받는다.** 통째로 받으면 다 쓸 때까지 연결에 아무것도 안 오고, 그
+        # 조용한 시간이 곧 답의 길이다 — 실측으로 출력 token 당 5.3ms 라 8,000 token 짜리
+        # 답 하나가 42초다. 시나리오 하나가 서른 스텝을 넘는 것은 정상이므로, 기다림 한도를
+        # 어디에 두든 통째로 받는 한 긴 답부터 죽는다. 같은 45초 한도에서 통째로 받으면
+        # 실패하고 토막으로 받으면 통과했다.
+        streaming=True,
+        # 안 돌아오는 호출을 끊는다. 값을 고른 이유는 `Settings.bedrock_timeout_seconds` 에 있다.
+        config=BotocoreConfig(
+            read_timeout=settings.bedrock_timeout_seconds,
+            connect_timeout=settings.bedrock_timeout_seconds,
+            retries={"max_attempts": settings.bedrock_max_attempts, "mode": "standard"},
+        ),
         # 카탈로그 값을 그대로 넘긴다. 응답은 `bedrock/` 을 뗀 이름으로 돌아오고,
         # 그대로 두면 `provider` 가 모델 이름 전체가 된다.
         callbacks=[UsageCallback(slug=model.value)],

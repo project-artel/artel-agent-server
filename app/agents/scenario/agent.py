@@ -77,8 +77,10 @@ def _default_agent_factory(
     # already uses tool calling for the search, and a structured-output tool
     # alongside it is the portable path across the OpenRouter catalog — the model
     # calls it to return the final plan, which ends the loop.
+    # 저작은 한 턴이 여러 번의 도구 왕복으로 자란다. 케이스 목록과 system prompt 는 그 사이
+    # 변하지 않으므로, 뒤 호출이 앞 호출의 prompt 를 되읽게 한다.
     return create_agent(
-        model=build_chat_model(model),
+        model=build_chat_model(model, cache_prompt=True),
         tools=tools,
         system_prompt=system_prompt,
         response_format=ToolStrategy(schema=ScenarioAgentResult),
