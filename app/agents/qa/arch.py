@@ -42,7 +42,12 @@ from app.llm.models import LLMModel, get_model_spec
 #
 # v2 because this is the second structure: v1 was one structured LLM call per
 # step, replaced wholesale by the tool loop rather than kept beside it.
-QA_ARCH_LABEL = "v2-tool-loop"
+#
+# v3 because `list_scene_capabilities`, `record_capability_verdict` and
+# `record_new_capability` (`app/agents/qa/tools/capability_tools.py`) joined the
+# tool set: the run can now read and write the content map's `capability` rows,
+# which is a different structure even though the loop around it did not change.
+QA_ARCH_LABEL = "v3-content-map-tools"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
