@@ -54,7 +54,7 @@ def test_a_changed_loop_bound_is_a_different_structure() -> None:
 
     This is the case the hand-written label misses: nobody bumps `QA_ARCH_LABEL`
     for a number, so without the fingerprint both runs would be filed under
-    `v2-tool-loop` and the difference would be read as noise.
+    `v3-content-map-tools` and the difference would be read as noise.
     """
     assert structure_of(resolved())[2] != structure_of(
         resolved(tool_calls_per_step=16)
@@ -289,3 +289,139 @@ def test_a_pinned_summarizer_stays_apart_from_the_run_model() -> None:
 
     assert resolved.compaction_model == LLMModel.gemma_4_free.value
     assert resolved.model is LLMModel.gpt_5_6_luna
+
+
+# --- the label stays paired with the structure it names ------------------------
+
+# Pinned next to the label they were computed under, so a diff to either one
+# shows the other in the same hunk. `QA_ARCH_LABEL` moved once already without
+# this pair moving with it: the content map tool set landed in
+# `app/agents/qa/tools/capability_tools.py` (`list_scene_capabilities`,
+# `record_capability_verdict`, `record_new_capability`) and changed
+# `structure_of(...)`'s fingerprint, but `QA_ARCH_LABEL` stayed `v2-tool-loop` —
+# so every run before and after the tools landed was filed under the same label
+# while carrying two different fingerprints. That is exactly the failure the
+# module docstring in `app/agents/qa/arch.py` names: "A label alone goes stale
+# the first time someone changes a tool and forgets to bump it." This pair
+# exists so the next such change fails a test instead of silently filing two
+# structures under one name.
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v3-content-map-tools"
+
+# The five knobs `_resolved()` in `arch.py` otherwise fills in from
+# `get_settings()`: `compaction`, `compaction_trigger_fraction`,
+# `compaction_keep_messages`, `compaction_min_new_messages` and
+# `compaction_trim_tokens`. Left as `None` — this test's default — the
+# structure below would depend on whatever `.env` or environment variables this
+# machine happens to have, and the same source would then fingerprint
+# differently on a machine with `QA_COMPACTION_ENABLED=false`. What this test
+# checks is whether the structure moved, not what these five numbers are, so
+# they only need to be *fixed*, not *right* — do not "correct" them to match a
+# deployment's `.env`. `compaction=True` is kept on because `compact_context`
+# being in the tool list is itself part of what this test pins.
+_PINNED_COMPACTION_KNOBS = {
+    "compaction": True,
+    "compaction_trigger_fraction": 0.9,
+    "compaction_keep_messages": 20,
+    "compaction_min_new_messages": 4,
+    "compaction_trim_tokens": 8000,
+}
+_EXPECTED_DEFAULT_TOOL_NAMES = (
+    "observe_scene",
+    "inspect_object",
+    "search_knowledge",
+    "record_knowledge",
+    "update_knowledge",
+    "forget_knowledge",
+    "link_knowledge",
+    "unlink_knowledge",
+    "expand_knowledge",
+    "include_screen_selector",
+    "exclude_screen_selector",
+    "list_scene_capabilities",
+    "record_capability_verdict",
+    "record_new_capability",
+    "click_button",
+    "enter_text",
+    "press_key",
+    "move_pointer",
+    "click_at",
+    "double_click_at",
+    "hold_mouse_button",
+    "release_mouse_button",
+    "hold_key",
+    "release_key",
+    "set_input_axis",
+    "set_input_button",
+    "drag_pointer",
+    "pause_game_time",
+    "resume_game_time",
+    "reset_game",
+    "wait_for_operator",
+    "report_step",
+    "report_issue",
+    "finish_run",
+    "reply_to_operator",
+    "capture_screen",
+    "compact_context",
+)
+_EXPECTED_DEFAULT_FINGERPRINT = "e8e1d4764809"
+
+
+def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
+    """Catches the failure the module docstring warns about before a run does.
+
+    `QA_ARCH_LABEL` is bumped by hand; nothing forces it to move the day a tool
+    is added, renamed, or reshaped. This test is that force: it freezes what
+    `structure_of(...)` returns today for the default spec, next to the label
+    this freeze was taken under, so either one moving without the other fails
+    here instead of silently splitting one label across two fingerprints in the
+    record.
+
+    Resolved with every knob given explicitly rather than through
+    `default_resolved_arch()`, which defers the compaction knobs to
+    `get_settings()` — see `_PINNED_COMPACTION_KNOBS` above for why that would
+    make this test's pass/fail depend on the machine it runs on.
+
+    A failure here is not a bug in this test — it is a prompt to decide something
+    a diff cannot decide by itself:
+
+    * If the tool names below changed, or a tool's argument schema changed
+      without its name changing, the agent's structure moved. Bump
+      `QA_ARCH_LABEL` in `app/agents/qa/arch.py`, add a sentence to the comment
+      above it saying why (the same way v2 and v3 are explained there), then
+      update `_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER` and
+      `_EXPECTED_DEFAULT_FINGERPRINT` below to match.
+    * If the tool names are unchanged and only `_EXPECTED_DEFAULT_FINGERPRINT`
+      moved, something that is not a tool name still hashed differently — a
+      middleware or a loop bound. Read `arch_fingerprint`'s `facts` to see what
+      changed, then decide by the same rule: a real structural change gets a
+      label bump, a change to a tool's description text or a docstring does
+      not — update only `_EXPECTED_DEFAULT_FINGERPRINT` in that case.
+    """
+    resolved_arch = resolve_arch(
+        QaArchSpec(vision=VisionMode.on, **_PINNED_COMPACTION_KNOBS),
+        LLMModel.gpt_chat_latest,
+    )
+    names, _middleware, fingerprint = structure_of(resolved_arch)
+
+    assert QA_ARCH_LABEL == _LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER, (
+        f"QA_ARCH_LABEL is now {QA_ARCH_LABEL!r}, but the fingerprint and tool "
+        f"list pinned in this test were taken under "
+        f"{_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER!r}. If the structure actually "
+        "changed, update this constant to match — that is this test catching up "
+        "to a label bump that already happened. If it did not, the label bump was "
+        "the mistake."
+    )
+    assert names == _EXPECTED_DEFAULT_TOOL_NAMES, (
+        "The default tool set no longer matches _EXPECTED_DEFAULT_TOOL_NAMES — a "
+        "tool was added, removed, or renamed. See this test's docstring for what "
+        "to do next."
+    )
+    assert fingerprint == _EXPECTED_DEFAULT_FINGERPRINT, (
+        f"the pinned default structure now hashes to {fingerprint!r}, not the "
+        f"{_EXPECTED_DEFAULT_FINGERPRINT!r} pinned here under "
+        f"QA_ARCH_LABEL = {_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER!r}. The tool "
+        "names above are unchanged, so the move came from something else — a "
+        "middleware or a loop bound. See this test's docstring for what to do "
+        "next."
+    )
