@@ -49,13 +49,28 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Graph steps the loop may take: a model turn and a tool turn per search, the
-# structured-output turn, and headroom. recursion_limit counts graph steps, so
-# this bounds tool calls and model turns together (see the QA runner). Doubled to
-# cover the model turn that sits between each tool result. The headroom is generous
-# so a model that keeps probing after the search budget still lands on the
-# structured output before the limit — and if it doesn't, we fail gracefully below.
-RECURSION_LIMIT = (MAX_SEARCHES_PER_RUN + 8) * 2
+# 한 턴이 걸을 수 있는 graph step 수: 조회마다 모델 turn 하나와 도구 turn 하나, 구조화 출력
+# turn, 그리고 여유. `recursion_limit` 은 graph step 을 세므로 도구 호출과 모델 turn 을 함께
+# 묶는다(QA runner 와 같다). 도구 결과 사이에 끼는 모델 turn 까지 덮으려고 두 배로 둔다.
+#
+# **일의 양에서 잡는다. 아무도 근거를 못 대는 수에서 잡지 않는다.** 앞서는
+# `(MAX_SEARCHES_PER_RUN + 8) * 2` 였고 그 천장이 백만이라, 주석은 "어떤 turn 도 닿지 않는
+# 천장"이라 적혀 있었지만 실제로는 아무것도 막지 못했다. 실측에서 한 turn 이 케이스 88건에
+# `find_path` 를 280번 왕복했고 그중 109번이 이미 답을 받은 두 케이스를 다시 물은 것이었으며,
+# 열네 분을 돌고도 끝나지 않았다.
+#
+# 일의 양을 정하는 것은 케이스 수다. 케이스 하나에 조회 두어 번이면 충분하고 — 사이는 흐름이
+# 이미 싣고 온다 — 케이스마다 여러 번 물은 turn 은 수렴하지 않는 것이다. 그대로 두면 오지
+# 않을 답을 기다리는 데 사용자의 몇 분을 쓴다.
+LOOKUPS_PER_CASE = 3
+
+# 목록 없는 turn 의 바닥값과 구조화 출력에 남길 여유.
+BASE_LOOKUPS = 16
+
+
+def recursion_limit_for(case_count: int) -> int:
+    """한 turn 이 걸을 수 있는 graph step 수. 놓을 케이스가 몇 건인지에서 잡는다."""
+    return (case_count * LOOKUPS_PER_CASE + BASE_LOOKUPS) * 2
 
 # How many flows one turn may rewrite for order (ARTEL-648). Each is another model
 # turn, and the session on the far side calls a turn dead after five minutes of
@@ -135,7 +150,7 @@ class ScenarioAgent:
         )
         config = {
             **context.trace_config("scenario-generation"),
-            "recursion_limit": RECURSION_LIMIT,
+            "recursion_limit": recursion_limit_for(len(request.test_case_list)),
             # The turn reports its own model turns (ARTEL-487). Orchestration sees
             # the tool frames but not the time between them, and that time is most
             # of the wait — see app/agents/scenario/progress.py.

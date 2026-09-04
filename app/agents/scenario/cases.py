@@ -223,6 +223,10 @@ def render_test_case_list(entries: list[TestCaseListItem]) -> str:
         if entry.state_after:
             leaves = ", ".join(f"{k} {v}" for k, v in entry.state_after.items())
             lines.append(f"    leaves: {leaves}")
+        # 이 케이스에서 무엇을 누르는지. 스텝의 `input` 에 그대로 넣을 수 있는 값이다.
+        # 비어 있는 것도 답이다 — 관측은 누를 것이 없다 — 그래서 있을 때만 줄을 쓴다.
+        if entry.input:
+            lines.append(f"    input: {entry.input}")
         # One step out of this screen. Blank `by` is an answer: the game goes there
         # by itself and there is nothing to press.
         for exit_ in entry.exits:
@@ -313,10 +317,15 @@ def render_results(payload: TestCaseSearchResult, remaining: int) -> str:
     )
 
 
-FIND_PATH_DESCRIPTION = """What has to happen between two test cases.
+FIND_PATH_DESCRIPTION = """What has to happen between two test cases — for pairs the flows do not cover.
 
-Call this whenever the next case you want sits in a different situation from the last one —
-a different screen, or a different value of something their preconditions name. Do NOT guess
+**The flows already answer this for the order they give.** Every hop inside a flow is written
+out there: what goes in between, or that nothing does, or what blocks it. Read that line rather
+than asking again for the same pair — the answers were all computed before this turn began, and
+asking re-derives what you are already holding.
+
+Call this only when you leave that order: two cases from different flows, a pair the flows never
+put next to each other, or an order the user asked for that the flows do not have. Do NOT guess
 what goes in between; that is what this answers.
 
 It replies one of three ways.
@@ -336,35 +345,3 @@ question about a named thing, not about a vague gap.
 Arguments are the two case ids, in the order you want them to run."""
 
 
-EXPLAIN_CASE_DESCRIPTION = """What a case is actually made of, from the scene spec.
-
-The case list tells you what to verify. It does not tell you how many operations that
-takes, or what they are called. Call this before writing the steps for a case whose
-operation you would otherwise have to guess — and instead of restating the case title as
-a step.
-
-**Do not call it for a case whose `step` already names the operation.** `Return 키를
-누른다`, `아무 키나 누른다`, `Canvas/MapSceneButton 을(를) 클릭한다` — there is nothing
-left to look up there, and the answer would only repeat what you are already holding.
-Measured on a real project the agent called this for all 42 cases in one turn and spent
-the whole turn deadline on it, while every one of those cases already named its key or
-its click. Call it for the ones that read like a title rather than an action.
-
-You get back:
-
-  operations   The operations the spec attributes to this case: `input` (`key:Return`,
-               `click:Canvas/StartButton`), a label, and what the operation itself
-               requires (`given`). Put `input` into the step's `input` field as-is.
-               `matched_by` is `evidence` when this is the code the case points at, and
-               `effect` when it is a capability that touches the same value — several may
-               come back for the latter, so pick by the label and summary.
-  state_before / state_after   The case's own state, already parsed.
-  observable   Whether the result can be read back while a run is in progress. False
-               means whoever runs it cannot judge that check by watching values; keep the
-               check, but do not promise a verdict that cannot be produced.
-
-**An empty `operations` is a normal answer.** It means the scene spec does not cover this
-case yet. Write the step from the case's own wording and do not invent an operation name —
-a made-up control is worse than a plainly worded step.
-
-The argument is one case id."""

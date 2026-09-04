@@ -130,6 +130,14 @@ class TestCaseListItem(BaseModel):
     # Where this screen leads in one step, and what to press to get there.
     # The map has known this all along; it was never sent.
     exits: list["SceneExit"] = Field(default_factory=list)
+    # 이 케이스의 스텝 `input` 에 넣을 값 — `key:Return`, `click:Canvas/continue`.
+    # 비어 있으면 누를 것이 없다는 뜻이다: 게임이 스스로 하는 관측이다. "누를 것이 없다"와
+    # "모른다"는 다른 답이고, 빈 문자열은 앞엣것이다.
+    #
+    # **이 한 칸이 도구 호출 하나였다.** `explain_case` 가 scene · requires · leaves 와
+    # 이것을 답했는데, 실측해 보니 넷 중 목록에 없던 것은 이것뿐이었다. 한 칸을 옮기니
+    # 왕복이 사라졌다.
+    input: str = ""
 
 
 class ScenarioAgentRequest(BaseModel):
@@ -198,6 +206,32 @@ class AuthoredFlow(BaseModel):
     # How many places along the way cannot be instructed — someone has to play through
     # them (win a fight, sit through a cutscene). Each one is a stop for whoever runs it.
     gaps: int = 0
+    # 케이스에서 다음 케이스로 가는 데 무엇이 필요한지를 순서대로. 케이스 n 건이면 hop 은
+    # n-1 개다. 비어 있으면 그것을 안 보내는 옛 orchestration 이고, 그때는 두 케이스 사이를
+    # 물어봐야 한다.
+    #
+    # **계산해 놓고 버리던 것이다.** 흐름을 고르려면 케이스 두 개씩의 행렬이 통째로 필요하므로,
+    # 여기 담긴 답은 turn 이 시작되기 전에 이미 다 있었다. 흐름은 순서만 실어 보냈다. 실측 한
+    # turn 에서 agent 가 그것을 다시 알아내려고 `find_path` 를 280번 왕복했고 그중 109번이
+    # 이미 답을 받은 것을 다시 물은 것이었다.
+    hops: list["FlowHop"] = Field(default_factory=list)
+
+
+class FlowHop(BaseModel):
+    """흐름에서 이웃한 두 케이스 사이에 무엇이 들어가는지.
+
+    `link` is the answer's kind: `beside` (nothing goes in between), `by_operation`
+    (press what `actions` says), `by_play` (someone has to play through it) or
+    `blocked` (there is no route, and `blocked_by` names what stops it).
+    """
+
+    from_case_id: int = Field(alias="from_case_id")
+    to_case_id: int = Field(alias="to_case_id")
+    link: str
+    actions: list[str] = Field(default_factory=list)
+    blocked_by: str | None = None
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class AuthoredStep(BaseModel):
