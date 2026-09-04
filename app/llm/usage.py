@@ -106,6 +106,36 @@ def _estimate_cost(
     ) / 1_000_000
 
 
+# 캐시에 실은 토큰이 실려 오는 이름들. **provider 마다 다르고, 둘 다 보는 편이 좁다.**
+#
+# Bedrock 은 `cache_creation` 을 만들어 두고 **거기에 0 을 넣은 채** 실제 값을 TTL 이 박힌
+# 이름으로 보낸다. 실측(2026-09-04, 런 하나의 호출 78 개)에서 예외가 없었다.
+#
+#     {'cache_creation': 0, 'cache_read': 98744, 'ephemeral_5m_input_tokens': 1729}
+#
+# 그래서 `cache_creation` 만 읽으면 `cache_write_tokens` 가 영영 0 이고, 비용이 그 몫만큼
+# 낮게 나온다 — 조용히 낮으므로 아무도 안 본다.
+#
+# 이름에 `5m` 이 박힌 것은 캐시 TTL 이다. 단가가 TTL 마다 다르므로(`ModelSpec.pricing` 의
+# 주석) 1 시간짜리를 쓰게 되면 그 이름이 함께 바뀐다. 그때 이 목록에 더하고 단가도 같이
+# 고쳐야 한다 — 여기만 더하면 비싼 쓰기를 싼 값으로 세게 된다.
+_CACHE_WRITE_KEYS = ("ephemeral_5m_input_tokens", "cache_creation")
+
+
+def _cache_write_of(usage: dict[str, Any]) -> int:
+    """캐시에 실은 토큰. 이름이 provider 마다 달라 아는 것을 순서대로 본다.
+
+    합치지 않고 **처음 값이 있는 것 하나**를 쓴다. 두 이름이 같은 것을 가리키므로 더하면
+    같은 토큰을 두 번 센다 — Bedrock 이 둘 다 실어 보내는데 한쪽이 0 인 것이 그 증거다.
+    """
+    details = usage.get("input_token_details") or {}
+    for key in _CACHE_WRITE_KEYS:
+        value = details.get(key)
+        if value:
+            return int(value)
+    return 0
+
+
 def _build_record(
     model: str,
     *,
@@ -356,12 +386,7 @@ def _record_from_response(
         cached_input_tokens=(usage.get("input_token_details") or {}).get(
             "cache_read", 0
         ),
-        # Bedrock 응답에 실제로 실려 오는 값이고(`{'cache_creation': 0, 'cache_read': …}`)
-        # 여기서 꺼내지 않아 버려지고 있었다. `cache_read` 와 달리 `input_tokens` 에
-        # 포함되지 않고 따로 청구된다.
-        cache_write_tokens=(usage.get("input_token_details") or {}).get(
-            "cache_creation", 0
-        ),
+        cache_write_tokens=_cache_write_of(usage),
         reasoning_tokens=(usage.get("output_token_details") or {}).get("reasoning", 0),
         cost_usd=float(cost) if isinstance(cost, (int, float)) else None,
         started_at=started[1] if started else datetime.now(UTC),
