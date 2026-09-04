@@ -179,6 +179,21 @@ class Settings(BaseSettings):
     # 이 값은 어느 엔드포인트에 말을 거는지를 정한다. 둘은 다른 축이다.
     bedrock_region: str = "us-west-2"
 
+    # 답이 안 오는 호출은 기다림이 아니라 실패로 끝나야 한다. botocore 는 기본 60초를
+    # 쓰고 재시도를 우리 뜻과 무관하게 정하는데, 저작 한 판이 그 한 번에 죽었다 —
+    # 실측(2026-09-03)에서 Bedrock 이 4.2만 token 을 2.7초에 답하던 시간대에 호출
+    # 하나가 60초를 넘겨 멈췄고, 턴 전체가 결과 없이 끝났다.
+    #
+    # **토막이 오는 동안은 시간이 안 흐른다.** 답을 토막으로 받으므로(`streaming`) 이 한도의
+    # 뜻은 "다음 토막이 이만큼 안 온다"이지 "답이 이만큼 안 끝난다"가 아니다. 그래서 답의 길이와
+    # 무관하고, 진짜로 멈춘 연결만 걸린다.
+    #
+    # 일찍 끊고 다시 걸려고 45초까지 좁혔다가 되돌린 값이다. 스트리밍이 끊기면 botocore 는 그
+    # 호출을 다시 걸지 못한다 — 실측(2026-09-03)에서 재시도 넷을 남겨 둔 채 턴이 53초에 끝났다.
+    # 다시 걸어 주지 않는다면 좁혀서 얻을 것이 없다.
+    bedrock_timeout_seconds: float = 120.0
+    bedrock_max_attempts: int = 3
+
     embedding_base_url: str | None = None
     embedding_api_key: str | None = None
     embedding_dimensions: int = 1024
