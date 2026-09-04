@@ -255,7 +255,7 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v16() -> None:
+def test_the_default_qa_version_is_v17() -> None:
     """A run that names no version has to get the newest prompt.
 
     This is also the trap in adding a version: `resolve_version` returns the
@@ -265,7 +265,7 @@ def test_the_default_qa_version_is_v16() -> None:
     `set_input_axis` before the tool exists teaches the agent to reach for
     something that is not there.
     """
-    assert resolve_version("qa_run") == "v16"
+    assert resolve_version("qa_run") == "v17"
 
 
 def test_v12_drops_the_screen_map_and_says_what_a_screen_anchors() -> None:
@@ -484,6 +484,80 @@ def test_v16_binds_the_verdict_to_report_step_and_keeps_the_rest_of_v15() -> Non
             assert paragraph not in v16, "고쳐 쓴다고 해 놓고 옛 문단이 남아 있다"
             continue
         assert paragraph in v16
+
+
+def test_v17_teaches_the_screen_reads_section_and_keeps_all_of_v16() -> None:
+    """The prompt never named `<<pulse>>` or the text it carries; v17 does both.
+
+    `app/qa/scene.py`'s own comment measures the split on a real run at
+    `GAME_STATE` 0 views against `PULSE` 14,489, so `<<pulse>>` is in practice
+    almost the only view the agent ever reads — and it is the one channel that
+    carries the screen's words. v16 taught `changed since your last look:`,
+    `unchanged:` and `gone from the scene:`, all of which describe the
+    `GAME_STATE` view, and said nothing about text at all. That gap is why a
+    tutorial instruction on screen went unfollowed: the agent had no section
+    teaching it that the screen's own words had arrived, or that a mark on a
+    line was the signal a dialogue box actually advanced.
+    """
+    v16 = load_prompt("qa_run", "system", "v16").body
+    v17 = load_prompt("qa_run", "system", "v17").body
+
+    # `<<pulse>>` is named, and the two channels are tied to the same view.
+    assert "`<<pulse>>`" in v17
+    assert "`<<pulse>>`" not in v16
+
+    # The new section: what it holds, and the address each line carries.
+    assert "the screen reads:" in v17
+    assert "top to bottom" in v17
+
+    # It is redrawn whole every turn — a repeat is not a new event.
+    assert (
+        "**That section is redrawn whole, every turn — it tracks no window.**" in v17
+    )
+    assert "not that text happening again" in v17
+
+    # `(changed)` is the only mark that means something actually moved.
+    assert "**`(changed)` after a line is what actually changed this turn.**" in v17
+    assert "No mark means no change" in v17
+
+    # Follow what the screen says to do, without letting that answer `expected`.
+    assert "**When the screen tells you what to do, do that.**" in v17
+    assert "never what the screen said would happen" in v17
+
+    # The cut list's remainder is reachable, and named by tool.
+    assert "`inspect_object`" in v17
+    assert "`observe_scene(current_scene=True)`" in v17
+
+    # Nothing v16 said is gone. This version is a pure addition.
+    for paragraph in v16.split("\n\n"):
+        assert paragraph in v17
+
+
+def test_v17_rewrites_the_vision_directive_and_keeps_its_shape() -> None:
+    """`capture_screen` answered "what does this text say" until v17.
+
+    v16's vision directive listed "text that may be unreadable" as a reason to
+    reach for `capture_screen`, with nothing yet in `system.md` saying the
+    screen's words already arrive as text. Once v17 adds `the screen reads:`,
+    that sentence reads as an instruction to go find the words in a picture
+    instead. This pins the fix without losing the other appearance cases the
+    directive still has to name.
+    """
+    v16 = load_prompt("qa_run", "vision_directive", "v16").body
+    v17 = load_prompt("qa_run", "vision_directive", "v17").body
+
+    assert v17 != v16
+
+    # `capture_screen` is no longer where the content of a line comes from.
+    assert "never how you find out what a line says" in v17
+    assert "`the screen reads:` already carries the game's words verbatim" in v17
+
+    # The appearance cases survive, legibility included, reworded around
+    # drawing rather than reading.
+    assert "a layout that may be broken" in v17
+    assert "a button that may be covered" in v17
+    assert "a sprite in the wrong state" in v17
+    assert "may not be legible" in v17
 
 
 def test_v15_defines_the_same_roles_as_v14() -> None:

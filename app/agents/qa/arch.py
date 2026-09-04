@@ -47,7 +47,22 @@ from app.llm.models import LLMModel, get_model_spec
 # `record_new_capability` (`app/agents/qa/tools/capability_tools.py`) joined the
 # tool set: the run can now read and write the content map's `capability` rows,
 # which is a different structure even though the loop around it did not change.
-QA_ARCH_LABEL = "v3-content-map-tools"
+#
+# v4 because the screen's own text moved into a section of its own, `the screen
+# reads:`, drawn on every model call instead of once (`app/qa/pulse.py`). Before
+# it, a label the game left on screen was printed the reading it changed and
+# never again, and `DEFAULT_KEEP_SCENES = 1` folded that message away on the next
+# tool result — so a tutorial line was in front of the model for exactly one call.
+# A run before this change and a run after it read different screens from the same
+# game.
+#
+# Nothing the fingerprint hashes moved: the tool set, the tool signatures, the
+# middleware order and every knob are the same. That is not this change being
+# small, it is `arch_fingerprint` not covering the format of what the model reads
+# — see its docstring for what it does cover. The hand-bumped label is the only
+# thing in the record that can separate these two structures, which is the case
+# the module docstring above says the label exists for.
+QA_ARCH_LABEL = "v4-screen-text"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
