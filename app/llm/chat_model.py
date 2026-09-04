@@ -4,6 +4,7 @@ from typing import Any
 from langchain_aws import ChatBedrockConverse
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
+from langchain_core.runnables import Runnable
 from langchain_openai import ChatOpenAI
 
 from app.config import get_settings
@@ -207,3 +208,32 @@ def build_chat_model(
 def select_structured_method(model: LLMModel) -> str:
     """Strict json_schema for capable models, json_mode as the fallback."""
     return "json_schema" if get_model_spec(model).supports_strict_json else "json_mode"
+
+
+def structured(model: LLMModel, schema: Any) -> Runnable:
+    """`schema` 모양으로 답하는 chain. 부르는 쪽은 provider 를 몰라도 된다.
+
+    **`strict` 를 넘길지는 모델이 아니라 클라이언트가 정한다.** 종전에는 부르는 쪽 셋이
+    각자 `select_structured_method` 를 보고 `strict=True` 를 붙였는데, 그 값은
+    `supports_strict_json` 에서 오고 그 칸은 OpenRouter 의 `structured_outputs` 능력을
+    적어 둔 것이다. Bedrock 항목이 그것을 참으로 물려받았고, 그 아래 클래스인
+    `ChatBedrockConverse` 는 그 인자를 안 받는다.
+
+        ChatBedrockConverse._converse_params() got an unexpected keyword argument 'strict'
+
+    stage 에서 화면 판정·게임 문맥·지식 질의가 전부 이 자리에서 죽었다. 예외를 삼키는
+    호출부라 런은 정상 종료로 보였고, 로그를 읽어야만 알 수 있었다(ARTEL-806).
+
+    **`supports_strict_json` 을 Bedrock 에서 거짓으로 바꾸지 않는다.** 그 칸의 뜻은
+    "모델이 엄격한 스키마를 안다" 이고 그것은 참이다. 거짓으로 적으면 다음 사람이 그
+    값을 믿고 다른 판단을 한다. 갈라야 하는 것은 모델의 능력이 아니라 **클라이언트가
+    받는 인자**이고, 그것을 아는 자리가 여기다.
+
+    Bedrock 은 `json_schema` 자체는 받는다. 빼는 것은 `strict` 하나다.
+    """
+    chat = build_chat_model(model)
+    if select_structured_method(model) != "json_schema":
+        return chat.with_structured_output(schema, method="json_mode")
+    if model.value.startswith(BEDROCK_PREFIX):
+        return chat.with_structured_output(schema, method="json_schema")
+    return chat.with_structured_output(schema, method="json_schema", strict=True)

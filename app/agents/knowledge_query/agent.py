@@ -17,7 +17,7 @@ from app.agents.knowledge_query.schemas import (
     KnowledgeQueries,
     KnowledgeQueryAgentRequest,
 )
-from app.llm.chat_model import build_chat_model, select_structured_method
+from app.llm.chat_model import structured
 from app.llm.models import DEFAULT_MODEL, LLMModel
 
 
@@ -27,12 +27,7 @@ StructuredFactory = Callable[[LLMModel], Runnable]
 
 
 def _default_structured_factory(model: LLMModel) -> Runnable:
-    chat = build_chat_model(model)
-    if select_structured_method(model) == "json_schema":
-        return chat.with_structured_output(
-            KnowledgeQueries, method="json_schema", strict=True
-        )
-    return chat.with_structured_output(KnowledgeQueries, method="json_mode")
+    return structured(model, KnowledgeQueries)
 
 
 class KnowledgeQueryAgent:

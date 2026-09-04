@@ -34,7 +34,7 @@ from app.agents.screen_verdict.schemas import (
     ScreenVerdictRequest,
 )
 from app.agents.screen_verdict.validate import DroppedEntry, usable_entries
-from app.llm.chat_model import build_chat_model, select_structured_method
+from app.llm.chat_model import structured
 from app.llm.models import LLMModel, get_model_spec
 from app.qa.envelope import ScreenSelectorEntry
 
@@ -56,12 +56,7 @@ def _default_structured_factory(model: LLMModel) -> Runnable:
     # `reasoning` 은 안 넘긴다. 런의 reasoning 예산은 그 런의 시나리오를 위해 고른 값이고,
     # 여기서 끌어 쓰면 이 곁일이 그 선택을 소리 없이 나눠 갖는다. 이 저장소의 다른 단발
     # agent 도 전부 이렇게 부른다.
-    chat = build_chat_model(model)
-    if select_structured_method(model) == "json_schema":
-        return chat.with_structured_output(
-            ProposedVerdict, method="json_schema", strict=True
-        )
-    return chat.with_structured_output(ProposedVerdict, method="json_mode")
+    return structured(model, ProposedVerdict)
 
 
 @dataclass(frozen=True)

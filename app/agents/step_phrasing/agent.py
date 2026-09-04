@@ -7,7 +7,7 @@ from app.agents.base import AgentContext
 from app.agents.step_phrasing.errors import StepPhrasingError
 from app.agents.step_phrasing.prompt import build_chain_inputs, build_step_phrasing_prompt
 from app.agents.step_phrasing.schemas import PhrasedStep, PhrasedSteps, StepPhrasingRequest
-from app.llm.chat_model import build_chat_model, select_structured_method
+from app.llm.chat_model import structured
 from app.llm.models import LLMModel
 
 _MAX_ATTEMPTS = 2
@@ -20,10 +20,7 @@ StructuredFactory = Callable[[LLMModel], Runnable]
 
 
 def _default_structured_factory(model: LLMModel) -> Runnable:
-    chat = build_chat_model(model)
-    if select_structured_method(model) == "json_schema":
-        return chat.with_structured_output(PhrasedSteps, method="json_schema", strict=True)
-    return chat.with_structured_output(PhrasedSteps, method="json_mode")
+    return structured(model, PhrasedSteps)
 
 
 class StepPhrasingAgent:

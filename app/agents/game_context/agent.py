@@ -10,7 +10,7 @@ from app.agents.game_context.prompt import (
     build_game_context_prompt,
 )
 from app.agents.game_context.schemas import GameContext, GameContextAgentRequest
-from app.llm.chat_model import build_chat_model, select_structured_method
+from app.llm.chat_model import structured
 from app.llm.models import LLMModel
 
 
@@ -20,12 +20,7 @@ StructuredFactory = Callable[[LLMModel], Runnable]
 
 
 def _default_structured_factory(model: LLMModel) -> Runnable:
-    chat = build_chat_model(model)
-    if select_structured_method(model) == "json_schema":
-        return chat.with_structured_output(
-            GameContext, method="json_schema", strict=True
-        )
-    return chat.with_structured_output(GameContext, method="json_mode")
+    return structured(model, GameContext)
 
 
 class GameContextAgent:
