@@ -265,7 +265,7 @@ class AuthoredStep(BaseModel):
             "              and marking it CASE is the most common way this field goes wrong\n"
             "              (measured: 22 of 70 steps in one turn, and the whole answer was\n"
             "              rejected for it)\n"
-            "  CAPABILITY  this step takes the route find_path gave you — put its id in\n"
+            "  CAPABILITY  this step takes a route the map named — put its capability id in\n"
             "              step_source_capability_id\n"
             "  UNKNOWN     no known route. Put what is blocking in step_unknown_reason,\n"
             "              and say so in `message` too.\n"

@@ -237,12 +237,20 @@ def render_test_case_list(entries: list[TestCaseListItem]) -> str:
 LIST_UNCOVERED_DESCRIPTION = """Which test cases no scenario has covered yet.
 
 Coverage is a fact about the project's scenarios, not about the cases — the case
-list you hold says what exists, never what has already been reached. It also
-changes while you work: cases you cover in this turn stop being uncovered.
+list you hold says what exists, never what has already been reached.
+
+**It is context, never a gate.** A case another scenario already covers is still
+yours to use: the same check belongs in more than one journey, and leaving it out
+to keep the tally clean breaks the journey the user asked for. "Everything is
+covered" answers *what is left*, not *what to write* — when someone asked for a
+particular scenario, write it, covered or not.
 
 Call this when the user asks what is left or what to test next, and when you want
 to lead an open-ended request toward a real gap. Do not guess at a count; this is
 where the number comes from.
+
+**Ask once.** The answer does not change until the turn ends — nothing is saved
+before then — so a second call returns what the first one said.
 
 The answer gives ids. Their wording is in the case list you already hold — quote
 that rather than reciting numbers, which mean nothing to the person reading.
@@ -263,6 +271,12 @@ class TestCaseSearchState:
 
     def __init__(self) -> None:
         self.searches_attempted = 0
+        # 이번 턴에 커버리지가 처음 답한 것.
+        #
+        # **턴이 도는 동안 답은 안 바뀐다** — 턴이 끝나야 저장되므로 — 그래서 두 번 물어도
+        # 얻는 것이 없고 왕복만 든다. 실측에서 한 턴이 95번 묻고 시나리오를 하나도 못 썼다:
+        # 답이 "남은 것이 없다"였는데 그건 다음으로 갈 길이 아니라, 모델이 길을 찾아 다시 물었다.
+        self.coverage: str | None = None
 
 
 def _clip(text: str) -> str:
@@ -316,6 +330,29 @@ def render_results(payload: TestCaseSearchResult, remaining: int) -> str:
         f"set that step's `case_id` to the case's id.\n\n{budget}"
     )
 
+
+SUBMIT_SCENARIO_DESCRIPTION = """Hand over one finished scenario. Call this once per scenario.
+
+**This is how scenarios are delivered — not the final answer.** Write one, send it, read what
+comes back, then write the next. Your final answer carries only `message` and `reviewed`; put no
+scenarios in it.
+
+**What tells you to stop is your own `reviewed` judgement, not this tool.** You decide which
+cases are `in` for this request; when every one of them sits in a scenario you have sent, you are
+done. Users rarely say how many scenarios they want, and they do not have to — the line is the one
+you drew. This tool answers every call the same way; it is not counting for you and it is not
+asking for more.
+
+One at a time, because a scenario is checked the moment it arrives. What comes back is either
+
+  accepted   It is kept. Write the next one.
+  refused    What is wrong with it, in one sentence. Fix that one scenario and send it again.
+
+A refusal is about the scenario you just sent, not about the ones already accepted — those stay.
+Do not resend them.
+
+Arguments are the scenario itself: `title`, `description`, and `steps` in order. `scenario_id`
+only when you are editing one that already exists (echo it from `current_scenarios`)."""
 
 FIND_PATH_DESCRIPTION = """What has to happen between two test cases — for pairs the flows do not cover.
 

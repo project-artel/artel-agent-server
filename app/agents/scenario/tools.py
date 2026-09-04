@@ -28,6 +28,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from langchain_core.tools import BaseTool, tool
+from pydantic import ValidationError
 
 from app.agents.scenario.cases import (
     FIND_PATH_DESCRIPTION,
@@ -35,9 +36,11 @@ from app.agents.scenario.cases import (
     MAX_SEARCHES_PER_RUN,
     RESULT_LIMIT,
     SEARCH_TEST_CASES_DESCRIPTION,
+    SUBMIT_SCENARIO_DESCRIPTION,
     TestCaseSearchState,
     render_results,
 )
+from app.agents.scenario.schemas import ScenarioPlan
 
 if TYPE_CHECKING:
     # Type-only: see app/agents/scenario/cases.py for why app.sessions is not
@@ -65,24 +68,77 @@ def build_tools(
     # app.sessions import at import time (that would cycle through the service).
     from app.sessions.channel import TestCaseSearchFailed
 
+    @tool(description=SUBMIT_SCENARIO_DESCRIPTION)
+    async def submit_scenario(
+        title: str,
+        description: str,
+        steps: list[dict],
+        scenario_id: int | None = None,
+    ) -> str:
+        # agent 가 읽는 것은 SUBMIT_SCENARIO_DESCRIPTION 이지 이 주석이 아니다.
+        try:
+            plan = ScenarioPlan(
+                scenario_id=scenario_id, title=title, description=description, steps=steps
+            )
+        except ValidationError as err:
+            # 시나리오를 거절한 것이 아니라 인자가 틀렸다고 말한다. 저쪽은 이것을 본 적이
+            # 없고, "모양을 고쳐라"와 "시나리오를 고쳐라"는 다른 일이다.
+            return f"The arguments did not fit the step contract — {err.error_count()} problem(s): {err}"
+        answer = await channel.submit_scenario(plan.model_dump(mode="json", by_alias=True))
+        if answer is None:
+            return (
+                "Nobody answered, so this scenario is not kept. Send it again; if it "
+                "keeps failing, say so in `message` rather than writing the rest as if "
+                "it had been kept."
+            )
+        if answer.accepted:
+            # **"Write the next one" 이라고만 답하지 않는다.** 그 문장은 전량을 청한 요청을
+            # 전제로 쓴 것인데, 좁은 요청에서도 똑같이 다음을 재촉했다 — 실측(런 14)에서 청한
+            # 하나를 첫 번째로 낸 뒤 마흔둘을 더 썼고, 뒤로 갈수록 제목이 시나리오가 아니라
+            # 전제의 곱집합이 됐다(`CompareTag(Me) damage>0 …`). 끝낼 자리를 도구가 주지
+            # 않으면 모델은 멈출 근거를 찾지 못한다.
+            return (
+                f"Kept ({answer.written} so far). Done when every case you judged `in` for this "
+                "request sits in some scenario — then stop and answer. Anything past that is "
+                "coverage nobody asked for."
+            )
+        return (
+            f"Not kept — {answer.detail or 'no reason given'}. Fix this scenario and send "
+            "it again. The ones already kept are untouched; do not resend them."
+        )
+
     @tool(description=LIST_UNCOVERED_DESCRIPTION)
     async def list_uncovered_cases() -> str:
         # What the agent reads is LIST_UNCOVERED_DESCRIPTION, not this.
+        #
+        # 한 턴에 한 번만 답한다. 턴이 끝나야 저장되므로 두 번째 물음은 같은 것을 돌려주고,
+        # 그 왕복은 공짜가 아니다. 두 번 묻는 값이 얼마였는지는
+        # `TestCaseSearchState.coverage` 에 적었다.
+        if state.coverage is not None:
+            return f"{state.coverage} (asked already this turn — this does not change until it ends)"
         answer = await channel.fetch_uncovered()
         if answer is None:
+            # 이것만은 안 들고 있는다. 조회는 다음에 될 수 있고, 실패한 조회는 들고 있을
+            # 답이 아니다.
             return (
                 "Coverage could not be read just now. Say so rather than guessing a "
                 "number — a made-up count is worse than no count."
             )
         if not answer.ids:
-            return "Every case in this project is already carried by some scenario."
-        by_scene = ", ".join(f"{s.scene} {s.count}" for s in answer.scenes)
-        return (
-            f"{len(answer.ids)} cases are not carried by any scenario yet "
-            f"({by_scene}). Ids: {', '.join(str(i) for i in answer.ids)}. "
-            "Their wording is in the case list you already hold — quote it rather "
-            "than describing the ids."
-        )
+            state.coverage = (
+                "Every case in this project is already carried by some scenario. "
+                "That is not a reason to stop: write what was asked for, reusing "
+                "whatever cases it needs."
+            )
+        else:
+            by_scene = ", ".join(f"{s.scene} {s.count}" for s in answer.scenes)
+            state.coverage = (
+                f"{len(answer.ids)} cases are not carried by any scenario yet "
+                f"({by_scene}). Ids: {', '.join(str(i) for i in answer.ids)}. "
+                "Their wording is in the case list you already hold — quote it rather "
+                "than describing the ids."
+            )
+        return state.coverage
 
     @tool(description=FIND_PATH_DESCRIPTION)
     async def find_path(from_case_id: int, to_case_id: int) -> str:
@@ -147,7 +203,12 @@ def build_tools(
         )
 
     if has_test_case_list:
-        return [list_uncovered_cases, find_path]
+        # **케이스 목록을 받은 세션은 `find_path` 를 안 쓴다**(ARTEL-772). 목록이 씬의
+        # 출구와 그 화면에서 무엇을 누르는지를 케이스마다 싣고 오므로, 사이에 무엇이
+        # 들어가는지는 이미 손에 있다. 실측 한 판에서 모델은 14가지를 120번 물었고 그중
+        # 13가지는 흐름이 이미 답을 적어 보낸 것이었다 — 왕복이 새로 알려 준 것은 없었다.
+        # 도구를 두고 부르지 말라고 적는 것으로는 안 멎는다. 손이 닿으면 부른다.
+        return [submit_scenario, list_uncovered_cases]
 
     @tool(description=SEARCH_TEST_CASES_DESCRIPTION.format(limit=MAX_SEARCHES_PER_RUN))
     async def search_test_cases(query: str, category: str | None = None) -> str:
@@ -179,4 +240,4 @@ def build_tools(
             )
         return render_results(answer, remaining)
 
-    return [list_uncovered_cases, search_test_cases, find_path]
+    return [submit_scenario, list_uncovered_cases, search_test_cases, find_path]

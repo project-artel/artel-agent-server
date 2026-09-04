@@ -1,6 +1,6 @@
 ---
 version: v8
-note: 턴 메시지 구성은 v7과 같다. 상태와 길을 읽는 규칙(ARTEL-628)은 system 쪽에만 들어간다.
+note: 턴 메시지 구성은 v9와 같다. 나누기를 코드에 맡기는 규칙(ARTEL-633)은 system 쪽에만 들어간다.
 placeholders: [unity_context, game_context, draft, current_scenarios, user_input]
 ---
 Unity context:

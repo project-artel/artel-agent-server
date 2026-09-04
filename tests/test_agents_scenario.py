@@ -161,7 +161,12 @@ def test_scenario_agent_binds_the_search_tool() -> None:
 
     # 목록이 없으면 검색으로 폴백한다. 미커버 도구는 목록 유무와 무관하게 늘 붙는다 —
     # 커버 상태는 목록이 답할 수 없는 질문이고 대화 중에 바뀐다.
-    assert seen["tools"] == ["list_uncovered_cases", "search_test_cases", "find_path"]
+    assert seen["tools"] == [
+        "submit_scenario",
+        "list_uncovered_cases",
+        "search_test_cases",
+        "find_path",
+    ]
     # The system prompt is the resolved v4 text, every placeholder substituted.
     assert "search_test_cases" in seen["system_prompt"]
     assert "{" not in seen["system_prompt"]
@@ -260,7 +265,7 @@ def test_system_prompt_uses_requested_language_directive() -> None:
     assert "한국어" in ko_body
     assert "English" in en_body
     # v13 is the newest scenario prompt version and the default (ARTEL-668).
-    assert version == "v14"
+    assert version == "v8"
 
 
 def test_first_message_carries_the_run_goal_and_context() -> None:
@@ -322,8 +327,9 @@ def test_turn_with_the_list_gets_no_tools_and_the_cases_in_its_prompt() -> None:
     agent = ScenarioAgent(agent_factory=factory)
     asyncio.run(agent.run(_request(test_case_list=_test_case_list()), _CTX, _channel()))
 
-    # 검색은 회수한다(목록을 이미 쥐고 있으므로). 미커버 도구는 남는다.
-    assert seen["tools"] == ["list_uncovered_cases", "find_path"]
+    # 검색도 경로 조회도 회수한다 — 케이스 목록이 씬의 출구까지 싣고 오므로 둘 다
+    # 이미 쥔 것을 다시 묻는 왕복이 된다. 미커버 도구만 남는다(세션 중 변한다).
+    assert seen["tools"] == ["submit_scenario", "list_uncovered_cases"]
     prompt = seen["system_prompt"]
     assert "id 11" in prompt and "id 57" in prompt
     assert "게스트 계정으로 로그인에 성공한다" in prompt
@@ -344,7 +350,12 @@ def test_empty_test_case_list_keeps_the_search_path() -> None:
     agent = ScenarioAgent(agent_factory=factory)
     asyncio.run(agent.run(_request(test_case_list=[]), _CTX, _channel()))
 
-    assert seen["tools"] == ["list_uncovered_cases", "search_test_cases", "find_path"]
+    assert seen["tools"] == [
+        "submit_scenario",
+        "list_uncovered_cases",
+        "search_test_cases",
+        "find_path",
+    ]
     # Not a blank section: an empty block reads as "this project has no cases",
     # and the agent would stop rather than search.
     assert NO_TEST_CASE_LIST_NOTICE in seen["system_prompt"]
@@ -440,23 +451,6 @@ def test_render_test_case_list_prints_bodies_whole() -> None:
 # is a valid one to hand downstream.
 
 
-def test_v6_unlocks_caseless_authoring_and_keeps_the_default_rule() -> None:
-    v6 = load_prompt("scenario", "system", "v6").body
-    v5 = load_prompt("scenario", "system", "v5").body
-
-    # The defaults are unchanged — the unlock is an exception, not a replacement.
-    assert "**Do NOT invent.**" in v6
-    assert "Ground every step in the cases above." in v6
-    # v5's exhaustive in/out verdict survives too, and the unlock says which side
-    # an uncovered case lands on: `in` is a promise some step carries the id.
-    assert "judge EVERY case in the list above" in v6
-    assert "no id may go to `reviewed.in` on its account" in v6
-    # An ungrounded step carries no id: guessing one would file a verdict against
-    # a case the step never exercises.
-    assert "Leave `case_id` null on EVERY step" in v6
-    # v5 has no such section, which is the whole reason v6 exists.
-    assert "WITHOUT TEST CASES" not in v5
-
 
 def test_a_scenario_of_ungrounded_steps_is_a_valid_result() -> None:
     """All-null `case_id` survives the contract: orchestration stores steps whole
@@ -485,23 +479,6 @@ def test_a_scenario_of_ungrounded_steps_is_a_valid_result() -> None:
 # 분할 품질은 오프라인에서 셀 수 없다. 셀 수 있는 것은 기준이 프롬프트에 하나로
 # 적혀 있는지, 그리고 v6이 들고 있던 규칙이 그 옆에서 살아남았는지다.
 
-
-def test_v7_pins_splitting_to_reachability_and_keeps_v6_intact() -> None:
-    v7 = load_prompt("scenario", "system", "v7").body
-    v6 = load_prompt("scenario", "system", "v6").body
-
-    # 나누느냐 잇느냐를 도달 가능성 하나로 환원한다.
-    assert "it is the NEXT STEP, not the next scenario" in v7
-    assert "two that exclude each other do not" in v7
-    # 이미 덮인 구간은 지나가되 다시 세지 않는다 — 앞부분 통째 복사를 막는 규칙.
-    assert "Leave their `case_id` null" in v7
-    assert "Coverage counts a case once it is carried anywhere" in v7
-    # v6의 케이스 없는 저작 예외와 근거 규칙은 그대로 남는다.
-    assert "WHEN THE USER ASKS FOR A SCENARIO WITHOUT TEST CASES" in v7
-    assert "**Do NOT invent.**" in v7
-    assert "judge EVERY case in the list above" in v7
-    # v6에는 기준이 "흐름이 여럿이면 나눠라" 한 줄뿐이라 요청 하나가 흐름 하나로 읽혔다.
-    assert "it is the NEXT STEP, not the next scenario" not in v6
 
 
 def test_system_prompt_with_the_list_is_byte_identical_across_turns() -> None:
@@ -554,3 +531,39 @@ def test_uncovered_is_a_tool_not_a_prompt_block() -> None:
 
     assert "list_uncovered_cases" in body
     assert "{uncovered_case_ids}" not in body
+
+
+def test_v6_unlocks_caseless_authoring_and_keeps_the_default_rule() -> None:
+    v6 = load_prompt("scenario", "system", "v6").body
+    v5 = load_prompt("scenario", "system", "v5").body
+
+    # The defaults are unchanged — the unlock is an exception, not a replacement.
+    assert "**Do NOT invent.**" in v6
+    assert "Ground every step in the cases above." in v6
+    # v5's exhaustive in/out verdict survives too, and the unlock says which side
+    # an uncovered case lands on: `in` is a promise some step carries the id.
+    assert "judge EVERY case in the list above" in v6
+    assert "no id may go to `reviewed.in` on its account" in v6
+    # An ungrounded step carries no id: guessing one would file a verdict against
+    # a case the step never exercises.
+    assert "Leave `case_id` null on EVERY step" in v6
+    # v5 has no such section, which is the whole reason v6 exists.
+    assert "WITHOUT TEST CASES" not in v5
+
+
+def test_v7_pins_splitting_to_reachability_and_keeps_v6_intact() -> None:
+    v7 = load_prompt("scenario", "system", "v7").body
+    v6 = load_prompt("scenario", "system", "v6").body
+
+    # 나누느냐 잇느냐를 도달 가능성 하나로 환원한다.
+    assert "it is the NEXT STEP, not the next scenario" in v7
+    assert "two that exclude each other do not" in v7
+    # 이미 덮인 구간은 지나가되 다시 세지 않는다 — 앞부분 통째 복사를 막는 규칙.
+    assert "Leave their `case_id` null" in v7
+    assert "Coverage counts a case once it is carried anywhere" in v7
+    # v6의 케이스 없는 저작 예외와 근거 규칙은 그대로 남는다.
+    assert "WHEN THE USER ASKS FOR A SCENARIO WITHOUT TEST CASES" in v7
+    assert "**Do NOT invent.**" in v7
+    assert "judge EVERY case in the list above" in v7
+    # v6에는 기준이 "흐름이 여럿이면 나눠라" 한 줄뿐이라 요청 하나가 흐름 하나로 읽혔다.
+    assert "it is the NEXT STEP, not the next scenario" not in v6

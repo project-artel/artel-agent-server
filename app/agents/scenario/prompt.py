@@ -38,16 +38,25 @@ def _hop_text(hop) -> str:
         steps = "; ".join(hop.actions) if hop.actions else "an operation the map knows"
         return f"bridge steps (case_id null): {steps}"
     if hop.link == "by_play":
+        # 여기서 문장이 끝나면 쓸 것이 없어 보인다. 실측 한 판에서 모델은 바로 이
+        # 자리마다 도구를 불렀고, 도구가 준 답은 케이스의 `to <scene>` 줄과 같은
+        # 것이었다. 그래서 어디를 읽으면 되는지를 문장 안에 적는다.
         steps = "; ".join(hop.actions) if hop.actions else ""
-        played = "someone has to play through this"
-        return f"{played} — {steps}" if steps else played
+        played = (
+            "someone has to play through this — write a bridge step saying what has "
+            "to happen. The two cases' `to <scene>` lines say which screen it leads "
+            "to and that there is nothing to press"
+        )
+        return f"{played}. Before that: {steps}" if steps else played
     if hop.link == "blocked":
         stops = hop.blocked_by or "unknown"
         return (
             f"no route — {stops} stops it. Do not invent steps: say so in `message` "
             "and ask the user how it is done."
         )
-    return "not checked — ask with find_path before writing steps in between"
+    # 이 자리에 도구를 부르라고 적어 두었었다. 케이스 목록을 받은 세션에는 그 도구가
+    # 없다 — 씬의 출구가 케이스마다 실려 오므로 읽을 곳이 이미 있다.
+    return "not checked — read the two cases' `to <scene>` lines and work it out"
 
 
 def render_flows(flows: list) -> str:
