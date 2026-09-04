@@ -83,6 +83,20 @@ class UncoveredCases(BaseModel):
     scenes: list[UncoveredScene] = Field(default_factory=list)
 
 
+class ScenarioAccepted(BaseModel):
+    """시나리오 하나를 넘긴 것에 대한 저쪽의 답.
+
+    받아들이지 않았을 때 `detail` 이 무엇이 틀렸는지를 싣는다. 모델이 손댈 근거는 이것뿐이다 —
+    이유 없는 거절은 고칠 방법이 없고, 실측에서 이유 없이 두 번 막힌 턴이 아무것도 못 쓰고
+    끝났다.
+    """
+
+    accepted: bool = False
+    # 이번 턴에 지금까지 받아들여진 수. 저쪽이 세므로 모델이 따로 셀 필요가 없다.
+    written: int = 0
+    detail: str | None = None
+
+
 class ScenarioPath(BaseModel):
     """The `find_path_result` frame: what is needed between two cases.
 
@@ -173,11 +187,47 @@ class ScenarioChannel:
         self._pending_search_id: str | None = None
         self._uncovered_waiter: asyncio.Future[UncoveredCases] | None = None
         self._pending_uncovered_id: str | None = None
+        self._submit_waiter: asyncio.Future[ScenarioAccepted] | None = None
+        self._pending_submit_id: str | None = None
+        # **한 번에 하나씩만 넘긴다.** 모델이 한 걸음에 도구를 여러 번 부를 수 있는데 여기
+        # 기다리는 자리는 하나뿐이라, 두 번째 호출이 첫 번째의 자리를 빼앗고 첫 번째는 이제
+        # 닿을 수 없는 답을 기다리게 된다. 잠그면 뒤엣것이 줄을 선다.
+        self._submit_lock = asyncio.Lock()
         self._path_waiter: asyncio.Future[ScenarioPath] | None = None
         self._pending_path_id: str | None = None
         self._pending_facts_id: str | None = None
 
     # --- outbound -------------------------------------------------------------
+
+    async def submit_scenario(self, scenario: dict) -> ScenarioAccepted | None:
+        """시나리오 하나를 넘긴다. 아무도 답하지 않으면 `None`.
+
+        마지막 답에 전부 담는 대신 하나씩 넘긴다. 한 답에 전부를 담으면 두 가지가 어긋나는
+        것을 실측했다. 하나는 쓰는 시간이 답의 길이라는 것 — 8,000 token 이 token 당 5.3ms 로
+        42초이고, 그 사이 기다림이 먼저 끝난다. 다른 하나는 `step_source` 하나가 어긋나면
+        나머지 시나리오까지 함께 버려지는 것이다.
+
+        저쪽이 받아들이기 전에 이것 하나를 지도에 비춰 보므로, 거절이 오면 모델은 자기가 왜
+        그렇게 썼는지를 아직 들고 있다.
+        """
+        async with self._submit_lock:
+            loop = asyncio.get_running_loop()
+            waiter: asyncio.Future[ScenarioAccepted] = loop.create_future()
+            self._submit_waiter = waiter
+            message_id = str(uuid4())
+            self._pending_submit_id = message_id
+            await self._send({
+                "type": "submit_scenario",
+                "messageId": message_id,
+                "scenario": scenario,
+            })
+            try:
+                return await asyncio.wait_for(waiter, timeout=self._search_timeout)
+            except asyncio.TimeoutError:
+                return None
+            finally:
+                self._submit_waiter = None
+                self._pending_submit_id = None
 
     async def fetch_uncovered(self) -> UncoveredCases | None:
         """Ask which cases nothing has covered yet. `None` when nobody answered.
@@ -298,6 +348,15 @@ class ScenarioChannel:
         """
         message_type = raw.get("type")
         try:
+            if message_type == "submit_scenario_result":
+                waiter = self._submit_waiter
+                if (
+                    waiter is not None
+                    and not waiter.done()
+                    and raw.get("correlationId") == self._pending_submit_id
+                ):
+                    waiter.set_result(ScenarioAccepted.model_validate(raw))
+                return True
             if message_type == "uncovered_cases_result":
                 waiter = self._uncovered_waiter
                 if (
