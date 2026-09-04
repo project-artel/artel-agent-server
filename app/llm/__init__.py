@@ -1,6 +1,6 @@
 """LLM configuration: model catalog, OpenRouter-backed chat and embedding models."""
 
-from app.llm.chat_model import build_chat_model, select_structured_method
+from app.llm.chat_model import build_chat_model, select_structured_method, structured
 from app.llm.embedding_model import (
     EmbeddingBatchTooLargeError,
     EmbeddingClient,
@@ -35,4 +35,5 @@ __all__ = [
     "get_model_spec",
     "list_models",
     "select_structured_method",
+    "structured",
 ]
