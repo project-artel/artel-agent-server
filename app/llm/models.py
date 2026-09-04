@@ -39,8 +39,8 @@ class LLMModel(StrEnum):
     gpt_chat_latest = "openai/gpt-chat-latest"
     claude_sonnet_5 = "anthropic/claude-sonnet-5"
     claude_opus_5 = "anthropic/claude-opus-5"
+    gemini_3_8_flash = "google/gemini-3.8-flash"
     gemini_3_7_flash = "google/gemini-3.7-flash"
-    gemini_2_5_pro = "google/gemini-2.5-pro"
     gemma_4_free = "google/gemma-4-31b-it:free"
     grok_4_6 = "x-ai/grok-4.6"
     kimi_k3 = "moonshotai/kimi-k3"
@@ -147,6 +147,9 @@ class ModelSpec:
     reasoning_efforts: tuple[ReasoningEffort, ...] | None = None
     reasoning_min_tokens: int | None = None
     reasoning_max_tokens: int | None = None
+    # 지금 이 값을 채우는 항목은 없다. Gemini 2.5 Pro 가 유일했고 그것을 카탈로그에서
+    # 뺐다. 필드는 남긴다 — `list_models` 가 `step` 을 계속 싣고, 예산을 단위로 받는
+    # 모델이 다시 들어오면 그 자리다.
     reasoning_step: int | None = None
     # 백만 토큰당 달러. **provider 가 청구액을 안 알려주는 모델에만 채운다.**
     #
@@ -266,16 +269,20 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         reasoning=ReasoningKind.effort,
         reasoning_efforts=tuple(ReasoningEffort),
     ),
-    LLMModel.gemini_3_7_flash: ModelSpec(
+    # 3.7 Flash 와 창, 출력 상한, modality, effort 세 개, 단가($0.75 / $3.75 per
+    # Mtok)가 전부 같다. 다른 것은 카탈로그가 싣고 온 점수뿐이다 — artificial
+    # analysis 의 agentic index 50 대 45.1, intelligence index 58.7 대 56.
+    #
+    # 그래서 둘 다 둔다. 슬러그를 갈아 끼우면 3.7 로 돌린 런과 비교할 수 없고, 같은
+    # 값에서 점수만 다른 두 항목이 나란히 있어야 그 차이를 QA 런으로 잴 수 있다.
+    LLMModel.gemini_3_8_flash: ModelSpec(
         provider=LLMProvider.google,
         supports_strict_json=True,
-        label="Gemini 3.7 Flash",
+        label="Gemini 3.8 Flash",
         max_input_tokens=983_040,
         input_modalities=("text", "image", "file", "audio", "video"),
-        # An effort, where 2.5 Pro below takes a token budget: 3.x Flash
-        # advertises `reasoning_effort` and three named efforts, and reasoning
-        # is mandatory, so the run reasons at the provider's `medium` whenever
-        # the request leaves it out.
+        # 3.7 Flash 와 같다: `reasoning_effort` 를 받고 세 개만 advertise 하며,
+        # 추론이 mandatory 라 요청이 빼면 provider 의 `medium` 으로 돈다.
         reasoning=ReasoningKind.effort,
         reasoning_efforts=(
             ReasoningEffort.high,
@@ -283,16 +290,21 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
             ReasoningEffort.low,
         ),
     ),
-    LLMModel.gemini_2_5_pro: ModelSpec(
+    LLMModel.gemini_3_7_flash: ModelSpec(
         provider=LLMProvider.google,
         supports_strict_json=True,
-        label="Gemini 2.5 Pro",
+        label="Gemini 3.7 Flash",
         max_input_tokens=983_040,
         input_modalities=("text", "image", "file", "audio", "video"),
-        reasoning=ReasoningKind.max_tokens,
-        reasoning_min_tokens=128,
-        reasoning_max_tokens=32768,
-        reasoning_step=128,
+        # 3.x Flash advertises `reasoning_effort` and three named efforts, and
+        # reasoning is mandatory, so the run reasons at the provider's `medium`
+        # whenever the request leaves it out.
+        reasoning=ReasoningKind.effort,
+        reasoning_efforts=(
+            ReasoningEffort.high,
+            ReasoningEffort.medium,
+            ReasoningEffort.low,
+        ),
     ),
     # json_object-only (no `structured_outputs`): exercises the strict fallback.
     LLMModel.gemma_4_free: ModelSpec(
