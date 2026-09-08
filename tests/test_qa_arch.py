@@ -305,7 +305,7 @@ def test_a_pinned_summarizer_stays_apart_from_the_run_model() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v3-content-map-tools"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v4-screen-text"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -397,6 +397,13 @@ def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
       changed, then decide by the same rule: a real structural change gets a
       label bump, a change to a tool's description text or a docstring does
       not — update only `_EXPECTED_DEFAULT_FINGERPRINT` in that case.
+    * If neither moved and only `QA_ARCH_LABEL` did, the change was to something
+      the fingerprint does not hash — most often the format of what the model
+      reads every call, which is `SceneMemory.render` and `PulseMemory.render`
+      rather than any knob. `v4-screen-text` is that case. It is a real structural
+      change and the label is the only place the record can carry it, so update
+      `_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER` here and leave the fingerprint
+      alone.
     """
     resolved_arch = resolve_arch(
         QaArchSpec(vision=VisionMode.on, **_PINNED_COMPACTION_KNOBS),
