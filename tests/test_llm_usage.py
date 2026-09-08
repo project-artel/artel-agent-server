@@ -53,7 +53,15 @@ def _chat_result(
             "input_tokens": 12043,
             "output_tokens": 318,
             "total_tokens": 12361,
-            "input_token_details": {"cache_read": 10240, "cache_creation": 512},
+            # **실제 Bedrock 응답의 모양이다.** `cache_creation` 을 만들어 두고 거기에 0 을
+            # 넣은 채 실제 쓰기량을 TTL 이 박힌 이름으로 보낸다. 종전 픽스처는
+            # `cache_creation` 에 값을 넣은 모양이라, 현실에 없는 응답으로 통과하고 있었다
+            # (ARTEL-793).
+            "input_token_details": {
+                "cache_read": 10240,
+                "cache_creation": 0,
+                "ephemeral_5m_input_tokens": 512,
+            },
             "output_token_details": {"reasoning": 64},
         },
     )
@@ -97,6 +105,25 @@ def test_chat_usage_becomes_one_record_in_the_wire_shape() -> None:
     assert record["costEstimated"] is False
     assert record["latencyMs"] >= 0
     assert record["calledAt"].endswith("Z")
+
+
+def test_cache_write_is_read_from_whichever_name_the_provider_used() -> None:
+    """이름이 provider 마다 다르다. 아는 것을 순서대로 보고 하나만 쓴다.
+
+    Bedrock 은 둘 다 실어 보내면서 `cache_creation` 에 0 을 넣는다. 더하면 같은 토큰을
+    두 번 세므로, 값이 있는 첫 이름 하나를 쓴다.
+    """
+    from app.llm.usage import _cache_write_of
+
+    # 실측 모양 — 0 인 `cache_creation` 을 건너뛰고 TTL 이름을 읽는다.
+    assert _cache_write_of(
+        {"input_token_details": {"cache_creation": 0, "ephemeral_5m_input_tokens": 1729}}
+    ) == 1729
+    # 그 이름으로 주는 provider 도 있을 수 있다. 분기를 늘리지 않고 둘 다 본다.
+    assert _cache_write_of({"input_token_details": {"cache_creation": 512}}) == 512
+    # 아무 이름도 없으면 0 이다. 캐시를 안 쓴 호출이 그 모양이다.
+    assert _cache_write_of({"input_token_details": {"cache_read": 1}}) == 0
+    assert _cache_write_of({}) == 0
 
 
 def test_cost_is_omitted_when_openrouter_did_not_report_one() -> None:
