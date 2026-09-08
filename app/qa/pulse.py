@@ -54,6 +54,15 @@ MAX_READING_LOG = 10
 #
 # 세는 것과 이름 대는 것을 가른다. 몇 개가 움직였나는 언제나 정확하고, 어느 것인지는 여기까지다.
 MAX_CHANGED_NAMED = 8
+# 화면의 글자를 한 번에 몇 줄까지 싣나.
+#
+# 이 절은 창(window)을 안 타고 매 턴 전부 다시 실린다. 그래서 이 값이 곧 매 턴 드는 비용이다 —
+# SDK 가 글자를 200 자까지 싣고 주소가 뒤에 붙으므로, 30 줄이면 이 절의 상한이 6 KB 남짓이다.
+# 실제 라벨은 그보다 훨씬 짧다.
+#
+# 30 으로 잡은 이유: 한 화면에 이보다 많은 글자가 떠 있는 것은 목록·상점 같은 화면이고, 그때
+# 읽는 쪽에 필요한 것은 전부가 아니라 이번에 바뀐 줄과 "더 있다" 는 사실이다. 넘으면 그 둘을 준다.
+MAX_SCREEN_TEXT = 30
 # `gone`·`deactive` 를 한 줄에 몇 개까지 이름 대나. scene 이 헐리는 순간에는 수십이 한꺼번에
 # 꺼지는데, 그때 필요한 것은 명단이 아니라 "많이 꺼졌다" 는 사실이다.
 MAX_NAMED_OFF = 12
@@ -275,13 +284,15 @@ class _HeldObject(BaseModel):
     # 159턴 런에서 판독이 움직였다고 이름 댄 멤버 53종 중 23종이 한 번도 값을 못 냈고,
     # 거기 `Enemy::Hp` 와 `CombineZone::spellCards` 가 있었다(ARTEL-662).
     shown: dict[str, int] = Field(default_factory=dict)
-    # 글자가 마지막으로 **도착한** 판독 번호와 마지막으로 **그린** 판독 번호. 멤버의
-    # `at`/`shown` 과 같은 짝이고 같은 질문에 답한다.
+    # 글자가 마지막으로 **도착한** 판독 번호. 멤버의 `at` 과 같은 질문에 답하고, 화면의
+    # 글자 절이 어느 줄에 `(changed)` 를 붙일지가 이 값이다.
     #
-    # 글자가 멤버가 아니라 객체 속성이라 그 두 사전에 못 들어간다. 억지로 넣으면 `on.member`
+    # 글자가 멤버가 아니라 객체 속성이라 `at` 사전에 못 들어간다. 억지로 넣으면 `on.member`
     # 모양의 이름을 지어내야 하고, 그 이름은 어느 컴포넌트에서도 오지 않은 것이 된다.
+    #
+    # 짝이던 `text_shown`(마지막으로 **그린** 판독 번호)은 없앴다. 화면의 글자 절이 창을 안
+    # 타고 매번 전부 그리므로 "언제 말했나" 를 물을 자리가 없다(ARTEL-690).
     text_at: int = 0
-    text_shown: int = 0
 
 
 class PulseMemory(BaseModel):
@@ -464,7 +475,6 @@ class PulseMemory(BaseModel):
                 held.text_at = now if obj.text is not None else (was.text_at if was else 0)
                 # 말한 기록도 이어받는다. 여기서 잃으면 이미 말한 값을 매 턴 다시 말한다.
                 held.shown = dict(was.shown) if was else {}
-                held.text_shown = was.text_shown if was else 0
                 for member in obj.members:
                     held.members[member.key] = member
                     held.at[member.key] = now
@@ -611,7 +621,64 @@ class PulseMemory(BaseModel):
         if gone or off or dark:
             lines.append("")
 
-        # statics 는 **매번 전부** 그린다. 이 절만 창(window)을 따르지 않는다.
+        # 화면의 글자는 **매번 전부** 그린다. 아래 `statics` 와 같은 이유다(ARTEL-690).
+        #
+        # 종전에는 객체 블록 안에서 `says '...'` 한 줄로, 창(window)을 타고 나갔다. 그것이
+        # 틀렸다. 글자는 바뀔 때만 델타에 실리므로 창으로 가르면 한 번 그리고 끝인데, `pulse`
+        # block 은 scene view marker 안에 들어가고(`app/qa/scene.py`) `DEFAULT_KEEP_SCENES = 1`
+        # (`app/agents/qa/context.py`)이라 다음 도구 결과가 오는 순간 접힌다. 그래서 화면의
+        # 글자는 모델 호출 딱 한 번 동안만 문맥에 있었고, 떠 있는 내내 안 변하는 튜토리얼
+        # 안내문은 그 뒤로 영영 안 보였다 — 에이전트가 화면이 시키는 것을 안 따른 원인이다.
+        #
+        # `statics` 와 성질이 같다: 안 변하는 동안에도 그것이 지금 무엇을 해야 하는지를
+        # 결정한다. 그래서 같은 거래를 한다 — 창을 안 타는 대신 상한(`MAX_SCREEN_TEXT`)을 둔다.
+        #
+        # 글자가 앞, 주소가 뒤다. 읽을 것은 글자이고 주소는 그것을 `inspect_object` 로 펴거나
+        # 겨누기 위한 것이다.
+        readable = [
+            (key, held)
+            for key, held in self.held.items()
+            # 꺼진 객체의 글자는 화면에 없다. SDK 는 꺼진 객체에도 글자를 싣는다 —
+            # `silent` 이 멤버 값에만 걸리기 때문이라, 거르는 것은 이쪽 몫이다.
+            if held.live and (held.text or "").strip()
+        ]
+        if readable:
+            readable.sort(key=self._reading_order)
+            shown = readable
+            hidden = 0
+            if len(readable) > MAX_SCREEN_TEXT:
+                # 넘치면 바뀐 줄을 먼저 살린다. `_roll` 이 꺼진 객체에 하는 거래와 같다 —
+                # 그때 읽는 쪽이 찾는 것은 전체 명단이 아니라 방금 무엇이 달라졌나다.
+                changed_indexes = [
+                    index
+                    for index, (_, held) in enumerate(readable)
+                    if held.text_at > news_since
+                ][:MAX_SCREEN_TEXT]
+                quiet_indexes = [
+                    index
+                    for index, (_, held) in enumerate(readable)
+                    if held.text_at <= news_since
+                ]
+                kept_indexes = changed_indexes + quiet_indexes[
+                    : MAX_SCREEN_TEXT - len(changed_indexes)
+                ]
+                # 고르는 것과 적는 것을 가른다. 살아남은 줄은 다시 읽는 순서로 적는다.
+                shown = [readable[index] for index in sorted(kept_indexes)]
+                hidden = len(readable) - len(shown)
+            lines.append("the screen reads:")
+            for key, held in shown:
+                where = held.selector or held.path or key
+                # 멤버 줄과 달리 `marking` 을 안 건다. 이 절은 창과 무관하게 매번 전부
+                # 그리므로, 표가 없으면 창 뷰에서도 어느 줄이 이번에 바뀐 것인지 알 수 없다.
+                # 그리고 그 표가 "Space 를 눌렀는데 대사가 넘어갔는가" 를 가리는 값이다.
+                news = "  (changed)" if held.text_at > news_since else ""
+                lines.append(f"  {held.text!r}   {where}{self._aim(held)}{news}")
+            if hidden:
+                # 잘랐다는 것을 말한다. 조용히 자르면 독자가 이것을 화면의 전부로 읽는다.
+                lines.append(f"  (+{hidden} more labels on screen; inspect_object shows what one says)")
+            lines.append("")
+
+        # statics 는 **매번 전부** 그린다. 이 절과 위의 화면의 글자 절만 창(window)을 안 따른다.
         #
         # 소유자가 없기 때문이다. 객체 멤버는 그 객체가 아래에 그려지면서 함께 보이지만,
         # static 은 어느 객체 아래에도 안 실린다 — 델타에서 빠지는 순간 화면 어디에도 없다.
@@ -648,8 +715,10 @@ class PulseMemory(BaseModel):
                 continue
             # 멤버가 없어도 쓴다. 판독이 유일한 출처일 때, 조준값과 무엇을 할 수 있는지만
             # 들고 오는 객체가 대다수다 — 그것을 버리면 누를 것이 화면에서 사라진다.
-            # 글자만 든 라벨도 같은 이유로 남긴다(ARTEL-690).
-            if not obj.members and not obj.offers and obj.id is None and obj.text is None:
+            #
+            # 글자만 든 라벨은 여기서 걸러도 된다. 위의 화면의 글자 절이 그 글자와 주소를
+            # 이미 싣고, 여기서 블록을 하나 더 만들면 같은 주소가 두 번 나온다(ARTEL-690).
+            if not obj.members and not obj.offers and obj.id is None:
                 continue
 
             fresh = [k for k in sorted(obj.members) if obj.at.get(k, 0) > since]
@@ -663,40 +732,20 @@ class PulseMemory(BaseModel):
             # 조작할 수 있다는 것은 **무엇을 할지 아는 것**이다. id 는 거의 모든 객체에
             # 실리므로 그것으로 가르면 아무것도 안 걸러진다 — offers 가 그 선이다.
             actionable = bool(obj.offers)
-            # 글자도 `fresh`/`owed` 와 같은 두 질문을 받는다(ARTEL-690). 이것이 없으면
-            # 라벨은 파싱까지 되고 여기서 사라진다 — 멤버도 offer 도 없어 셋 다 비기 때문이다.
-            # 실제로 그래서 판독에 글자를 실어 보내기 시작한 첫날 렌더에 라벨이 한 줄도
-            # 나오지 않았다.
-            said_now = obj.text is not None and obj.text_at > since
-            said_owed = (
-                obj.text is not None
-                and not said_now
-                and obj.text_at > obj.text_shown
-            )
 
             # 이번 창에 아무 말도 없고, 아직 안 말한 값도 없고, 누를 수도 없는 객체는
             # 건너뛴다. 독자가 이미 아는 것을 다시 적는 자리다.
             #
-            # `owed` 가 여기 있어야 `TutorialController` 처럼 누를 것이 없는 객체가 보인다.
-            # 그것이 안 보여서 에이전트가 대사창이 떠 있는지도 모르고 진행했다.
-            if not fresh and not owed and not actionable and not said_now and not said_owed:
+            # `owed` 가 여기 있어야 창 밖에서 값이 변한 객체가 보인다. 그것이 없던 때
+            # 159턴 런에서 판독이 이름 댄 멤버 53종 중 23종이 한 번도 값을 못 냈다(ARTEL-662).
+            #
+            # 글자는 이 판단에 안 든다. 화면의 글자 절이 창과 무관하게 전부 그리므로,
+            # 글자만 든 객체는 여기서 블록을 안 만드는 것이 맞다(ARTEL-690).
+            if not fresh and not owed and not actionable:
                 continue
 
             where = obj.selector or obj.path or key
             lines.append(f"{where}{self._aim(obj)}:")
-            # 헤더 바로 아래, offer 보다 먼저. 화면의 글자는 이 객체가 무엇인지 말하는 것이라
-            # 무엇을 할 수 있는지보다 앞이다. `tag` 처럼 헤더 대괄호에 넣지 않는 것은 길이
-            # 때문이다 — SDK 가 200 자까지 싣는다.
-            if said_now or said_owed:
-                news = (
-                    "  (changed)"
-                    if marking and obj.text_at > news_since
-                    else ""
-                )
-                earlier = "  (changed earlier)" if said_owed else ""
-                lines.append(f"  says {obj.text!r}{news}{earlier}")
-                if advance:
-                    obj.text_shown = self.clock()
             offered = self._offered(obj)
             if offered:
                 lines.append(f"  {offered}")
@@ -844,6 +893,25 @@ class PulseMemory(BaseModel):
             x, y = center_of(*corner)
             bits.append(f"@ {x},{y} {int(corner[2])}x{int(corner[3])}")
         return f"  [{' · '.join(bits)}]" if bits else ""
+
+    @staticmethod
+    def _reading_order(item: tuple[str, "_HeldObject"]) -> tuple[int, float, float, str]:
+        """사람이 화면을 읽는 순서. 위에서 아래로, 같은 높이면 왼쪽부터.
+
+        화면 좌표의 원점이 좌상단이라(`app/qa/envelope.py` 의 `Rect`) y 가 작은 것이 화면
+        위쪽이다. 판독이 싣는 `rect.x/y` 는 요소의 좌상단이고, 여기서는 중심으로 고칠 이유가
+        없다 — 겨누는 것이 아니라 줄을 세우는 것이라 두 좌표계가 같은 순서를 낸다.
+
+        `rect` 가 없거나 x/y 가 수가 아닌 객체는 어디 있는지 모르는 것이라 맨 뒤에 두고, 그
+        안에서는 주소 순으로 세운다. 순서가 판독마다 흔들리면 같은 화면이 매번 다르게 읽힌다.
+        """
+        key, obj = item
+        where = obj.selector or obj.path or key
+        rect = obj.rect or {}
+        x, y = rect.get("x"), rect.get("y")
+        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            return 1, 0.0, 0.0, where
+        return 0, float(y), float(x), where
 
     @staticmethod
     def _offered(obj: "_HeldObject") -> str:
