@@ -42,21 +42,22 @@ def test_models_api_exposes_reasoning_selection_capabilities() -> None:
         "max_tokens": None,
         "step": None,
     }
-    assert catalog[LLMModel.gemini_2_5_pro]["reasoning"] == {
+    # The one entry left that takes a token budget instead of an effort.
+    assert catalog[LLMModel.claude_haiku_4_5_bedrock]["reasoning"] == {
         "kind": "max_tokens",
         "efforts": None,
-        "min_tokens": 128,
-        "max_tokens": 32768,
-        "step": 128,
+        "min_tokens": 1_024,
+        "max_tokens": 32_000,
+        "step": None,
     }
-    assert catalog[LLMModel.gemini_2_5_pro]["input_modalities"] == [
+    assert catalog[LLMModel.gemini_3_8_flash]["input_modalities"] == [
         "text",
         "image",
         "file",
         "audio",
         "video",
     ]
-    assert catalog[LLMModel.gemini_2_5_pro]["multimodal"] is True
+    assert catalog[LLMModel.gemini_3_8_flash]["multimodal"] is True
     assert catalog[LLMModel.gpt_5_6_luna]["reasoning"] == {
         "kind": "effort",
         "efforts": ["max", "xhigh", "high", "medium", "low"],
@@ -68,6 +69,15 @@ def test_models_api_exposes_reasoning_selection_capabilities() -> None:
         "kind": "effort",
         # Three, not five. The picker has to offer what the model takes: an
         # effort it never advertised is a 400 the user only sees mid-run.
+        "efforts": ["high", "medium", "low"],
+        "min_tokens": None,
+        "max_tokens": None,
+        "step": None,
+    }
+    # 3.8 Flash carries the same three efforts as 3.7. Pinned separately so a
+    # copied spec that widened them fails here rather than at the provider.
+    assert catalog[LLMModel.gemini_3_8_flash]["reasoning"] == {
+        "kind": "effort",
         "efforts": ["high", "medium", "low"],
         "min_tokens": None,
         "max_tokens": None,
@@ -85,7 +95,7 @@ def test_request_accepts_each_supported_reasoning_shape() -> None:
     )
     budget = OpenQaSessionRequest.model_validate(
         open_request(
-            model=LLMModel.gemini_2_5_pro,
+            model=LLMModel.claude_haiku_4_5_bedrock,
             reasoning={"max_tokens": 2048},
         )
     )
@@ -99,9 +109,10 @@ def test_request_accepts_each_supported_reasoning_shape() -> None:
     [
         (LLMModel.gpt_chat_latest, {"effort": "low"}),
         (LLMModel.claude_sonnet_5, {"max_tokens": 2048}),
-        (LLMModel.gemini_2_5_pro, {"effort": "high"}),
+        (LLMModel.claude_haiku_4_5_bedrock, {"effort": "high"}),
         # The right kind, an effort the model does not offer.
         (LLMModel.gemini_3_7_flash, {"effort": "max"}),
+        (LLMModel.gemini_3_8_flash, {"effort": "xhigh"}),
         (LLMModel.kimi_k3, {"effort": "medium"}),
     ],
 )
@@ -129,11 +140,11 @@ def test_request_rejects_unknown_or_out_of_range_reasoning_fields() -> None:
                 reasoning={"effort": "high", "max_token": 2048},
             )
         )
-    with pytest.raises(ValidationError, match="max_tokens >= 128"):
+    with pytest.raises(ValidationError, match="max_tokens >= 1024"):
         OpenQaSessionRequest.model_validate(
             open_request(
-                model=LLMModel.gemini_2_5_pro,
-                reasoning={"max_tokens": 127},
+                model=LLMModel.claude_haiku_4_5_bedrock,
+                reasoning={"max_tokens": 1023},
             )
         )
 
