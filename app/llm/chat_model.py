@@ -119,6 +119,8 @@ def _bedrock(
     return factory(
         model=model.value.removeprefix(BEDROCK_PREFIX),
         region_name=settings.bedrock_region,
+        # 안 쥐고 있으면 `None` 이고, 그러면 표준 AWS 자격증명 사슬이 그대로 답한다.
+        bedrock_api_key=settings.bedrock_api_key,
         temperature=temperature,
         max_tokens=max_tokens,
         additional_model_request_fields=extra or None,
