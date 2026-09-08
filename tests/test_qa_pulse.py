@@ -5,7 +5,13 @@
 """
 
 from app.qa.envelope import MessageType
-from app.qa.pulse import MAX_CHANGED_NAMED, MAX_READING_LOG, PulseMemory, PulseReading
+from app.qa.pulse import (
+    MAX_CHANGED_NAMED,
+    MAX_READING_LOG,
+    MAX_SCREEN_TEXT,
+    PulseMemory,
+    PulseReading,
+)
 from app.qa.scene import SceneMemory
 from app.qa.service import QaExecutionService
 from app.qa.store import InMemoryQaSessionStore
@@ -1267,7 +1273,7 @@ def test_current_scene_은_예약된_페이지를_안_먹는다():
     assert memory.page_due is True
 
 
-# --- 화면의 글자 (ARTEL-690) ---------------------------------------------------
+# --- 화면의 글자 (ARTEL-690) ----------------------------------------------
 
 
 def label(said: str | None = "전투를 시작하려면 Space", **over) -> dict:
@@ -1285,64 +1291,211 @@ def label(said: str | None = "전투를 시작하려면 Space", **over) -> dict:
     return base
 
 
-def test_글자만_든_라벨이_화면에_나온다():
+def test_화면의_글자_절이_글자와_주소를_함께_싣는다():
     """이것이 없으면 라벨은 파싱까지 되고 렌더에서 사라진다.
 
-    가지치기(ARTEL-662)가 신선한 값도, 빚진 값도, 누를 것도 없으면 건너뛰는데 라벨은
-    셋 다 비어 있다. 판독에 글자를 실어 보내기 시작한 첫날 스테이지 렌더에 라벨이 한 줄도
-    나오지 않은 이유가 이것이었다.
+    객체 블록의 가지치기(ARTEL-662)는 신선한 값도, 빚진 값도, 누를 것도 없으면 건너뛰는데
+    라벨은 셋 다 비어 있다. 글자가 먼저이고 주소가 뒤인 것은 읽을 것이 글자이고 주소는
+    그것을 `inspect_object` 로 펴거나 겨누기 위한 것이기 때문이다.
     """
     memory = fold(reading(active=[label()]))
 
     view = memory.render(since=0)
 
-    assert "Canvas[2]/Dialogue[0]" in view
-    assert "says '전투를 시작하려면 Space'" in view
+    assert "the screen reads:" in view
+    assert "'전투를 시작하려면 Space'   Canvas[2]/Dialogue[0]" in view
 
 
-def test_글자가_바뀌면_변화로_보인다():
-    """읽는 것만큼 바뀌는 것을 아는 게 중요하다.
+def test_안_변한_글자가_여러_turn_뒤에도_계속_보인다():
+    """이 절이 창(window)을 안 타는 이유 전부가 이것이다.
 
-    누른 뒤 값이 바뀌면 넘어간 것이고, 그대로면 입력이 안 먹은 것이다. 지금은 그 둘을
-    가릴 수단이 없어 `Space` 를 네 번 눌러 보는 것 말고 할 수 있는 일이 없었다.
+    글자는 바뀔 때만 델타에 실리므로 창으로 가르면 한 번 그리고 끝인데, `pulse` block 은
+    scene view marker 안에 들어가고 `DEFAULT_KEEP_SCENES = 1` 이라 다음 도구 결과가 오는
+    순간 접힌다. 그래서 튜토리얼 안내문처럼 떠 있는 내내 안 변하는 글자가 모델 호출 딱 한 번
+    동안만 문맥에 있었고, QA agent 가 화면이 시키는 것을 안 따랐다.
     """
-    memory = fold(
-        reading(active=[label("첫 줄")]),
-        reading(reading=2, whole=False, active=[label("둘째 줄")]),
-    )
-
-    view = memory.render(since=1)
-
-    assert "says '둘째 줄'" in view
-
-
-def test_안_바뀐_글자는_창에_다시_안_적는다():
-    """델타에 안 실린 글자는 이번 창의 소식이 아니다.
-
-    SDK 가 장부에 얹어 보내므로 안 바뀐 글자는 애초에 오지 않는다. 그것을 매 턴 다시
-    적으면 독자가 이미 아는 것으로 창이 찬다.
-    """
-    memory = fold(reading(active=[label("그대로")]))
+    memory = fold(reading(active=[label("Space 를 눌러 계속")]))
     memory.render(since=0, advance=True)
 
-    later = memory.render(since=memory.clock())
+    for turn in range(2, 6):
+        memory.apply(
+            PulseReading.model_validate(
+                reading(reading=turn, whole=False, active=[obj()], changed=["continue|turn"])
+            )
+        )
+        view = memory.render(advance=True)
 
-    assert "says" not in later
+        assert "'Space 를 눌러 계속'" in view, (turn, view)
+        # 안 바뀐 글자에 소식 표가 붙으면 표가 뜻을 잃는다.
+        assert "(changed)" not in view, (turn, view)
 
 
-def test_말한_적_없는_글자는_창_밖에서_와도_적는다():
-    """`owed` 가 멤버에 하는 일을 글자에도 한다 (ARTEL-662 와 같은 이유).
+def test_화면의_글자는_위에서_아래로_왼쪽에서_오른쪽으로_읽힌다():
+    """줄 순서가 곧 화면을 읽는 순서여야 한다.
 
-    창의 경계는 마지막 행위이고 "내가 무엇을 말했나" 는 다른 질문이다. 행위 전에 도착한
-    글자를 창으로만 가르면 영영 탈락한다.
+    화면 좌표의 원점이 좌상단이라 y 가 작은 것이 위쪽이다. 순서를 안 세우면 제목과 대사와
+    버튼 라벨이 `held` 사전 순서대로 섞여 나오고, 읽는 쪽은 어느 글자가 어느 글자에 딸린
+    것인지를 좌표로 되짚어야 한다.
     """
-    memory = fold(reading(active=[label("행위 전에 도착한 대사")]))
+    memory = fold(
+        reading(
+            active=[
+                label("아래쪽 안내", selector="Hint[1]", rect={"x": 10, "y": 400, "w": 200, "h": 40}),
+                label("위쪽 오른쪽", selector="Score[2]", rect={"x": 500, "y": 20, "w": 100, "h": 40}),
+                label("위쪽 왼쪽", selector="Title[0]", rect={"x": 10, "y": 20, "w": 200, "h": 40}),
+            ]
+        )
+    )
 
-    # 창이 판독보다 뒤에 있어도 — 아직 한 번도 안 말했으므로 나온다.
-    view = memory.render(since=memory.clock())
+    view = memory.render(since=0)
 
-    assert "says '행위 전에 도착한 대사'" in view
-    assert "(changed earlier)" in view
+    assert view.index("'위쪽 왼쪽'") < view.index("'위쪽 오른쪽'") < view.index("'아래쪽 안내'")
+
+
+def test_rect_없는_라벨도_빠지지_않고_맨_뒤에_나온다():
+    """자리를 모르는 것과 없는 것은 다르다.
+
+    `rect` 를 안 싣는 라벨을 빼면 그 글자가 화면 어디에도 안 남는다. 자리를 모르니 줄을
+    세울 수 없을 뿐이라, 좌표를 아는 것들 뒤에 붙이고 그 안에서는 주소 순으로 둔다 —
+    순서가 판독마다 흔들리면 같은 화면이 매번 다르게 읽힌다.
+    """
+    memory = fold(
+        reading(
+            active=[
+                label("자리를 모르는 안내", selector="Floating[9]", rect=None),
+                label("아래쪽 안내", selector="Hint[1]", rect={"x": 10, "y": 400, "w": 200, "h": 40}),
+            ]
+        )
+    )
+
+    view = memory.render(since=0)
+
+    assert "'자리를 모르는 안내'" in view
+    assert view.index("'아래쪽 안내'") < view.index("'자리를 모르는 안내'")
+
+
+def test_바뀐_턴에만_changed_가_붙는다():
+    """이 표가 "Space 를 눌렀는데 대사가 넘어갔는가" 를 가리는 값이다.
+
+    이 절은 창과 무관하게 매번 전부 그리므로, 표가 없으면 창 뷰에서도 어느 줄이 이번에
+    바뀐 것인지 알 수 없다. 그러면 누른 뒤 대사가 넘어갔는지를 아는 수단이 없어져서, 안
+    먹은 입력을 먹은 것으로 읽는다.
+    """
+    memory = fold(reading(active=[label("첫 줄")]))
+    memory.render(since=0, advance=True)
+
+    memory.apply(
+        PulseReading.model_validate(
+            reading(reading=2, whole=False, active=[label("둘째 줄")])
+        )
+    )
+    turned = memory.render(advance=True)
+
+    assert "'둘째 줄'   Canvas[2]/Dialogue[0]" in turned
+    assert "(changed)" in turned
+
+    memory.apply(
+        PulseReading.model_validate(reading(reading=3, whole=False, active=[obj()]))
+    )
+    later = memory.render(advance=True)
+
+    # 글자는 그대로 있고, 소식 표만 사라진다.
+    assert "'둘째 줄'" in later
+    assert "(changed)" not in later
+
+
+def test_꺼진_객체의_글자는_화면에_안_나온다():
+    """화면에 없는 글자를 읽게 하면 안 된다.
+
+    SDK 는 꺼진 객체에도 글자를 싣는다 — `silent` 이 멤버 값에만 걸리기 때문이다. 거르는
+    것은 이쪽 몫이고, 객체 블록이 이미 `live` 로 거르고 있다. 그 보장을 이 절에도 못 박는다.
+    """
+    memory = fold(
+        reading(active=[label("보이지 않는 대사")]),
+        reading(reading=2, whole=True, active=[], deactive=[label("보이지 않는 대사")]),
+    )
+
+    view = memory.render(since=0)
+
+    assert "보이지 않는 대사" not in view
+
+
+def test_빈_글자와_공백뿐인_글자는_화면에_안_나온다():
+    """빈 라벨은 화면에서 아무것도 아니다.
+
+    Unity 의 텍스트 컴포넌트는 값이 아직 안 들어온 동안 `""` 를 들고 있고, 자리만 잡아 두는
+    라벨은 공백을 들고 있다. 그것을 줄로 만들면 이 절이 빈 따옴표로 차고, 상한 30 줄을 그런
+    줄이 먹는다.
+    """
+    memory = fold(
+        reading(
+            active=[
+                label("", selector="Empty[0]"),
+                label("   ", selector="Blank[1]"),
+            ]
+        )
+    )
+
+    view = memory.render(since=0)
+
+    assert "the screen reads:" not in view
+
+
+def test_상한을_넘으면_바뀐_줄이_살아남고_몇_개가_더_있는지_말한다():
+    """이 절은 창을 안 타므로 상한이 곧 매 턴 드는 비용이다.
+
+    목록이나 상점 화면은 글자 든 객체가 서른을 쉽게 넘는데, 그때 읽는 쪽이 찾는 것은 전체
+    명단이 아니라 방금 무엇이 달라졌나다. 자른 것을 조용히 자르면 독자가 남은 서른 줄을
+    화면의 전부로 읽는다.
+    """
+    crowd = [
+        label(
+            f"줄 {index}",
+            selector=f"Line[{index}]",
+            rect={"x": 0, "y": index, "w": 10, "h": 10},
+        )
+        for index in range(MAX_SCREEN_TEXT + 5)
+    ]
+    memory = fold(reading(active=crowd))
+    memory.render(since=0, advance=True)
+
+    # 읽는 순서로는 맨 마지막인 줄이 바뀐다. 상한이 앞에서부터 자르면 이것이 떨어진다.
+    memory.apply(
+        PulseReading.model_validate(
+            reading(
+                reading=2,
+                whole=False,
+                active=[
+                    label(
+                        "방금 바뀐 대사",
+                        selector=f"Line[{MAX_SCREEN_TEXT + 4}]",
+                        rect={"x": 0, "y": MAX_SCREEN_TEXT + 4, "w": 10, "h": 10},
+                    )
+                ],
+            )
+        )
+    )
+    view = memory.render(advance=True)
+
+    kept = next(line for line in view.splitlines() if "방금 바뀐 대사" in line)
+    assert kept.startswith("  '방금 바뀐 대사'   Line[34]")
+    assert kept.endswith("  (changed)")
+    assert view.count("   Line[") == MAX_SCREEN_TEXT
+    assert "(+5 more labels on screen; inspect_object shows what one says)" in view
+
+
+def test_글자만_든_객체는_객체_블록을_안_만든다():
+    """같은 주소가 두 번 나오면 읽는 쪽이 두 객체로 읽는다.
+
+    화면의 글자 절이 글자와 주소를 이미 싣는다. 글자만 들고 멤버도 offer 도 없는 객체가
+    그 아래에 헤더만 있는 블록을 하나 더 만들면, 그 블록은 아무 값도 안 싣고 자리만 먹는다.
+    """
+    memory = fold(reading(active=[label()]))
+
+    view = memory.render(since=0)
+
+    assert "Canvas[2]/Dialogue[0]  [id=31182]:" not in view
+    assert view.count("Canvas[2]/Dialogue[0]") == 1
 
 
 def test_글자를_안_실은_델타가_들고_있던_글자를_지우지_않는다():
@@ -1359,22 +1512,6 @@ def test_글자를_안_실은_델타가_들고_있던_글자를_지우지_않는
     held = next(iter(memory.held.values()))
 
     assert held.text == "들고 있어야 하는 대사"
-
-
-def test_꺼진_객체의_글자는_화면에_안_나온다():
-    """화면에 없는 글자를 읽게 하면 안 된다.
-
-    SDK 는 꺼진 객체에도 글자를 싣는다 — `silent` 이 멤버 값에만 걸리기 때문이다. 거르는
-    것은 이쪽 몫이고, 이미 `live` 로 거르고 있다. 그 보장을 글자에도 못 박는다.
-    """
-    memory = fold(
-        reading(active=[label("보이지 않는 대사")]),
-        reading(reading=2, whole=True, active=[], deactive=[label("보이지 않는 대사")]),
-    )
-
-    view = memory.render(since=0)
-
-    assert "보이지 않는 대사" not in view
 
 
 def test_물으면_이미_말한_글자도_답한다():
