@@ -79,13 +79,25 @@ from app.llm.models import LLMModel, get_model_spec
 # `_FINGERPRINT_SCHEME` is NOT bumped alongside it: the digests already separate,
 # and bumping would only make one structure carry two of them.
 #
-# The two arms of that axis are named in `QaArchSpec.label` rather than here,
-# because a deployment runs both from one image. They are `v4-capture-on-demand`
-# and `v4-capture-every-call`, and the specs that carry them are checked in at
-# `benchmarks/wordventure/arch/` in the workspace. Both arms take a NEW label
-# rather than one of them reusing this constant: `agent_arch` is what
-# `/api/qa-stats` groups cells by, so an arm left on the default label shares its
-# cell with every run this deployment has ever done.
+# The arms of that axis are named in `QaArchSpec.label` rather than here, because
+# a deployment runs them all from one image. The specs are checked in at
+# `benchmarks/wordventure/arch/` in the workspace. Every arm takes a NEW label
+# rather than reusing this constant: `agent_arch` is what `/api/qa-stats` groups
+# cells by, so an arm left on the default label shares its cell with every run
+# this deployment has ever done.
+#
+# * `v4-capture-on-demand` — `screen_capture=on_demand`, today's run.
+# * `v4-capture-every-call` — the first `every_call` build, which stored the
+#   picture in the conversation. Retired. It read 1.3% of its input from cache
+#   against the baseline's 97.3% and cost $14.22 against $0.87, because storing a
+#   picture per turn means editing an already-sent message to dispose of the last
+#   one, and that moves the prefix out from under the cache boundary.
+# * `v4-capture-transient` — the same knob after that fix: the picture rides on
+#   one request and is never stored. **Same `screen_capture` value, so the same
+#   fingerprint** — `arch_fingerprint` hashes the knobs, the tool schemas and the
+#   middleware order, and none of those moved. The label is the only thing that
+#   separates the two builds in the record, which is the case the module docstring
+#   above says the hand-bumped label exists for.
 QA_ARCH_LABEL = "v4-screen-text"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
