@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 # The wire value. Orchestration maps it to AuthoringStage.THINKING and drops
 # stages it does not know, so adding one here does not require a deploy there.
 THINKING = "thinking"
+# 워크플로 C(문장 쓰기)·E(수정)의 노드 경계 보고 — 오케 AuthoringStage.WRITING 그대로.
+WRITING = "writing"
 
 
 class ProgressCallback(AsyncCallbackHandler):

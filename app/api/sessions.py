@@ -14,9 +14,10 @@ from app.agents import (
     ScenarioGenerationError,
     ScenarioPlan,
     AuthoredFlow,
+    SceneEdge,
     TestCaseListItem,
 )
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig, validate_reasoning
 from app.sessions.channel import ScenarioChannel
 from app.sessions.service import SessionService
 from app.sessions.store import SessionExpired
@@ -39,8 +40,15 @@ class OpenSessionRequest(BaseModel):
     flows: list[AuthoredFlow] = Field(default_factory=list)
     # Which screen the game boots into (ARTEL-670). Empty from an older orchestration.
     entry_scene: str | None = None
+    # The whole map's screen transitions and boot values (flows-off experiment).
+    # Empty from an older orchestration; the shape block then adds nothing.
+    scene_edges: list[SceneEdge] = Field(default_factory=list)
+    starting_values: dict[str, str] = Field(default_factory=dict)
     user_input: str
     model: LLMModel = DEFAULT_MODEL
+    # 추론 예산. 안 보내면 안 켠다 — 지금까지의 저작이 그랬다. 모델이 그 설정을 못 받으면
+    # `validate_reasoning` 이 거절한다(조용히 낮추지 않는다, QA 런과 같은 규칙이다).
+    reasoning: ReasoningConfig | None = None
     # Applies to the whole session, including the first turn (run from the stored
     # pending input when the WS connects), so it must be set here, not only on the
     # per-turn message below.
@@ -53,6 +61,8 @@ class OpenSessionRequest(BaseModel):
     # pre-run-scope callers keep working.
     run_id: int | None = None
     project_id: int | None = None
+    # 세션을 연 사용자 — 묶기·순서 검증(B 미니 루프)의 지도 읽기 스코프. 안 오면 검증을 건너뛴다.
+    app_user_id: int | None = None
     # The run's current scenarios at open (ARTEL-206 Step 6); lets the agent edit
     # existing scenarios by echoing their `scenario_id`. Empty for a fresh run.
     current_scenarios: list[ScenarioPlan] = Field(default_factory=list)
@@ -105,18 +115,25 @@ async def open_session(
     payload: OpenSessionRequest,
     request: Request,
 ) -> OpenSessionResponse:
+    # **못 켜는 모델이면 열 때 거절한다.** 이 검사는 `build_chat_model` 도 하지만 그것은
+    # 턴 도중이라, 사용자는 세션이 열린 뒤에야 실패를 본다. QA 런과 같은 자리로 당긴다.
+    validate_reasoning(payload.model, payload.reasoning)
     session_id = await _service(request.app).open(
         unity_context=payload.unity_context,
         game_context=payload.game_context,
         test_case_list=payload.test_case_list,
         flows=payload.flows,
         entry_scene=payload.entry_scene,
+        scene_edges=payload.scene_edges,
+        starting_values=payload.starting_values,
         user_input=payload.user_input,
         model=payload.model,
+        reasoning=payload.reasoning,
         locale=payload.locale,
         test_scenario_id=payload.test_scenario_id,
         run_id=payload.run_id,
         project_id=payload.project_id,
+        app_user_id=payload.app_user_id,
         current_scenarios=payload.current_scenarios,
     )
     return OpenSessionResponse(session_id=session_id)
