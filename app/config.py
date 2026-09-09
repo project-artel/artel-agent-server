@@ -139,6 +139,20 @@ class Settings(BaseSettings):
             ) from error
         return value
     scenario_prompt_version: str | None = None
+    # 입구 라우터(워크플로 재편 Step 1). 끄면 예전 그대로 모든 입력이 루프로 간다 —
+    # 실험의 롤백 스위치다.
+    scenario_router_enabled: bool = True
+    # 한 저작 턴의 절대 천장(워크플로 재편 ⑥ — 토큰 가드). recursion_limit 은 케이스 수로
+    # 자라는 작업량 한도고, 이것은 **케이스 수와 무관한 폭주 방지선**이다. 정상 판(계측:
+    # 전량 20~40호출)을 안 건드리는 여유값이며, 최적값은 재계측 실측에서 조정한다.
+    # 본선 워크플로(B→C→D). 끄면 저작이 현행 루프로 간다 — 롤백 스위치.
+    scenario_workflow_enabled: bool = True
+    # 구 루프 갈래(수정·미분류)의 스위치. 서비스에서는 켠다(비싸게라도 동작해야 하니).
+    # 실험 중에는 꺼서 — 루프로 갈 요청을 **기록만 남기고 끊는다**. 워크플로가 못 받는
+    # 요청이 얼마나, 어떤 모양으로 오는지는 이 기록이 곧 Step 3(E 갈래)의 재료다.
+    scenario_loop_enabled: bool = True
+    scenario_max_model_calls: int = 40
+    scenario_max_tool_calls: int = 30
     game_context_prompt_version: str | None = None
     knowledge_query_prompt_version: str | None = None
     # 화면 제안을 판정하는 agent 의 프롬프트 (ARTEL-656). QA 런의 프롬프트와 따로
@@ -178,14 +192,6 @@ class Settings(BaseSettings):
     # Bedrock 호출이 갈 리전. 모델 값의 `us.` 접두가 inference profile 을 정하고,
     # 이 값은 어느 엔드포인트에 말을 거는지를 정한다. 둘은 다른 축이다.
     bedrock_region: str = "us-west-2"
-    # Bedrock API key. 없으면 `None` 이고, 그때는 표준 AWS 자격증명 사슬이 그대로 답한다 —
-    # 이 값을 안 쥔 배포는 종전과 똑같이 돈다.
-    #
-    # 여기 두는 것은 `boto3` 가 읽는 `AWS_BEARER_TOKEN_BEDROCK` 을 `.env` 로 줄 수 없기
-    # 때문이다. `env_file` 은 이 `Settings` 만 채우고 `os.environ` 에는 안 넣는데 그 변수를
-    # 보는 것은 `boto3` 라, `.env` 에 그 이름으로 적으면 아무 말 없이 무시된다.
-    # `ChatBedrockConverse` 가 `bedrock_api_key` 로 키를 직접 받으므로 그리로 넘긴다.
-    bedrock_api_key: str | None = None
 
     # 답이 안 오는 호출은 기다림이 아니라 실패로 끝나야 한다. botocore 는 기본 60초를
     # 쓰고 재시도를 우리 뜻과 무관하게 정하는데, 저작 한 판이 그 한 번에 죽었다 —
