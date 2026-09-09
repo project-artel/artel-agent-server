@@ -395,7 +395,7 @@ def test_a_pinned_summarizer_stays_apart_from_the_run_model() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v4-screen-text"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v5-pointer-target"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -434,15 +434,15 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
     "enter_text",
     "press_key",
     "move_pointer",
-    "click_at",
-    "double_click_at",
+    "click",
+    "double_click",
     "hold_mouse_button",
     "release_mouse_button",
     "hold_key",
     "release_key",
     "set_input_axis",
     "set_input_button",
-    "drag_pointer",
+    "drag",
     "pause_game_time",
     "resume_game_time",
     "reset_game",
@@ -454,10 +454,12 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
     "capture_screen",
     "compact_context",
 )
-# Moved by `screen_capture` joining `QaArchSpec` (ARTEL-868). The tool names and
-# the label above did not move with it — see the fourth bullet in the docstring
-# below for why a new axis field is the fingerprint-only case.
-_EXPECTED_DEFAULT_FINGERPRINT = "9f68c0fa44ab"
+# Moved twice since it was last pinned: `screen_capture` joined `QaArchSpec`
+# (ARTEL-868), which every structure's digest follows because the dump gained a
+# key, and then three pointer tool names and four tool schemas changed
+# (ARTEL-880). Only the second is a change of shape, and it is why the label
+# above moved with the digest this time.
+_EXPECTED_DEFAULT_FINGERPRINT = "83bc272fee58"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
