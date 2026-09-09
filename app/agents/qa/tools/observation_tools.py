@@ -128,7 +128,7 @@ def build_capture_tool(ctx: ToolContext) -> BaseTool:
     _answer = ctx.answer
 
     description = CAPTURE_SCREEN_DESCRIPTION.format(limit=arch.max_captures_per_run)
-    if arch.screen_capture is ScreenCaptureMode.every_call:
+    if arch.screen_capture is not ScreenCaptureMode.on_demand:
         description += EVERY_CALL_CAPTURE_NOTE
 
     @tool(description=description)
