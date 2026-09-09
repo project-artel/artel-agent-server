@@ -192,6 +192,14 @@ class Settings(BaseSettings):
     # Bedrock 호출이 갈 리전. 모델 값의 `us.` 접두가 inference profile 을 정하고,
     # 이 값은 어느 엔드포인트에 말을 거는지를 정한다. 둘은 다른 축이다.
     bedrock_region: str = "us-west-2"
+    # Bedrock API key. 없으면 `None` 이고, 그때는 표준 AWS 자격증명 사슬이 그대로 답한다 —
+    # 이 값을 안 쥔 배포는 종전과 똑같이 돈다.
+    #
+    # 여기 두는 것은 `boto3` 가 읽는 `AWS_BEARER_TOKEN_BEDROCK` 을 `.env` 로 줄 수 없기
+    # 때문이다. `env_file` 은 이 `Settings` 만 채우고 `os.environ` 에는 안 넣는데 그 변수를
+    # 보는 것은 `boto3` 라, `.env` 에 그 이름으로 적으면 아무 말 없이 무시된다.
+    # `ChatBedrockConverse` 가 `bedrock_api_key` 로 키를 직접 받으므로 그리로 넘긴다.
+    bedrock_api_key: str | None = None
 
     # 답이 안 오는 호출은 기다림이 아니라 실패로 끝나야 한다. botocore 는 기본 60초를
     # 쓰고 재시도를 우리 뜻과 무관하게 정하는데, 저작 한 판이 그 한 번에 죽었다 —

@@ -96,7 +96,12 @@ class _CachingChatBedrockConverse(ChatBedrockConverse):
 def _bedrock(
     model: LLMModel, reasoning: ReasoningConfig | None, cache_prompt: bool
 ) -> ChatBedrockConverse:
-    """Bedrock 경로. 인증은 표준 AWS 자격증명 사슬을 그대로 쓴다.
+    """Bedrock 경로.
+
+    인증은 `bedrock_api_key` 를 쥐고 있으면 그것으로, 아니면 표준 AWS 자격증명 사슬로
+    간다. 그 키를 `Settings` 로 받는 이유는 `boto3` 가 읽는 `AWS_BEARER_TOKEN_BEDROCK`
+    을 `.env` 로 줄 수 없기 때문이다 — `env_file` 은 `Settings` 만 채우고 `os.environ`
+    에는 안 넣는데, 그 변수를 보는 것은 `boto3` 다.
 
     `LLMModel` 값에서 `bedrock/` 접두만 떼면 inference profile ID 가 된다. 그
     문자열이 리전 접두와 판을 담고 있어 어느 요율로 청구되는지까지 정한다.
@@ -131,6 +136,8 @@ def _bedrock(
     return factory(
         model=model.value.removeprefix(BEDROCK_PREFIX),
         region_name=settings.bedrock_region,
+        # 안 쥐고 있으면 `None` 이고, 그러면 표준 AWS 자격증명 사슬이 그대로 답한다.
+        bedrock_api_key=settings.bedrock_api_key,
         temperature=temperature,
         max_tokens=max_tokens,
         additional_model_request_fields=extra or None,
