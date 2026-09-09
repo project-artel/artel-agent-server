@@ -106,6 +106,36 @@ def _estimate_cost(
     ) / 1_000_000
 
 
+# 캐시에 실은 토큰이 실려 오는 이름들. **provider 마다 다르고, 둘 다 보는 편이 좁다.**
+#
+# Bedrock 은 `cache_creation` 을 만들어 두고 **거기에 0 을 넣은 채** 실제 값을 TTL 이 박힌
+# 이름으로 보낸다. 실측(2026-09-04, 런 하나의 호출 78 개)에서 예외가 없었다.
+#
+#     {'cache_creation': 0, 'cache_read': 98744, 'ephemeral_5m_input_tokens': 1729}
+#
+# 그래서 `cache_creation` 만 읽으면 `cache_write_tokens` 가 영영 0 이고, 비용이 그 몫만큼
+# 낮게 나온다 — 조용히 낮으므로 아무도 안 본다.
+#
+# 이름에 `5m` 이 박힌 것은 캐시 TTL 이다. 단가가 TTL 마다 다르므로(`ModelSpec.pricing` 의
+# 주석) 1 시간짜리를 쓰게 되면 그 이름이 함께 바뀐다. 그때 이 목록에 더하고 단가도 같이
+# 고쳐야 한다 — 여기만 더하면 비싼 쓰기를 싼 값으로 세게 된다.
+def _cache_write_of(usage: dict[str, Any]) -> int:
+    """캐시에 실은 토큰. 이름이 provider 마다 달라, 아는 이름들을 이렇게 읽는다.
+
+    TTL 별 내역(`ephemeral_5m/1h_input_tokens`)은 서로소 분할이라 **합치고**, 내역이
+    없을 때만 `cache_creation` 을 본다. langchain-aws 는 내역이 실려 오면
+    `cache_creation` 을 0 으로 덮으므로(같은 값의 두 이름) 내역과 그것을 더하면 같은
+    토큰을 두 번 센다 — 그래서 합산은 내역끼리만 한다.
+    """
+    details = usage.get("input_token_details") or {}
+    ephemeral = (details.get("ephemeral_5m_input_tokens") or 0) + (
+        details.get("ephemeral_1h_input_tokens") or 0
+    )
+    if ephemeral:
+        return int(ephemeral)
+    return int(details.get("cache_creation") or 0)
+
+
 def _build_record(
     model: str,
     *,
@@ -323,22 +353,6 @@ class UsageCallback(AsyncCallbackHandler):
             logger.warning("[llm-usage] could not read chat usage", exc_info=True)
 
 
-def _cache_write_tokens(details: dict[str, Any]) -> int:
-    """캐시 쓰기 토큰 — `cache_creation` 이 0 이어도 믿지 않는다.
-
-    langchain-aws 는 Bedrock 응답에 `cacheDetails`(TTL 별 내역)가 실려 오면
-    `cache_creation` 을 **0 으로 덮고** 같은 값을 `ephemeral_5m_input_tokens` /
-    `ephemeral_1h_input_tokens` 로 옮겨 담는다(`_extract_usage_metadata`). 우리가
-    `cache_creation` 만 읽는 동안 원장이 쓰기를 전부 0 으로 적었고, CloudWatch 실측
-    (호출당 ~19.7k, 2026-09-09)과 어긋나던 것이 이 구멍이다.
-    """
-    creation = details.get("cache_creation", 0) or 0
-    if creation:
-        return creation
-    return (details.get("ephemeral_5m_input_tokens", 0) or 0) + (
-        details.get("ephemeral_1h_input_tokens", 0) or 0
-    )
-
 
 def _record_from_response(
     response: LLMResult,
@@ -373,10 +387,7 @@ def _record_from_response(
         cached_input_tokens=(usage.get("input_token_details") or {}).get(
             "cache_read", 0
         ),
-        # Bedrock 응답에 실제로 실려 오는 값이고(`{'cache_creation': 0, 'cache_read': …}`)
-        # 여기서 꺼내지 않아 버려지고 있었다. `cache_read` 와 달리 `input_tokens` 에
-        # 포함되지 않고 따로 청구된다.
-        cache_write_tokens=_cache_write_tokens(usage.get("input_token_details") or {}),
+        cache_write_tokens=_cache_write_of(usage),
         reasoning_tokens=(usage.get("output_token_details") or {}).get("reasoning", 0),
         cost_usd=float(cost) if isinstance(cost, (int, float)) else None,
         started_at=started[1] if started else datetime.now(UTC),
