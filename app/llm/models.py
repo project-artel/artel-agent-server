@@ -39,8 +39,8 @@ class LLMModel(StrEnum):
     gpt_chat_latest = "openai/gpt-chat-latest"
     claude_sonnet_5 = "anthropic/claude-sonnet-5"
     claude_opus_5 = "anthropic/claude-opus-5"
-    gemini_3_8_flash = "google/gemini-3.8-flash"
     gemini_3_7_flash = "google/gemini-3.7-flash"
+    gemini_2_5_pro = "google/gemini-2.5-pro"
     gemma_4_free = "google/gemma-4-31b-it:free"
     grok_4_6 = "x-ai/grok-4.6"
     kimi_k3 = "moonshotai/kimi-k3"
@@ -71,7 +71,14 @@ class ReasoningConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     effort: ReasoningEffort | None = None
+    # 0 = **추론을 끈다.** None(미지정)과 다르다 — 미지정은 카탈로그 기본 예산으로
+    # 켜진다(Bedrock 경로). 라우터처럼 판단이 얕은 호출이 끄는 데 쓴다: 669토큰
+    # 분류에 추론이 13초·수백 토큰을 쓰던 실측(2026-09-09)이 이 값의 이유다.
     max_tokens: int | None = Field(default=None, ge=0)
+
+    @property
+    def disabled(self) -> bool:
+        return self.max_tokens == 0
 
     @model_validator(mode="after")
     def require_one_budget(self) -> "ReasoningConfig":
@@ -147,9 +154,6 @@ class ModelSpec:
     reasoning_efforts: tuple[ReasoningEffort, ...] | None = None
     reasoning_min_tokens: int | None = None
     reasoning_max_tokens: int | None = None
-    # 지금 이 값을 채우는 항목은 없다. Gemini 2.5 Pro 가 유일했고 그것을 카탈로그에서
-    # 뺐다. 필드는 남긴다 — `list_models` 가 `step` 을 계속 싣고, 예산을 단위로 받는
-    # 모델이 다시 들어오면 그 자리다.
     reasoning_step: int | None = None
     # 백만 토큰당 달러. **provider 가 청구액을 안 알려주는 모델에만 채운다.**
     #
@@ -186,12 +190,14 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         supports_strict_json=True,
         label="Claude Haiku 4.5 (AWS Bedrock)",
         # 실측한 창은 200,000 이다(195,011 통과, 그 위 `prompt is too long`). 거기서
-        # 출력 예약 8,192 를 뺀다 — `max_tokens` 가 `budget_tokens` 보다 커야 해서
-        # 예산 4,096 이 그 예약분을 정한다.
+        # 출력 예약 16,384 를 뺀다 — `chat_model` 의 `max_tokens` 계산(예산×여유 +
+        # `OUTPUT_RESERVE`)과 같은 수여야 한다. 예산은 상한이 아니라 목표치라(실측:
+        # 목표 4,096 에 8,188 을 생각하고 잘렸다) 목표 바로 위에 상한을 두면 무거운
+        # 과제에서 답도 도구 호출도 없이 끝난다.
         #
         # 앞서 136,000 으로 적었던 것은 근거 없는 수였다. 그 값이 압축 임계를 정하므로
         # 200k 창을 68% 만 쓰고 있었다.
-        max_input_tokens=191_808,
+        max_input_tokens=183_616,
         input_modalities=("text", "image"),
         # Anthropic 은 `effort` 를 안 받는다. 토큰 예산으로만 켠다.
         reasoning=ReasoningKind.max_tokens,
@@ -269,20 +275,16 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         reasoning=ReasoningKind.effort,
         reasoning_efforts=tuple(ReasoningEffort),
     ),
-    # 3.7 Flash 와 창, 출력 상한, modality, effort 세 개, 단가($0.75 / $3.75 per
-    # Mtok)가 전부 같다. 다른 것은 카탈로그가 싣고 온 점수뿐이다 — artificial
-    # analysis 의 agentic index 50 대 45.1, intelligence index 58.7 대 56.
-    #
-    # 그래서 둘 다 둔다. 슬러그를 갈아 끼우면 3.7 로 돌린 런과 비교할 수 없고, 같은
-    # 값에서 점수만 다른 두 항목이 나란히 있어야 그 차이를 QA 런으로 잴 수 있다.
-    LLMModel.gemini_3_8_flash: ModelSpec(
+    LLMModel.gemini_3_7_flash: ModelSpec(
         provider=LLMProvider.google,
         supports_strict_json=True,
-        label="Gemini 3.8 Flash",
+        label="Gemini 3.7 Flash",
         max_input_tokens=983_040,
         input_modalities=("text", "image", "file", "audio", "video"),
-        # 3.7 Flash 와 같다: `reasoning_effort` 를 받고 세 개만 advertise 하며,
-        # 추론이 mandatory 라 요청이 빼면 provider 의 `medium` 으로 돈다.
+        # An effort, where 2.5 Pro below takes a token budget: 3.x Flash
+        # advertises `reasoning_effort` and three named efforts, and reasoning
+        # is mandatory, so the run reasons at the provider's `medium` whenever
+        # the request leaves it out.
         reasoning=ReasoningKind.effort,
         reasoning_efforts=(
             ReasoningEffort.high,
@@ -290,21 +292,16 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
             ReasoningEffort.low,
         ),
     ),
-    LLMModel.gemini_3_7_flash: ModelSpec(
+    LLMModel.gemini_2_5_pro: ModelSpec(
         provider=LLMProvider.google,
         supports_strict_json=True,
-        label="Gemini 3.7 Flash",
+        label="Gemini 2.5 Pro",
         max_input_tokens=983_040,
         input_modalities=("text", "image", "file", "audio", "video"),
-        # 3.x Flash advertises `reasoning_effort` and three named efforts, and
-        # reasoning is mandatory, so the run reasons at the provider's `medium`
-        # whenever the request leaves it out.
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=(
-            ReasoningEffort.high,
-            ReasoningEffort.medium,
-            ReasoningEffort.low,
-        ),
+        reasoning=ReasoningKind.max_tokens,
+        reasoning_min_tokens=128,
+        reasoning_max_tokens=32768,
+        reasoning_step=128,
     ),
     # json_object-only (no `structured_outputs`): exercises the strict fallback.
     LLMModel.gemma_4_free: ModelSpec(
@@ -394,6 +391,10 @@ def validate_reasoning(
 ) -> ReasoningConfig | None:
     if reasoning is None:
         return None
+    if reasoning.disabled:
+        # 0 = 끔 — kind·예산 범위 검사의 대상이 아니다(요청에 추론이 아예 안 실린다).
+        # 추론을 지원하지 않는 모델에도 유효하다: "끄겠다"는 어느 모델에서든 참이다.
+        return reasoning
 
     supported = get_model_spec(model).reasoning
     requested = (
