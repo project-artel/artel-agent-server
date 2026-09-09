@@ -29,7 +29,7 @@ from app.agents.scenario.prompt import (
 )
 from app.llm.chat_model import select_structured_method
 from app.prompts import load_prompt
-from app.llm.models import LLMModel
+from app.llm.models import LLMModel, ReasoningConfig
 from app.sessions.channel import ScenarioChannel
 
 
@@ -65,7 +65,7 @@ def _canned_factory(result: ScenarioAgentResult):
     ``structured_response``; the agent reads exactly that key.
     """
 
-    def factory(*, model, tools, system_prompt):
+    def factory(*, model, tools, system_prompt, reasoning=None):
         return RunnableLambda(
             lambda _inputs: {"messages": [], "structured_response": result}
         )
@@ -136,7 +136,7 @@ def test_scenario_agent_returns_multi_scenario_result() -> None:
 def test_scenario_agent_raises_when_no_structured_response() -> None:
     """A loop that ended without a plan is a generation failure, not empty output."""
 
-    def factory(*, model, tools, system_prompt):
+    def factory(*, model, tools, system_prompt, reasoning=None):
         return RunnableLambda(lambda _inputs: {"messages": [], "structured_response": None})
 
     agent = ScenarioAgent(agent_factory=factory)
@@ -149,7 +149,7 @@ def test_scenario_agent_binds_the_search_tool() -> None:
     """The turn is a tool loop: the case-search tool must reach the model."""
     seen: dict[str, list[str]] = {}
 
-    def factory(*, model, tools, system_prompt):
+    def factory(*, model, tools, system_prompt, reasoning=None):
         seen["tools"] = [tool.name for tool in tools]
         seen["system_prompt"] = system_prompt
         return RunnableLambda(
@@ -265,7 +265,7 @@ def test_system_prompt_uses_requested_language_directive() -> None:
     assert "한국어" in ko_body
     assert "English" in en_body
     # v13 is the newest scenario prompt version and the default (ARTEL-668).
-    assert version == "v8"
+    assert version == "v9"
 
 
 def test_first_message_carries_the_run_goal_and_context() -> None:
@@ -317,7 +317,7 @@ def test_turn_with_the_list_gets_no_tools_and_the_cases_in_its_prompt() -> None:
     """With the cases in context, a search could only return what it already has."""
     seen: dict[str, object] = {}
 
-    def factory(*, model, tools, system_prompt):
+    def factory(*, model, tools, system_prompt, reasoning=None):
         seen["tools"] = [tool.name for tool in tools]
         seen["system_prompt"] = system_prompt
         return RunnableLambda(
@@ -340,7 +340,7 @@ def test_empty_test_case_list_keeps_the_search_path() -> None:
     """The fallback is also the rollback: orchestration can stop sending one."""
     seen: dict[str, object] = {}
 
-    def factory(*, model, tools, system_prompt):
+    def factory(*, model, tools, system_prompt, reasoning=None):
         seen["tools"] = [tool.name for tool in tools]
         seen["system_prompt"] = system_prompt
         return RunnableLambda(
@@ -567,3 +567,80 @@ def test_v7_pins_splitting_to_reachability_and_keeps_v6_intact() -> None:
     assert "judge EVERY case in the list above" in v7
     # v6에는 기준이 "흐름이 여럿이면 나눠라" 한 줄뿐이라 요청 하나가 흐름 하나로 읽혔다.
     assert "it is the NEXT STEP, not the next scenario" not in v6
+
+
+def test_scenario_agent_hands_the_reasoning_budget_to_the_model() -> None:
+    """**추론 예산이 모델까지 닿는다.**
+
+    QA 런은 켜고 저작은 안 켜고 있었다. 배선이 끊기면 요청은 성공하는데 모델은 예산을 못
+    받으므로, 값이 factory 에 도착했는지를 여기서 본다 — 조용히 없이 도는 것이 이 자리의
+    실패 방식이다.
+    """
+    seen: dict = {}
+
+    def factory(*, model, tools, system_prompt, reasoning=None):
+        seen["reasoning"] = reasoning
+        return RunnableLambda(
+            lambda _inputs: {"messages": [], "structured_response": _result()}
+        )
+
+    budget = ReasoningConfig(max_tokens=4_096)
+    asyncio.run(
+        ScenarioAgent(agent_factory=factory).run(
+            _request(reasoning=budget), _CTX, _channel()
+        )
+    )
+    assert seen["reasoning"] == budget
+
+
+def test_scenario_agent_runs_without_a_reasoning_budget() -> None:
+    """안 주면 없이 간다 — 지금까지의 저작이 그랬고, 그 길이 안 막혀야 한다."""
+    seen: dict = {}
+
+    def factory(*, model, tools, system_prompt, reasoning=None):
+        seen["reasoning"] = reasoning
+        return RunnableLambda(
+            lambda _inputs: {"messages": [], "structured_response": _result()}
+        )
+
+    asyncio.run(ScenarioAgent(agent_factory=factory).run(_request(), _CTX, _channel()))
+    assert seen["reasoning"] is None
+
+
+def test_scenario_agent_structures_the_transcript_when_the_loop_declines() -> None:
+    """thinking 이 켜지면 `tool_choice` 강제가 auto 로 낮춰져(Bedrock 제약) 모델이
+    구조화 답 없이 턴을 끝낼 수 있다 — 실측(런 16, Haiku): 10,545 token 을 생각하고
+    도구도 본문도 없이 멈췄다. 그 기록을 버리지 않고 `structured()` 로 한 번 더
+    계약 모양을 받는다."""
+    from langchain_core.messages import AIMessage
+
+    import app.agents.scenario.agent as agent_module
+
+    thought = AIMessage(
+        content=[
+            {"type": "reasoning_content", "reasoning_content": {"text": "타이틀 확인 시나리오 하나면 된다."}},
+        ]
+    )
+
+    def factory(*, model, tools, system_prompt, reasoning=None):
+        return RunnableLambda(lambda _inputs: {"messages": [thought], "structured_response": None})
+
+    salvaged = _result()
+    seen: dict[str, str] = {}
+
+    class _FakeChain:
+        async def ainvoke(self, prompt):
+            seen["prompt"] = prompt
+            return salvaged
+
+    original = agent_module.structured
+    agent_module.structured = lambda model, schema: _FakeChain()
+    try:
+        agent = ScenarioAgent(agent_factory=factory)
+        out = asyncio.run(agent.run(_request(), _CTX, _channel()))
+    finally:
+        agent_module.structured = original
+
+    assert out is salvaged
+    # 기록의 생각이 글로 펴져 넘어간다 — thinking block 을 그대로 되보내지 않는다.
+    assert "타이틀 확인 시나리오 하나면 된다." in seen["prompt"]
