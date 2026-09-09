@@ -4,7 +4,7 @@ from typing import Literal
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig
 
 
 class OutputLanguage(StrEnum):
@@ -98,6 +98,21 @@ class SceneExit(BaseModel):
     by: str | None = None
 
 
+class SceneEdge(BaseModel):
+    """One screen transition from the whole map, not tied to any case.
+
+    `SceneExit` above rides on a case, so a screen carrying no case never shows
+    its outgoing steps — and the model reads that absence as "no way there". This
+    is the same fact (where a screen leads, what to press; ``by`` empty means the
+    game moves on its own), sent once for the whole map, so the shape block can
+    fold it into routes between screens.
+    """
+
+    from_scene: str
+    to_scene: str
+    by: str | None = None
+
+
 class TestCaseListItem(BaseModel):
     """One TestCase as the session receives it, in the project's whole list.
 
@@ -165,6 +180,8 @@ class ScenarioAgentRequest(BaseModel):
     # existing scenario for edits by echoing its `scenario_id`. Empty for a fresh run.
     current_scenarios: list["ScenarioPlan"] = Field(default_factory=list)
     model: LLMModel = DEFAULT_MODEL
+    # 이 턴의 추론 예산. 없으면 안 켠다 — 지금까지가 그랬다.
+    reasoning: ReasoningConfig | None = None
     # Locale for the natural-language output (message + scenario text).
     locale: OutputLanguage = DEFAULT_LANGUAGE
     # Which run this turn belongs to (ARTEL-650). Carried for one reason: the
@@ -172,6 +189,11 @@ class ScenarioAgentRequest(BaseModel):
     # the prompt the model saw plus its raw answer are the only two things that
     # never reach it. Without the id they cannot be filed with the rest.
     run_id: int | None = None
+    # 묶기·순서 검증(워크플로 B 미니 루프)이 오케 채점 창구를 부를 때 쓰는 스코프.
+    # 채점의 지도 읽기가 project + user 로 좁혀지므로 둘 다 있어야 한다. 없으면
+    # (구 배포가 안 보냄) 검증을 건너뛴다 — 턴은 그대로 진행된다.
+    project_id: int | None = None
+    app_user_id: int | None = None
     # Walkable flows, worked out by orchestration before the turn starts (ARTEL-658).
     #
     # Which cases belong in one scenario and in what order is what decides whether the
@@ -190,6 +212,21 @@ class ScenarioAgentRequest(BaseModel):
     # was used only inside orchestration's own calculation and never told to the
     # model. Absent means "not sent", which the shape block prints as such.
     entry_scene: str | None = None
+    # The whole map's screen transitions (flows-off experiment). Folded into
+    # screen-to-screen routes by the shape block, because per-case `exits` answer
+    # one step only and the model reads a missing second step as "no way there" —
+    # the same misreading the pair matrix used to correct, 1,126 cells of it.
+    # Empty from an older orchestration; the shape block then says nothing new.
+    scene_edges: list[SceneEdge] = Field(default_factory=list)
+    # Which router branch this request is already on (workflow Step 1). None means
+    # "not yet routed" — the agent routes once and re-enters with the branch set,
+    # so a re-entry (e.g. the slim question turn) is never routed twice.
+    current_route: str | None = None
+    # What every value starts as when the game boots (flows-off experiment).
+    # The flow calculation used to be the only holder of this fact; with flows
+    # off nothing carried it, and the model could not even tell whether the
+    # first case of a scenario is placeable.
+    starting_values: dict[str, str] = Field(default_factory=dict)
 
 
 class AuthoredFlow(BaseModel):
