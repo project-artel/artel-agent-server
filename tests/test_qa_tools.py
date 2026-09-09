@@ -9,8 +9,11 @@ These pin the frames themselves — category, step, and the actions inside them.
 import asyncio
 import json
 
+import pytest
+
 from app.agents.qa.arch import default_resolved_arch
 from app.agents.qa.tools import QaRunState, build_tools
+from app.agents.qa.tools.action_tools import parse_target
 from app.agents.qa.vision import MAX_CAPTURES_PER_RUN
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import MessageType
@@ -186,18 +189,141 @@ def test_pressing_a_key_needs_no_target_and_batches_no_tail() -> None:
     asyncio.run(run())
 
 
+# --- parse_target ---------------------------------------------------------
+
+
+def test_parse_target_reads_a_screen_point() -> None:
+    assert parse_target("640,360") == [640.0, 360.0]
+
+
+def test_parse_target_tolerates_whitespace_around_the_point() -> None:
+    assert parse_target(" 640 , 360 ") == [640.0, 360.0]
+    assert parse_target("640,360") == parse_target("  640,360  ")
+
+
+def test_parse_target_reads_negative_and_decimal_coordinates() -> None:
+    assert parse_target("-12.5,300") == [-12.5, 300.0]
+
+
+def test_parse_target_reads_an_instance_id() -> None:
+    assert parse_target("#12345") == [12345]
+
+
+def test_parse_target_reads_a_negative_instance_id() -> None:
+    assert parse_target("#-7") == [-7]
+
+
+def test_parse_target_reads_a_selector() -> None:
+    assert parse_target("Root[0]/Canvas[1]/Card(Clone)[3]") == [
+        "Root[0]/Canvas[1]/Card(Clone)[3]"
+    ]
+
+
+def test_parse_target_reads_a_name_with_a_comma_as_a_selector() -> None:
+    """The comma form is checked strictly — two numbers and nothing else — so a
+    Unity object whose name happens to contain a comma still reads as a
+    selector rather than a broken point."""
+
+    assert parse_target("Item (1, upgraded)") == ["Item (1, upgraded)"]
+    assert parse_target("100,200,300") == ["100,200,300"]
+
+
+def test_parse_target_refuses_an_empty_target() -> None:
+    with pytest.raises(ValueError, match="empty"):
+        parse_target("")
+    with pytest.raises(ValueError):
+        parse_target("   ")
+
+
+def test_parse_target_refuses_a_broken_id() -> None:
+    """A '#' prefix commits to the id form — it does not silently fall back to
+    reading the whole thing as a selector."""
+
+    with pytest.raises(ValueError, match="screen point"):
+        parse_target("#twelve")
+    with pytest.raises(ValueError):
+        parse_target("#")
+
+
 def test_moving_the_pointer_sends_the_screen_coordinates() -> None:
-    """The pointer tools address pixels, not ids — the params are the whole target."""
+    """A screen-point `target` becomes the pixel pair `move_mouse` takes."""
 
     async def run() -> None:
         _, _, tools, sent = make()
         await tools["move_pointer"].ainvoke(
-            {"step": 1, "x": 860, "y": 540, "thought": "칸 위로 옮긴다"}
+            {"step": 1, "target": "860,540", "thought": "칸 위로 옮긴다"}
         )
 
         assert actions(sent)[0]["payload"]["actions"] == [
             {"id": 1, "jsonrpc": "2.0", "method": "move_mouse", "params": [860, 540]},
         ]
+
+    asyncio.run(run())
+
+
+def test_moving_the_pointer_can_target_an_instance_id() -> None:
+    async def run() -> None:
+        _, _, tools, sent = make()
+        await tools["move_pointer"].ainvoke(
+            {"step": 1, "target": "#12345", "thought": "카드 위로 옮긴다"}
+        )
+
+        assert actions(sent)[0]["payload"]["actions"] == [
+            {"id": 1, "jsonrpc": "2.0", "method": "move_mouse", "params": [12345]},
+        ]
+
+    asyncio.run(run())
+
+
+def test_moving_the_pointer_can_target_a_selector() -> None:
+    async def run() -> None:
+        _, _, tools, sent = make()
+        await tools["move_pointer"].ainvoke(
+            {
+                "step": 1,
+                "target": "Root[0]/Canvas[1]/Card(Clone)[3]",
+                "thought": "카드 위로 옮긴다",
+            }
+        )
+
+        assert actions(sent)[0]["payload"]["actions"] == [
+            {
+                "id": 1,
+                "jsonrpc": "2.0",
+                "method": "move_mouse",
+                "params": ["Root[0]/Canvas[1]/Card(Clone)[3]"],
+            },
+        ]
+
+    asyncio.run(run())
+
+
+def test_a_malformed_target_is_refused_before_anything_reaches_the_game() -> None:
+    """A target matching none of the three forms must not send even a partial batch."""
+
+    async def run() -> None:
+        _, _, tools, sent = make()
+        result = await tools["move_pointer"].ainvoke(
+            {"step": 1, "target": "#twelve", "thought": "카드 위로 옮긴다"}
+        )
+
+        assert "screen point" in result
+        assert "instance id" in result
+        assert "selector" in result
+        assert actions(sent) == []
+
+    asyncio.run(run())
+
+
+def test_an_empty_target_is_refused_too() -> None:
+    async def run() -> None:
+        _, _, tools, sent = make()
+        result = await tools["move_pointer"].ainvoke(
+            {"step": 1, "target": "   ", "thought": "카드 위로 옮긴다"}
+        )
+
+        assert "empty" in result
+        assert actions(sent) == []
 
     asyncio.run(run())
 
@@ -309,13 +435,11 @@ def test_a_drag_goes_out_as_one_batch_in_order() -> None:
 
     async def run() -> None:
         _, _, tools, sent = make()
-        await tools["drag_pointer"].ainvoke(
+        await tools["drag"].ainvoke(
             {
                 "step": 1,
-                "from_x": 100,
-                "from_y": 200,
-                "to_x": 700,
-                "to_y": 200,
+                "from_target": "100,200",
+                "to_target": "700,200",
                 "thought": "카드를 슬롯으로 끌어다 놓는다",
             }
         )
@@ -331,6 +455,50 @@ def test_a_drag_goes_out_as_one_batch_in_order() -> None:
     asyncio.run(run())
 
 
+def test_a_drag_can_mix_target_forms_at_each_end() -> None:
+    """The whole point of unifying the vocabulary: grab a point, drop on an id."""
+
+    async def run() -> None:
+        _, _, tools, sent = make()
+        await tools["drag"].ainvoke(
+            {
+                "step": 1,
+                "from_target": "100,200",
+                "to_target": "#777",
+                "thought": "카드를 슬롯으로 끌어다 놓는다",
+            }
+        )
+
+        assert actions(sent)[0]["payload"]["actions"] == [
+            {"id": 1, "jsonrpc": "2.0", "method": "move_mouse", "params": [100, 200]},
+            {"id": 2, "jsonrpc": "2.0", "method": "mouse_down", "params": [0]},
+            {"id": 3, "jsonrpc": "2.0", "method": "move_mouse", "params": [777]},
+            {"id": 4, "jsonrpc": "2.0", "method": "mouse_up", "params": [0]},
+        ]
+
+    asyncio.run(run())
+
+
+def test_a_drag_refuses_a_malformed_end_without_sending_anything() -> None:
+    """A tool that half-sends a drag is worse than one that refuses it."""
+
+    async def run() -> None:
+        _, _, tools, sent = make()
+        result = await tools["drag"].ainvoke(
+            {
+                "step": 1,
+                "from_target": "100,200",
+                "to_target": "#seven",
+                "thought": "카드를 슬롯으로 끌어다 놓는다",
+            }
+        )
+
+        assert "screen point" in result
+        assert actions(sent) == []
+
+    asyncio.run(run())
+
+
 def test_a_click_goes_out_as_one_batch_in_order() -> None:
     """세 턴으로 쪼개면 그 사이에 게임이 돈다 — 누른 채로 다른 판단이 끼어들고, 실패하면
     눌린 채로 남는다.
@@ -341,8 +509,8 @@ def test_a_click_goes_out_as_one_batch_in_order() -> None:
 
     async def run() -> None:
         _, _, tools, sent = make()
-        await tools["click_at"].ainvoke(
-            {"step": 1, "x": 409, "y": 500, "thought": "조합 칸을 누른다"}
+        await tools["click"].ainvoke(
+            {"step": 1, "target": "409,500", "thought": "조합 칸을 누른다"}
         )
 
         assert len(actions(sent)) == 1
@@ -360,8 +528,8 @@ def test_a_click_takes_the_button_it_is_given() -> None:
 
     async def run() -> None:
         _, _, tools, sent = make()
-        await tools["click_at"].ainvoke(
-            {"step": 1, "x": 10, "y": 20, "thought": "오른쪽 클릭", "button": 1}
+        await tools["click"].ainvoke(
+            {"step": 1, "target": "10,20", "thought": "오른쪽 클릭", "button": 1}
         )
 
         methods = [(a["method"], a["params"]) for a in actions(sent)[0]["payload"]["actions"]]
@@ -374,8 +542,31 @@ def test_a_click_takes_the_button_it_is_given() -> None:
     asyncio.run(run())
 
 
+def test_a_click_can_target_a_selector() -> None:
+    """A card the scene never gave an id for is still reachable by its path."""
+
+    async def run() -> None:
+        _, _, tools, sent = make()
+        await tools["click"].ainvoke(
+            {
+                "step": 1,
+                "target": "Root[0]/Canvas[1]/Card(Clone)[3]",
+                "thought": "카드를 누른다",
+            }
+        )
+
+        methods = [(a["method"], a["params"]) for a in actions(sent)[0]["payload"]["actions"]]
+        assert methods == [
+            ("move_mouse", ["Root[0]/Canvas[1]/Card(Clone)[3]"]),
+            ("mouse_down", [0]),
+            ("mouse_up", [0]),
+        ]
+
+    asyncio.run(run())
+
+
 def test_a_double_click_rides_one_batch() -> None:
-    """`click_at` 두 번은 두 턴이고 실측으로 한 턴이 4초쯤이다. 게임이 더블클릭으로 치는
+    """`click` 두 번은 두 턴이고 실측으로 한 턴이 4초쯤이다. 게임이 더블클릭으로 치는
     간격은 0.3~0.5초라 절대 못 들어가고, 싱글클릭 두 번이 된다(ARTEL-675).
 
     그리고 실패가 조용하다 — 액션은 둘 다 ok 로 답하므로 화면이 안 바뀐 것만 남고, 그것은
@@ -384,8 +575,8 @@ def test_a_double_click_rides_one_batch() -> None:
 
     async def run() -> None:
         _, _, tools, sent = make()
-        await tools["double_click_at"].ainvoke(
-            {"step": 1, "x": 300, "y": 400, "thought": "아이템을 더블클릭해 장착한다"}
+        await tools["double_click"].ainvoke(
+            {"step": 1, "target": "300,400", "thought": "아이템을 더블클릭해 장착한다"}
         )
 
         assert len(actions(sent)) == 1
@@ -403,8 +594,8 @@ def test_a_double_click_rides_one_batch() -> None:
 def test_a_double_click_takes_the_button_it_is_given() -> None:
     async def run() -> None:
         _, _, tools, sent = make()
-        await tools["double_click_at"].ainvoke(
-            {"step": 1, "x": 1, "y": 2, "thought": "오른쪽 더블클릭", "button": 1}
+        await tools["double_click"].ainvoke(
+            {"step": 1, "target": "1,2", "thought": "오른쪽 더블클릭", "button": 1}
         )
 
         buttons = {
@@ -605,13 +796,11 @@ def test_a_batch_result_names_which_action_failed() -> None:
                 {"id": 5, "success": True},
             ],
         )
-        result = await tools["drag_pointer"].ainvoke(
+        result = await tools["drag"].ainvoke(
             {
                 "step": 1,
-                "from_x": 100,
-                "from_y": 200,
-                "to_x": 700,
-                "to_y": 200,
+                "from_target": "100,200",
+                "to_target": "700,200",
                 "thought": "카드를 슬롯으로 끌어다 놓는다",
             }
         )
@@ -1030,15 +1219,15 @@ def test_the_agent_is_offered_exactly_these_tools() -> None:
         "enter_text",
         "press_key",
         "move_pointer",
-        "click_at",
-        "double_click_at",
+        "click",
+        "double_click",
         "hold_mouse_button",
         "release_mouse_button",
         "hold_key",
         "release_key",
         "set_input_axis",
         "set_input_button",
-        "drag_pointer",
+        "drag",
         "pause_game_time",
         "resume_game_time",
         "reset_game",
