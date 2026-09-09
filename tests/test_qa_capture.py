@@ -13,9 +13,11 @@ import httpx
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+import app.agents.qa.vision as vision_module
 from app.agents.qa.arch import ScreenCaptureMode, default_resolved_arch
 from app.agents.qa.tools import PendingCapture, QaRunState, build_tools
 from app.agents.qa.vision import (
+    FAILURE_CAPTURE_TURNS,
     MAX_CAPTURES_PER_RUN,
     CaptureFetchError,
     QaCaptureVisionMiddleware,
@@ -25,6 +27,7 @@ from app.agents.qa.vision import (
 )
 from app.llm.models import LLMModel, get_model_spec
 from app.qa.channel import QaRunChannel
+from app.qa.schemas import QaStepResult
 from app.qa.envelope import LogCategory, MessageType
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake image body"
@@ -608,6 +611,204 @@ def _has_image(message) -> bool:
     return isinstance(content, list) and any(
         isinstance(b, dict) and b.get("type") == "image_url" for b in content
     )
+
+
+# --- 역할별로 들고 가기 ---
+
+
+def by_role_arch(vision: bool = True):
+    return default_resolved_arch().model_copy(
+        update={"vision": vision, "screen_capture": ScreenCaptureMode.by_role}
+    )
+
+
+def captions(messages) -> list[str]:
+    return [
+        m.content[0]["text"]
+        for m in messages
+        if isinstance(getattr(m, "content", None), list) and _has_image(m)
+    ]
+
+
+async def one_by_role_call(middleware, channel, sent, capture_id="cap"):
+    """자동 capture 한 번을 답해 주고 `awrap_model_call` 을 한 번 돌린다."""
+    answer(channel, sent, capture_answer(capture_id))
+    with storage_answers(httpx.Response(200, content=PNG_BYTES)):
+        return await one_call(middleware, [HumanMessage(content="plan")])
+
+
+def test_the_first_call_carries_only_the_current_screen() -> None:
+    """행위도 scene 도 실패도 아직 없으면 들고 갈 역할이 하나뿐이다."""
+
+    async def run() -> None:
+        channel, state, _tools, sent = make()
+        middleware = QaCaptureVisionMiddleware(state, channel, by_role_arch())
+
+        messages = await one_by_role_call(middleware, channel, sent)
+
+        assert captions(messages) == ["the screen right now"]
+
+    asyncio.run(run())
+
+
+def test_an_action_turns_the_last_screen_into_pre_action() -> None:
+    """기본 두 장이 되는 자리. 누른 전후가 나란히 실린다.
+
+    `last_action_frame` 은 게임을 실제로 건드린 action 에서만 움직인다. 지식 검색이나
+    보고만 한 turn 에서는 안 움직이므로, 그 turn 들 내내 같은 짝이 남는다.
+    """
+
+    async def run() -> None:
+        channel, state, _tools, sent = make()
+        middleware = QaCaptureVisionMiddleware(state, channel, by_role_arch())
+
+        await one_by_role_call(middleware, channel, sent, "before")
+        state.last_action_frame = 100
+        messages = await one_by_role_call(middleware, channel, sent, "after")
+
+        assert captions(messages) == [
+            "the screen just before your last action",
+            "the screen right now",
+        ]
+
+    asyncio.run(run())
+
+
+def test_a_turn_with_no_action_keeps_the_same_pair() -> None:
+    async def run() -> None:
+        channel, state, _tools, sent = make()
+        middleware = QaCaptureVisionMiddleware(state, channel, by_role_arch())
+
+        await one_by_role_call(middleware, channel, sent, "one")
+        state.last_action_frame = 100
+        await one_by_role_call(middleware, channel, sent, "two")
+        # 이 turn 은 게임을 안 건드렸다.
+        messages = await one_by_role_call(middleware, channel, sent, "three")
+
+        assert captions(messages) == [
+            "the screen just before your last action",
+            "the screen right now",
+        ]
+
+    asyncio.run(run())
+
+
+def test_a_scene_change_adds_the_checkpoint() -> None:
+    """석 장이 되는 자리."""
+
+    async def run() -> None:
+        channel, state, _tools, sent = make()
+        middleware = QaCaptureVisionMiddleware(state, channel, by_role_arch())
+
+        channel.scene.scene = "TitleScene"
+        await one_by_role_call(middleware, channel, sent, "title")
+        state.last_action_frame = 100
+        channel.scene.scene = "BattleScene"
+        messages = await one_by_role_call(middleware, channel, sent, "battle")
+
+        assert captions(messages) == [
+            "the screen when this scene began",
+            "the screen just before your last action",
+            "the screen right now",
+        ]
+
+    asyncio.run(run())
+
+
+def test_a_failed_step_adds_the_fourth_and_it_expires() -> None:
+    """넉 장이 되는 자리, 그리고 그것이 일시적이라는 것.
+
+    실패는 그 turn 에 판정되지 않는 일이 많아 몇 turn 은 들고 있어야 하고, 오래 들고 있으면
+    지나간 실패가 계속 넉 장을 채운다.
+    """
+
+    async def run() -> None:
+        channel, state, _tools, sent = make()
+        middleware = QaCaptureVisionMiddleware(state, channel, by_role_arch())
+
+        channel.scene.scene = "BattleScene"
+        await one_by_role_call(middleware, channel, sent, "one")
+        state.last_action_frame = 100
+        state.step_results.append(
+            QaStepResult(step=1, passed=False, message="눌러도 안 바뀐다")
+        )
+        messages = await one_by_role_call(middleware, channel, sent, "failed")
+        assert "the screen at the step that failed" in captions(messages)
+        assert len(captions(messages)) == 4
+
+        for _ in range(FAILURE_CAPTURE_TURNS + 1):
+            messages = await one_by_role_call(middleware, channel, sent, "later")
+        assert "the screen at the step that failed" not in captions(messages)
+
+    asyncio.run(run())
+
+
+def test_the_current_screen_is_always_last() -> None:
+    """모델이 무엇을 기준으로 판단할지 헷갈리지 않으려면 마지막에 읽은 것이 지금이어야 한다."""
+
+    async def run() -> None:
+        channel, state, _tools, sent = make()
+        middleware = QaCaptureVisionMiddleware(state, channel, by_role_arch())
+
+        channel.scene.scene = "A"
+        await one_by_role_call(middleware, channel, sent, "one")
+        state.last_action_frame = 100
+        channel.scene.scene = "B"
+        state.step_results.append(QaStepResult(step=1, passed=False, message=""))
+        messages = await one_by_role_call(middleware, channel, sent, "now")
+
+        assert captions(messages)[-1] == "the screen right now"
+
+    asyncio.run(run())
+
+
+def test_by_role_stores_nothing_in_the_conversation() -> None:
+    """캐시 경계 밖에 서야 한다. 역할이 turn 마다 바뀌므로 저장하면 매 turn 전사를 고치게 된다."""
+
+    async def run() -> None:
+        channel, state, _tools, sent = make()
+        middleware = QaCaptureVisionMiddleware(state, channel, by_role_arch())
+
+        answer(channel, sent, capture_answer())
+        with storage_answers(httpx.Response(200, content=PNG_BYTES)):
+            assert await middleware.abefore_model({}, None) is None
+
+        history = [HumanMessage(content="plan")]
+        await one_by_role_call(middleware, channel, sent)
+        assert not any(_has_image(m) for m in history)
+
+    asyncio.run(run())
+
+
+def test_a_held_picture_is_downloaded_once() -> None:
+    """같은 그림이 여러 turn 실린다. turn 마다 다시 받으면 왕복이 turn 수만큼 늘고,
+    다운로드 주소는 30분짜리라 긴 런의 후반에는 만료된다."""
+
+    async def run() -> None:
+        channel, state, _tools, sent = make()
+        middleware = QaCaptureVisionMiddleware(state, channel, by_role_arch())
+
+        await one_by_role_call(middleware, channel, sent, "one")
+        state.last_action_frame = 100
+        fetched: list[str] = []
+
+        original = vision_module.fetch_capture
+
+        async def counting(url, mime_type):
+            fetched.append(url)
+            return await original(url, mime_type)
+
+        vision_module.fetch_capture = counting
+        try:
+            messages = await one_by_role_call(middleware, channel, sent, "two")
+        finally:
+            vision_module.fetch_capture = original
+
+        # 이번 turn 에 새로 받은 것은 현재 화면 하나뿐인데 실린 그림은 둘이다.
+        assert len(fetched) == 1
+        assert len(captions(messages)) == 2
+
+    asyncio.run(run())
 
 
 # --- cost ---
