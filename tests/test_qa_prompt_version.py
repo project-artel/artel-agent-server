@@ -255,7 +255,7 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v16() -> None:
+def test_the_default_qa_version_is_v17() -> None:
     """A run that names no version has to get the newest prompt.
 
     This is also the trap in adding a version: `resolve_version` returns the
@@ -265,7 +265,7 @@ def test_the_default_qa_version_is_v16() -> None:
     `set_input_axis` before the tool exists teaches the agent to reach for
     something that is not there.
     """
-    assert resolve_version("qa_run") == "v16"
+    assert resolve_version("qa_run") == "v17"
 
 
 def test_v12_drops_the_screen_map_and_says_what_a_screen_anchors() -> None:
@@ -484,6 +484,86 @@ def test_v16_binds_the_verdict_to_report_step_and_keeps_the_rest_of_v15() -> Non
             assert paragraph not in v16, "고쳐 쓴다고 해 놓고 옛 문단이 남아 있다"
             continue
         assert paragraph in v16
+
+
+V17_REWRITES_FROM_V16 = (
+    "1. Call `observe_scene` before acting. You cannot act on a screen you have not "
+    "seen, and ids only mean anything in the scene you just observed.\n"
+    "2. Carry out the step's `action` with `click_button`, `enter_text`, `press_key`, "
+    "or the pointer and hold tools described below. Take ids from the scene you just "
+    "observed — never invent one.\n"
+    "3. Each of those returns the outcome AND the scene it produced, written as what "
+    "CHANGED. That is the evidence the step's `expected` is about; you usually do not "
+    "need a separate observation afterwards.\n"
+    "4. Call `report_step` with your verdict and the evidence you saw.\n"
+    "5. Repeat for every step, then call `finish_run` exactly once.",
+    "Neither is a target the scene gives no id for. The scene prints each element as "
+    "`@ x,y wxh` — `x,y` is its CENTRE, the point to aim at, and `wxh` its size. Those "
+    "numbers go into `move_pointer` and `drag_pointer` VERBATIM: the tools take exactly "
+    "the pixels the scene reports, so never convert, flip or recompute them. An element "
+    "marked `(off screen)` has no position you can aim at — bring it into view first.",
+    "Some tools leave the game in a state you set: `hold_mouse_button` and `hold_key` "
+    "for input the game reads as held, `pause_game_time` for a screen that will not "
+    "hold still long enough to judge — an effect, a countdown, a toast that vanishes. "
+    "Whatever you hold or freeze, undo it in the same step, before you report that "
+    "step's verdict. A key, a button or game time left as you set it poisons every "
+    "step after it. When a plain drag is all you need, use `drag_pointer` rather than "
+    "holding the button yourself.",
+)
+
+
+def test_v17_teaches_the_polymorphic_target_and_keeps_the_rest_of_v16() -> None:
+    """The pointer tools stop taking `x`/`y`; every one of them aims with `target`.
+
+    `click_at` becomes `click`, `double_click_at` becomes `double_click`, `drag_pointer`
+    becomes `drag` with an independent `target` on each end, and `move_pointer` keeps
+    its name but not its arguments. `click_button` stays but is DEPRECATED: `click` on
+    the same id goes through the pointer and the game's own `EventSystem`, so occlusion
+    shows up instead of being stepped past, and it reaches anything on screen rather
+    than only a `Button`.
+
+    A `target` is a string in one of two forms the agent can actually get at runtime:
+    the id the scene view prints in brackets, or the coordinate it prints beside the
+    element. The scene view never prints a hierarchy selector, and the content map's
+    `control_selector_hint` is explicitly not an aiming key (see the paragraph on
+    `A capability line is what the map recorded`), so the prompt does not teach the
+    agent to build one.
+    """
+    v16 = load_prompt("qa_run", "system", "v16").body
+    v17 = load_prompt("qa_run", "system", "v17").body
+
+    # The new vocabulary: `click` replaces `click_button` in the workflow, and
+    # `click_button` itself is still callable but named as deprecated.
+    assert "2. Carry out the step's `action` with `click`, `enter_text`, `press_key`" in v17
+    assert "`click_button` is deprecated" not in v17  # taught by the tool description, not here
+
+    # The scene view line, and both halves of it being aimable.
+    assert "`[id] name (type) @ x,y wxh`" in v17
+    assert "`#12345` for the id, `640,360` for the coordinate" in v17
+    assert "Prefer the id: the SDK resolves it at the moment the action runs" in v17
+    assert "a coordinate is a snapshot of where it was" in v17
+    assert "`drag` takes two targets, one per end, and mixes the two freely" in v17
+
+    # The hold-state paragraph now names `drag`, not `drag_pointer`.
+    assert "use `drag` rather than holding the button yourself" in v17
+
+    # A selector is not something the prompt tells the agent to construct.
+    assert "Root[0]/Canvas[1]" not in v17
+    assert "hierarchy selector" not in v17
+
+    for paragraph in v16.split("\n\n"):
+        if paragraph.startswith(V17_REWRITES_FROM_V16):
+            assert paragraph not in v17, "rewritten but the old paragraph is still there"
+            continue
+        assert paragraph in v17
+
+
+def test_v17_defines_the_same_roles_as_v16() -> None:
+    """The pointer tools took a new argument shape; reading a screen did not."""
+    assert roles_in("qa_run", "v17") == roles_in("qa_run", "v16")
+    assert load_prompt("qa_run", "vision_directive", "v17").body == (
+        load_prompt("qa_run", "vision_directive", "v16").body
+    )
 
 
 def test_v15_defines_the_same_roles_as_v14() -> None:

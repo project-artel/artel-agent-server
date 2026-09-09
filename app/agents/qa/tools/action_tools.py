@@ -4,12 +4,53 @@
 이후에 쌓인 `pulse` 만이 결과로 돌아온다.
 """
 
+import re
 from typing import Any
 
 from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.tools.tool_context import ToolContext
 from app.qa.envelope import JsonRpcAction
+
+# `parse_target` 이 판별하는 두 엄격한 모양. 나머지 전부는 selector 로 읽는다.
+_SCREEN_POINT_RE = re.compile(r"^(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)$")
+_INSTANCE_ID_RE = re.compile(r"^#(-?\d+)$")
+
+_TARGET_FORMS = (
+    'a screen point ("640,360"), a Unity instance id ("#12345"), or a Unity '
+    'hierarchy path selector ("Root[0]/Canvas[1]/Card(Clone)[3]")'
+)
+
+
+def parse_target(target: str) -> list:
+    """`target` 문자열 하나를 `move_mouse` 가 받는 params 로 바꾼다.
+
+    성공하면 정확히 하나만 돌려준다 — 점이면 숫자 둘, id 면 정수 하나, selector 면
+    문자열 하나. 세 형태 중 어디에도 안 맞으면 `ValueError` 를 낸다. 그 메시지가 세
+    형태를 이름으로 대므로, 부르는 tool 은 그대로 에이전트에게 돌려주면 된다 — 게임에는
+    아무것도 나가지 않은 채로.
+
+    쉼표 형태는 엄격하게 본다: 숫자 둘이 쉼표 하나를 사이에 두고 정확히 그것뿐이어야
+    점으로 읽는다. 그래서 쉼표가 든 Unity 오브젝트 이름은 selector 로 남는다.
+    """
+    stripped = target.strip()
+    if not stripped:
+        raise ValueError(f"A target cannot be empty. A target is {_TARGET_FORMS}.")
+
+    point = _SCREEN_POINT_RE.match(stripped)
+    if point is not None:
+        return [float(point.group(1)), float(point.group(2))]
+
+    if stripped.startswith("#"):
+        instance_id = _INSTANCE_ID_RE.match(stripped)
+        if instance_id is None:
+            raise ValueError(
+                f"'{target}' starts with '#' but is not a valid id. A target is "
+                f"{_TARGET_FORMS}."
+            )
+        return [int(instance_id.group(1))]
+
+    return [stripped]
 
 
 def build_action_tools(ctx: ToolContext) -> list[BaseTool]:
@@ -18,10 +59,18 @@ def build_action_tools(ctx: ToolContext) -> list[BaseTool]:
 
     @tool
     async def click_button(step: int, target_id: int, thought: str) -> str:
-        """Click a button. `target_id` must be an id from the scene you just saw.
+        """DEPRECATED — use `click` instead.
 
-        `step` is the scenario step this belongs to and `thought` is why you are
-        clicking; both go on the timeline.
+        This invokes a Button's `onClick` directly: it never goes near the
+        pointer or the EventSystem, so it shows no occlusion — a dialog sitting
+        on top of the button still "clicks" it — and it reaches nothing but a
+        `Button`. `click` goes through the pointer and the EventSystem instead,
+        the same path a real click takes, so it exercises the game's own click
+        path and reaches anything the scene shows, not only a `Button`.
+
+        Kept, and its behaviour is unchanged: `target_id` must be an id from the
+        scene you just saw. `step` is the scenario step this belongs to and
+        `thought` is why you are clicking; both go on the timeline.
         """
         return await _run(
             [JsonRpcAction(id=1, method="button_click", params=[target_id])],
@@ -53,71 +102,103 @@ def build_action_tools(ctx: ToolContext) -> list[BaseTool]:
         )
 
     @tool
-    async def move_pointer(step: int, x: float, y: float, thought: str) -> str:
-        """Move the pointer to a point on the screen, without pressing anything.
+    async def move_pointer(step: int, target: str, thought: str) -> str:
+        """Move the pointer to `target`, without pressing anything.
 
-        `x` and `y` are screen pixels, taken from the scene exactly as printed:
-        an element's `@ x,y` is its centre, and it belongs here unchanged — no
-        conversion of any kind. Use this to hover, or to put the pointer
-        somewhere a target id cannot address — a map, a canvas, an inventory slot.
+        `target` takes one of three forms — see `click` for the full
+        explanation of all three, where the numbers come from, and what an id
+        or a selector buys over a bare coordinate. Use this to hover, or to
+        put the pointer somewhere before `hold_mouse_button` presses there.
         """
+        try:
+            params = parse_target(target)
+        except ValueError as error:
+            return str(error)
         return await _run(
-            [JsonRpcAction(id=1, method="move_mouse", params=[x, y])],
-            f"Moving the pointer to ({x}, {y})",
+            [JsonRpcAction(id=1, method="move_mouse", params=params)],
+            f"Moving the pointer to {target}",
             step,
         )
 
     @tool
-    async def click_at(step: int, x: float, y: float, thought: str, button: int = 0) -> str:
-        """Click a point on the screen, for something the scene gives no id for.
+    async def click(step: int, target: str, thought: str, button: int = 0) -> str:
+        """Click `target`. `button` is 0 for left, 1 for right, 2 for middle.
 
-        Coordinates are screen pixels, taken from the scene unchanged, as with
-        `move_pointer`. `button` is 0 for left, 1 for right, 2 for middle.
+        `target` is one string, read as one of three forms, disambiguated by
+        its shape:
 
-        Prefer this over pressing and releasing yourself: the move, the press and
-        the release go to the game as ONE batch, which the game runs strictly in
-        order, so the click cannot be interrupted or left with the button down.
+        - a screen point: two numbers around one comma, e.g. "640,360" —
+          screen pixels, taken from the scene view's `@ x,y` for an element
+          exactly as printed. That value is the element's CENTRE and goes in
+          verbatim, no conversion of any kind. Whitespace around the numbers
+          is tolerated. This form is checked strictly — exactly two numbers
+          around exactly one comma — so a Unity object name that happens to
+          contain a comma still reads as a selector, the third form below.
+        - a Unity instance id: "#" followed by an integer, e.g. "#12345" —
+          the same id the scene view prints in brackets before an element's
+          name.
+        - anything else: a selector, a Unity hierarchy path, e.g.
+          "Root[0]/Canvas[1]/Card(Clone)[3]".
 
-        `click_button` is the one to use when the scene DOES give an id — it
-        presses what the game wired the button to, rather than a point that may
-        be covered by something else.
+        An id or a selector is resolved by the SDK at the moment this action
+        actually runs, not when you read the scene. That is what either buys
+        over a bare coordinate: a card that moved, or animated in, since your
+        last look is still hit where it now is, and the click cannot be off by
+        a rect that went stale between your observation and this call.
+
+        A target matching none of the three forms is refused before anything
+        reaches the game, and the refusal names all three so you can fix it.
+
+        Prefer this over pressing and releasing yourself: the move, the press
+        and the release go to the game as ONE batch, which the game runs
+        strictly in order, so the click cannot be interrupted or left with the
+        button down.
+
+        `click_button` is DEPRECATED — use this instead; its own docstring
+        says why.
         """
+        try:
+            params = parse_target(target)
+        except ValueError as error:
+            return str(error)
         return await _run(
             [
-                # 누르기는 좌표를 안 받는다. 포인터가 있는 자리에 떨어지므로 먼저 옮긴다 —
-                # `drag_pointer` 가 같은 이유로 같은 순서를 쓴다.
-                JsonRpcAction(id=1, method="move_mouse", params=[x, y]),
+                # 누르기는 target 을 안 받는다. 포인터가 있는 자리에 떨어지므로 먼저
+                # 옮긴다 — `drag` 가 같은 이유로 같은 순서를 쓴다.
+                JsonRpcAction(id=1, method="move_mouse", params=params),
                 JsonRpcAction(id=2, method="mouse_down", params=[button]),
                 JsonRpcAction(id=3, method="mouse_up", params=[button]),
             ],
-            f"Clicking at ({x}, {y})",
+            f"Clicking {target}",
             step,
         )
 
     @tool
-    async def double_click_at(
-        step: int, x: float, y: float, thought: str, button: int = 0
-    ) -> str:
-        """Double-click a point, for something that only a double-click does.
+    async def double_click(step: int, target: str, thought: str, button: int = 0) -> str:
+        """Double-click `target`, for something that only a double-click does.
 
-        Coordinates and `button` are as in `click_at`. Both presses ride ONE
-        batch, which the game runs strictly in order, so nothing lands between
-        them — two separate `click_at` calls are two turns apart and the game
-        reads them as two single clicks.
+        `target` and `button` are as in `click`. Both presses ride ONE batch,
+        which the game runs strictly in order, so nothing lands between them —
+        two separate `click` calls are two turns apart and the game reads them
+        as two single clicks.
 
-        Use `click_at` twice when the game wants two clicks. This one is for the
+        Use `click` twice when the game wants two clicks. This one is for the
         gesture a game treats as its own: opening an item, equipping from a list.
         """
+        try:
+            params = parse_target(target)
+        except ValueError as error:
+            return str(error)
         return await _run(
             [
-                # 누르기는 좌표를 안 받는다. 포인터가 있는 자리에 떨어지므로 먼저 옮긴다.
-                JsonRpcAction(id=1, method="move_mouse", params=[x, y]),
+                # 누르기는 target 을 안 받는다. 포인터가 있는 자리에 떨어지므로 먼저 옮긴다.
+                JsonRpcAction(id=1, method="move_mouse", params=params),
                 JsonRpcAction(id=2, method="mouse_down", params=[button]),
                 JsonRpcAction(id=3, method="mouse_up", params=[button]),
                 JsonRpcAction(id=4, method="mouse_down", params=[button]),
                 JsonRpcAction(id=5, method="mouse_up", params=[button]),
             ],
-            f"Double-clicking at ({x}, {y})",
+            f"Double-clicking {target}",
             step,
         )
 
@@ -129,9 +210,9 @@ def build_action_tools(ctx: ToolContext) -> list[BaseTool]:
         the current pointer position — move there first with `move_pointer`.
 
         This is for input the game reads as HELD — charging, a long press,
-        anything behind `Input.GetMouseButton`. For a plain click use `click_at`,
-        and for a plain drag `drag_pointer`: both ride one batch and cannot be
-        left half-done.
+        anything behind `Input.GetMouseButton`. For a plain click use `click`,
+        and for a plain drag `drag`: both ride one batch and cannot be left
+        half-done.
 
         Nothing releases this for you. Call `release_mouse_button` before you
         judge the step, or every later step runs with the button still down.
@@ -229,34 +310,48 @@ def build_action_tools(ctx: ToolContext) -> list[BaseTool]:
         )
 
     @tool
-    async def drag_pointer(
+    async def drag(
         step: int,
-        from_x: float,
-        from_y: float,
-        to_x: float,
-        to_y: float,
+        from_target: str,
+        to_target: str,
         thought: str,
         button: int = 0,
     ) -> str:
-        """Drag from one point on the screen to another and drop there.
+        """Drag from `from_target` to `to_target` and drop there.
 
-        Coordinates are screen pixels, taken from the scene unchanged, as with
-        `move_pointer`. `button` is 0 for left, 1 for right, 2 for middle.
+        Each end is independently one of the three forms `click` describes —
+        a screen point, a Unity instance id, or a selector — so this reaches a
+        drag `click` alone cannot: grab a card at a coordinate and drop it on a
+        slot the scene gives an id for, or the reverse, or an id at both ends.
+        Both ends are resolved by the SDK at the moment each move actually
+        runs, which is why an id or a selector still lands correctly even if
+        the thing it names has moved since you last looked. `button` is 0 for
+        left, 1 for right, 2 for middle.
 
-        Prefer this over pressing and releasing yourself: the press, the move and
-        the release go to the game as ONE batch, which the game runs strictly in
-        order, so the drag cannot be interrupted or left with the button down.
+        Either end matching none of the three forms is refused before
+        anything reaches the game — a drag that only half sends is worse than
+        one that is refused outright.
+
+        Prefer this over pressing and releasing yourself: the move, the press,
+        the move and the release go to the game as ONE batch, which the game
+        runs strictly in order, so the drag cannot be interrupted or left with
+        the button down.
         """
+        try:
+            from_params = parse_target(from_target)
+            to_params = parse_target(to_target)
+        except ValueError as error:
+            return str(error)
         return await _run(
             [
-                # The press takes no coordinates — it lands wherever the pointer
-                # already is, so the drag has to start by moving there.
-                JsonRpcAction(id=1, method="move_mouse", params=[from_x, from_y]),
+                # 누르기는 target 을 안 받는다. 포인터가 있는 자리에 떨어지므로 먼저
+                # from_target 으로 옮긴다.
+                JsonRpcAction(id=1, method="move_mouse", params=from_params),
                 JsonRpcAction(id=2, method="mouse_down", params=[button]),
-                JsonRpcAction(id=3, method="move_mouse", params=[to_x, to_y]),
+                JsonRpcAction(id=3, method="move_mouse", params=to_params),
                 JsonRpcAction(id=4, method="mouse_up", params=[button]),
             ],
-            f"Dragging from ({from_x}, {from_y}) to ({to_x}, {to_y})",
+            f"Dragging from {from_target} to {to_target}",
             step,
         )
 
@@ -347,15 +442,15 @@ def build_action_tools(ctx: ToolContext) -> list[BaseTool]:
         enter_text,
         press_key,
         move_pointer,
-        click_at,
-        double_click_at,
+        click,
+        double_click,
         hold_mouse_button,
         release_mouse_button,
         hold_key,
         release_key,
         set_input_axis,
         set_input_button,
-        drag_pointer,
+        drag,
         pause_game_time,
         resume_game_time,
         reset_game,

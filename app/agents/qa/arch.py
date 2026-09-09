@@ -62,7 +62,18 @@ from app.llm.models import LLMModel, get_model_spec
 # — see its docstring for what it does cover. The hand-bumped label is the only
 # thing in the record that can separate these two structures, which is the case
 # the module docstring above says the label exists for.
-QA_ARCH_LABEL = "v4-screen-text"
+#
+# v5 because every pointer tool now aims with one `target` string instead of
+# `x`/`y` (`app/agents/qa/tools/action_tools.py`). `click_at` became `click`,
+# `double_click_at` became `double_click`, `drag_pointer` became `drag` with an
+# independent target at each end, and `move_pointer` kept its name but not its
+# arguments. A target is a screen point, a Unity instance id, or a hierarchy
+# selector, and the SDK resolves the last two at the moment the action runs
+# rather than when the scene was read. Two things the agent could not do before:
+# drag an element the scene gives an id for, and hit a target that moved between
+# the observation and the click. Three tool names and four tool schemas moved, so
+# the fingerprint moves with the label here.
+QA_ARCH_LABEL = "v5-pointer-target"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

@@ -305,7 +305,7 @@ def test_a_pinned_summarizer_stays_apart_from_the_run_model() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v4-screen-text"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v5-pointer-target"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -344,15 +344,15 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
     "enter_text",
     "press_key",
     "move_pointer",
-    "click_at",
-    "double_click_at",
+    "click",
+    "double_click",
     "hold_mouse_button",
     "release_mouse_button",
     "hold_key",
     "release_key",
     "set_input_axis",
     "set_input_button",
-    "drag_pointer",
+    "drag",
     "pause_game_time",
     "resume_game_time",
     "reset_game",
@@ -364,7 +364,7 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
     "capture_screen",
     "compact_context",
 )
-_EXPECTED_DEFAULT_FINGERPRINT = "e8e1d4764809"
+_EXPECTED_DEFAULT_FINGERPRINT = "8487bb1656c8"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
