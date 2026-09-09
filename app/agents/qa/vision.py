@@ -31,7 +31,31 @@ MAX_IMAGES_IN_REQUEST = 2
 # name its callers and tests already use.
 from app.agents.qa.arch import MAX_CAPTURES_PER_RUN  # noqa: E402 - re-export
 
+# Down here with it because the constant above forces the whole block below the
+# module's own definitions; these are ordinary imports, not re-exports.
+from app.agents.qa.arch import ScreenCaptureMode  # noqa: E402
+from app.agents.qa.tools.state import (  # noqa: E402
+    PendingCapture,
+    capture_from_action_result,
+)
+from app.qa.envelope import JsonRpcAction  # noqa: E402
+
 DOWNLOAD_TIMEOUT_SECONDS = 15.0
+
+# How long an automatic capture waits for the game, in `every_call` runs only.
+#
+# Well under `ACTION_TIMEOUT_SECONDS` (30.0), which is what a tool call may wait.
+# A tool capture happens when the model decides to look; an automatic one happens
+# on every model call, so 30 seconds of silence per call would make a slow game
+# indistinguishable from a wedged run.
+#
+# Not shorter than this either. One normal capture is `WaitForEndOfFrame`, an
+# encode, a presign POST and an S3 PUT, and three game slots sharing a machine
+# still finish inside ten seconds. Cutting it further would start timing out
+# captures that were about to arrive, and a capture that times out and lands late
+# is the input to the `correlationId` fallback in `QaRunChannel._action_waiter_for`
+# — the one place a late answer can be read as the next action's.
+AUTO_CAPTURE_TIMEOUT_SECONDS = 10.0
 
 # Marks the messages this module owns, so the trimming pass can find them without
 # guessing from content shape.
@@ -152,15 +176,84 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
     Anthropic slugs included. Injecting from `before_model` also puts the image
     after all of that turn's tool results, which is the ordering Anthropic
     requires.
+
+    In an `every_call` run this hook also *takes* the capture, rather than only
+    placing one the model asked for. That is safe to do here for a reason worth
+    writing down: LangChain gives every middleware overriding `before_model` its
+    own graph node, and those nodes are chained ahead of the single `model` node
+    (`langchain/agents/factory.py`). `QaCompactionMiddleware` calls its summarizer
+    inside its own hook rather than through the graph, so this hook never wraps
+    that call. One automatic capture per turn of the QA agent's own model, and
+    none around the summarizer.
     """
 
-    def __init__(self, state, max_images: int = MAX_IMAGES_IN_REQUEST) -> None:
+    def __init__(
+        self,
+        state,
+        channel=None,
+        arch=None,
+        max_images: int = MAX_IMAGES_IN_REQUEST,
+    ) -> None:
         super().__init__()
         self._state = state
+        self._channel = channel
+        self._arch = arch
         self._max_images = max_images
 
+    def _captures_every_call(self) -> bool:
+        return (
+            self._channel is not None
+            and getattr(self._arch, "screen_capture", None) is ScreenCaptureMode.every_call
+        )
+
+    async def _auto_capture(self) -> PendingCapture | None:
+        """Ask the game for the screen, for a run that reads it on every call.
+
+        Never raises and never ends the run. Every way this can fail — the game is
+        busy, the SDK does not know the action, the answer is late — leaves the
+        turn with no new picture, and `trim_images` still has the last two, so the
+        model is looking at a screen one turn old rather than at nothing.
+
+        `state.captures_attempted` is deliberately not touched. That counter is the
+        model's tool ration and `max_captures_per_run` builds the tool's refusal
+        message out of it; spending it here would ration a budget the model never
+        asked to spend.
+
+        No `channel.note` either. One line per model call would bury the timeline a
+        person reads, and the ACTION row Orchestration writes for this dispatch is
+        already the durable record — a note here is also what would make an
+        automatic capture indistinguishable from a tool one when they are counted
+        afterwards.
+        """
+        result = await self._channel.dispatch_actions(
+            [JsonRpcAction(id=1, method="capture_screen", params=[])],
+            "Capturing the screen",
+            timeout=AUTO_CAPTURE_TIMEOUT_SECONDS,
+        )
+        if result is None or not result.results:
+            logger.warning("[QA] the game did not answer the automatic capture")
+            return None
+
+        capture = capture_from_action_result(result.results[0], "the screen")
+        if capture is None:
+            item = result.results[0]
+            logger.warning(
+                "[QA] automatic capture produced no image: %s",
+                item.error or "no reason given",
+            )
+        return capture
+
     async def abefore_model(self, state, runtime) -> dict | None:
+        # Drained first, and the automatic capture only fills a queue this leaves
+        # empty. Anything pending here was queued by `capture_screen` during the
+        # turn that just ended, because the previous call drained everything older.
+        # Capturing anyway would put two near-identical screens in one request —
+        # filling both of `MAX_IMAGES_IN_REQUEST`'s slots with the same moment — and
+        # spend a second round trip to the game for it.
         pending = self._state.take_pending_captures()
+        if not pending and self._captures_every_call():
+            captured = await self._auto_capture()
+            pending = [captured] if captured is not None else []
         if not pending:
             return None
 

@@ -8,7 +8,8 @@ from typing import Any
 
 from langchain_core.tools import BaseTool, tool
 
-from app.agents.qa.tools.state import PendingCapture
+from app.agents.qa.arch import ScreenCaptureMode
+from app.agents.qa.tools.state import capture_from_action_result
 from app.agents.qa.tools.tool_context import ToolContext
 from app.qa.envelope import JsonRpcAction, LogCategory
 
@@ -30,6 +31,20 @@ You get {limit} screenshots for the whole run and no more, so spend them on the
 steps where looking is what decides the verdict.
 
 The picture arrives right after this result, as its own message."""
+
+# Appended to the description above when the run captures on every model call.
+# The tool still exists then — `target_id` gives a close-up the automatic
+# whole-screen picture cannot — but an agent told only the text above would spend
+# calls asking for a screen it is already being shown.
+#
+# Code rather than prompt data, because both arms of the comparison have to run on
+# one `prompt_version`. `arch_fingerprint` hashes `screen_capture`, so the two
+# descriptions still land in two structures rather than folding into one.
+EVERY_CALL_CAPTURE_NOTE = """
+
+You do not need this tool to see the current screen: a fresh picture of the whole
+screen is already in front of you on every one of your turns. Use it only to look
+at one element close up, with `target_id`."""
 
 
 def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
@@ -111,7 +126,11 @@ def build_capture_tool(ctx: ToolContext) -> BaseTool:
     channel, state, arch = ctx.channel, ctx.state, ctx.arch
     _answer = ctx.answer
 
-    @tool(description=CAPTURE_SCREEN_DESCRIPTION.format(limit=arch.max_captures_per_run))
+    description = CAPTURE_SCREEN_DESCRIPTION.format(limit=arch.max_captures_per_run)
+    if arch.screen_capture is ScreenCaptureMode.every_call:
+        description += EVERY_CALL_CAPTURE_NOTE
+
+    @tool(description=description)
     async def capture_screen(step: int, thought: str, target_id: int | None = None) -> str:
         # What the agent reads is CAPTURE_SCREEN_DESCRIPTION above, not this.
         # Returns the capture as a promise: the image itself is handed to the
@@ -154,31 +173,23 @@ def build_capture_tool(ctx: ToolContext) -> BaseTool:
                 messages,
             )
 
-        captured = item.returnValue or {}
-        url = captured.get("url")
-        if not url:
+        capture = capture_from_action_result(item, what)
+        if capture is None:
             return _answer(
                 "The game reported a capture but no image to read. Judge from the "
                 "scene text.",
                 messages,
             )
 
-        caption = f"This is {what} right now."
-        if captured.get("clipped"):
-            # Worth saying out loud: a cropped-off element is itself a finding, and
-            # the agent would otherwise read the partial image as the whole thing.
-            caption += " Part of it is off the edge of the screen."
-
-        state.add_pending_capture(
-            PendingCapture(
-                capture_id=str(captured.get("captureId") or ""),
-                url=url,
-                mime_type=str(captured.get("mimeType") or "image/jpeg"),
-                caption=caption,
-            )
-        )
+        state.add_pending_capture(capture)
         # On the timeline so a reviewer can open exactly what the agent looked at.
-        await channel.note(f"Captured {what}: {url}", LogCategory.OBSERVATION, step)
+        #
+        # This note is also what tells a tool capture apart from one the vision
+        # middleware took by itself: the middleware writes none, and Orchestration's
+        # own per-screen capture writes none either. Counting these against the
+        # `capture_screen` ACTION rows is how a run's automatic captures are counted
+        # after the fact (ARTEL-868).
+        await channel.note(f"Captured {what}: {capture.url}", LogCategory.OBSERVATION, step)
 
         return _answer(f"Captured {what}. The image follows.", messages)
 

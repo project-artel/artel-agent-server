@@ -62,6 +62,26 @@ from app.llm.models import LLMModel, get_model_spec
 # — see its docstring for what it does cover. The hand-bumped label is the only
 # thing in the record that can separate these two structures, which is the case
 # the module docstring above says the label exists for.
+#
+# `screen_capture` (ARTEL-868) opened as an axis without moving this label. The
+# default run's shape did not move: the default is `on_demand`, which is what the
+# run has always done, and the tool set, the tool signatures and the middleware
+# list are all unchanged by the field's arrival. `fold_stale_knowledge` is the
+# precedent — `d78e6d4` added it to `QaArchSpec` as a new axis and left the label
+# at `v2-tool-loop`.
+#
+# The fingerprint does move, for every structure, because it hashes
+# `arch.model_dump()` and that dump gained a key. That is expected and is why
+# `_FINGERPRINT_SCHEME` is NOT bumped alongside it: the digests already separate,
+# and bumping would only make one structure carry two of them.
+#
+# The two arms of that axis are named in `QaArchSpec.label` rather than here,
+# because a deployment runs both from one image. They are `v4-capture-on-demand`
+# and `v4-capture-every-call`, and the specs that carry them are checked in at
+# `benchmarks/wordventure/arch/` in the workspace. Both arms take a NEW label
+# rather than one of them reusing this constant: `agent_arch` is what
+# `/api/qa-stats` groups cells by, so an arm left on the default label shares its
+# cell with every run this deployment has ever done.
 QA_ARCH_LABEL = "v4-screen-text"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
@@ -120,6 +140,30 @@ class VisionMode(StrEnum):
     off = "off"
 
 
+class ScreenCaptureMode(StrEnum):
+    """When a screenshot of the running game reaches the model.
+
+    ``on_demand`` is what every run did before this was a choice: the model calls
+    `capture_screen` and the picture arrives on the next model call. ``every_call``
+    puts a fresh one in front of the model on every call, whether it asked or not.
+
+    An enum rather than a bool for two reasons. `on_change` — capture only when
+    the screen actually moved — is the next value this axis is expected to take,
+    and the string lands verbatim in `run_config`, where `screen_capture=every_call`
+    reads in a report and `auto_capture=true` does not.
+
+    `every_call` does NOT remove `capture_screen` from the tool set. Removing it
+    would make the arm two changes rather than one: the picture arriving unasked,
+    and the loss of the cropped close-up of a single element that the tool's
+    `target_id` gives. It would also strand the vision directive
+    (`app/prompts/qa_run/*/vision_directive.md`), which names the tool, and fixing
+    that would move `prompt_version` — an axis the comparison needs held still.
+    """
+
+    on_demand = "on_demand"
+    every_call = "every_call"
+
+
 class QaArchError(ValueError):
     """The requested structure cannot be built for the requested model."""
 
@@ -147,6 +191,7 @@ class QaArchSpec(BaseModel):
     max_captures_per_run: int = Field(default=MAX_CAPTURES_PER_RUN, ge=0, le=1_000_000)
     max_issues_per_run: int = Field(default=MAX_ISSUES_PER_RUN, ge=0, le=1_000_000)
     vision: VisionMode = VisionMode.auto
+    screen_capture: ScreenCaptureMode = ScreenCaptureMode.on_demand
     fold_stale_scenes: bool = True
     # Folds the neighbour blocks the search volunteers, and only those (ARTEL-277).
     # Separate from `fold_stale_scenes` because the two are independently useful
@@ -224,6 +269,7 @@ class ResolvedArch(BaseModel):
     max_captures_per_run: int
     max_issues_per_run: int
     vision: bool
+    screen_capture: ScreenCaptureMode
     fold_stale_scenes: bool
     fold_stale_knowledge: bool
     compaction: bool
@@ -307,6 +353,21 @@ def resolve_arch(spec: QaArchSpec, model: LLMModel) -> ResolvedArch:
             f"honoured. Use 'auto' to follow the model, or 'off' to state it."
         )
     vision = supports_vision if spec.vision is VisionMode.auto else spec.vision is VisionMode.on
+    # Against the settled `vision`, not against `spec.vision`. The case that
+    # matters is `vision='auto'` on a model that cannot read images, which is only
+    # False after the line above. Checked here rather than in a `model_validator`
+    # for the same reason: the spec alone does not know.
+    #
+    # Refused rather than downgraded, exactly as `vision='on'` is.
+    # `middleware_names_for` only wires `capture_vision` when vision is on, so a
+    # downgrade would leave a run labelled `every_call` running with no pictures at
+    # all — the wrong-bucket failure the refusal above exists to prevent.
+    if spec.screen_capture is ScreenCaptureMode.every_call and not vision:
+        raise QaArchError(
+            f"screen_capture='every_call' needs vision, and this run resolved to "
+            f"vision off (model '{model.value}', vision='{spec.vision.value}'). "
+            f"Use screen_capture='on_demand', or a model that reads images."
+        )
     return _resolved(spec, vision)
 
 
