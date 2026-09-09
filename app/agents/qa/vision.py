@@ -61,6 +61,13 @@ AUTO_CAPTURE_TIMEOUT_SECONDS = 10.0
 # guessing from content shape.
 CAPTURE_MESSAGE_KEY = "artel_capture_id"
 
+# Marks a message that rides on one request and is never stored, so the cache
+# boundary can be written before it rather than after
+# (`_CachingChatBedrockConverse._with_cache_point`). A boundary written after it
+# would put a picture that changes every turn inside the cached prefix, which is
+# the same lost read this arm exists to avoid.
+TRANSIENT_MESSAGE_KEY = "artel_transient"
+
 _ALLOWED_MIME_TYPES = frozenset({"image/jpeg", "image/png"})
 
 # 파일이 스스로 말하는 자기 타입. 캡처를 실어 오는 프레임이 전부 mime 을 말해 주지는
@@ -258,24 +265,16 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
         return capture
 
     async def abefore_model(self, state, runtime) -> dict | None:
-        # Drained first, and the automatic capture is skipped only when the model
-        # already asked for the same picture this turn. Anything pending here was
-        # queued by `capture_screen` during the turn that just ended, because the
-        # previous call drained everything older.
-        #
-        # `whole_screen`, not merely "something is pending". A `target_id` capture
-        # is one element at 512px and shows what the whole screen does not, so
-        # skipping on it would drop the automatic picture exactly on the turn the
-        # tool description tells the model to ask for a close-up. Skipping on a
-        # whole-screen one is right: two pictures of the same moment would fill both
-        # of `MAX_IMAGES_IN_REQUEST`'s slots and cost a second round trip.
+        """Put the captures the model asked for into the conversation.
+
+        `on_demand` only. In `every_call` the picture never enters the stored
+        conversation at all — `awrap_model_call` below puts it in the request and
+        nowhere else, and the reason is the prompt cache. Draining here would leave
+        this hook competing with that one for the same queue.
+        """
+        if self._captures_every_call():
+            return None
         pending = self._state.take_pending_captures()
-        if self._captures_every_call() and not any(
-            capture.whole_screen for capture in pending
-        ):
-            captured = await self._auto_capture()
-            if captured is not None:
-                pending = [*pending, captured]
         if not pending:
             return None
 
@@ -307,4 +306,64 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
         return {"messages": messages} if messages else None
 
     async def awrap_model_call(self, request, handler):
-        return await handler(request.override(messages=trim_images(request.messages, self._max_images)))
+        """Trim images for `on_demand`; hand `every_call` exactly one, and only here.
+
+        ## Why `every_call` does not put the picture in the conversation
+
+        The cache boundary is written at the end of the prompt
+        (`_CachingChatBedrockConverse._with_cache_point`), so the next turn reads
+        this whole prompt back — but only while every byte of it is the same again.
+
+        Storing a picture per turn cannot keep that promise, whichever way the old
+        ones are disposed of. `trim_images` rewrites them into text and a deletion
+        would remove them outright; both edit a message that has already been sent,
+        so the prefix diverges and the read is lost. Measured on a real run: the
+        `on_demand` arm read 97.3% of its input from cache and the `every_call` arm
+        1.3%, and the bill went from $0.87 to $14.22 while input tokens rose only
+        1.25x (ARTEL-868). The whole difference was cache writes nothing ever read.
+
+        So the conversation stays text and append-only, and the picture is added to
+        this one request and thrown away. Nothing older is ever disposed of because
+        nothing older was ever kept. Each turn then costs a cache read over the
+        prefix plus one image at full price.
+
+        Exactly one image, the freshest there is: an automatic whole-screen capture,
+        or the close-up if the model asked for one this turn. `MAX_IMAGES_IN_REQUEST`
+        does not apply — it bounds how many pictures a *stored* transcript resends,
+        and this transcript stores none.
+        """
+        if not self._captures_every_call():
+            return await handler(
+                request.override(messages=trim_images(request.messages, self._max_images))
+            )
+
+        message = await self._current_screen_message()
+        messages = request.messages if message is None else [*request.messages, message]
+        return await handler(request.override(messages=messages))
+
+    async def _current_screen_message(self):
+        """One `HumanMessage` holding the current screen, or `None` if there is none.
+
+        A capture the tool queued this turn wins over taking a new one: it is at
+        least as fresh, the round trip is already paid, and when it is a `target_id`
+        close-up it is what the model asked to look at.
+        """
+        pending = self._state.take_pending_captures()
+        capture = pending[-1] if pending else await self._auto_capture()
+        if capture is None:
+            return None
+        try:
+            encoded = await fetch_capture(capture.url, capture.mime_type)
+        except CaptureFetchError as error:
+            # Not fatal, and not worth telling the model about either: it did not
+            # ask for this picture, so a line explaining its absence would be noise
+            # on a turn that reads the screen text instead.
+            logger.warning(
+                "[QA] capture %s could not be fetched: %s", capture.capture_id, error
+            )
+            return None
+        message = build_capture_message(
+            capture.capture_id, encoded, capture.mime_type, capture.caption
+        )
+        message.additional_kwargs[TRANSIENT_MESSAGE_KEY] = True
+        return message

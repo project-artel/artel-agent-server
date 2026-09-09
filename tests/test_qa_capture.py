@@ -428,6 +428,24 @@ def capture_answer(capture_id: str = "auto-1") -> list[dict]:
     ]
 
 
+async def one_call(middleware, request_messages):
+    """Drive `awrap_model_call` once and return what the model would have been sent."""
+    seen: dict = {}
+
+    class Request:
+        messages = request_messages
+
+        def override(self, messages):
+            seen["messages"] = messages
+            return self
+
+    async def handler(request):
+        return request
+
+    await middleware.awrap_model_call(Request(), handler)
+    return seen.get("messages", request_messages)
+
+
 def test_every_call_takes_the_picture_itself() -> None:
     """The whole point of the arm: no tool call, and the image is still there."""
 
@@ -437,12 +455,12 @@ def test_every_call_takes_the_picture_itself() -> None:
 
         answer(channel, sent, capture_answer())
         with storage_answers(httpx.Response(200, content=PNG_BYTES)):
-            update = await middleware.abefore_model({}, None)
+            messages = await one_call(middleware, [HumanMessage(content="plan")])
 
         dispatched = actions(sent)
         assert len(dispatched) == 1
         assert dispatched[0]["payload"]["actions"][0]["method"] == "capture_screen"
-        assert update["messages"][0].content[1]["type"] == "image_url"
+        assert messages[-1].content[1]["type"] == "image_url"
 
         # The tool's ration is untouched: this capture is not one the model spent.
         assert state.captures_attempted == 0
@@ -452,53 +470,51 @@ def test_every_call_takes_the_picture_itself() -> None:
     asyncio.run(run())
 
 
-def test_on_demand_never_takes_a_picture_by_itself() -> None:
-    async def run() -> None:
-        channel, state, _tools, sent = make()
-        middleware = QaCaptureVisionMiddleware(state, channel, default_resolved_arch())
+def test_the_picture_never_enters_the_conversation() -> None:
+    """The cache boundary reads the stored prompt back, so nothing may edit it.
 
-        assert await middleware.abefore_model({}, None) is None
-        assert actions(sent) == []
-
-    asyncio.run(run())
-
-
-def test_a_capture_the_tool_already_took_is_not_taken_again() -> None:
-    """Otherwise one turn carries the same moment twice.
-
-    `MAX_IMAGES_IN_REQUEST` is 2, so a duplicate fills both slots with one screen
-    and the model loses the earlier one it was comparing against — and the run pays
-    a second round trip to the game for it.
+    A picture stored per turn has to be disposed of on the next one, and every way
+    of disposing of it edits a message already sent. Keeping it out of the stored
+    messages is what makes the prefix append-only.
     """
 
     async def run() -> None:
         channel, state, _tools, sent = make()
-        state.add_pending_capture(
-            PendingCapture(
-                capture_id="from-the-tool",
-                url="https://storage.test/tool.png",
-                mime_type="image/png",
-                caption="This is the screen right now.",
-            )
-        )
         middleware = QaCaptureVisionMiddleware(state, channel, every_call_arch())
 
+        answer(channel, sent, capture_answer())
         with storage_answers(httpx.Response(200, content=PNG_BYTES)):
-            update = await middleware.abefore_model({}, None)
-
+            assert await middleware.abefore_model({}, None) is None
+        # `abefore_model` adds nothing, and it did not spend a round trip either.
         assert actions(sent) == []
-        assert len(update["messages"]) == 1
 
     asyncio.run(run())
 
 
-def test_a_close_up_does_not_stand_in_for_the_whole_screen() -> None:
-    """The turn the tool description asks for is the turn both pictures are wanted.
+def test_only_one_picture_rides_on_a_request() -> None:
+    """`MAX_IMAGES_IN_REQUEST` does not apply — nothing older is ever resent."""
 
-    A `target_id` capture is one element at 512px. Skipping the automatic
-    whole-screen picture on it would drop the screen exactly when the model
-    followed the instruction to look at one element close up.
-    """
+    async def run() -> None:
+        channel, state, _tools, sent = make()
+        middleware = QaCaptureVisionMiddleware(state, channel, every_call_arch())
+
+        history = [HumanMessage(content="plan")]
+        for capture_id in ("auto-1", "auto-2", "auto-3"):
+            answer(channel, sent, capture_answer(capture_id))
+            with storage_answers(httpx.Response(200, content=PNG_BYTES)):
+                messages = await one_call(middleware, history)
+            images = [m for m in messages if _has_image(m)]
+            assert len(images) == 1
+            # The request is the history plus one picture, and the history itself
+            # never gained one.
+            assert messages[:-1] == history
+            assert not any(_has_image(m) for m in history)
+
+    asyncio.run(run())
+
+
+def test_a_close_up_the_model_asked_for_wins_over_a_new_capture() -> None:
+    """It is fresher, already paid for, and is what the model asked to look at."""
 
     async def run() -> None:
         channel, state, tools, sent = make()
@@ -509,13 +525,13 @@ def test_a_close_up_does_not_stand_in_for_the_whole_screen() -> None:
         )
         middleware = QaCaptureVisionMiddleware(state, channel, every_call_arch())
 
-        answer(channel, sent, capture_answer())
+        before = len(actions(sent))
         with storage_answers(httpx.Response(200, content=PNG_BYTES)):
-            update = await middleware.abefore_model({}, None)
+            messages = await one_call(middleware, [HumanMessage(content="plan")])
 
-        # Two dispatches: the tool's close-up, then the middleware's whole screen.
-        assert len(actions(sent)) == 2
-        assert len(update["messages"]) == 2
+        # No second round trip, and the close-up is what rode along.
+        assert len(actions(sent)) == before
+        assert "element 42" in messages[-1].content[0]["text"]
 
     asyncio.run(run())
 
@@ -533,7 +549,7 @@ def test_the_automatic_capture_carries_no_step_so_it_can_be_counted_apart() -> N
 
         answer(channel, sent, capture_answer())
         with storage_answers(httpx.Response(200, content=PNG_BYTES)):
-            await middleware.abefore_model({}, None)
+            await one_call(middleware, [HumanMessage(content="plan")])
 
         assert actions(sent)[0]["payload"]["step"] is None
 
@@ -541,13 +557,12 @@ def test_the_automatic_capture_carries_no_step_so_it_can_be_counted_apart() -> N
 
 
 def test_a_game_that_does_not_answer_leaves_the_turn_without_a_picture() -> None:
-    """Never fatal. `trim_images` still holds the last two, so the model has a screen.
+    """Never fatal. The turn goes on reading the screen text.
 
-    No answer is sent here at all, so the dispatch runs out its wait. The timeout
-    is injected rather than left at `AUTO_CAPTURE_TIMEOUT_SECONDS`: the automatic
-    capture passes its own value to `dispatch_actions`, which overrides the
-    channel's, so the harness's 50 ms would never be consulted and this one test
-    would take ten seconds.
+    The timeout is injected rather than left at `AUTO_CAPTURE_TIMEOUT_SECONDS`: the
+    automatic capture passes its own value to `dispatch_actions`, which overrides
+    the channel's, so the harness's 50 ms would never be consulted and this one
+    test would take ten seconds.
     """
 
     async def run() -> None:
@@ -556,7 +571,10 @@ def test_a_game_that_does_not_answer_leaves_the_turn_without_a_picture() -> None
             state, channel, every_call_arch(), auto_capture_timeout=0.05
         )
 
-        assert await middleware.abefore_model({}, None) is None
+        history = [HumanMessage(content="plan")]
+        messages = await one_call(middleware, history)
+
+        assert messages == history
         assert len(actions(sent)) == 1
 
     asyncio.run(run())
@@ -567,10 +585,29 @@ def test_a_refused_capture_leaves_the_turn_without_a_picture() -> None:
         channel, state, _tools, sent = make()
         middleware = QaCaptureVisionMiddleware(state, channel, every_call_arch())
 
+        history = [HumanMessage(content="plan")]
         answer(channel, sent, [{"id": 1, "success": False, "error": "Unsupported method"}])
-        assert await middleware.abefore_model({}, None) is None
+        assert await one_call(middleware, history) == history
 
     asyncio.run(run())
+
+
+def test_on_demand_never_takes_a_picture_by_itself() -> None:
+    async def run() -> None:
+        channel, state, _tools, sent = make()
+        middleware = QaCaptureVisionMiddleware(state, channel, default_resolved_arch())
+
+        assert await middleware.abefore_model({}, None) is None
+        assert actions(sent) == []
+
+    asyncio.run(run())
+
+
+def _has_image(message) -> bool:
+    content = getattr(message, "content", None)
+    return isinstance(content, list) and any(
+        isinstance(b, dict) and b.get("type") == "image_url" for b in content
+    )
 
 
 # --- cost ---
