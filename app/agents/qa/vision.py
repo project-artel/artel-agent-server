@@ -17,6 +17,10 @@ import httpx
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 
+from app.agents.qa.arch import ScreenCaptureMode
+from app.agents.qa.tools.state import PendingCapture, capture_from_action_result
+from app.qa.envelope import JsonRpcAction
+
 logger = logging.getLogger(__name__)
 
 # Images older than this are replaced with a line of text saying one was there.
@@ -30,15 +34,6 @@ MAX_IMAGES_IN_REQUEST = 2
 # one, and the arch fingerprint has to see it — and is re-exported here under the
 # name its callers and tests already use.
 from app.agents.qa.arch import MAX_CAPTURES_PER_RUN  # noqa: E402 - re-export
-
-# Down here with it because the constant above forces the whole block below the
-# module's own definitions; these are ordinary imports, not re-exports.
-from app.agents.qa.arch import ScreenCaptureMode  # noqa: E402
-from app.agents.qa.tools.state import (  # noqa: E402
-    PendingCapture,
-    capture_from_action_result,
-)
-from app.qa.envelope import JsonRpcAction  # noqa: E402
 
 DOWNLOAD_TIMEOUT_SECONDS = 15.0
 
@@ -55,6 +50,11 @@ DOWNLOAD_TIMEOUT_SECONDS = 15.0
 # captures that were about to arrive, and a capture that times out and lands late
 # is the input to the `correlationId` fallback in `QaRunChannel._action_waiter_for`
 # — the one place a late answer can be read as the next action's.
+#
+# The waiting this arm adds to a model call is 25 seconds, not 10: the fetch that
+# follows a successful capture is bounded separately by `DOWNLOAD_TIMEOUT_SECONDS`
+# (15.0). Under `on_demand` that 15 was paid only on the turns the model asked to
+# look; here it is on every turn.
 AUTO_CAPTURE_TIMEOUT_SECONDS = 10.0
 
 # Marks the messages this module owns, so the trimming pass can find them without
@@ -193,26 +193,40 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
         channel=None,
         arch=None,
         max_images: int = MAX_IMAGES_IN_REQUEST,
+        auto_capture_timeout: float = AUTO_CAPTURE_TIMEOUT_SECONDS,
     ) -> None:
         super().__init__()
         self._state = state
         self._channel = channel
         self._arch = arch
         self._max_images = max_images
+        # Injectable for the same reason `QaRunChannel.action_timeout` is: a test
+        # that waited out the real one would pay ten seconds to prove a timeout.
+        self._auto_capture_timeout = auto_capture_timeout
 
     def _captures_every_call(self) -> bool:
-        return (
-            self._channel is not None
-            and getattr(self._arch, "screen_capture", None) is ScreenCaptureMode.every_call
-        )
+        """Read from the arch alone, so a missing channel raises instead of hiding.
+
+        Keying this on `self._channel is not None` as well would turn a wiring
+        mistake into a run recorded as `every_call` that never captures — the
+        wrong-bucket failure `resolve_arch` refuses `every_call` without vision to
+        prevent, put back one layer down. `_auto_capture` is where the `None`
+        shows up, and an `AttributeError` there is the right kind of loud.
+        """
+        return getattr(self._arch, "screen_capture", None) is ScreenCaptureMode.every_call
 
     async def _auto_capture(self) -> PendingCapture | None:
         """Ask the game for the screen, for a run that reads it on every call.
 
-        Never raises and never ends the run. Every way this can fail — the game is
-        busy, the SDK does not know the action, the answer is late — leaves the
-        turn with no new picture, and `trim_images` still has the last two, so the
-        model is looking at a screen one turn old rather than at nothing.
+        Returns `None` for every failure the game can produce — it is busy, its SDK
+        does not know the action, the answer is late — and the turn then goes on
+        with no new picture. `trim_images` still holds the last two, so the model
+        is looking at a screen one turn old rather than at nothing.
+
+        `QaCancelled` from `dispatch_actions` is deliberately NOT caught. The
+        operator ending the run has to stop the run, and every tool re-raises it
+        for that reason; catching it here would swallow a cancel on every model
+        call.
 
         `state.captures_attempted` is deliberately not touched. That counter is the
         model's tool ration and `max_captures_per_run` builds the tool's refusal
@@ -228,7 +242,7 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
         result = await self._channel.dispatch_actions(
             [JsonRpcAction(id=1, method="capture_screen", params=[])],
             "Capturing the screen",
-            timeout=AUTO_CAPTURE_TIMEOUT_SECONDS,
+            timeout=self._auto_capture_timeout,
         )
         if result is None or not result.results:
             logger.warning("[QA] the game did not answer the automatic capture")
@@ -244,16 +258,24 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
         return capture
 
     async def abefore_model(self, state, runtime) -> dict | None:
-        # Drained first, and the automatic capture only fills a queue this leaves
-        # empty. Anything pending here was queued by `capture_screen` during the
-        # turn that just ended, because the previous call drained everything older.
-        # Capturing anyway would put two near-identical screens in one request —
-        # filling both of `MAX_IMAGES_IN_REQUEST`'s slots with the same moment — and
-        # spend a second round trip to the game for it.
+        # Drained first, and the automatic capture is skipped only when the model
+        # already asked for the same picture this turn. Anything pending here was
+        # queued by `capture_screen` during the turn that just ended, because the
+        # previous call drained everything older.
+        #
+        # `whole_screen`, not merely "something is pending". A `target_id` capture
+        # is one element at 512px and shows what the whole screen does not, so
+        # skipping on it would drop the automatic picture exactly on the turn the
+        # tool description tells the model to ask for a close-up. Skipping on a
+        # whole-screen one is right: two pictures of the same moment would fill both
+        # of `MAX_IMAGES_IN_REQUEST`'s slots and cost a second round trip.
         pending = self._state.take_pending_captures()
-        if not pending and self._captures_every_call():
+        if self._captures_every_call() and not any(
+            capture.whole_screen for capture in pending
+        ):
             captured = await self._auto_capture()
-            pending = [captured] if captured is not None else []
+            if captured is not None:
+                pending = [*pending, captured]
         if not pending:
             return None
 

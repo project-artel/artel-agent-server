@@ -68,7 +68,11 @@ from app.llm.models import LLMModel, get_model_spec
 # run has always done, and the tool set, the tool signatures and the middleware
 # list are all unchanged by the field's arrival. `fold_stale_knowledge` is the
 # precedent — `d78e6d4` added it to `QaArchSpec` as a new axis and left the label
-# at `v2-tool-loop`.
+# at `v2-tool-loop`. It is a weaker precedent than it looks: that commit also put
+# `fold_knowledge_neighbours` into the default middleware list, which AGENTS.md
+# does count as a change of shape. This change needs no such licence — the tool
+# set, the tool signatures, the middleware list and every knob of the default run
+# are provably where they were.
 #
 # The fingerprint does move, for every structure, because it hashes
 # `arch.model_dump()` and that dump gained a key. That is expected and is why
@@ -145,7 +149,8 @@ class ScreenCaptureMode(StrEnum):
 
     ``on_demand`` is what every run did before this was a choice: the model calls
     `capture_screen` and the picture arrives on the next model call. ``every_call``
-    puts a fresh one in front of the model on every call, whether it asked or not.
+    puts a fresh one in front of the model on every call it did not already ask for
+    a whole-screen picture on.
 
     An enum rather than a bool for two reasons. `on_change` — capture only when
     the screen actually moved — is the next value this axis is expected to take,

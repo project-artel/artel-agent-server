@@ -187,10 +187,14 @@ def test_the_two_capture_arms_are_two_structures_with_one_tool_set() -> None:
         LLMModel.gpt_chat_latest,
     )
 
-    on_demand_tools, _, on_demand_print = structure_of(on_demand)
-    every_call_tools, _, every_call_print = structure_of(every_call)
+    on_demand_tools, on_demand_middleware, on_demand_print = structure_of(on_demand)
+    every_call_tools, every_call_middleware, every_call_print = structure_of(every_call)
 
     assert on_demand_tools == every_call_tools
+    # The middleware list too, so "the arms differ by exactly one thing" is checked
+    # rather than half checked: `capture_vision` is in both, and the axis changes
+    # what it does rather than whether it is there.
+    assert on_demand_middleware == every_call_middleware
     assert on_demand_print != every_call_print
 
 

@@ -8,7 +8,7 @@
 from dataclasses import dataclass
 from typing import Any
 
-from app.qa.envelope import JsonRpcAction
+from app.qa.envelope import ActionResultItem, JsonRpcAction
 from app.qa.schemas import QaStepResult
 
 
@@ -20,9 +20,19 @@ class PendingCapture:
     url: str
     mime_type: str
     caption: str
+    # False for a `target_id` capture, which is one element cropped at 512px
+    # rather than the whole screen.
+    #
+    # Only the caption distinguished the two before, and a `screen_capture`
+    # run that skips its automatic capture whenever anything is pending would
+    # skip it exactly on the turn the model asked for a close-up — the one turn
+    # where the two pictures show different things and both are worth having.
+    whole_screen: bool = True
 
 
-def capture_from_action_result(item: Any, what: str) -> "PendingCapture | None":
+def capture_from_action_result(
+    item: ActionResultItem, what: str, whole_screen: bool = True
+) -> PendingCapture | None:
     """The `PendingCapture` an `ACTION_RESULT` describes, or `None` if it has none.
 
     `None` covers all three ways a capture comes back with no image to read: the
@@ -35,9 +45,9 @@ def capture_from_action_result(item: Any, what: str) -> "PendingCapture | None":
     same payload, and a second copy is how the caption and the `clipped` note
     drift apart.
     """
-    if not getattr(item, "success", False):
+    if not item.success:
         return None
-    captured = getattr(item, "returnValue", None) or {}
+    captured = item.returnValue or {}
     url = captured.get("url")
     if not url:
         return None
@@ -53,6 +63,7 @@ def capture_from_action_result(item: Any, what: str) -> "PendingCapture | None":
         url=url,
         mime_type=str(captured.get("mimeType") or "image/jpeg"),
         caption=caption,
+        whole_screen=whole_screen,
     )
 
 

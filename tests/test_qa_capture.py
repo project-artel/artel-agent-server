@@ -382,6 +382,29 @@ def test_an_unreachable_image_becomes_a_line_the_agent_can_act_on() -> None:
     asyncio.run(run())
 
 
+# --- what the model is told ---
+
+
+def test_only_the_every_call_arm_is_told_the_screen_is_already_there() -> None:
+    """The description is the model's half of this change, and nothing else pins it.
+
+    `arch_fingerprint` hashes tool names and argument schemas, not descriptions, so
+    the two arms would hash apart even if this text never changed.
+    """
+
+    def description_for(arch) -> str:
+        channel, state, _tools, _sent = make()
+        tools = {tool.name: tool for tool in build_tools(channel, state, arch)}
+        return tools["capture_screen"].description
+
+    on_demand = description_for(default_resolved_arch())
+    every_call = description_for(every_call_arch())
+
+    assert "already in front of you" not in on_demand
+    assert "already in front of you" in every_call
+    assert every_call.startswith(on_demand)
+
+
 # --- taking the picture without being asked ---
 
 
@@ -469,16 +492,69 @@ def test_a_capture_the_tool_already_took_is_not_taken_again() -> None:
     asyncio.run(run())
 
 
-def test_a_game_that_does_not_answer_leaves_the_turn_without_a_picture() -> None:
-    """Never fatal. `trim_images` still holds the last two, so the model has a screen.
+def test_a_close_up_does_not_stand_in_for_the_whole_screen() -> None:
+    """The turn the tool description asks for is the turn both pictures are wanted.
 
-    No answer is sent here at all, so the dispatch runs out its wait — the harness
-    builds the channel with a 50 ms timeout for exactly this.
+    A `target_id` capture is one element at 512px. Skipping the automatic
+    whole-screen picture on it would drop the screen exactly when the model
+    followed the instruction to look at one element close up.
+    """
+
+    async def run() -> None:
+        channel, state, tools, sent = make()
+
+        answer(channel, sent, [capture_result(targetId=42)])
+        await tools["capture_screen"].ainvoke(
+            {"step": 1, "thought": "버튼이 가려졌는지 본다", "target_id": 42}
+        )
+        middleware = QaCaptureVisionMiddleware(state, channel, every_call_arch())
+
+        answer(channel, sent, capture_answer())
+        with storage_answers(httpx.Response(200, content=PNG_BYTES)):
+            update = await middleware.abefore_model({}, None)
+
+        # Two dispatches: the tool's close-up, then the middleware's whole screen.
+        assert len(actions(sent)) == 2
+        assert len(update["messages"]) == 2
+
+    asyncio.run(run())
+
+
+def test_the_automatic_capture_carries_no_step_so_it_can_be_counted_apart() -> None:
+    """`step` is what separates the two in `qa_log`, not the timeline note.
+
+    A tool capture that fails writes no note, so subtracting notes overcounts the
+    automatic ones. The tool always sends a `step`; this dispatch never does.
     """
 
     async def run() -> None:
         channel, state, _tools, sent = make()
         middleware = QaCaptureVisionMiddleware(state, channel, every_call_arch())
+
+        answer(channel, sent, capture_answer())
+        with storage_answers(httpx.Response(200, content=PNG_BYTES)):
+            await middleware.abefore_model({}, None)
+
+        assert actions(sent)[0]["payload"]["step"] is None
+
+    asyncio.run(run())
+
+
+def test_a_game_that_does_not_answer_leaves_the_turn_without_a_picture() -> None:
+    """Never fatal. `trim_images` still holds the last two, so the model has a screen.
+
+    No answer is sent here at all, so the dispatch runs out its wait. The timeout
+    is injected rather than left at `AUTO_CAPTURE_TIMEOUT_SECONDS`: the automatic
+    capture passes its own value to `dispatch_actions`, which overrides the
+    channel's, so the harness's 50 ms would never be consulted and this one test
+    would take ten seconds.
+    """
+
+    async def run() -> None:
+        channel, state, _tools, sent = make()
+        middleware = QaCaptureVisionMiddleware(
+            state, channel, every_call_arch(), auto_capture_timeout=0.05
+        )
 
         assert await middleware.abefore_model({}, None) is None
         assert len(actions(sent)) == 1

@@ -43,8 +43,9 @@ The picture arrives right after this result, as its own message."""
 EVERY_CALL_CAPTURE_NOTE = """
 
 You do not need this tool to see the current screen: a fresh picture of the whole
-screen is already in front of you on every one of your turns. Use it only to look
-at one element close up, with `target_id`."""
+screen is already in front of you on every turn. Use it to look at one element
+close up, with `target_id` — that crop is the one thing the automatic picture
+cannot give you."""
 
 
 def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
@@ -173,7 +174,7 @@ def build_capture_tool(ctx: ToolContext) -> BaseTool:
                 messages,
             )
 
-        capture = capture_from_action_result(item, what)
+        capture = capture_from_action_result(item, what, whole_screen=target_id is None)
         if capture is None:
             return _answer(
                 "The game reported a capture but no image to read. Judge from the "
@@ -184,11 +185,13 @@ def build_capture_tool(ctx: ToolContext) -> BaseTool:
         state.add_pending_capture(capture)
         # On the timeline so a reviewer can open exactly what the agent looked at.
         #
-        # This note is also what tells a tool capture apart from one the vision
-        # middleware took by itself: the middleware writes none, and Orchestration's
-        # own per-screen capture writes none either. Counting these against the
-        # `capture_screen` ACTION rows is how a run's automatic captures are counted
-        # after the fact (ARTEL-868).
+        # Not what separates a tool capture from an automatic one, though it looks
+        # like it could: a tool capture that fails or times out returns above
+        # without writing this note, so subtracting notes from `capture_screen`
+        # ACTION rows overcounts the automatic ones. What separates them exactly is
+        # `step`. This dispatch always carries one because the tool requires it;
+        # `QaCaptureVisionMiddleware` sends none, so its ACTION rows have
+        # `payload.step` null (ARTEL-868).
         await channel.note(f"Captured {what}: {capture.url}", LogCategory.OBSERVATION, step)
 
         return _answer(f"Captured {what}. The image follows.", messages)
