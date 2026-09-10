@@ -52,9 +52,6 @@ class LLMModel(StrEnum):
     # `ChatBedrockConverse` 로 간다. 리전 접두(`us.`)와 판(`-v1:0`)까지 적는 것은
     # 어느 프로파일로 청구되는지가 이 문자열 하나로 정해지기 때문이다.
     claude_haiku_4_5_bedrock = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
-    claude_3_7_sonnet_bedrock = "bedrock/us.anthropic.claude-3-7-sonnet-20250219-v1:0"
-    claude_3_5_sonnet_bedrock = "bedrock/us.anthropic.claude-3-5-sonnet-20241022-v2:0"
-    claude_3_opus_bedrock = "bedrock/us.anthropic.claude-3-opus-20240229-v1:0"
 
 
 class ReasoningKind(StrEnum):
@@ -220,55 +217,6 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
             cache_read_per_mtok=0.10,
             as_of="2026-09-03",
             source="AWS 콘솔, Claude Haiku 4.5 / us-west-2 / on-demand",
-        ),
-    ),
-    LLMModel.claude_3_7_sonnet_bedrock: ModelSpec(
-        provider=LLMProvider.anthropic,
-        supports_strict_json=True,
-        label="Claude 3.7 Sonnet (AWS Bedrock)",
-        max_input_tokens=191_808,
-        input_modalities=("text", "image"),
-        reasoning=ReasoningKind.max_tokens,
-        reasoning_min_tokens=1_024,
-        reasoning_max_tokens=64_000,
-        reasoning_default_tokens=4_096,
-        pricing=ModelPricing(
-            input_per_mtok=3.00,
-            output_per_mtok=15.00,
-            cache_write_per_mtok=3.75,
-            cache_read_per_mtok=0.30,
-            as_of="2026-09-10",
-            source="AWS 콘솔, Claude 3.7 Sonnet / us-west-2 / on-demand",
-        ),
-    ),
-    LLMModel.claude_3_5_sonnet_bedrock: ModelSpec(
-        provider=LLMProvider.anthropic,
-        supports_strict_json=True,
-        label="Claude 3.5 Sonnet (AWS Bedrock)",
-        max_input_tokens=191_808,
-        input_modalities=("text", "image"),
-        pricing=ModelPricing(
-            input_per_mtok=3.00,
-            output_per_mtok=15.00,
-            cache_write_per_mtok=3.75,
-            cache_read_per_mtok=0.30,
-            as_of="2026-09-10",
-            source="AWS 콘솔, Claude 3.5 Sonnet / us-west-2 / on-demand",
-        ),
-    ),
-    LLMModel.claude_3_opus_bedrock: ModelSpec(
-        provider=LLMProvider.anthropic,
-        supports_strict_json=True,
-        label="Claude 3 Opus (AWS Bedrock)",
-        max_input_tokens=191_808,
-        input_modalities=("text", "image"),
-        pricing=ModelPricing(
-            input_per_mtok=15.00,
-            output_per_mtok=75.00,
-            cache_write_per_mtok=18.75,
-            cache_read_per_mtok=1.50,
-            as_of="2026-09-10",
-            source="AWS 콘솔, Claude 3 Opus / us-west-2 / on-demand",
         ),
     ),
     LLMModel.gpt_5_6_luna: ModelSpec(
