@@ -297,6 +297,54 @@ def test_workflow_reports_a_case_it_could_not_place(monkeypatch) -> None:
     assert "싣지 못해" in out.message
 
 
+def test_workflow_merges_into_an_existing_scenario_when_b_points_at_it(monkeypatch) -> None:
+    """거의 같은 요청이 중복 행을 만들지 않는다(run 57, 558 vs 560 실측). B 가 기존
+    시나리오 번호를 가리키면 그 본문을 교체하도록 scenario_id 가 제출까지 흐른다."""
+    import asyncio as aio
+    import app.agents.scenario.workflow as wf_mod
+
+    plan = wf_mod.GroupingPlan(groups=[
+        wf_mod.Group(title="게임 시작 여정", case_ids=[1], scenario_id=560),
+    ])
+    writers = [wf_mod._Writer(steps=[_case_step()])]
+    wf, calls = _workflow_agent(monkeypatch, plan, writers)
+    channel = _FakeChannel()
+
+    aio.run(wf.run_authoring_workflow(
+        _request(
+            user_input="같은 범위 다시 짜줘",
+            test_case_list=_case_list(),
+            current_scenarios=[_current_scenario(scenario_id=560, title="게임 시작 여정")],
+        ),
+        _CTX, channel,
+    ))
+
+    assert channel.submitted[0]["scenario_id"] == 560   # 새 행이 아니라 교체
+    # B 는 기존 목록을 tail 에서 읽는다 — 캐시되는 prefix 를 더럽히지 않는다.
+    assert "EXISTING SCENARIOS" in calls["b_prompts"][0]
+    assert "[id 560]" in calls["b_prompts"][0]
+
+
+def test_workflow_ignores_a_ghost_merge_target(monkeypatch) -> None:
+    import asyncio as aio
+    import app.agents.scenario.workflow as wf_mod
+
+    plan = wf_mod.GroupingPlan(groups=[
+        wf_mod.Group(title="여정", case_ids=[1], scenario_id=999),  # 목록에 없는 번호
+    ])
+    writers = [wf_mod._Writer(steps=[_case_step()])]
+    wf, _ = _workflow_agent(monkeypatch, plan, writers)
+    channel = _FakeChannel()
+
+    aio.run(wf.run_authoring_workflow(
+        _request(user_input="짜줘", test_case_list=_case_list(),
+                 current_scenarios=[_current_scenario(scenario_id=560)]),
+        _CTX, channel,
+    ))
+
+    assert channel.submitted[0]["scenario_id"] is None  # 짐작으로 남의 행을 안 덮는다
+
+
 def test_workflow_b_regroups_once_on_order_findings(monkeypatch) -> None:
     """B 미니 루프: 걷기 검증이 어긋남을 짚으면 B 가 그 지적을 들고 한 번 다시 묶는다.
     run 53 의 그 부류(상태 조건이 안 맞는 케이스 배치)를 문장 쓰기 전에 잡는 자리다."""

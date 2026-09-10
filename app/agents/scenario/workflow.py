@@ -70,6 +70,17 @@ def _rules(prompt_agent: str) -> str:
 class Group(BaseModel):
     title: str = Field(description="플레이어가 한 일처럼 읽히는 여정 제목 — 사용자 언어로")
     case_ids: list[int] = Field(description="실행 순서 그대로의 케이스 id")
+    # 기존 시나리오와 실질적으로 같은 여정이면 그 번호 — 새 행 대신 그 본문을 교체·확장한다.
+    # "같은 내용인가"는 판단이라 모델 몫이고(코드 유사도 임계값은 만들지 않는다), 목록에
+    # 없는 번호는 코드가 무시한다(유령 방어).
+    scenario_id: int | None = Field(
+        default=None,
+        description=(
+            "If this journey covers substantially the same ground as an EXISTING"
+            " SCENARIO, its id — the scenario will be rewritten to this journey"
+            " instead of creating a duplicate. Empty for a genuinely new journey."
+        ),
+    )
 
 
 class GroupingPlan(BaseModel):
@@ -135,6 +146,20 @@ def _modify_prompt(request: ScenarioAgentRequest, feedback: str = "") -> tuple[s
     return prefix, tail
 
 
+def _existing_scenarios(request: ScenarioAgentRequest) -> str:
+    """B 가 겹침을 판단할 재료 — 기존 시나리오의 번호·제목·케이스 구성만.
+
+    스텝 본문은 싣지 않는다: 겹치는지 보는 데는 무엇을 검증하는 여정인지(케이스 구성)면
+    충분하고, 본문까지 실으면 턴마다 변하는 tail 이 무거워진다."""
+    lines = [
+        f"[id {s.scenario_id}] {s.title} — cases: "
+        + ", ".join(str(step.case_id) for step in s.steps if step.case_id is not None)
+        for s in request.current_scenarios
+        if s.scenario_id is not None
+    ]
+    return "\n".join(lines) if lines else "(none)"
+
+
 def _grouping_prompt(
     request: ScenarioAgentRequest, findings: list[str] | None = None
 ) -> tuple[str, str]:
@@ -150,7 +175,10 @@ def _grouping_prompt(
         if findings
         else ""
     )
-    tail = f"=== USER REQUEST ===\n{request.user_input}{findings_tail}\n\nAnswer via the schema."
+    tail = (
+        f"=== EXISTING SCENARIOS (this run) ===\n{_existing_scenarios(request)}\n\n"
+        f"=== USER REQUEST ===\n{request.user_input}{findings_tail}\n\nAnswer via the schema."
+    )
     return prefix, tail
 
 
@@ -252,8 +280,15 @@ async def run_authoring_workflow(
         request.model, request.reasoning, GroupingPlan, _grouping_prompt(request)
     )
     # 유령 id 방어 — 하네스 실측은 0/30 이었지만, 지어낸 번호가 D 까지 가면 반려다.
+    known_scenario_ids = {
+        s.scenario_id for s in request.current_scenarios if s.scenario_id is not None
+    }
     groups = [
-        Group(title=g.title, case_ids=[i for i in g.case_ids if i in known_ids])
+        Group(
+            title=g.title,
+            case_ids=[i for i in g.case_ids if i in known_ids],
+            scenario_id=g.scenario_id if g.scenario_id in known_scenario_ids else None,
+        )
         for g in plan.groups
     ]
     groups = [g for g in groups if g.case_ids]
@@ -261,7 +296,11 @@ async def run_authoring_workflow(
         run_id, "워크플로 B — 묶기·순서",
         f"묶음 {len(groups)}개" + (f" · 질문: {plan.question}" if plan.question else "")
         + (f"\n{plan.note}" if plan.note else "")
-        + "".join(f"\n  · {g.title} — {len(g.case_ids)}케이스" for g in groups),
+        + "".join(
+            f"\n  · {g.title} — {len(g.case_ids)}케이스"
+            + (f" (기존 id {g.scenario_id} 에 잇기)" if g.scenario_id is not None else "")
+            for g in groups
+        ),
     )
     if plan.question and not groups:
         return ScenarioAgentResult(message=plan.question, scenarios=[])
@@ -282,7 +321,11 @@ async def run_authoring_workflow(
             _grouping_prompt(request, findings=findings),
         )
         retried_groups = [
-            Group(title=g.title, case_ids=[i for i in g.case_ids if i in known_ids])
+            Group(
+                title=g.title,
+                case_ids=[i for i in g.case_ids if i in known_ids],
+                scenario_id=g.scenario_id if g.scenario_id in known_scenario_ids else None,
+            )
             for g in retried_plan.groups
         ]
         retried_groups = [g for g in retried_groups if g.case_ids]
@@ -310,7 +353,12 @@ async def run_authoring_workflow(
         except Exception as error:  # noqa: BLE001 — worker 하나가 판을 죽이면 안 된다
             logger.warning("[scenario] writer failed for %s: %s", group.title, error)
             return None
-        return ScenarioPlan(title=group.title, description=out.description, steps=out.steps)
+        return ScenarioPlan(
+            scenario_id=group.scenario_id,
+            title=group.title,
+            description=out.description,
+            steps=out.steps,
+        )
 
     def _unplaced(group: Group, plan_: ScenarioPlan | None) -> list[int]:
         if plan_ is None:
