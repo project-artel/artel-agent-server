@@ -308,6 +308,11 @@ def test_every_live_agent_has_a_v1(monkeypatch) -> None:
             "qa_run",
             "qa_compaction",
             "scenario",
+            # 저작 워크플로의 단계별 프롬프트 — 루프의 scenario(v9)에서 갈라져 나옴.
+            "scenario_router",
+            "scenario_grouping",
+            "scenario_writer",
+            "scenario_modify",
             "game_context",
             "knowledge_query",
             "screen_verdict",

@@ -42,7 +42,17 @@ THINKING_TEMPERATURE = 1.0
 # 추론 예산 위에 답이 설 자리. `max_tokens` 는 예산보다 커야 하고, 그 합이
 # `ModelSpec.max_input_tokens` 이 창에서 빼 둔 출력 예약분과 같아야 한다 — 두 수가
 # 어긋나면 압축이 도는 임계와 provider 가 거절하는 지점이 어긋난다.
-OUTPUT_RESERVE = 4_096
+#
+# 4,096 은 스트리밍 주석 자신이 적어 둔 실측과 어긋나 있었다 — 시나리오 서른 스텝짜리
+# 답 하나가 8,000 token 이다. 그 값으로 맞춘다.
+OUTPUT_RESERVE = 8_192
+
+# 예산은 상한이 아니라 **목표치**다(Anthropic 문서). 작은 과제에선 지켜지지만
+# (실측: 목표 1,024 에 사용 949), 88건 저작처럼 무거운 과제에선 넘는다 — 실측
+# (2026-09-08): 목표 4,096 에 8,188 token 을 생각하고도 문장 중간에서 잘렸다.
+# `max_tokens` 가 목표 바로 위에 있으면 생각이 창을 다 먹고 답도 도구 호출도 없이
+# 끝난다. 그래서 생각 자리는 목표의 두 배로 잡는다 — 그 실측이 정한 배수다.
+THINKING_HEADROOM = 2
 
 
 class _CachingChatBedrockConverse(ChatBedrockConverse):
@@ -114,12 +124,13 @@ def _bedrock(
         if reasoning is not None and reasoning.max_tokens is not None
         else spec.reasoning_default_tokens
     )
-    if budget is not None:
+    # 0 은 "끈다" — None(미지정→기본 예산)과 다르다. `ReasoningConfig.disabled` 참조.
+    if budget:
         extra["thinking"] = {"type": "enabled", "budget_tokens": budget}
         # `max_tokens` 가 예산보다 커야 한다(실측: `max_tokens must be greater than
         # thinking.budget_tokens`). 예산에 답할 자리를 더해 잡는다 — 이 값이 곧
         # `max_input_tokens` 이 빼 둔 출력 예약분이다.
-        max_tokens = budget + OUTPUT_RESERVE
+        max_tokens = budget * THINKING_HEADROOM + OUTPUT_RESERVE
         temperature = THINKING_TEMPERATURE
 
     return factory(
@@ -191,7 +202,8 @@ def build_chat_model(
     # when asked — without usage.include the response carries token counts and
     # no `cost`. Merged rather than assigned: reasoning shares this field.
     extra_body: dict[str, object] = {"usage": {"include": True}}
-    if reasoning is not None:
+    # disabled(max_tokens=0)면 아예 안 싣는다 — OpenRouter 는 안 실으면 안 켠다.
+    if reasoning is not None and not reasoning.disabled:
         extra_body["reasoning"] = reasoning.as_openrouter()
     if cache_prompt and get_model_spec(model).provider is LLMProvider.anthropic:
         # OpenRouter caches OpenAI and Google prompts by itself; Anthropic only

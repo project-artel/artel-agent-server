@@ -52,7 +52,7 @@ class CountingAgent(ScenarioAgent):
     def __init__(self, result: ScenarioAgentResult) -> None:
         self.calls = 0
 
-        def factory(*, model, tools, system_prompt):
+        def factory(*, model, tools, system_prompt, reasoning=None):
             def run(_inputs):
                 self.calls += 1
                 return {"messages": [], "structured_response": result}
@@ -445,7 +445,7 @@ def test_a_scenario_turn_books_its_spend_against_the_run() -> None:
         """
 
         def __init__(self) -> None:
-            def factory(*, model, tools, system_prompt):
+            def factory(*, model, tools, system_prompt, reasoning=None):
                 def run(_inputs):
                     seen.append(_scope.get())
                     return {"messages": [], "structured_response": _result()}

@@ -107,11 +107,46 @@ def test_chat_usage_becomes_one_record_in_the_wire_shape() -> None:
     assert record["calledAt"].endswith("Z")
 
 
-def test_cache_write_is_read_from_whichever_name_the_provider_used() -> None:
-    """이름이 provider 마다 다르다. 아는 것을 순서대로 보고 하나만 쓴다.
+def test_cache_writes_survive_the_ephemeral_ttl_shape() -> None:
+    """langchain-aws 는 cacheDetails 가 오면 cache_creation 을 0 으로 덮고 같은 값을
+    ephemeral_5m/1h 키로 옮겨 담는다 — 그 모양에서도 쓰기가 원장에 남아야 한다.
+    (원장 전부 0 vs CloudWatch 호출당 ~19.7k 로 실측된 그 구멍.)"""
+    sender = RecordingSender()
+    buffer = _buffer(sender, flush_size=1)
+    message = AIMessage(
+        content="done",
+        usage_metadata={
+            "input_tokens": 42890,
+            "output_tokens": 2016,
+            "total_tokens": 44906,
+            "input_token_details": {
+                "cache_read": 37067,
+                "cache_creation": 0,
+                "ephemeral_5m_input_tokens": 5600,
+                "ephemeral_1h_input_tokens": 123,
+            },
+        },
+    )
+    result = LLMResult(
+        generations=[[ChatGeneration(message=message)]],
+        llm_output={"model_name": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"},
+    )
 
-    Bedrock 은 둘 다 실어 보내면서 `cache_creation` 에 0 을 넣는다. 더하면 같은 토큰을
-    두 번 세므로, 값이 있는 첫 이름 하나를 쓴다.
+    async def scenario() -> None:
+        set_usage_scope("SCENARIO", 47)
+        await _feed_chat(UsageCallback(buffer), result)
+
+    asyncio.run(scenario())
+
+    (record,) = sender.payloads[0]["records"]
+    assert record["cachedInputTokens"] == 37067
+    assert record["cacheWriteTokens"] == 5723  # 5m + 1h 합 — 0 이라고 적지 않는다
+
+def test_cache_write_is_read_from_whichever_name_the_provider_used() -> None:
+    """이름이 provider 마다 다르다. TTL 내역(서로소)은 합치고, 없을 때만 cache_creation.
+
+    Bedrock 은 둘 다 실어 보내면서 `cache_creation` 에 0 을 넣는다 — 내역과 그것을
+    더하면 같은 토큰을 두 번 센다.
     """
     from app.llm.usage import _cache_write_of
 
