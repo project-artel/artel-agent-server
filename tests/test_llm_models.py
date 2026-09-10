@@ -1,6 +1,14 @@
 """The model catalog's numbers, and what depends on them being right."""
 
-from app.llm.models import MODEL_SPECS, list_models
+from app.llm.models import MODEL_SPECS, LLMModel, list_models
+
+
+def test_every_model_in_the_enum_has_a_spec() -> None:
+    """`get_model_spec` raises for a member with no entry in `MODEL_SPECS`, and the
+    first thing that calls it is a request naming that model — so an enum entry
+    added without a spec reaches a caller as a 500 rather than a startup failure.
+    Adding a slug and forgetting the spec is the easy half of the mistake."""
+    assert set(LLMModel) == set(MODEL_SPECS)
 
 
 def test_every_model_declares_an_input_budget() -> None:
