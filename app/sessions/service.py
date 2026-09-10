@@ -14,7 +14,8 @@ from app.agents import (
     AuthoredFlow,
     TestCaseListItem,
 )
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.default_model import resolve_default_model
+from app.llm.models import LLMModel
 from app.llm.usage import set_usage_scope
 from app.sessions.channel import ScenarioChannel
 from app.sessions.schemas import HistoryTurn, SessionRecord
@@ -41,13 +42,14 @@ class SessionService:
         test_case_list: list[TestCaseListItem] | None = None,
         flows: list[AuthoredFlow] | None = None,
         entry_scene: str | None = None,
-        model: LLMModel = DEFAULT_MODEL,
+        model: LLMModel | None = None,
         locale: OutputLanguage = DEFAULT_LANGUAGE,
         test_scenario_id: int | None = None,
         run_id: int | None = None,
         project_id: int | None = None,
         current_scenarios: list[ScenarioPlan] | None = None,
     ) -> str:
+        model = model or resolve_default_model()
         session_id = uuid.uuid4().hex
         record = SessionRecord(
             unity_context=unity_context,

@@ -14,7 +14,8 @@ from app.agents import AgentContext, GameContext, GameContextAgent
 from app.agents.game_context import GameContextAgentRequest
 from app.documents.fetch import fetch_document
 from app.documents.loader import extract_document_text
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.default_model import resolve_default_model
+from app.llm.models import LLMModel
 from app.llm.usage import set_usage_scope
 
 
@@ -38,9 +39,10 @@ class ExtractionService:
         self,
         source_url: str,
         filename: str,
-        model: LLMModel = DEFAULT_MODEL,
+        model: LLMModel | None = None,
         document_id: int | None = None,
     ) -> GameContext:
+        model = model or resolve_default_model()
         set_usage_scope("GAME_CONTEXT", document_id)
         fetched = await fetch_document(
             source_url,

@@ -16,7 +16,8 @@ from app.agents import (
     AuthoredFlow,
     TestCaseListItem,
 )
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.default_model import resolve_default_model
+from app.llm.models import LLMModel
 from app.sessions.channel import ScenarioChannel
 from app.sessions.service import SessionService
 from app.sessions.store import SessionExpired
@@ -40,7 +41,7 @@ class OpenSessionRequest(BaseModel):
     # Which screen the game boots into (ARTEL-670). Empty from an older orchestration.
     entry_scene: str | None = None
     user_input: str
-    model: LLMModel = DEFAULT_MODEL
+    model: LLMModel = Field(default_factory=resolve_default_model)
     # Applies to the whole session, including the first turn (run from the stored
     # pending input when the WS connects), so it must be set here, not only on the
     # per-turn message below.

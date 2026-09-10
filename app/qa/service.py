@@ -9,7 +9,7 @@ from app.agents.qa.arch import DEFAULT_ARCH, QaArchSpec
 from app.agents.qa.reset import DEFAULT_RESET_POLICY, ResetPolicy
 from app.agents.qa.runner import QaRunner
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage
-from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig
+from app.llm.models import LLMModel, ReasoningConfig
 from app.llm.usage import set_usage_scope
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import (
@@ -75,7 +75,7 @@ class QaExecutionService:
         qa_run_id: int,
         game_instance_id: int,
         scenarios: list[QaRunScenario],
-        model: LLMModel = DEFAULT_MODEL,
+        model: LLMModel | None = None,
         language: OutputLanguage = DEFAULT_LANGUAGE,
         prompt_version: str | None = None,
         reasoning: ReasoningConfig | None = None,

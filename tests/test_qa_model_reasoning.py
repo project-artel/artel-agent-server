@@ -201,7 +201,7 @@ def test_service_rejects_invalid_reasoning_before_saving() -> None:
                         qa_try_id=7, test_scenario_id=1, scenario=make_scenario()
                     )
                 ],
-                # Named rather than left to DEFAULT_MODEL: the default now
+                # Named rather than left to the deployment default: that default
                 # reasons, and this case needs a model that does not.
                 model=LLMModel.gpt_chat_latest,
                 reasoning=ReasoningConfig(effort=ReasoningEffort.low),
