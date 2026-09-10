@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,6 +29,22 @@ class Settings(BaseSettings):
         default="https://openrouter.ai/api/v1",
         validation_alias=AliasChoices("LLM_BASE_URL", "OPENROUTER_BASE_URL"),
     )
+    # model 을 안 지정한 호출이 어느 model 로 가나. **비우면 `FALLBACK_MODEL` 을
+    # 따른다** (`app/llm/default_model.py`), 그래서 이 값을 설정하지 않은 배포는
+    # 종전과 똑같이 돈다.
+    #
+    # 이것이 설정인 이유: 이 값이 `bedrock/` 로 시작하면 model 을 안 지정한 호출
+    # 전부가 Bedrock 으로 가고, 안 그러면 `llm_base_url` 로 간다. 그 선택이 코드에
+    # 박혀 있으면 provider 를 옮기는 배포가 이미지를 다시 빌드해야 한다.
+    #
+    # 실제로 그것 때문에 깨졌다. orchestration 이 `POST /extract` 에 model 을 안
+    # 실어 보내는데 (`artel.agent.extract.model` 이 기본으로 비어 있다) 기본값이
+    # OpenRouter slug 라, 그 계정 credit 이 떨어진 배포에서 기획 문서 지식 추출만
+    # 죽었다 (ARTEL-884). `qa_compaction_model` 이 겪은 것과 같은 실패다.
+    #
+    # `LLMModel` 로 타입을 못 붙이는 이유는 `qa_compaction_model` 과 같다 — 아래
+    # `known_model` 이 그 자리에서 catalog 를 확인한다.
+    default_model: str | None = None
     openrouter_site_url: str | None = None
     openrouter_app_title: str = "Artel Agent Server"
     # Per-request ceiling on a model call, and how many times the client retries.
@@ -122,9 +138,9 @@ class Settings(BaseSettings):
     # 슬러그를 적으면 된다.
     qa_compaction_model: str | None = None
 
-    @field_validator("qa_compaction_model")
+    @field_validator("qa_compaction_model", "default_model")
     @classmethod
-    def known_model(cls, value: str | None) -> str | None:
+    def known_model(cls, value: str | None, info: ValidationInfo) -> str | None:
         if value is None or value == "":
             return None
 
@@ -135,7 +151,7 @@ class Settings(BaseSettings):
         except ValueError as error:
             known = ", ".join(model.value for model in LLMModel)
             raise ValueError(
-                f"qa_compaction_model '{value}' is not in the catalog. Known: {known}."
+                f"{info.field_name} '{value}' is not in the catalog. Known: {known}."
             ) from error
         return value
     scenario_prompt_version: str | None = None

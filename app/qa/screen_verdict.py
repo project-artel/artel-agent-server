@@ -36,7 +36,8 @@ from app.agents.screen_verdict import (
     ScreenVerdictError,
     ScreenVerdictRequest,
 )
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.default_model import resolve_default_model
+from app.llm.models import LLMModel
 from app.llm.usage import set_usage_scope
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import (
@@ -85,11 +86,12 @@ class ScreenSelectorAdjudicator:
 
     def __init__(
         self,
-        model: LLMModel = DEFAULT_MODEL,
+        model: LLMModel | None = None,
         agent: ScreenVerdictAgent | None = None,
         timeout: float = VERDICT_TIMEOUT_SECONDS,
         max_in_flight: int = MAX_VERDICTS_IN_FLIGHT,
     ) -> None:
+        model = model or resolve_default_model()
         self._model = model
         self._agent = agent or ScreenVerdictAgent()
         self._timeout = timeout
