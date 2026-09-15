@@ -86,7 +86,8 @@ from app.llm.models import LLMModel, get_model_spec
 # cells by, so an arm left on the default label shares its cell with every run
 # this deployment has ever done.
 #
-# * `v4-capture-on-demand` — `screen_capture=on_demand`, today's run.
+# * `v4-capture-on-demand` — `screen_capture=on_demand`, which is what the
+#   default run still does under the label below.
 # * `v4-capture-every-call` — the first `every_call` build, which stored the
 #   picture in the conversation. Retired. It read 1.3% of its input from cache
 #   against the baseline's 97.3% and cost $14.22 against $0.87, because storing a
@@ -103,7 +104,22 @@ from app.llm.models import LLMModel, get_model_spec
 #   middleware order, and none of those moved. The label is the only thing that
 #   separates the two builds in the record, which is the case the module docstring
 #   above says the hand-bumped label exists for.
-QA_ARCH_LABEL = "v4-screen-text"
+#
+# The four arm labels keep their `v4-` names now that the default has moved to
+# v5. They are how runs already in `/api/qa-stats` are filed, and renaming them
+# here would leave those runs under a name nothing in the source carries.
+#
+# v5 because every pointer tool now aims with one `target` string instead of
+# `x`/`y` (`app/agents/qa/tools/action_tools.py`). `click_at` became `click`,
+# `double_click_at` became `double_click`, `drag_pointer` became `drag` with an
+# independent target at each end, and `move_pointer` kept its name but not its
+# arguments. A target is a screen point, a Unity instance id, or a hierarchy
+# selector, and the SDK resolves the last two at the moment the action runs
+# rather than when the scene was read. Two things the agent could not do before:
+# drag an element the scene gives an id for, and hit a target that moved between
+# the observation and the click. Three tool names and four tool schemas moved, so
+# the fingerprint moves with the label here.
+QA_ARCH_LABEL = "v5-pointer-target"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
