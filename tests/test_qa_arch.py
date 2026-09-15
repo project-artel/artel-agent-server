@@ -198,6 +198,44 @@ def test_the_two_capture_arms_are_two_structures_with_one_tool_set() -> None:
     assert on_demand_print != every_call_print
 
 
+def test_the_three_capture_modes_are_three_structures_with_one_tool_set() -> None:
+    """세 mode 가 digest 로 갈리고 tool 은 셋 다 같다.
+
+    갈리지 않으면 `agent_fingerprint` 가 세 구현을 한 구조로 묶고, tool 이 다르면 arm 이
+    두 가지로 달라져 비교가 축 하나에 대한 것이 아니게 된다.
+    """
+    resolved_modes = {
+        mode: resolve_arch(
+            QaArchSpec(vision=VisionMode.on, screen_capture=mode), LLMModel.gpt_chat_latest
+        )
+        for mode in ScreenCaptureMode
+    }
+    structures = {mode: structure_of(arch) for mode, arch in resolved_modes.items()}
+
+    tool_names = {names for names, _middleware, _print in structures.values()}
+    assert len(tool_names) == 1
+
+    fingerprints = [print_ for _names, _middleware, print_ in structures.values()]
+    assert len(set(fingerprints)) == len(ScreenCaptureMode)
+
+
+def test_every_automatic_mode_is_refused_without_vision(monkeypatch) -> None:
+    """`by_role` 도 `every_call` 과 같은 이유로 거절된다.
+
+    `middleware_names_for` 가 vision 이 켜진 런에만 `capture_vision` 을 붙이므로, 통과시키면
+    그림을 실으라고 적힌 런이 한 장도 없이 돈다.
+    """
+    blind = replace(get_model_spec(LLMModel.gpt_chat_latest), input_modalities=("text",))
+    monkeypatch.setattr(arch_module, "get_model_spec", lambda _model: blind)
+
+    for mode in (ScreenCaptureMode.every_call, ScreenCaptureMode.by_role):
+        with pytest.raises(QaArchError, match="needs vision"):
+            resolve_arch(QaArchSpec(screen_capture=mode), LLMModel.gpt_chat_latest)
+
+    # 기본 mode 는 그대로 통과한다.
+    assert resolve_arch(QaArchSpec(), LLMModel.gpt_chat_latest).vision is False
+
+
 def test_deleting_without_being_able_to_replace_is_refused() -> None:
     """`knowledge.py` exempts a replacement write from the record cap so that a
     correction cannot strand halfway. A spec that allows deletions and no records

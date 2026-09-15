@@ -92,6 +92,11 @@ from app.llm.models import LLMModel, get_model_spec
 #   against the baseline's 97.3% and cost $14.22 against $0.87, because storing a
 #   picture per turn means editing an already-sent message to dispose of the last
 #   one, and that moves the prefix out from under the cache boundary.
+# * `v4-capture-by-role` — `screen_capture=by_role` (ARTEL-870). Two to four
+#   pictures a call instead of one, chosen by what the run has done: the current
+#   screen, the screen before the last action, and — when there is one — the scene
+#   change and the last failure. Same tool set, same middleware; only the number of
+#   transient messages moves, so the fingerprint separates it through the knob.
 # * `v4-capture-transient` — the same knob after that fix: the picture rides on
 #   one request and is never stored. **Same `screen_capture` value, so the same
 #   fingerprint** — `arch_fingerprint` hashes the knobs, the tool schemas and the
@@ -169,6 +174,16 @@ class ScreenCaptureMode(StrEnum):
     and the string lands verbatim in `run_config`, where `screen_capture=every_call`
     reads in a report and `auto_capture=true` does not.
 
+    ``by_role`` is ``every_call`` with more than one picture. It carries the current
+    screen, the screen as it was just before the last action, and — when there is
+    one — the screen at the last scene change and at the last failure. Two, three
+    or four, decided by what the run has done rather than by the model. The pilot
+    that motivates it is in `ARTEL-868`: matched against the labelled steps, the
+    `every_call` arm caught one of L1's six deliberately-refused steps and the
+    baseline caught none and two. One picture says what is on screen; most QA
+    verdicts turn on what *changed* when something was pressed, and that needs the
+    pair.
+
     `every_call` does NOT remove `capture_screen` from the tool set. Removing it
     would make the arm two changes rather than one: the picture arriving unasked,
     and the loss of the cropped close-up of a single element that the tool's
@@ -179,6 +194,7 @@ class ScreenCaptureMode(StrEnum):
 
     on_demand = "on_demand"
     every_call = "every_call"
+    by_role = "by_role"
 
 
 class QaArchError(ValueError):
@@ -379,11 +395,12 @@ def resolve_arch(spec: QaArchSpec, model: LLMModel) -> ResolvedArch:
     # `middleware_names_for` only wires `capture_vision` when vision is on, so a
     # downgrade would leave a run labelled `every_call` running with no pictures at
     # all — the wrong-bucket failure the refusal above exists to prevent.
-    if spec.screen_capture is ScreenCaptureMode.every_call and not vision:
+    if spec.screen_capture is not ScreenCaptureMode.on_demand and not vision:
         raise QaArchError(
-            f"screen_capture='every_call' needs vision, and this run resolved to "
-            f"vision off (model '{model.value}', vision='{spec.vision.value}'). "
-            f"Use screen_capture='on_demand', or a model that reads images."
+            f"screen_capture='{spec.screen_capture.value}' needs vision, and this run "
+            f"resolved to vision off (model '{model.value}', "
+            f"vision='{spec.vision.value}'). Use screen_capture='on_demand', or a "
+            f"model that reads images."
         )
     return _resolved(spec, vision)
 
