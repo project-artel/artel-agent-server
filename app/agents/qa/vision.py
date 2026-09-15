@@ -17,6 +17,10 @@ import httpx
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 
+from app.agents.qa.arch import ScreenCaptureMode
+from app.agents.qa.tools.state import PendingCapture, capture_from_action_result
+from app.qa.envelope import JsonRpcAction
+
 logger = logging.getLogger(__name__)
 
 # Images older than this are replaced with a line of text saying one was there.
@@ -33,9 +37,36 @@ from app.agents.qa.arch import MAX_CAPTURES_PER_RUN  # noqa: E402 - re-export
 
 DOWNLOAD_TIMEOUT_SECONDS = 15.0
 
+# How long an automatic capture waits for the game, in `every_call` runs only.
+#
+# Well under `ACTION_TIMEOUT_SECONDS` (30.0), which is what a tool call may wait.
+# A tool capture happens when the model decides to look; an automatic one happens
+# on every model call, so 30 seconds of silence per call would make a slow game
+# indistinguishable from a wedged run.
+#
+# Not shorter than this either. One normal capture is `WaitForEndOfFrame`, an
+# encode, a presign POST and an S3 PUT, and three game slots sharing a machine
+# still finish inside ten seconds. Cutting it further would start timing out
+# captures that were about to arrive, and a capture that times out and lands late
+# is the input to the `correlationId` fallback in `QaRunChannel._action_waiter_for`
+# — the one place a late answer can be read as the next action's.
+#
+# The waiting this arm adds to a model call is 25 seconds, not 10: the fetch that
+# follows a successful capture is bounded separately by `DOWNLOAD_TIMEOUT_SECONDS`
+# (15.0). Under `on_demand` that 15 was paid only on the turns the model asked to
+# look; here it is on every turn.
+AUTO_CAPTURE_TIMEOUT_SECONDS = 10.0
+
 # Marks the messages this module owns, so the trimming pass can find them without
 # guessing from content shape.
 CAPTURE_MESSAGE_KEY = "artel_capture_id"
+
+# Marks a message that rides on one request and is never stored, so the cache
+# boundary can be written before it rather than after
+# (`_CachingChatBedrockConverse._with_cache_point`). A boundary written after it
+# would put a picture that changes every turn inside the cached prefix, which is
+# the same lost read this arm exists to avoid.
+TRANSIENT_MESSAGE_KEY = "artel_transient"
 
 _ALLOWED_MIME_TYPES = frozenset({"image/jpeg", "image/png"})
 
@@ -152,14 +183,97 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
     Anthropic slugs included. Injecting from `before_model` also puts the image
     after all of that turn's tool results, which is the ordering Anthropic
     requires.
+
+    In an `every_call` run this hook also *takes* the capture, rather than only
+    placing one the model asked for. That is safe to do here for a reason worth
+    writing down: LangChain gives every middleware overriding `before_model` its
+    own graph node, and those nodes are chained ahead of the single `model` node
+    (`langchain/agents/factory.py`). `QaCompactionMiddleware` calls its summarizer
+    inside its own hook rather than through the graph, so this hook never wraps
+    that call. One automatic capture per turn of the QA agent's own model, and
+    none around the summarizer.
     """
 
-    def __init__(self, state, max_images: int = MAX_IMAGES_IN_REQUEST) -> None:
+    def __init__(
+        self,
+        state,
+        channel=None,
+        arch=None,
+        max_images: int = MAX_IMAGES_IN_REQUEST,
+        auto_capture_timeout: float = AUTO_CAPTURE_TIMEOUT_SECONDS,
+    ) -> None:
         super().__init__()
         self._state = state
+        self._channel = channel
+        self._arch = arch
         self._max_images = max_images
+        # Injectable for the same reason `QaRunChannel.action_timeout` is: a test
+        # that waited out the real one would pay ten seconds to prove a timeout.
+        self._auto_capture_timeout = auto_capture_timeout
+
+    def _captures_every_call(self) -> bool:
+        """Read from the arch alone, so a missing channel raises instead of hiding.
+
+        Keying this on `self._channel is not None` as well would turn a wiring
+        mistake into a run recorded as `every_call` that never captures — the
+        wrong-bucket failure `resolve_arch` refuses `every_call` without vision to
+        prevent, put back one layer down. `_auto_capture` is where the `None`
+        shows up, and an `AttributeError` there is the right kind of loud.
+        """
+        return getattr(self._arch, "screen_capture", None) is ScreenCaptureMode.every_call
+
+    async def _auto_capture(self) -> PendingCapture | None:
+        """Ask the game for the screen, for a run that reads it on every call.
+
+        Returns `None` for every failure the game can produce — it is busy, its SDK
+        does not know the action, the answer is late — and the turn then goes on
+        with no new picture. `trim_images` still holds the last two, so the model
+        is looking at a screen one turn old rather than at nothing.
+
+        `QaCancelled` from `dispatch_actions` is deliberately NOT caught. The
+        operator ending the run has to stop the run, and every tool re-raises it
+        for that reason; catching it here would swallow a cancel on every model
+        call.
+
+        `state.captures_attempted` is deliberately not touched. That counter is the
+        model's tool ration and `max_captures_per_run` builds the tool's refusal
+        message out of it; spending it here would ration a budget the model never
+        asked to spend.
+
+        No `channel.note` either. One line per model call would bury the timeline a
+        person reads, and the ACTION row Orchestration writes for this dispatch is
+        already the durable record — a note here is also what would make an
+        automatic capture indistinguishable from a tool one when they are counted
+        afterwards.
+        """
+        result = await self._channel.dispatch_actions(
+            [JsonRpcAction(id=1, method="capture_screen", params=[])],
+            "Capturing the screen",
+            timeout=self._auto_capture_timeout,
+        )
+        if result is None or not result.results:
+            logger.warning("[QA] the game did not answer the automatic capture")
+            return None
+
+        capture = capture_from_action_result(result.results[0], "the screen")
+        if capture is None:
+            item = result.results[0]
+            logger.warning(
+                "[QA] automatic capture produced no image: %s",
+                item.error or "no reason given",
+            )
+        return capture
 
     async def abefore_model(self, state, runtime) -> dict | None:
+        """Put the captures the model asked for into the conversation.
+
+        `on_demand` only. In `every_call` the picture never enters the stored
+        conversation at all — `awrap_model_call` below puts it in the request and
+        nowhere else, and the reason is the prompt cache. Draining here would leave
+        this hook competing with that one for the same queue.
+        """
+        if self._captures_every_call():
+            return None
         pending = self._state.take_pending_captures()
         if not pending:
             return None
@@ -192,4 +306,64 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
         return {"messages": messages} if messages else None
 
     async def awrap_model_call(self, request, handler):
-        return await handler(request.override(messages=trim_images(request.messages, self._max_images)))
+        """Trim images for `on_demand`; hand `every_call` exactly one, and only here.
+
+        ## Why `every_call` does not put the picture in the conversation
+
+        The cache boundary is written at the end of the prompt
+        (`_CachingChatBedrockConverse._with_cache_point`), so the next turn reads
+        this whole prompt back — but only while every byte of it is the same again.
+
+        Storing a picture per turn cannot keep that promise, whichever way the old
+        ones are disposed of. `trim_images` rewrites them into text and a deletion
+        would remove them outright; both edit a message that has already been sent,
+        so the prefix diverges and the read is lost. Measured on a real run: the
+        `on_demand` arm read 97.3% of its input from cache and the `every_call` arm
+        1.3%, and the bill went from $0.87 to $14.22 while input tokens rose only
+        1.25x (ARTEL-868). The whole difference was cache writes nothing ever read.
+
+        So the conversation stays text and append-only, and the picture is added to
+        this one request and thrown away. Nothing older is ever disposed of because
+        nothing older was ever kept. Each turn then costs a cache read over the
+        prefix plus one image at full price.
+
+        Exactly one image, the freshest there is: an automatic whole-screen capture,
+        or the close-up if the model asked for one this turn. `MAX_IMAGES_IN_REQUEST`
+        does not apply — it bounds how many pictures a *stored* transcript resends,
+        and this transcript stores none.
+        """
+        if not self._captures_every_call():
+            return await handler(
+                request.override(messages=trim_images(request.messages, self._max_images))
+            )
+
+        message = await self._current_screen_message()
+        messages = request.messages if message is None else [*request.messages, message]
+        return await handler(request.override(messages=messages))
+
+    async def _current_screen_message(self):
+        """One `HumanMessage` holding the current screen, or `None` if there is none.
+
+        A capture the tool queued this turn wins over taking a new one: it is at
+        least as fresh, the round trip is already paid, and when it is a `target_id`
+        close-up it is what the model asked to look at.
+        """
+        pending = self._state.take_pending_captures()
+        capture = pending[-1] if pending else await self._auto_capture()
+        if capture is None:
+            return None
+        try:
+            encoded = await fetch_capture(capture.url, capture.mime_type)
+        except CaptureFetchError as error:
+            # Not fatal, and not worth telling the model about either: it did not
+            # ask for this picture, so a line explaining its absence would be noise
+            # on a turn that reads the screen text instead.
+            logger.warning(
+                "[QA] capture %s could not be fetched: %s", capture.capture_id, error
+            )
+            return None
+        message = build_capture_message(
+            capture.capture_id, encoded, capture.mime_type, capture.caption
+        )
+        message.additional_kwargs[TRANSIENT_MESSAGE_KEY] = True
+        return message

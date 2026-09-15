@@ -8,7 +8,7 @@
 from dataclasses import dataclass
 from typing import Any
 
-from app.qa.envelope import JsonRpcAction
+from app.qa.envelope import ActionResultItem, JsonRpcAction
 from app.qa.schemas import QaStepResult
 
 
@@ -20,6 +20,51 @@ class PendingCapture:
     url: str
     mime_type: str
     caption: str
+    # False for a `target_id` capture, which is one element cropped at 512px
+    # rather than the whole screen.
+    #
+    # Only the caption distinguished the two before, and a `screen_capture`
+    # run that skips its automatic capture whenever anything is pending would
+    # skip it exactly on the turn the model asked for a close-up — the one turn
+    # where the two pictures show different things and both are worth having.
+    whole_screen: bool = True
+
+
+def capture_from_action_result(
+    item: ActionResultItem, what: str, whole_screen: bool = True
+) -> PendingCapture | None:
+    """The `PendingCapture` an `ACTION_RESULT` describes, or `None` if it has none.
+
+    `None` covers all three ways a capture comes back with no image to read: the
+    action failed, or it succeeded with no `returnValue`, or with one that carries
+    no `url`. The caller says what to do about it, because the two callers say
+    different things — the tool answers the model in words, the vision middleware
+    logs and lets the turn go on without a picture.
+
+    Here rather than in either caller because both need the same reading of the
+    same payload, and a second copy is how the caption and the `clipped` note
+    drift apart.
+    """
+    if not item.success:
+        return None
+    captured = item.returnValue or {}
+    url = captured.get("url")
+    if not url:
+        return None
+
+    caption = f"This is {what} right now."
+    if captured.get("clipped"):
+        # Worth saying out loud: a cropped-off element is itself a finding, and
+        # the agent would otherwise read the partial image as the whole thing.
+        caption += " Part of it is off the edge of the screen."
+
+    return PendingCapture(
+        capture_id=str(captured.get("captureId") or ""),
+        url=url,
+        mime_type=str(captured.get("mimeType") or "image/jpeg"),
+        caption=caption,
+        whole_screen=whole_screen,
+    )
 
 
 class QaRunState:

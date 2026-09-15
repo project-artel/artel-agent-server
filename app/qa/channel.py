@@ -395,7 +395,11 @@ class QaRunChannel:
         return True
 
     async def dispatch_actions(
-        self, actions: list[JsonRpcAction], message: str, step: int | None = None
+        self,
+        actions: list[JsonRpcAction],
+        message: str,
+        step: int | None = None,
+        timeout: float | None = None,
     ) -> ActionResultPayload | None:
         """Run actions on the game. `None` means no result came back.
 
@@ -404,6 +408,15 @@ class QaRunChannel:
         entry is removed in `finally` — a timeout, a cancellation or a failed send
         all leave through it, and an entry left behind would be a waiter nobody
         will ever resolve.
+
+        `timeout` overrides `action_timeout` for this batch alone. A caller that
+        sends on every model call cannot afford the 30 seconds a tool call may
+        wait: the run would be indistinguishable from a wedged one. The override
+        lives here rather than in an `asyncio.wait_for` around the call because
+        this method answers a timeout with `None` instead of raising, and wrapping
+        it from outside would make every such caller re-implement that answer.
+        `__init__` already takes `action_timeout` for the same reason; this is the
+        same idea one scope narrower.
         """
         self._raise_if_cancelled()
         loop = asyncio.get_running_loop()
@@ -416,7 +429,9 @@ class QaRunChannel:
         self._action_waiters[message_id] = waiter
         try:
             await self._send(frame)
-            return await asyncio.wait_for(waiter, timeout=self._action_timeout)
+            return await asyncio.wait_for(
+                waiter, timeout=self._action_timeout if timeout is None else timeout
+            )
         except asyncio.TimeoutError:
             return None
         finally:

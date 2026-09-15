@@ -45,6 +45,16 @@ THINKING_TEMPERATURE = 1.0
 OUTPUT_RESERVE = 4_096
 
 
+def _is_transient(message: BaseMessage) -> bool:
+    """이번 요청에만 실렸고 저장되지 않는 메시지인가.
+
+    `app/agents/qa/vision.py` 의 `TRANSIENT_MESSAGE_KEY` 를 읽는다. 그 이름을 여기서
+    import 하지 않는 것은 `app/llm` 이 `app/agents` 를 모르게 두기 위해서다 —
+    의존은 지금 한 방향이고, 캐시 경계를 찍자고 그것을 뒤집을 이유가 없다.
+    """
+    return bool((getattr(message, "additional_kwargs", None) or {}).get("artel_transient"))
+
+
 class _CachingChatBedrockConverse(ChatBedrockConverse):
     """프롬프트 끝에 캐시 경계를 찍고 부른다.
 
@@ -65,7 +75,18 @@ class _CachingChatBedrockConverse(ChatBedrockConverse):
     def _with_cache_point(self, messages: list[BaseMessage]) -> list[BaseMessage]:
         if not messages:
             return messages
-        last = messages[-1]
+        # 뒤에서부터 "이번 요청에만 실린" 메시지를 건너뛰고 경계를 찍는다.
+        #
+        # 경계 뒤는 캐시에 안 들어간다. 매 턴 바뀌는 것을 경계 **앞**에 두면 그 뒤로
+        # 되읽을 것이 사라지므로, 화면 그림처럼 한 번 실렸다 버려지는 메시지는 경계
+        # 밖에 있어야 한다. 그러면 앞의 대화는 그대로 되읽히고 그림 한 장만 정가다.
+        cut = len(messages)
+        while cut > 0 and _is_transient(messages[cut - 1]):
+            cut -= 1
+        if cut == 0:
+            return messages
+        head, tail = messages[:cut], messages[cut:]
+        last = head[-1]
         content = last.content
         blocks: list[Any] = (
             [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
@@ -74,7 +95,8 @@ class _CachingChatBedrockConverse(ChatBedrockConverse):
         # 재시도로 같은 메시지가 두 번 지나가는 일이 있다.
         if any(isinstance(b, dict) and "cachePoint" in b for b in blocks):
             return messages
-        return [*messages[:-1], last.model_copy(update={"content": [*blocks, CACHE_POINT]})]
+        marked = last.model_copy(update={"content": [*blocks, CACHE_POINT]})
+        return [*head[:-1], marked, *tail]
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         return super()._generate(self._with_cache_point(messages), stop, run_manager, **kwargs)

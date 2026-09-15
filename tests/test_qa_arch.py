@@ -26,6 +26,7 @@ from app.agents.qa.arch import (
     QaArchError,
     QaArchSpec,
     ResolvedArch,
+    ScreenCaptureMode,
     TOOL_CALLS_PER_STEP,
     VisionMode,
     resolve_arch,
@@ -144,6 +145,57 @@ def test_vision_on_is_refused_when_the_model_cannot_see(monkeypatch) -> None:
 
     # `auto` still resolves, to the truth about the model.
     assert resolve_arch(QaArchSpec(vision=VisionMode.auto), LLMModel.gpt_chat_latest).vision is False
+
+
+def test_every_call_is_refused_when_the_run_resolves_to_no_vision(monkeypatch) -> None:
+    """The `vision='auto'` case is the one that matters, and only resolution knows it.
+
+    `middleware_names_for` wires `capture_vision` only when vision is on, so a run
+    allowed through here with vision off would carry `screen_capture=every_call` in
+    `run_config` and never see a single picture. That is the same wrong-data-point
+    failure `test_vision_on_is_refused_when_the_model_cannot_see` guards, one axis
+    over — and it cannot be caught from the spec alone, because `vision='auto'` is
+    still `auto` until a model is named.
+    """
+    blind = replace(get_model_spec(LLMModel.gpt_chat_latest), input_modalities=("text",))
+    monkeypatch.setattr(arch_module, "get_model_spec", lambda _model: blind)
+
+    every_call = QaArchSpec(screen_capture=ScreenCaptureMode.every_call)
+    with pytest.raises(QaArchError, match="needs vision"):
+        resolve_arch(every_call, LLMModel.gpt_chat_latest)
+
+    stated_off = QaArchSpec(vision=VisionMode.off, screen_capture=ScreenCaptureMode.every_call)
+    with pytest.raises(QaArchError, match="needs vision"):
+        resolve_arch(stated_off, LLMModel.gpt_chat_latest)
+
+    # The default mode is unaffected by any of this.
+    assert resolve_arch(QaArchSpec(), LLMModel.gpt_chat_latest).vision is False
+
+
+def test_the_two_capture_arms_are_two_structures_with_one_tool_set() -> None:
+    """What makes the pilot a comparison rather than two unrelated runs.
+
+    The arms have to hash apart, or `agent_fingerprint` files them as one
+    structure. They also have to offer the model the same tools, or the arm is two
+    changes — the picture arriving unasked, and a tool the other arm had.
+    `capture_screen`'s description differs between them, which `arch_fingerprint`
+    does not hash; `screen_capture` is what carries that difference into the digest.
+    """
+    on_demand = resolved(vision=VisionMode.on)
+    every_call = resolve_arch(
+        QaArchSpec(vision=VisionMode.on, screen_capture=ScreenCaptureMode.every_call),
+        LLMModel.gpt_chat_latest,
+    )
+
+    on_demand_tools, on_demand_middleware, on_demand_print = structure_of(on_demand)
+    every_call_tools, every_call_middleware, every_call_print = structure_of(every_call)
+
+    assert on_demand_tools == every_call_tools
+    # The middleware list too, so "the arms differ by exactly one thing" is checked
+    # rather than half checked: `capture_vision` is in both, and the axis changes
+    # what it does rather than whether it is there.
+    assert on_demand_middleware == every_call_middleware
+    assert on_demand_print != every_call_print
 
 
 def test_deleting_without_being_able_to_replace_is_refused() -> None:
@@ -364,7 +416,10 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
     "capture_screen",
     "compact_context",
 )
-_EXPECTED_DEFAULT_FINGERPRINT = "e8e1d4764809"
+# Moved by `screen_capture` joining `QaArchSpec` (ARTEL-868). The tool names and
+# the label above did not move with it — see the fourth bullet in the docstring
+# below for why a new axis field is the fingerprint-only case.
+_EXPECTED_DEFAULT_FINGERPRINT = "9f68c0fa44ab"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
@@ -397,6 +452,16 @@ def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
       changed, then decide by the same rule: a real structural change gets a
       label bump, a change to a tool's description text or a docstring does
       not — update only `_EXPECTED_DEFAULT_FINGERPRINT` in that case.
+    * A new `QaArchSpec` axis whose default leaves the default run's tools,
+      middleware and knobs exactly as they were is that second case, not the
+      first, even though a field was added to the spec. Every structure's digest
+      moves, because `arch_fingerprint` hashes `arch.model_dump()` and the dump
+      gained a key — but nothing the default run *does* moved, so there is no
+      second shape to name and the label stays. `fold_stale_knowledge`
+      (`d78e6d4`) is the precedent, and `screen_capture` (ARTEL-868) is the
+      reason this bullet exists. Update only `_EXPECTED_DEFAULT_FINGERPRINT`.
+      What names the arms of such an axis is `QaArchSpec.label` on the spec each
+      arm is run with, not this constant.
     * If neither moved and only `QA_ARCH_LABEL` did, the change was to something
       the fingerprint does not hash — most often the format of what the model
       reads every call, which is `SceneMemory.render` and `PulseMemory.render`

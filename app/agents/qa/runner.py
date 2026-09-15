@@ -200,7 +200,7 @@ def build_middleware(
         ),
         "fold_scene_views": lambda: _fold_scene_views,
         "fold_knowledge_neighbours": lambda: _fold_knowledge_neighbours,
-        "capture_vision": lambda: QaCaptureVisionMiddleware(state),
+        "capture_vision": lambda: QaCaptureVisionMiddleware(state, channel, arch),
         "log_token_usage": lambda: _log_token_usage,
     }
     return [builders[name]() for name in middleware_names_for(arch)]
