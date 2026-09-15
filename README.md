@@ -1,7 +1,7 @@
 # artel-agent-server
 
 - 게임 QA 를 LLM agent 로 돌리는 Python FastAPI 서버
-- agent 여섯 — QA 실행, 시나리오 저작, game context 추출, knowledge 검색어 생성,
+- agent 여섯 — QA 실행, 시나리오 생성, game context 추출, knowledge 검색어 생성,
   screen selector 판정, 스텝 문구 다듬기
 - QA 런은 tool 37 개와 middleware 5 개를 두른 tool loop. 게임을 직접 만지지 않고
   artel-orchestration-server 를 거쳐 artel-sdk 가 붙은 Unity 빌드를 조작함
