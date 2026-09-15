@@ -52,7 +52,7 @@ LANGSMITH_TRACING=false python -m pytest -q
   `HTTPBearer`, `Authorization` 를 읽는 코드가 없음
 - 노출을 막는 것은 경로가 아니라 배포 구성 — 컨테이너가 `app-net` 에만 붙고
   `docker run` 에 `-p` 가 없으며 리버스 프록시가 이 서비스를 가리키지 않음
-- 접두사 밖에 있는 것은 `/health` 와 문서 진입점 `/docs` · `/redoc` · `/openapi.json` 뿐.
+- `/internal` 밖에 있는 것은 `/health` 와 문서 진입점 `/docs` · `/redoc` · `/openapi.json` 뿐.
   컨테이너 헬스체크와 도구 표면이라 경계와 무관함
 - 새 서버-투-서버 라우트는 `/internal` 아래 붙임. 공개 라우트를 처음 붙이는 사람이
   그 시점에 엔드유저 인증을 설계함

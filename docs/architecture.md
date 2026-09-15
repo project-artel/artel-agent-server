@@ -139,7 +139,7 @@ sequenceDiagram
 
 - 기본은 `LLM_BASE_URL` 로 가는 OpenAI 호환 경로. OpenRouter 를 가리킬 수도, 여러
   provider 를 함께 서빙하는 gateway 를 가리킬 수도 있어 설정 이름에 provider 를 안 박음
-- 모델 값이 `bedrock/` 로 시작하면 `ChatBedrockConverse` 로 감. 접두를 뗀 나머지가
+- 모델 값이 `bedrock/` 로 시작하면 `ChatBedrockConverse` 로 감. prefix 를 뗀 나머지가
   그대로 Bedrock inference profile ID 라, 어느 프로파일로 청구되는지가 이 문자열 하나로 정해짐
 - Bedrock 은 OpenAI 호환이 아님 — SigV4 와 Converse API 라 `extra_body` 가 안 통함
 - prompt cache 도 모양이 다름. OpenRouter 쪽은 provider 가 경계를 놓아 주고,
