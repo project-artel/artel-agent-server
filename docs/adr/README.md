@@ -109,12 +109,12 @@
 | [`2026-07-29-extract-agent-prompts-to-versioned-files.md`](../../.plan/general/2026-07-29-extract-agent-prompts-to-versioned-files.md) | 프롬프트를 상수에서 버전 디렉터리로 옮긴 이유 |
 | [`2026-08-06-lock-released-prompt-versions.md`](../../.plan/general/2026-08-06-lock-released-prompt-versions.md) | 내보낸 버전을 제자리에서 고치지 못하게 막는 lock |
 
-### 시나리오 저작
+### 시나리오 생성
 
 | 문서 | 무엇에 답하나 |
 | --- | --- |
 | [`2026-07-24-add-scenario-output-language.md`](../../.plan/general/2026-07-24-add-scenario-output-language.md) | 출력 언어를 고르게 한 이유 |
-| [`2026-07-30-run-scoped-multi-scenario-case-authoring.md`](../../.plan/general/2026-07-30-run-scoped-multi-scenario-case-authoring.md) | 저작을 런 스코프와 복수 시나리오로 넓힌 설계 |
+| [`2026-07-30-run-scoped-multi-scenario-case-authoring.md`](../../.plan/general/2026-07-30-run-scoped-multi-scenario-case-authoring.md) | 생성을 런 스코프와 복수 시나리오로 넓힌 설계 |
 | [`2026-08-17-scenario-reviewed-verification-state.md`](../../.plan/general/2026-08-17-scenario-reviewed-verification-state.md) | `reviewed` 판정 상태의 현재 문제 |
 
 ### 기반과 배포
