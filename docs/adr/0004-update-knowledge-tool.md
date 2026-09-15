@@ -44,7 +44,7 @@
 | `knowledge_seen` | 전문을 읽음 | 고치기, 지우기 |
 | `knowledge_glimpsed` | 한 줄로 봄 | link, unlink, expand 의 출발점 |
 
-- `search_knowledge` 가 볼려 준 이웃 블록은 **120 자로 잘린 한 줄**이라 읽은 것이
+- `search_knowledge` 가 보여 준 이웃 블록은 **120 자로 잘린 한 줄**이라 읽은 것이
   아닙니다. 그래서 이웃은 `knowledge_glimpsed` 에만 들어갑니다.
 - `knowledge_seen` 의 취지는 「읽지 않은 것은 고치거나 지울 수 없다」입니다.
   이름이 그 구분을 집니다.

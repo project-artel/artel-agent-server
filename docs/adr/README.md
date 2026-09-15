@@ -28,14 +28,14 @@
 | [`2026-07-26-qa-agent-diagnostics-loop-and-protocol-cleanup.md`](../../.plan/general/2026-07-26-qa-agent-diagnostics-loop-and-protocol-cleanup.md) | 43 회 반복 루프와 프레임 하나가 소켓을 닫던 문제 |
 | [`2026-08-05-qa-run-config-and-arch-versioning.md`](../../.plan/general/2026-08-05-qa-run-config-and-arch-versioning.md) | `run_config` 에 무엇을 확정해 적는지, `QA_ARCH_LABEL` 과 fingerprint |
 | [`2026-08-05-qa-agent-does-not-stop-on-a-failed-step.md`](../../.plan/general/2026-08-05-qa-agent-does-not-stop-on-a-failed-step.md) | 스텝 하나가 실패해도 런이 계속되는 이유 |
-| [`2026-08-05-qa-run-context-compaction.md`](../../.plan/general/2026-08-05-qa-run-context-compaction.md) | 대화가 창을 넘기 전에 접는 법, 트리거와 thrash 방지 |
+| [`2026-08-05-qa-run-context-compaction.md`](../../.plan/general/2026-08-05-qa-run-context-compaction.md) | 대화가 context window 를 넘기기 전에 compaction 하는 법, 트리거와 thrash 방지 |
 | [`2026-08-13-fix-langchain-summary-failure-regression.md`](../../.plan/general/2026-08-13-fix-langchain-summary-failure-regression.md) | langchain 1.3.15 가 요약 실패 처리를 바꾼 회귀 |
 
 ### 모델이 매 호출 읽는 것
 
 | 문서 | 무엇에 답하나 |
 | --- | --- |
-| [`2026-07-29-fold-stale-scene-views.md`](../../.plan/general/2026-07-29-fold-stale-scene-views.md) | 지난 씬 뷰를 자리표로 접는 이유와 몇 장을 남기는지 |
+| [`2026-07-29-fold-stale-scene-views.md`](../../.plan/general/2026-07-29-fold-stale-scene-views.md) | 지난 씬 뷰를 placeholder 로 fold 하는 이유와 몇 장을 남기는지 |
 | [`2026-07-28-expose-aim-coordinates-in-scene-view.md`](../../.plan/general/2026-07-28-expose-aim-coordinates-in-scene-view.md) | 씬 뷰에 조준 좌표를 싣는 이유 |
 | [`2026-07-28-expose-non-interactable-visuals-in-scene-view.md`](../../.plan/general/2026-07-28-expose-non-interactable-visuals-in-scene-view.md) | 누를 수 없는 시각 요소도 보여 주는 이유 |
 | [`2026-07-28-qa-agent-screen-capture-vision.md`](../../.plan/general/2026-07-28-qa-agent-screen-capture-vision.md) | 찍은 화면을 모델이 보고 판정하는 첫 설계 |
