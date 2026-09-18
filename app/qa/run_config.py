@@ -58,6 +58,10 @@ COMPACTION_PROMPT_AGENT = "qa_compaction"
 SYSTEM_ROLE = "system"
 VISION_ROLE = "vision_directive"
 MEMORY_ROLE = "memory_directive"
+# 같은 까닭으로 조건부다. `phase_directive` 는 phase 를 강제하는 런에만,
+# `decide_directive` 는 `decide_next_action` 이 tool 목록에 있는 런에만 닿는다.
+PHASE_ROLE = "phase_directive"
+DECIDE_ROLE = "decide_directive"
 COMPACTION_ROLE = "summary"
 
 # This build reports citations. Declared as a constant rather than written inline
@@ -145,6 +149,14 @@ def resolve_run_config(
         # halves of one prompt have to come from the same version.
         hashes[VISION_ROLE] = load_prompt(
             PROMPT_AGENT, VISION_ROLE, prompt.version
+        ).body_sha256
+    if resolved_arch.phase_cycle.gates_phases:
+        hashes[PHASE_ROLE] = load_prompt(
+            PROMPT_AGENT, PHASE_ROLE, prompt.version
+        ).body_sha256
+    if resolved_arch.phase_cycle.decides_in_its_own_turn:
+        hashes[DECIDE_ROLE] = load_prompt(
+            PROMPT_AGENT, DECIDE_ROLE, prompt.version
         ).body_sha256
     if resolved_arch.phase_cycle.remembers_in_verdict:
         # Hashed only when it is used, like the vision half above. A run with
