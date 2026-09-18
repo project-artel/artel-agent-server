@@ -57,7 +57,12 @@ Two run rules that decide whether repetition means anything:
 
 - **Relaunch the game between arms.** A finished run leaves the game where it
   stopped, so the next arm's "observe the title screen" starts from a battle
-  scene. That difference is not the arm.
+  scene. That difference is not the arm. Killing the pid `artel game start`
+  reports does not relaunch anything — that pid is the WSL-side launcher, and
+  `WordVenture.exe` keeps running and keeps its instance's WebSocket, so the next
+  run drives the old game. Kill by window title, which Unity sets to
+  `productName`; the canonical skill's "Kill a slot's game by window title" has
+  the command and the signature to check for.
 - **`frozen`, not `on`.** `on` lets a run write `verdict` rows and `knowledge`
   back, so the second run of an arm reads what the first one left behind.
 
