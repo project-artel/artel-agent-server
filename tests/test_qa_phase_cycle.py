@@ -99,13 +99,50 @@ def test_lite_walks_four_phases_and_comes_back_to_observe() -> None:
     assert cycle.phase is RunPhase.observe
     for name, expected in (
         ("observe_scene", RunPhase.act),
-        ("click", RunPhase.verify),
+        # ACT does not end on an action tool — see the repeat test below.
+        ("click", RunPhase.act),
+        # `report_step` closes ACT and VERIFY in one call.
         ("report_step", RunPhase.update_memory),
         ("skip_memory_update", RunPhase.observe),
     ):
         assert cycle.refusal_for(name) is None
         cycle.advance(name)
         assert cycle.phase is expected
+
+
+def test_act_stays_open_for_as_many_actions_as_the_step_needs() -> None:
+    """One scenario step is not one action, so ACT must not end on the first one.
+
+    L1 step 3 is "advance the opening story to the end" and takes a key press per
+    line of dialogue. With ACT ending on the first press, the second one is
+    refused: in the 2026-09-18 pilot, 51 of 147 refusals were `press_key` called
+    in VERIFY, which is a third of every refusal the run made.
+    """
+    cycle = build_phase_cycle(PhaseCycleMode.lite)
+    cycle.advance("observe_scene")
+
+    for _ in range(5):
+        assert cycle.refusal_for("press_key") is None
+        cycle.advance("press_key")
+        assert cycle.phase is RunPhase.act
+
+    assert cycle.refusals == 0
+    assert cycle.forced_passes == 0
+
+
+def test_update_memory_is_still_the_one_phase_that_cannot_be_skipped() -> None:
+    """Making ACT repeatable must not open a way around the phase that matters.
+
+    The whole axis exists to make UPDATE_MEMORY happen; every other phase is
+    scaffolding around it.
+    """
+    cycle = build_phase_cycle(PhaseCycleMode.lite)
+    cycle.advance("observe_scene")
+    cycle.advance("press_key")
+    cycle.advance("report_step")
+    assert cycle.phase is RunPhase.update_memory
+
+    assert "UPDATE_MEMORY" in cycle.refusal_for("press_key")
 
 
 def test_full_puts_decide_between_observing_and_acting() -> None:

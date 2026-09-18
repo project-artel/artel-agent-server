@@ -140,10 +140,29 @@ _FULL_ORDER = (
 MAX_CONSECUTIVE_REFUSALS = 2
 
 
+# 자기 tool 이 돌아도 안 끝나는 phase. **`ACT` 하나다.**
+#
+# 한 시나리오 step 이 동작 하나라는 가정이 틀렸다. `benchmarks/wordventure` L1 의 step 3 은
+# "오프닝 스토리를 끝까지 진행한다" 하나이고, 그러려면 키를 여러 번 눌러야 한다. 동작 하나에
+# phase 를 넘기면 두 번째 누름이 거절당한다 — 2026-09-18 파일럿에서 거절 147 회 중 51 회가
+# `VERIFY` 에서 `press_key` 를 부른 것이었고, 그 한 자리가 전체의 3분의 1이다.
+#
+# 그래서 `ACT` 는 자기 tool 로 안 끝난다. 끝내는 것은 **다음 phase 의 tool** 인 `report_step`
+# 이고, 그 호출이 `ACT` 와 `VERIFY` 를 함께 닫는다 — 판정하는 행위가 곧 "그만 조작한다" 는
+# 선언이기 때문이다. 다른 phase 는 종전 그대로다.
+_REPEATABLE = frozenset({RunPhase.act})
+
+
 def _tools_that_end(phase: RunPhase) -> str:
     """그 phase 를 끝내는 tool 이름을, 거절 문구에 넣을 한 줄로."""
     names = sorted(name for name, at in _TOOL_PHASE.items() if at is phase)
     return ", ".join(f"`{name}`" for name in names)
+
+
+def _ends_repeatable(phase: RunPhase, order: tuple[RunPhase, ...]) -> str:
+    """반복 phase 를 끝내는 것은 자기 tool 이 아니라 다음 phase 의 tool 이다."""
+    following = order[(order.index(phase) + 1) % len(order)]
+    return _tools_that_end(following)
 
 
 class PhaseCycle:
@@ -167,6 +186,22 @@ class PhaseCycle:
         self.forced_passes = 0
         self._consecutive_refusals = 0
         self._held = False
+
+    def _after(self, phase: RunPhase) -> RunPhase:
+        return self._order[(self._order.index(phase) + 1) % len(self._order)]
+
+    def _closes_repeatable(self, at: RunPhase | None) -> bool:
+        """지금이 반복 phase 이고, 이 tool 이 그것을 끝내는 다음 phase 의 것인가."""
+        return (
+            at is not None
+            and self.phase in _REPEATABLE
+            and at is self._after(self.phase)
+        )
+
+    def _ending_tools(self) -> str:
+        if self.phase in _REPEATABLE:
+            return _ends_repeatable(self.phase, self._order)
+        return _tools_that_end(self.phase)
 
     def hold(self) -> None:
         """이 호출은 자기 phase 를 끝낸 것으로 치지 말라고 tool 이 말하는 자리.
@@ -195,7 +230,7 @@ class PhaseCycle:
             return None
 
         at = _TOOL_PHASE.get(tool_name)
-        if at is None or at is self.phase:
+        if at is None or at is self.phase or self._closes_repeatable(at):
             self._consecutive_refusals = 0
             return None
 
@@ -211,7 +246,7 @@ class PhaseCycle:
             f"Not now — this run is in the {self.phase.value} phase and `{tool_name}` "
             f"belongs to {at.value}. Nothing ran and nothing was recorded. "
             f"{self.phase.value} ends when you call one of: "
-            f"{_tools_that_end(self.phase)}. Do that first; `{tool_name}` will be "
+            f"{self._ending_tools()}. Do that first; `{tool_name}` will be "
             "waiting on the other side of it."
         )
 
@@ -225,10 +260,17 @@ class PhaseCycle:
         if self._held:
             self._held = False
             return
-        if _TOOL_PHASE.get(tool_name) is not self.phase:
+        at = _TOOL_PHASE.get(tool_name)
+        if at is self.phase:
+            # 반복 phase 는 자기 tool 로 안 끝난다. 같은 step 안에서 몇 번이고 더 부를 수 있다.
+            if self.phase in _REPEATABLE:
+                return
+            self.phase = self._after(self.phase)
             return
-        position = self._order.index(self.phase)
-        self.phase = self._order[(position + 1) % len(self._order)]
+        if self._closes_repeatable(at):
+            # `report_step` 이 `ACT` 와 `VERIFY` 를 함께 닫는다 — 판정이 곧 조작을 그만둔다는
+            # 선언이고, 그 호출 자체가 `VERIFY` 가 요구하는 바로 그것이다.
+            self.phase = self._after(at)
 
 
 def build_phase_cycle(mode: PhaseCycleMode) -> PhaseCycle | None:
