@@ -27,6 +27,7 @@ from app.agents.scenario import (
     ScenarioPlan,
     ScenarioStep,
     AuthoredFlow,
+    SceneEdge,
     TestCaseListItem,
 )
 from app.agents.screen_verdict import (
@@ -80,5 +81,6 @@ __all__ = [
     "StepPhrasingError",
     "StepPhrasingRequest",
     "AuthoredFlow",
+    "SceneEdge",
     "TestCaseListItem",
 ]

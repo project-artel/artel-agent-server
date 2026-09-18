@@ -139,6 +139,20 @@ class Settings(BaseSettings):
             ) from error
         return value
     scenario_prompt_version: str | None = None
+    # 입구 라우터(워크플로 재편 Step 1). 끄면 예전 그대로 모든 입력이 루프로 간다 —
+    # 실험의 롤백 스위치다.
+    scenario_router_enabled: bool = True
+    # 한 저작 턴의 절대 천장(워크플로 재편 ⑥ — 토큰 가드). recursion_limit 은 케이스 수로
+    # 자라는 작업량 한도고, 이것은 **케이스 수와 무관한 폭주 방지선**이다. 정상 판(계측:
+    # 전량 20~40호출)을 안 건드리는 여유값이며, 최적값은 재계측 실측에서 조정한다.
+    # 본선 워크플로(B→C→D). 끄면 저작이 현행 루프로 간다 — 롤백 스위치.
+    scenario_workflow_enabled: bool = True
+    # 구 루프 갈래(수정·미분류)의 스위치. 서비스에서는 켠다(비싸게라도 동작해야 하니).
+    # 실험 중에는 꺼서 — 루프로 갈 요청을 **기록만 남기고 끊는다**. 워크플로가 못 받는
+    # 요청이 얼마나, 어떤 모양으로 오는지는 이 기록이 곧 Step 3(E 갈래)의 재료다.
+    scenario_loop_enabled: bool = True
+    scenario_max_model_calls: int = 40
+    scenario_max_tool_calls: int = 30
     game_context_prompt_version: str | None = None
     knowledge_query_prompt_version: str | None = None
     # 화면 제안을 판정하는 agent 의 프롬프트 (ARTEL-656). QA 런의 프롬프트와 따로

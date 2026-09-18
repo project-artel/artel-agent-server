@@ -392,3 +392,21 @@ def test_a_model_call_carries_a_request_timeout_and_bounded_retries(
     # that is the whole point of setting them.
     assert settings.openrouter_timeout_seconds < 600
     assert settings.openrouter_max_retries < 2
+
+
+def test_zero_budget_disables_reasoning_on_both_paths() -> None:
+    """max_tokens=0 = 추론 끔 — None(미지정→기본 예산으로 켬)과 다르다. 라우터가
+    쓴다: 669토큰 분류에 추론이 지연 13초를 먹던 실측이 이 값의 이유다."""
+    from app.llm.chat_model import build_chat_model
+    from app.llm.models import LLMModel, ReasoningConfig
+
+    off = ReasoningConfig(max_tokens=0)
+
+    bedrock = build_chat_model(LLMModel.claude_haiku_4_5_bedrock, off)
+    assert "thinking" not in (bedrock.additional_model_request_fields or {})
+
+    default_on = build_chat_model(LLMModel.claude_haiku_4_5_bedrock)
+    assert "thinking" in default_on.additional_model_request_fields
+
+    openrouter = build_chat_model(LLMModel.gemini_3_8_flash, off)
+    assert "reasoning" not in openrouter.extra_body

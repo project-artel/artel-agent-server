@@ -119,21 +119,21 @@ def _estimate_cost(
 # 이름에 `5m` 이 박힌 것은 캐시 TTL 이다. 단가가 TTL 마다 다르므로(`ModelSpec.pricing` 의
 # 주석) 1 시간짜리를 쓰게 되면 그 이름이 함께 바뀐다. 그때 이 목록에 더하고 단가도 같이
 # 고쳐야 한다 — 여기만 더하면 비싼 쓰기를 싼 값으로 세게 된다.
-_CACHE_WRITE_KEYS = ("ephemeral_5m_input_tokens", "cache_creation")
-
-
 def _cache_write_of(usage: dict[str, Any]) -> int:
-    """캐시에 실은 토큰. 이름이 provider 마다 달라 아는 것을 순서대로 본다.
+    """캐시에 실은 토큰. 이름이 provider 마다 달라, 아는 이름들을 이렇게 읽는다.
 
-    합치지 않고 **처음 값이 있는 것 하나**를 쓴다. 두 이름이 같은 것을 가리키므로 더하면
-    같은 토큰을 두 번 센다 — Bedrock 이 둘 다 실어 보내는데 한쪽이 0 인 것이 그 증거다.
+    TTL 별 내역(`ephemeral_5m/1h_input_tokens`)은 서로소 분할이라 **합치고**, 내역이
+    없을 때만 `cache_creation` 을 본다. langchain-aws 는 내역이 실려 오면
+    `cache_creation` 을 0 으로 덮으므로(같은 값의 두 이름) 내역과 그것을 더하면 같은
+    토큰을 두 번 센다 — 그래서 합산은 내역끼리만 한다.
     """
     details = usage.get("input_token_details") or {}
-    for key in _CACHE_WRITE_KEYS:
-        value = details.get(key)
-        if value:
-            return int(value)
-    return 0
+    ephemeral = (details.get("ephemeral_5m_input_tokens") or 0) + (
+        details.get("ephemeral_1h_input_tokens") or 0
+    )
+    if ephemeral:
+        return int(ephemeral)
+    return int(details.get("cache_creation") or 0)
 
 
 def _build_record(
@@ -351,6 +351,7 @@ class UsageCallback(AsyncCallbackHandler):
                 await self._target.add(record)
         except Exception:  # noqa: BLE001 - accounting never propagates
             logger.warning("[llm-usage] could not read chat usage", exc_info=True)
+
 
 
 def _record_from_response(

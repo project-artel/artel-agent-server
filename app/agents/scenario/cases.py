@@ -37,7 +37,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import TYPE_CHECKING
 
-from app.agents.scenario.schemas import TestCaseListItem
+from app.agents.scenario.schemas import SceneEdge, TestCaseListItem
 
 if TYPE_CHECKING:
     # Type-only: importing app.sessions at module load would form a cycle
@@ -103,7 +103,66 @@ your context. Use `search_test_cases` to find the ones each scenario needs. An
 empty search result means no case matches — not that something went wrong."""
 
 
-def render_game_shape(entries: list[TestCaseListItem], entry_scene: str | None = None) -> str:
+def fold_scene_routes(edges: list[SceneEdge]) -> list[str]:
+    """Shortest route between every ordered pair of screens, as printed lines.
+
+    A pure fold — edges in, lines out. BFS over the map's own transitions, no
+    scoring and no constants, so nothing here can drift toward one game. Kept
+    pure on purpose: a game with many screens outgrows printing the whole table,
+    and then the same function serves its answers from behind a tool instead.
+
+    Pairs with no route are printed as such. Absence is exactly what a model
+    misreads — per-case ``exits`` answer one step only, and the missing second
+    step used to read as "no way there" (the pair matrix corrected 1,126 such
+    cells). This table exists to remove that misreading, so it never goes silent
+    where the map has no answer either.
+    """
+    if not edges:
+        return []
+    steps: dict[str, list[SceneEdge]] = {}
+    for edge in edges:
+        if edge.to_scene != edge.from_scene:
+            steps.setdefault(edge.from_scene, []).append(edge)
+    scenes = sorted({edge.from_scene for edge in edges} | {edge.to_scene for edge in edges})
+
+    lines: list[str] = []
+    for start in scenes:
+        # BFS: first time a screen is seen is a shortest route to it. Neighbors in
+        # sorted order so the same map always prints the same bytes — this block
+        # sits in the cached prompt prefix.
+        reached: dict[str, tuple[list[str], list[str | None]]] = {start: ([start], [])}
+        frontier = [start]
+        while frontier:
+            here = frontier.pop(0)
+            route, presses = reached[here]
+            for edge in sorted(steps.get(here, []), key=lambda e: (e.to_scene, e.by or "")):
+                if edge.to_scene in reached:
+                    continue
+                reached[edge.to_scene] = (route + [edge.to_scene], presses + [edge.by])
+                frontier.append(edge.to_scene)
+        for goal in scenes:
+            if goal == start:
+                continue
+            found = reached.get(goal)
+            if found is None:
+                lines.append(f"  {start} → {goal}: no route the map knows")
+                continue
+            route, presses = found
+            count = len(presses)
+            doing = " · ".join(by if by else "on its own" for by in presses)
+            line = f"  {start} → {goal}: {count} step{'s' if count > 1 else ''}"
+            if count > 1:
+                line += f", via {' → '.join(route[1:-1])}"
+            lines.append(f"{line} [{doing}]")
+    return lines
+
+
+def render_game_shape(
+    entries: list[TestCaseListItem],
+    entry_scene: str | None = None,
+    scene_edges: list[SceneEdge] | None = None,
+    starting_values: dict[str, str] | None = None,
+) -> str:
     """What the game looks like, in one block, before any case (ARTEL-670).
 
     **The map was never given as a shape.** Every prompt version so far carried it
@@ -118,10 +177,13 @@ def render_game_shape(entries: list[TestCaseListItem], entry_scene: str | None =
     boots into, what leads where, and which values are progress rather than
     position. None of it is new data — it is the same map, folded.
 
-    Everything here is derived from the cases already on the wire, except
-    ``entry_scene``, which only orchestration can know: the screen graph is cyclic,
-    so no amount of structure says where the game starts. Absent, the block says so
-    rather than guessing — a wrong entry is worse than none.
+    Everything here is derived from the cases already on the wire, except what
+    only orchestration can know: ``entry_scene`` (the screen graph is cyclic, so
+    no amount of structure says where the game starts), ``scene_edges`` (screens
+    carrying no case never show their steps through the cases), and
+    ``starting_values`` (what the boot screen reads from storage). Absent, the
+    block says so or stays silent rather than guessing — a wrong entry is worse
+    than none.
     """
     if not entries:
         return "(no cases, so nothing is known about this game's screens)"
@@ -148,6 +210,27 @@ def render_game_shape(entries: list[TestCaseListItem], entry_scene: str | None =
         lines.append("Where each screen leads in one step:")
         for scene in sorted(leads):
             lines.append(f"  {scene} → {', '.join(sorted(leads[scene]))}")
+
+    # Routes between screens, folded once from the whole map (flows-off
+    # experiment). Per-case `exits` answer one step only, and the model reads a
+    # missing second step as "no way there" — this table pre-answers the
+    # multi-step moves so ordering never trips on a phantom dead end.
+    routes = fold_scene_routes(scene_edges or [])
+    if routes:
+        lines.append("")
+        lines.append(
+            "Routes between screens — every pair, folded from the map's own "
+            "transitions. \"on its own\" means the game moves without input: such "
+            "a step cannot be written as an instruction, only played through:"
+        )
+        lines.extend(routes)
+
+    if starting_values:
+        lines.append("")
+        lines.append(
+            "When the game boots: "
+            + ", ".join(f"{name} = {value}" for name, value in starting_values.items())
+        )
 
     lines.append("")
     lines.append(

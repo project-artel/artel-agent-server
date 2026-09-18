@@ -71,7 +71,14 @@ class ReasoningConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     effort: ReasoningEffort | None = None
+    # 0 = **추론을 끈다.** None(미지정)과 다르다 — 미지정은 카탈로그 기본 예산으로
+    # 켜진다(Bedrock 경로). 라우터처럼 판단이 얕은 호출이 끄는 데 쓴다: 669토큰
+    # 분류에 추론이 13초·수백 토큰을 쓰던 실측(2026-09-09)이 이 값의 이유다.
     max_tokens: int | None = Field(default=None, ge=0)
+
+    @property
+    def disabled(self) -> bool:
+        return self.max_tokens == 0
 
     @model_validator(mode="after")
     def require_one_budget(self) -> "ReasoningConfig":
@@ -186,12 +193,14 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         supports_strict_json=True,
         label="Claude Haiku 4.5 (AWS Bedrock)",
         # 실측한 창은 200,000 이다(195,011 통과, 그 위 `prompt is too long`). 거기서
-        # 출력 예약 8,192 를 뺀다 — `max_tokens` 가 `budget_tokens` 보다 커야 해서
-        # 예산 4,096 이 그 예약분을 정한다.
+        # 출력 예약 16,384 를 뺀다 — `chat_model` 의 `max_tokens` 계산(예산×여유 +
+        # `OUTPUT_RESERVE`)과 같은 수여야 한다. 예산은 상한이 아니라 목표치라(실측:
+        # 목표 4,096 에 8,188 을 생각하고 잘렸다) 목표 바로 위에 상한을 두면 무거운
+        # 과제에서 답도 도구 호출도 없이 끝난다.
         #
         # 앞서 136,000 으로 적었던 것은 근거 없는 수였다. 그 값이 압축 임계를 정하므로
         # 200k 창을 68% 만 쓰고 있었다.
-        max_input_tokens=191_808,
+        max_input_tokens=183_616,
         input_modalities=("text", "image"),
         # Anthropic 은 `effort` 를 안 받는다. 토큰 예산으로만 켠다.
         reasoning=ReasoningKind.max_tokens,
@@ -394,6 +403,10 @@ def validate_reasoning(
 ) -> ReasoningConfig | None:
     if reasoning is None:
         return None
+    if reasoning.disabled:
+        # 0 = 끔 — kind·예산 범위 검사의 대상이 아니다(요청에 추론이 아예 안 실린다).
+        # 추론을 지원하지 않는 모델에도 유효하다: "끄겠다"는 어느 모델에서든 참이다.
+        return reasoning
 
     supported = get_model_spec(model).reasoning
     requested = (

@@ -12,6 +12,7 @@ from app.agents.scenario.schemas import (
     ScenarioPlan,
     ScenarioStep,
     AuthoredFlow,
+    SceneEdge,
     TestCaseListItem,
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     "ScenarioPlan",
     "ScenarioStep",
     "AuthoredFlow",
+    "SceneEdge",
     "TestCaseListItem",
 ]
