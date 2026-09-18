@@ -34,6 +34,7 @@ from app.qa.schemas import QaScenario, QaStep
 from app.qa.run_config import (
     COMPACTION_PROMPT_AGENT,
     COMPACTION_ROLE,
+    MEMORY_ROLE,
     PROMPT_AGENT,
     SYSTEM_ROLE,
     VISION_ROLE,
@@ -360,9 +361,21 @@ class QaRunner:
             if arch.vision
             else ""
         )
+        # The same arrangement one axis over. The paragraph this replaces asks for
+        # a separate `record_capability_verdict` call, and that is still the only
+        # way on a run with `phase_cycle=off` — so the base text keeps saying it,
+        # and this directive overrides it only where `report_step` really does
+        # take the answer. Empty otherwise, which is what makes the rendered
+        # prompt of an `off` run the v17 text it has always been.
+        memory_directive = (
+            load_prompt(PROMPT_AGENT, MEMORY_ROLE, config.prompt_version).body
+            if arch.phase_cycle.remembers_in_verdict
+            else ""
+        )
         system_prompt = prompt.body.format(
             language_directive=LANGUAGE_DIRECTIVES[config.language],
             vision_directive=vision_directive,
+            memory_directive=memory_directive,
         )
         first_message = _plan(scenario)
         total_steps = len(scenario.steps)

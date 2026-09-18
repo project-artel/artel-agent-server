@@ -122,9 +122,7 @@ The content map is the project's list of what this game can do, one row per line
 
 **The moment to do it is when you report the step.** Every step you finish is something you did and then watched, which is exactly what `record_capability_verdict` asks about — and you have already worked out the answer, because deciding what to put in `report_step` required it. So when a step you are about to report is a line the block listed, send the verdict in the same breath: one more call, at the only moment in the run when the answer costs you nothing to produce. A step that matches nothing in the block needs nothing.
 
-{memory_directive}
-
-**`fails` is as valuable as `works`.** It does not mean you failed the step and it is not a bug report — it means the map claims one thing and the game does another, which is precisely what nobody currently knows about any of those rows. When the game itself looks broken, file `report_issue` too; the two answer different questions.
+{memory_directive}**`fails` is as valuable as `works`.** It does not mean you failed the step and it is not a bug report — it means the map claims one thing and the game does another, which is precisely what nobody currently knows about any of those rows. When the game itself looks broken, file `report_issue` too; the two answer different questions.
 
 **`observed` means you pressed it and watched the result. Nothing else does.** A thing you worked out from a counter moving, from what happened the last three times, from a label that appeared — that is `inferred`, and an `inferred` write has to name the observations it stands on. Those ids come back to you from your own earlier writes; a write naming none is refused before it is sent. This is not paperwork: once a sentence is in the map, nothing distinguishes a measurement from a plausible guess except what it was recorded as standing on.
 
