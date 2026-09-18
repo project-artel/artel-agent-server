@@ -423,7 +423,10 @@ def test_modify_workflow_replaces_the_target_by_id(monkeypatch) -> None:
     import app.agents.scenario.workflow as wf_mod
 
     plans = [wf_mod.ModifyPlan(
-        scenario_id=7, title="", description="", steps=[_case_step()], note="스텝을 다듬음",
+        # 본문이 원본과 달라야 **고친 것**이다. 같으면 저장하지 않는다(ARTEL-913) — 그 규칙은
+        # `test_modify_workflow_refuses_to_claim_an_edit_it_did_not_make` 가 따로 본다.
+        scenario_id=7, title="", description="",
+        steps=[_case_step(), _case_step()], note="스텝을 다듬음",
     )]
     wf, calls = _modify_agent(monkeypatch, plans)
     channel = _FakeChannel()
@@ -509,6 +512,64 @@ def test_modify_workflow_relays_why_something_was_kept(monkeypatch) -> None:
     assert "걷어냈어요" not in out.message  # 안 지운 것을 지웠다고 말하지 않는다
 
 
+def test_modify_workflow_refuses_to_claim_an_edit_it_did_not_make(monkeypatch) -> None:
+    """**안 고치고 고쳤다고 말하지 않는다**(ARTEL-913).
+
+    실측(run 75): 사용자가 "스토리가 끝나면 알아서 맵으로 이동함 이걸 적용해서 고쳐줘" 라고
+    했는데 모델이 본문을 그대로 돌려주고 답만 "바로잡았습니다" 라고 썼다. 사용자는 고쳐진 줄
+    알았고 저장된 것은 그대로였다 — 말한 것이 사라진 것을 알 방법이 없었다.
+
+    프롬프트로는 못 막는다. 낸 것과 원본을 **코드가 비교**해야 한다.
+    """
+    import asyncio as aio
+    import app.agents.scenario.workflow as wf_mod
+
+    same = _current_scenario()
+    # 두 번 다 원본 그대로 돌려준다 — 한 번은 재시도를 받고, 두 번째도 안 고친 경우다.
+    plans = [
+        wf_mod.ModifyPlan(scenario_id=7, steps=list(same.steps)),
+        wf_mod.ModifyPlan(scenario_id=7, steps=list(same.steps)),
+    ]
+    wf, calls = _modify_agent(monkeypatch, plans)
+    channel = _FakeChannel()
+
+    out = aio.run(wf.run_modify_workflow(
+        _request(
+            user_input="스토리 끝나면 알아서 맵으로 가니까 고쳐줘",
+            test_case_list=_case_list(), current_scenarios=[same],
+        ),
+        _CTX, channel,
+    ))
+
+    # 한 번 더 시켰고, 그래도 그대로라 **저장하지 않았다.**
+    assert len(calls) == 2 and "unchanged" in calls[1]
+    assert channel.submitted == []
+    assert "반영하지 못했습니다" in out.message
+    assert "고쳐서 저장했어요" not in out.message
+
+
+def test_modify_workflow_saves_when_the_retry_actually_changes_it(monkeypatch) -> None:
+    """한 번 그대로 냈어도 다시 시켜서 고쳐 오면 정상 저장이다 — 막는 것이 목적이 아니다."""
+    import asyncio as aio
+    import app.agents.scenario.workflow as wf_mod
+
+    same = _current_scenario()
+    plans = [
+        wf_mod.ModifyPlan(scenario_id=7, steps=list(same.steps)),
+        wf_mod.ModifyPlan(scenario_id=7, steps=[_case_step(), _case_step()]),
+    ]
+    wf, calls = _modify_agent(monkeypatch, plans)
+    channel = _FakeChannel()
+
+    out = aio.run(wf.run_modify_workflow(
+        _request(user_input="고쳐줘", test_case_list=_case_list(), current_scenarios=[same]),
+        _CTX, channel,
+    ))
+
+    assert len(calls) == 2 and len(channel.submitted) == 1
+    assert "고쳐서 저장했어요" in out.message
+
+
 def test_modify_workflow_asks_when_the_target_is_unclear(monkeypatch) -> None:
     import asyncio as aio
     import app.agents.scenario.workflow as wf_mod
@@ -557,8 +618,8 @@ def test_modify_workflow_retries_once_then_leaves_the_original(monkeypatch) -> N
     from app.sessions.channel import ScenarioAccepted
 
     plans = [
-        wf_mod.ModifyPlan(scenario_id=7, steps=[_case_step()]),
-        wf_mod.ModifyPlan(scenario_id=7, steps=[_case_step()]),  # 재작성
+        wf_mod.ModifyPlan(scenario_id=7, steps=[_case_step(), _case_step()]),
+        wf_mod.ModifyPlan(scenario_id=7, steps=[_case_step(), _case_step()]),  # 재작성
     ]
     wf, calls = _modify_agent(monkeypatch, plans)
     channel = _FakeChannel(answers=[

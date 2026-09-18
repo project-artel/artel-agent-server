@@ -625,6 +625,9 @@ async def run_modify_workflow(
         s for s in request.current_scenarios if s.scenario_id == plan.scenario_id
     )
 
+    def title_of(p: ModifyPlan) -> str:
+        return p.title or original.title
+
     def to_scenario(p: ModifyPlan) -> ScenarioPlan:
         return ScenarioPlan(
             scenario_id=p.scenario_id,
@@ -640,6 +643,69 @@ async def run_modify_workflow(
             i for i in p.absorbed_scenario_ids
             if i in known_scenario_ids and i != p.scenario_id
         ]
+
+    def _body(steps: list) -> list[tuple]:
+        """본문을 비교할 수 있는 모양으로. 사람이 읽는 것과 기계가 읽는 것을 함께 본다 —
+        문장만 같고 근거가 바뀐 것도 고친 것이고, 그 반대도 마찬가지다."""
+        return [
+            (
+                (step.action or "").strip(),
+                step.case_id,
+                (step.input or "").strip(),
+                step.step_source,
+                (step.step_unknown_reason or "").strip(),
+            )
+            for step in steps
+        ]
+
+    def unchanged(p: ModifyPlan) -> bool:
+        """**아무것도 안 고쳤나.** 여기가 정정이 조용히 삼켜지던 자리다.
+
+        실측(run 75): 사용자가 "스토리가 끝나면 알아서 맵으로 이동함 이걸 적용해서 고쳐줘"
+        라고 했는데 모델은 본문을 그대로 돌려주고 답만 "바로잡았습니다" 라고 썼다. 사용자는
+        고쳐진 줄 알았고, 저장된 것은 그대로였다 — 말한 것이 사라진 것을 알 방법이 없었다.
+
+        프롬프트로는 막을 수 없다. 안 고치고도 고쳤다고 말하는 것을 막는 유일한 방법은
+        **낸 것과 원본을 코드가 비교하는 것**이다. 같으면 성공이라 말하지 않는다.
+        """
+        if absorbed_of(p):
+            return False  # 걷어낼 것을 지목했으면 이 턴이 한 일이 있다
+        if (p.title or original.title) != original.title:
+            return False
+        if (p.description or original.description) != original.description:
+            return False
+        return _body(p.steps) == _body(original.steps)
+
+    # **안 고쳤으면 한 번 더 시킨다.** 요청을 받고 본문을 그대로 돌려준 것은 답이 아니다 —
+    # 못 하겠으면 못 한다고 말해야 하고, 그 말은 `question` 에 적는 것이 계약이다.
+    if unchanged(plan):
+        retried = await edit(
+            feedback=(
+                "You returned the scenario unchanged. The user asked for a change, so"
+                " returning the same body is not an answer. Apply what they asked — or,"
+                " if it truly cannot be applied (no case covers it, it contradicts the"
+                " journey's start, it is already true), leave steps empty and say that"
+                " in `question`, naming the part you could not do and why."
+            )
+        )
+        if retried is not None and retried.scenario_id == plan.scenario_id:
+            plan = retried
+        # 두 번째도 그대로면 저장하지 않는다. 같은 것을 다시 저장하면 사용자는 고쳐진 줄 안다.
+        if unchanged(plan):
+            trace.record(run_id, "워크플로 E — 그대로", "요청을 받고 본문이 안 바뀌었다 — 저장하지 않음")
+            asked = (plan.question or "").strip()
+            message = (
+                (f"말씀하신 것을 반영하지 못했습니다 — '{title_of(plan)}' 본문이 그대로입니다.\n{asked}"
+                 if asked else
+                 f"말씀하신 것을 '{title_of(plan)}' 에 반영하지 못했습니다 — 본문이 그대로라 저장하지"
+                 " 않았어요. 어느 스텝을 어떻게 바꿀지 짚어 주시면 그대로 고치겠습니다.")
+                if ko else
+                (f"I could not apply that — '{title_of(plan)}' is unchanged.\n{asked}"
+                 if asked else
+                 f"I could not apply that to '{title_of(plan)}', so I saved nothing. "
+                 "Point at the step and what it should say, and I will change exactly that.")
+            )
+            return ScenarioAgentResult(message=message, scenarios=[])
 
     answer = await channel.submit_scenario(
         to_scenario(plan).model_dump(by_alias=True), absorbed_of(plan)
