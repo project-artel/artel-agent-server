@@ -94,6 +94,15 @@ class ScenarioAccepted(BaseModel):
     accepted: bool = False
     # 이번 턴에 지금까지 받아들여진 수. 저쪽이 세므로 모델이 따로 셀 필요가 없다.
     written: int = 0
+    # **저장된 최종본의 스텝 수** — 우리가 낸 수가 아니다. 검수가 나누기·메우기를 하고 코드가
+    # `bridge` 를 끼운 뒤의 수라 둘은 자주 다르다. 사용자에게 말할 수 있는 수는 이것뿐이다
+    # (실측: 우리는 37개라 말했는데 화면에 뜬 것은 다른 수였다).
+    steps: int = 0
+    # 합치기에서 실제로 걷어낸 시나리오 제목 / 걷어내지 못하고 남긴 것의 이유 문장.
+    # 지운 것도 남긴 것도 저쪽이 판정하므로 우리는 이 목록을 옮겨 말하기만 한다 — "합쳤습니다"
+    # 를 우리가 지어내면 안 된다.
+    absorbed: list[str] = Field(default_factory=list)
+    kept: list[str] = Field(default_factory=list)
     detail: str | None = None
 
 
@@ -199,8 +208,16 @@ class ScenarioChannel:
 
     # --- outbound -------------------------------------------------------------
 
-    async def submit_scenario(self, scenario: dict) -> ScenarioAccepted | None:
+    async def submit_scenario(
+        self, scenario: dict, absorbed_scenario_ids: list[int] | None = None
+    ) -> ScenarioAccepted | None:
         """시나리오 하나를 넘긴다. 아무도 답하지 않으면 `None`.
+
+        `absorbed_scenario_ids` 는 합치기의 나머지 절반이다 — 이 본문 안으로 들어와 이제
+        따로 있을 이유가 없어진 기존 시나리오들. **여기에 적는 것은 요청이지 명령이 아니다**:
+        지울지는 저쪽이 센다(흡수된 쪽 케이스가 남는 쪽에 전부 있는지, QA 실행 이력이 없는지).
+        시나리오 본문 안이 아니라 프레임 바깥에 싣는 이유는 이것이 본문의 일부가 아니라
+        **이 제출에 딸린 정리 지시**이고, 검수(`reconcile`)가 알 필요가 없기 때문이다.
 
         마지막 답에 전부 담는 대신 하나씩 넘긴다. 한 답에 전부를 담으면 두 가지가 어긋나는
         것을 실측했다. 하나는 쓰는 시간이 답의 길이라는 것 — 8,000 token 이 token 당 5.3ms 로
@@ -220,6 +237,7 @@ class ScenarioChannel:
                 "type": "submit_scenario",
                 "messageId": message_id,
                 "scenario": scenario,
+                "absorbedScenarioIds": absorbed_scenario_ids or [],
             })
             try:
                 return await asyncio.wait_for(waiter, timeout=self._search_timeout)
