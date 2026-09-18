@@ -130,6 +130,52 @@ def test_act_stays_open_for_as_many_actions_as_the_step_needs() -> None:
     assert cycle.forced_passes == 0
 
 
+def test_an_action_satisfies_observe_on_its_way_past() -> None:
+    """The base prompt already says an action returns the scene it produced.
+
+    `system.md`: "Each of those returns the outcome AND the scene it produced...
+    you usually do not need a separate observation afterwards." The gate did not
+    know that and demanded `observe_scene` at the top of every lap. In the
+    2026-09-18 pilot that was 97 of 137 refusals, 50 of them an action tool
+    called from OBSERVE.
+    """
+    cycle = build_phase_cycle(PhaseCycleMode.lite)
+    assert cycle.phase is RunPhase.observe
+
+    assert cycle.refusal_for("press_key") is None
+    cycle.advance("press_key")
+    assert cycle.phase is RunPhase.act
+    assert cycle.refusals == 0
+
+
+def test_a_step_that_only_looks_needs_no_action() -> None:
+    """L1 step 1 is "observe the title screen". Demanding an action invents one."""
+    cycle = build_phase_cycle(PhaseCycleMode.lite)
+    cycle.advance("observe_scene")
+
+    assert cycle.refusal_for("report_step") is None
+    cycle.advance("report_step")
+    assert cycle.phase is RunPhase.update_memory
+
+
+def test_decide_is_not_skippable_because_it_is_the_whole_full_arm() -> None:
+    """`full` still cannot reach ACT without writing the decision down.
+
+    The refusal names OBSERVE rather than DECIDE — it reports the phase the run
+    is in, and DECIDE is what makes the jump unreachable from there. Following
+    the message still works: `observe_scene` lands in DECIDE, and DECIDE only
+    opens on `decide_next_action`.
+    """
+    cycle = build_phase_cycle(PhaseCycleMode.full)
+
+    assert cycle.refusal_for("press_key") is not None
+    assert cycle.phase is RunPhase.observe
+
+    cycle.advance("observe_scene")
+    assert cycle.phase is RunPhase.decide
+    assert "DECIDE" in cycle.refusal_for("press_key")
+
+
 def test_update_memory_is_still_the_one_phase_that_cannot_be_skipped() -> None:
     """Making ACT repeatable must not open a way around the phase that matters.
 
@@ -248,6 +294,12 @@ def test_a_refused_tool_does_not_run() -> None:
         channel, state, tools, sent = make(PhaseCycleMode.lite)
         standing_on(channel)
 
+        # UPDATE_MEMORY 로 보낸다. 거기서 `report_step` 은 뒤로 가는 호출이라 거절된다 —
+        # OBSERVE 와 ACT 는 건너뛸 수 있지만 UPDATE_MEMORY 는 아니다.
+        state.phase_cycle.advance("report_step")
+        assert state.phase_cycle.phase is RunPhase.update_memory
+        before = len(sent)
+
         result = await tools["report_step"].ainvoke(
             {
                 "step": 1,
@@ -258,9 +310,9 @@ def test_a_refused_tool_does_not_run() -> None:
             }
         )
 
-        assert "OBSERVE" in result
+        assert "UPDATE_MEMORY" in result
         assert state.step_results == []
-        assert sent == []
+        assert len(sent) == before
         assert state.phase_cycle.refusals == 1
 
     asyncio.run(run())
