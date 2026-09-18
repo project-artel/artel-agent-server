@@ -20,6 +20,8 @@ from app.agents.qa.capability import (
     RECORD_CAPABILITY_VERDICT_DESCRIPTION,
     RECORD_NEW_CAPABILITY_DESCRIPTION,
     UNCONFIRMED_CAPABILITY_WRITE,
+    capability_search_matches,
+    capability_search_page,
     render_capability_search,
     render_capability_write_result,
 )
@@ -349,9 +351,14 @@ def build_capability_tools(ctx: ToolContext) -> list[BaseTool]:
                 "here to look up. Anything you watch happen on this scene is new — "
                 "`record_new_capability` is where it goes."
             )
-        return render_capability_search(
-            scene, entry.all_capabilities(), contains, offset
+        capabilities = entry.all_capabilities()
+        # 이 호출이 실제로 찍는 줄만 기억한다. `report_step` 의 `capability_key` 가 이 표에
+        # 묻고, 안 찍힌 줄까지 넣으면 그 검사가 "이 런이 받은 것" 이 아니라 "이 씬에 있는 것"
+        # 을 묻게 된다.
+        state.remember_listed_capabilities(
+            capability_search_page(capability_search_matches(capabilities, contains), offset)
         )
+        return render_capability_search(scene, capabilities, contains, offset)
 
 
     return [
