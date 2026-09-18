@@ -48,8 +48,16 @@ COMPACTION_PROMPT_AGENT = "qa_compaction"
 # The roles that make up the run's system prompt. `vision_directive` only reaches
 # a run that can see — telling a text-only model about a tool it does not have
 # sends it looking for one — so it is hashed only when it is used.
+#
+# `memory_directive` is the same shape for the same reason. `report_step` carries
+# `capability_key` and `learned` only when `phase_cycle` is past `off`, so on a
+# default run those arguments do not exist and describing them would send the
+# model reaching for them. Keeping the text in its own role is also what lets
+# every arm of the phase-cycle comparison share one `prompt_version`: the arms
+# differ by the arch knob alone, and `agent_fingerprint` separates them.
 SYSTEM_ROLE = "system"
 VISION_ROLE = "vision_directive"
+MEMORY_ROLE = "memory_directive"
 COMPACTION_ROLE = "summary"
 
 # This build reports citations. Declared as a constant rather than written inline
@@ -137,6 +145,13 @@ def resolve_run_config(
         # halves of one prompt have to come from the same version.
         hashes[VISION_ROLE] = load_prompt(
             PROMPT_AGENT, VISION_ROLE, prompt.version
+        ).body_sha256
+    if resolved_arch.phase_cycle.remembers_in_verdict:
+        # Hashed only when it is used, like the vision half above. A run with
+        # `phase_cycle=off` reads none of this text, and recording its hash would
+        # say the run was given something it never saw.
+        hashes[MEMORY_ROLE] = load_prompt(
+            PROMPT_AGENT, MEMORY_ROLE, prompt.version
         ).body_sha256
 
     settings = get_settings()

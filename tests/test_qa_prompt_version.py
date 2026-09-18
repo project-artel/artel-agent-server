@@ -255,7 +255,7 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v17() -> None:
+def test_the_default_qa_version_is_v18() -> None:
     """A run that names no version has to get the newest prompt.
 
     This is also the trap in adding a version: `resolve_version` returns the
@@ -264,8 +264,50 @@ def test_the_default_qa_version_is_v17() -> None:
     same change as the tools it talks about — a prompt that names
     `set_input_axis` before the tool exists teaches the agent to reach for
     something that is not there.
+
+    v18 is what that rule looks like when the tools are conditional. The
+    arguments it describes — `report_step`'s `capability_key` and `learned` —
+    exist only when `phase_cycle` is past `off`, so the text describing them is
+    not in `system.md` at all: it is the `memory_directive` role, injected by
+    `QaRunner.run` only on a run that has them, exactly as `vision_directive` is
+    injected only on a run that can see. On a default run the placeholder renders
+    empty and the body is the v17 text, which is why moving the default here is
+    safe rather than a silent repointing.
     """
-    assert resolve_version("qa_run") == "v17"
+    assert resolve_version("qa_run") == "v18"
+
+
+def test_v18_without_the_memory_directive_renders_the_v17_text() -> None:
+    """An `off` run reads exactly what it read before v18 existed.
+
+    This is the whole safety argument for letting the default resolve to v18, and
+    for every arm of the phase-cycle comparison sharing one `prompt_version`. If
+    the empty placeholder left so much as a blank line behind, an `off` run would
+    be reading a different prompt from the v17 runs it is the baseline for, and
+    the difference would be invisible in `prompt_hashes` — that records the file,
+    not what was rendered from it.
+
+    Compared after `.format`, not before: the placeholder is the only difference
+    in the file, so comparing the bodies would pass on a template that renders
+    wrongly.
+    """
+    filled = {"language_directive": "L", "vision_directive": "V"}
+    v17 = load_prompt("qa_run", "system", "v17").body.format(**filled)
+    v18 = load_prompt("qa_run", "system", "v18").body.format(
+        **filled, memory_directive=""
+    )
+    assert v18 == v17
+
+
+def test_v18_with_the_memory_directive_adds_the_report_step_arguments() -> None:
+    """And when it is injected, it is actually there and names both arguments."""
+    body = load_prompt("qa_run", "system", "v18").body.format(
+        language_directive="L",
+        vision_directive="V",
+        memory_directive=load_prompt("qa_run", "memory_directive", "v18").body,
+    )
+    assert "`capability_key`" in body
+    assert "`learned`" in body
 
 
 def test_v12_drops_the_screen_map_and_says_what_a_screen_anchors() -> None:
