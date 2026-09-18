@@ -73,6 +73,7 @@
     "scenario_router/v4/system": "f5f7a5e573fad5c69ccaf211158b3e6f25544ee57df41797afaeb9afdd9ce4c2",
     "scenario_writer/v1/system": "6f5fd02dd38d08621b7739407c02eb184f0caac713b5e197982d29b7ce9f422f",
     "scenario_writer/v2/system": "9eb544a44a48b850d73c78d86708118106ae75d17a0dbc550177fa97a4591611",
+    "scenario_writer/v3/system": "cf70a8cd64d8e16ea3bd297041f0f9d7e1fe42a4b9677b624dbfa140a721c210",
     "screen_verdict/v1/human": "f1958dff017ff23e6a46560d2feb7cf221ab44033148248b2bc43749f5f4f401",
     "screen_verdict/v1/system": "eeb8d312ecf9ee2df60296f80602409a0a482f08d2d9547667499a4cc1998fd2",
     "step_phrasing/v1/human": "0fdc21deb1b90726ae0c520c7c6a9b4dcce63d312a78f31a1c70943707bd9e5e",
