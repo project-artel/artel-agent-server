@@ -145,6 +145,10 @@ class Settings(BaseSettings):
     # 버전을 매긴다 — 서로 다른 파일에 서로 다른 속도로 살고, 한쪽을 되돌리는 것이
     # 다른 쪽을 되돌리면 안 된다.
     screen_verdict_prompt_version: str | None = None
+    # `screen` 에 이름을 짓는 agent 의 프롬프트 (ARTEL-909). 판정의 것과 따로 버전을
+    # 매긴다 — 두 호출은 서로 다른 것을 묻고, 한쪽 문구를 되돌리는 것이 다른 쪽을
+    # 되돌리면 안 된다.
+    screen_name_prompt_version: str | None = None
 
     # Stamped onto every `test-case.v1` record. Spec discovery is deterministic
     # today — no prompt is loaded and no model is called — so both are `None`

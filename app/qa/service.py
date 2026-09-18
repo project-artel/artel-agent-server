@@ -22,6 +22,7 @@ from app.qa.envelope import (
 from app.qa.run_config import RunConfig, resolve_run_config
 from app.qa.scene_context import fetch_scene_context
 from app.qa.schemas import QaRunScenario, QaSessionRecord
+from app.qa.screen_name import ScreenNamer
 from app.qa.screen_verdict import ScreenSelectorAdjudicator
 from app.qa.store import QaSessionStore
 from app.sessions.store import SessionExpired
@@ -45,6 +46,18 @@ def _build_adjudicator(run_config: RunConfig) -> ScreenSelectorAdjudicator:
     return ScreenSelectorAdjudicator(model=run_config.model)
 
 
+def _build_namer(run_config: RunConfig) -> ScreenNamer:
+    """이 런의 모델로 이름 짓는 자리를 세운다 (ARTEL-909).
+
+    `_build_adjudicator` 와 같은 이유로 런의 모델을 쓴다 — 그림을 봐야 하는 일이라, 그
+    게임을 상대할 만하다고 이미 고른 모델이 여기서도 맞다.
+
+    프롬프트 버전은 `SCREEN_NAME_PROMPT_VERSION` 이 정한다. 런의 `prompt_version` 도
+    판정의 것도 끌어 쓰지 않는다 — 셋은 서로 다른 파일에 서로 다른 속도로 산다.
+    """
+    return ScreenNamer(model=run_config.model)
+
+
 class QaExecutionService:
     """Opens QA sessions and runs one agent loop per connected session.
 
@@ -59,6 +72,7 @@ class QaExecutionService:
         runner_factory: Callable[..., QaRunner] | None = None,
         reset_policy: ResetPolicy | None = None,
         adjudicator_factory: Callable[[RunConfig], ScreenSelectorAdjudicator] | None = None,
+        namer_factory: Callable[[RunConfig], ScreenNamer] | None = None,
     ) -> None:
         self._store = store
         self._runner_factory = runner_factory or (lambda *, config: QaRunner(config))
@@ -67,8 +81,12 @@ class QaExecutionService:
         # 화면 제안을 판정하는 자리(seam, ARTEL-656). 채널과 나란히 두고 함께 버린다 —
         # 판정은 QA 런의 일이 아니므로 `QaRunChannel` 안에 살지 않는다.
         self._adjudicator_factory = adjudicator_factory or _build_adjudicator
+        # 새로 굳은 `screen` 에 이름을 짓는 자리(seam, ARTEL-909). 판정기와 나란히 두고
+        # 함께 버린다 — 이름 짓기도 QA 런의 일이 아니므로 `QaRunChannel` 안에 살지 않는다.
+        self._namer_factory = namer_factory or _build_namer
         self._channels: dict[str, QaRunChannel] = {}
         self._adjudicators: dict[str, ScreenSelectorAdjudicator] = {}
+        self._namers: dict[str, ScreenNamer] = {}
 
     async def open(
         self,
@@ -129,6 +147,11 @@ class QaExecutionService:
             # 소켓이 사라진 뒤에도 모델 호출이 계속 도는 것을 막는다. 끊긴 판정은 답 없이
             # 끝나고, 그것은 지도를 종전대로 두는 결과다.
             adjudicator.close()
+        namer = self._namers.pop(session_id, None)
+        if namer is not None:
+            # 같은 이유로 끊는다. 끊긴 요청은 답 없이 끝나고, 그 `screen` 은 이름 없이
+            # 남는다.
+            namer.close()
         await self._store.delete(session_id)
 
     # --- the run --------------------------------------------------------------
@@ -159,6 +182,10 @@ class QaExecutionService:
             if previous is not None:
                 previous.close()
             self._adjudicators[session_id] = self._adjudicator_factory(record.run_config)
+            previous_namer = self._namers.get(session_id)
+            if previous_namer is not None:
+                previous_namer.close()
+            self._namers[session_id] = self._namer_factory(record.run_config)
 
             # Reset before every scenario but the first — the first act of this
             # scenario's try, so the reset frame is attributed to a try about to be
@@ -202,6 +229,9 @@ class QaExecutionService:
                 ending = self._adjudicators.pop(session_id, None)
                 if ending is not None:
                     ending.close()
+                ending_namer = self._namers.pop(session_id, None)
+                if ending_namer is not None:
+                    ending_namer.close()
 
             if channel.cancelled:
                 await self._send_terminal(
@@ -278,6 +308,16 @@ class QaExecutionService:
                 adjudicator = self._adjudicators.get(session_id)
                 if adjudicator is not None:
                     adjudicator.answer_later(channel, raw)
+            elif message_type == MessageType.SCREEN_NAME_REQUEST:
+                # 채널은 이 frame 에서 아무것도 안 읽는다 (ARTEL-909). 방금 굳은 행 하나에
+                # 이름을 물어보는 것이고, agent 가 지금 어느 `screen` 에 서 있는가는
+                # `SCREEN_SETTLED` 가 말한다.
+                #
+                # **아무것도 기다리지 않는다.** 이 loop 가 이름 하나를 기다리면 그동안
+                # `PULSE` 도 `ACTION_RESULT` 도 안 들어오고, 그것이 곧 런이 서는 것이다.
+                namer = self._namers.get(session_id)
+                if namer is not None:
+                    namer.answer_later(channel, raw)
             elif message_type == MessageType.SCREEN_SETTLED:
                 # 화면이 바뀔 때마다 온다 (ARTEL-668). 판정기에 안 넘긴다 — 이 프레임은
                 # 아무것도 안 물어보고 후보도 안 싣는다.
