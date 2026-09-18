@@ -197,6 +197,23 @@ class SceneContextEntry(_Payload):
     not_a_step_capabilities: list[SceneCapability] = Field(default_factory=list)
     knowledge: list[SceneKnowledge] = Field(default_factory=list)
 
+    def printed_actionable(self) -> list[SceneCapability]:
+        """block 이 찍는 "여기서 할 수 있는 것" 줄. 잘린 나머지는 여기 없다."""
+        return self.capabilities[:MAX_CAPABILITIES_IN_SCENE_CONTEXT]
+
+    def printed_happenings(self) -> list[SceneCapability]:
+        """block 이 찍는 "여기서 일어나는 것" 줄 (ARTEL-680)."""
+        return self.not_a_step_capabilities[:MAX_NOT_A_STEP_IN_SCENE_CONTEXT]
+
+    def printed_capabilities(self) -> list[SceneCapability]:
+        """block 이 실제로 찍는 줄 전부.
+
+        `_entry_lines` 와 `_not_a_step_lines` 가 위 둘로 그리고, `report_step` 의
+        `capability_key` 검사가 이 목록에 묻는다. 자르는 수를 두 자리에서 따로 적으면 검사가
+        찍힌 적 없는 키를 받아 준다.
+        """
+        return [*self.printed_actionable(), *self.printed_happenings()]
+
     def all_capabilities(self) -> list[SceneCapability]:
         """두 목록을 합친 것. `list_scene_capabilities` 가 뒤지는 대상이다.
 
@@ -335,7 +352,7 @@ def _not_a_step_lines(entry: SceneContextEntry) -> list[str]:
         return []
 
     total = len(entry.not_a_step_capabilities)
-    shown = entry.not_a_step_capabilities[:MAX_NOT_A_STEP_IN_SCENE_CONTEXT]
+    shown = entry.printed_happenings()
     lines = [""]
     heading = (
         "things the map says HAPPEN here — not controls to press, results to watch for "
@@ -380,7 +397,7 @@ def _entry_lines(entry: SceneContextEntry) -> list[str]:
             "the content map knows this scene and lists nothing that can be done here."
         )
     else:
-        shown = entry.capabilities[:MAX_CAPABILITIES_IN_SCENE_CONTEXT]
+        shown = entry.printed_actionable()
         heading = f"the content map says this can be done here ({len(entry.capabilities)} known)"
         if len(shown) < len(entry.capabilities):
             heading = (
