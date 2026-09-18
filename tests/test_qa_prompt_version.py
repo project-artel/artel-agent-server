@@ -292,10 +292,9 @@ def test_v18_without_the_memory_directive_renders_the_v17_text() -> None:
     wrongly.
     """
     filled = {"language_directive": "L", "vision_directive": "V"}
+    empty = {"memory_directive": "", "phase_directive": "", "decide_directive": ""}
     v17 = load_prompt("qa_run", "system", "v17").body.format(**filled)
-    v18 = load_prompt("qa_run", "system", "v18").body.format(
-        **filled, memory_directive=""
-    )
+    v18 = load_prompt("qa_run", "system", "v18").body.format(**filled, **empty)
     assert v18 == v17
 
 
@@ -305,6 +304,8 @@ def test_v18_with_the_memory_directive_adds_the_report_step_arguments() -> None:
         language_directive="L",
         vision_directive="V",
         memory_directive=load_prompt("qa_run", "memory_directive", "v18").body,
+        phase_directive="",
+        decide_directive="",
     )
     assert "`capability_key`" in body
     assert "`learned`" in body

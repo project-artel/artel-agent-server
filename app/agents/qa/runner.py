@@ -34,7 +34,9 @@ from app.qa.schemas import QaScenario, QaStep
 from app.qa.run_config import (
     COMPACTION_PROMPT_AGENT,
     COMPACTION_ROLE,
+    DECIDE_ROLE,
     MEMORY_ROLE,
+    PHASE_ROLE,
     PROMPT_AGENT,
     SYSTEM_ROLE,
     VISION_ROLE,
@@ -372,10 +374,24 @@ class QaRunner:
             if arch.phase_cycle.remembers_in_verdict
             else ""
         )
+        # phase 를 강제하는 런에만, 그리고 `DECIDE` 가 자기 turn 을 갖는 런에만. 안 실리면
+        # 빈 문자열이라 렌더 결과가 그만큼 그대로다.
+        phase_directive = (
+            load_prompt(PROMPT_AGENT, PHASE_ROLE, config.prompt_version).body
+            if arch.phase_cycle.gates_phases
+            else ""
+        )
+        decide_directive = (
+            load_prompt(PROMPT_AGENT, DECIDE_ROLE, config.prompt_version).body
+            if arch.phase_cycle.decides_in_its_own_turn
+            else ""
+        )
         system_prompt = prompt.body.format(
             language_directive=LANGUAGE_DIRECTIVES[config.language],
             vision_directive=vision_directive,
             memory_directive=memory_directive,
+            phase_directive=phase_directive,
+            decide_directive=decide_directive,
         )
         first_message = _plan(scenario)
         total_steps = len(scenario.steps)
