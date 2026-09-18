@@ -16,6 +16,7 @@ from app.agents.qa import arch as arch_module
 from app.agents.qa.arch import (
     BASE_TOOL_CALLS,
     DEFAULT_ARCH,
+    PhaseCycleMode,
     MAX_EXPANDS_PER_RUN,
     MAX_FORGETS_PER_RUN,
     MAX_LINKS_PER_RUN,
@@ -381,6 +382,48 @@ def test_a_pinned_summarizer_stays_apart_from_the_run_model() -> None:
     assert resolved.model is LLMModel.gpt_5_6_luna
 
 
+# --- the phase cycle as an axis -----------------------------------------------
+
+
+def test_the_default_run_is_untouched_by_the_axis() -> None:
+    """`phase_cycle=off` has to be the run that existed before the field did.
+
+    Not a preference. ARTEL-667 pushed back from `finish_run` once and eighteen
+    tests that close a run broke; this axis pushes back at every step, so any
+    existing test paying one extra round trip would be the axis leaking into runs
+    that never asked for it. The three things that decide what a run does — the
+    tool set, each tool's argument schema, the middleware — are compared against
+    the `in_verdict` rung's, which is the nearest value that does change
+    `report_step`, so this asserts a difference in one direction and identity in
+    the other.
+    """
+    off = resolved(phase_cycle=PhaseCycleMode.off, vision=VisionMode.on)
+    default = resolved(vision=VisionMode.on)
+    in_verdict = resolved(phase_cycle=PhaseCycleMode.remember_in_verdict, vision=VisionMode.on)
+
+    assert DEFAULT_ARCH.phase_cycle is PhaseCycleMode.off
+    assert structure_of(off) == structure_of(default)
+    # Same tools and same middleware as the rung above; only `report_step`'s
+    # schema and the knob itself separate them.
+    assert structure_of(off)[0] == structure_of(in_verdict)[0]
+    assert structure_of(off)[1] == structure_of(in_verdict)[1]
+    assert structure_of(off)[2] != structure_of(in_verdict)[2]
+
+
+def test_each_rung_of_the_ladder_is_its_own_structure() -> None:
+    """Four values, four digests, or `agent_fingerprint` averages the arms.
+
+    The pilot compares arms that run from one image against one game. If two of
+    them hashed the same, `/api/qa-stats` would put them in one cell and the
+    comparison would read as noise inside a single structure.
+    """
+    digests = {
+        mode: structure_of(resolved(phase_cycle=mode, vision=VisionMode.on))[2]
+        for mode in PhaseCycleMode
+    }
+    assert len(set(digests.values())) == len(PhaseCycleMode)
+
+
 # --- the label stays paired with the structure it names ------------------------
 
 # Pinned next to the label they were computed under, so a diff to either one
@@ -395,7 +438,7 @@ def test_a_pinned_summarizer_stays_apart_from_the_run_model() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v5-pointer-target"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v6-phase-cycle"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -454,12 +497,20 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
     "capture_screen",
     "compact_context",
 )
-# Moved twice since it was last pinned: `screen_capture` joined `QaArchSpec`
-# (ARTEL-868), which every structure's digest follows because the dump gained a
-# key, and then three pointer tool names and four tool schemas changed
-# (ARTEL-880). Only the second is a change of shape, and it is why the label
-# above moved with the digest this time.
-_EXPECTED_DEFAULT_FINGERPRINT = "83bc272fee58"
+# Moved once since it was last pinned, and by the smallest thing that can move
+# it: `phase_cycle` joined `QaArchSpec`, so `arch.model_dump()` gained a key and
+# every structure's digest followed. Measured — with that one key dropped back
+# out of the dump this default hashes `83bc272fee58` again, the value pinned
+# here before. Nothing else about the default run moved, which is what
+# `test_the_default_is_untouched_by_the_axis` below checks directly.
+#
+# The label above still moved. `screen_capture` (ARTEL-868) was the same kind of
+# arrival and did not bump it, on the argument that the default run's shape was
+# where it was — but that axis left the tool set alone at every value, and this
+# one adds `skip_memory_update` at `lite`, `decide_next_action` at `full` and two
+# `report_step` arguments from `in_verdict` up. There is a second shape here to
+# name, so it is named.
+_EXPECTED_DEFAULT_FINGERPRINT = "7235b9a26d43"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
