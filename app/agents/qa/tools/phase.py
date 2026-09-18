@@ -152,6 +152,22 @@ MAX_CONSECUTIVE_REFUSALS = 2
 # 선언이기 때문이다. 다른 phase 는 종전 그대로다.
 _REPEATABLE = frozenset({RunPhase.act})
 
+# 건너뛸 수 있는 phase. **`UPDATE_MEMORY` 만 건너뛸 수 없다** — 이 축이 존재하는 이유가
+# 그것이고 나머지는 그 둘레의 비계다.
+#
+# `OBSERVE` 가 여기 있는 것은 prompt 가 이미 참이라고 가르치는 것을 gate 가 몰랐기 때문이다.
+# `system.md` 는 action tool 이 "returns the outcome AND the scene it produced" 이므로
+# "you usually do not need a separate observation afterwards" 라고 적는다. 그 말은 맞다 —
+# 그런데 gate 가 매 바퀴 `observe_scene` 을 요구했다. 2026-09-18 ACT 수정 후 파일럿에서
+# 거절 137 회 중 **97 회가 `OBSERVE` 에서** 났고, 그중 47 회는 `report_step` 이었다.
+#
+# `ACT` 도 건너뛸 수 있다. 관측만 하는 스텝이 있다 — L1 의 step 1 이 "타이틀 화면을
+# 관찰한다" 이고, 거기서 조작을 요구하면 없는 동작을 지어내게 된다.
+#
+# `DECIDE` 는 여기 없다. `full` arm 의 전부가 그 phase 이고, 건너뛸 수 있으면 그 arm 이
+# `lite` 와 같아진다.
+_SKIPPABLE = frozenset({RunPhase.observe, RunPhase.act})
+
 
 def _tools_that_end(phase: RunPhase) -> str:
     """그 phase 를 끝내는 tool 이름을, 거절 문구에 넣을 한 줄로."""
@@ -198,6 +214,20 @@ class PhaseCycle:
             and at is self._after(self.phase)
         )
 
+    def _reachable(self, at: RunPhase | None) -> bool:
+        """지금 자리에서 저 phase 까지, 건너뛸 수 있는 것만 지나서 갈 수 있나.
+
+        뒤로 가는 것은 안 된다. 사이에 `UPDATE_MEMORY` 같은 필수 phase 가 하나라도 있으면
+        안 된다 — 그것을 건너뛰게 하려고 이 검사를 두는 것이 아니다.
+        """
+        if at is None or at is self.phase:
+            return False
+        here = self._order.index(self.phase)
+        there = self._order.index(at)
+        if there < here:
+            return False
+        return all(self._order[i] in _SKIPPABLE for i in range(here, there))
+
     def _ending_tools(self) -> str:
         if self.phase in _REPEATABLE:
             return _ends_repeatable(self.phase, self._order)
@@ -230,7 +260,7 @@ class PhaseCycle:
             return None
 
         at = _TOOL_PHASE.get(tool_name)
-        if at is None or at is self.phase or self._closes_repeatable(at):
+        if at is None or at is self.phase or self._closes_repeatable(at) or self._reachable(at):
             self._consecutive_refusals = 0
             return None
 
@@ -267,10 +297,14 @@ class PhaseCycle:
                 return
             self.phase = self._after(self.phase)
             return
-        if self._closes_repeatable(at):
+        if self._closes_repeatable(at) or self._reachable(at):
             # `report_step` 이 `ACT` 와 `VERIFY` 를 함께 닫는다 — 판정이 곧 조작을 그만둔다는
-            # 선언이고, 그 호출 자체가 `VERIFY` 가 요구하는 바로 그것이다.
-            self.phase = self._after(at)
+            # 선언이고, 그 호출 자체가 `VERIFY` 가 요구하는 바로 그것이다. 건너뛰어 온 경우도
+            # 같다: 지나온 phase 는 건너뛸 수 있는 것뿐이었고, 이 tool 이 자기 phase 를 닫는다.
+            if at in _REPEATABLE:
+                self.phase = at
+            else:
+                self.phase = self._after(at)
 
 
 def build_phase_cycle(mode: PhaseCycleMode) -> PhaseCycle | None:
