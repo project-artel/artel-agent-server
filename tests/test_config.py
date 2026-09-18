@@ -83,6 +83,21 @@ def test_compaction_defaults_are_safe_to_deploy_with() -> None:
     assert settings.qa_compaction_model is None
 
 
+def test_the_default_model_is_unset_until_a_deployment_names_one() -> None:
+    """비어 있는 것이 기본이고, 그것은 `FALLBACK_MODEL` 을 따른다는 뜻이다. 이 값을
+    설정하지 않은 배포가 종전과 똑같이 도는 것이 rollback 경로다 (ARTEL-884)."""
+    settings = Settings(_env_file=None, default_model=None)
+
+    assert settings.default_model is None
+
+
+def test_a_default_model_outside_the_catalog_is_refused_at_startup() -> None:
+    """`qa_compaction_model` 과 같은 validator 를 쓴다. 오타가 첫 요청까지 살아남으면
+    그 배포는 자기가 어느 model 로 도는지 모르는 채로 돈다."""
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, default_model="anthropic/not-a-model")
+
+
 def test_a_summarizer_outside_the_catalog_is_refused_at_startup() -> None:
     """The slug cannot be typed as `LLMModel` here — importing `app.llm` from this
     module would import `chat_model`, which imports this module back. The validator

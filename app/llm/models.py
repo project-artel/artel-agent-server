@@ -379,9 +379,6 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
 }
 
 
-DEFAULT_MODEL: LLMModel = LLMModel.gpt_5_6_luna
-
-
 def get_model_spec(model: LLMModel) -> ModelSpec:
     try:
         return MODEL_SPECS[model]

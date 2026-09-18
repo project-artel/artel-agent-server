@@ -11,7 +11,8 @@ from app.agents import (
     KnowledgeQueryAgent,
     KnowledgeQueryGenerationError,
 )
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.default_model import resolve_default_model
+from app.llm.models import LLMModel
 from app.llm.usage import set_usage_scope
 
 
@@ -20,7 +21,7 @@ router = APIRouter(tags=["knowledge"])
 
 class KnowledgeQueriesRequest(BaseModel):
     items: list[KnowledgeItem] = Field(min_length=1)
-    model: LLMModel = DEFAULT_MODEL
+    model: LLMModel = Field(default_factory=resolve_default_model)
     # What this call's LLM spend is booked against. Optional so an Orchestration
     # that does not send it yet keeps working, with a null reference until then.
     project_id: int | None = None

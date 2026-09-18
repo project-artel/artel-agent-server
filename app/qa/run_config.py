@@ -30,8 +30,8 @@ from app.agents.qa.arch import (
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage
 from app.config import get_settings
 from app.llm.chat_model import TEMPERATURE
+from app.llm.default_model import resolve_default_model
 from app.llm.models import (
-    DEFAULT_MODEL,
     LLMModel,
     ReasoningConfig,
     get_model_spec,
@@ -107,7 +107,7 @@ class RunConfig(BaseModel):
 
 
 def resolve_run_config(
-    model: LLMModel = DEFAULT_MODEL,
+    model: LLMModel | None = None,
     language: OutputLanguage = DEFAULT_LANGUAGE,
     prompt_version: str | None = None,
     reasoning: ReasoningConfig | None = None,
@@ -125,6 +125,7 @@ def resolve_run_config(
     known while the session is still being opened and a broken prompt file fails
     the open instead of the run.
     """
+    model = model or resolve_default_model()
     reasoning = validate_reasoning(model, reasoning)
     spec = get_model_spec(model)
     resolved_arch = resolve_arch(arch, model)

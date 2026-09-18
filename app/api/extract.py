@@ -1,13 +1,14 @@
 import openai
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.agents import GameContextExtractionError
 from app.api.game_context_knowledge import KnowledgeIngestItem, game_context_to_knowledge_items
 from app.documents.fetch import DocumentFetchError
 from app.documents.loader import UnsupportedDocumentError
 from app.documents.service import ExtractionService
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.default_model import resolve_default_model
+from app.llm.models import LLMModel
 
 
 router = APIRouter(tags=["game_context"])
@@ -16,7 +17,7 @@ router = APIRouter(tags=["game_context"])
 class ExtractRequest(BaseModel):
     source_url: str
     filename: str
-    model: LLMModel = DEFAULT_MODEL
+    model: LLMModel = Field(default_factory=resolve_default_model)
     # What this call's LLM spend is booked against. Optional so an Orchestration
     # that does not send it yet keeps working, with a null reference until then.
     document_id: int | None = None

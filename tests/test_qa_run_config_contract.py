@@ -9,7 +9,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.agents.qa.arch import QA_ARCH_LABEL, RUN_DEADLINE_SECONDS, TOOL_CALLS_PER_STEP
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.default_model import FALLBACK_MODEL
+from app.llm.models import LLMModel
 from app.main import app
 from app.prompts import load_prompt, resolve_version
 from app.qa.service import QaExecutionService
@@ -44,7 +45,7 @@ def test_the_response_carries_what_the_run_will_use() -> None:
     config = body["run_config"]
 
     assert body["session_id"]
-    assert config["model"] == DEFAULT_MODEL.value
+    assert config["model"] == FALLBACK_MODEL.value
     assert config["provider"] == "openai"
     assert config["agent_arch"] == QA_ARCH_LABEL
     assert len(config["agent_fingerprint"]) == 12

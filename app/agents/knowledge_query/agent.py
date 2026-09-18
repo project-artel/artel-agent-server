@@ -18,7 +18,8 @@ from app.agents.knowledge_query.schemas import (
     KnowledgeQueryAgentRequest,
 )
 from app.llm.chat_model import structured
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.default_model import resolve_default_model
+from app.llm.models import LLMModel
 
 
 _MAX_ATTEMPTS = 5
@@ -87,8 +88,9 @@ class KnowledgeQueryAgent:
         self,
         items: list[KnowledgeItem],
         context: AgentContext,
-        model: LLMModel = DEFAULT_MODEL,
+        model: LLMModel | None = None,
     ) -> list[KnowledgeItemQueries]:
+        model = model or resolve_default_model()
         results = await asyncio.gather(
             *(
                 self.run(KnowledgeQueryAgentRequest(item=item, model=model), context)

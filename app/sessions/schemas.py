@@ -9,7 +9,8 @@ from app.agents import (
     AuthoredFlow,
     TestCaseListItem,
 )
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.default_model import resolve_default_model
+from app.llm.models import LLMModel
 
 
 class HistoryTurn(BaseModel):
@@ -39,7 +40,7 @@ class SessionRecord(BaseModel):
     history: list[HistoryTurn] = Field(default_factory=list)
     # First user input, consumed when the WS connects to run the first turn.
     pending_user_input: str | None = None
-    model: LLMModel = DEFAULT_MODEL
+    model: LLMModel = Field(default_factory=resolve_default_model)
     # Output locale for generated scenarios. Default keeps records saved
     # before this field was introduced deserializing as Korean.
     locale: OutputLanguage = DEFAULT_LANGUAGE

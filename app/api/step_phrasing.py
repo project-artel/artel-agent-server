@@ -10,7 +10,7 @@ import uuid
 
 import openai
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.agents import (
     AgentContext,
@@ -19,7 +19,8 @@ from app.agents import (
     StepPhrasingError,
     StepPhrasingRequest,
 )
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.default_model import resolve_default_model
+from app.llm.models import LLMModel
 from app.llm.usage import set_usage_scope
 
 router = APIRouter(tags=["scenario"])
@@ -31,7 +32,7 @@ class StepPhrasingBody(BaseModel):
     before: str = ""
     after: str = ""
     locale: str = "ko"
-    model: LLMModel = DEFAULT_MODEL
+    model: LLMModel = Field(default_factory=resolve_default_model)
     # What this call's LLM spend is booked against, like /knowledge-queries.
     project_id: int | None = None
 

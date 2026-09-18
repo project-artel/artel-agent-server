@@ -4,7 +4,8 @@ from typing import Literal
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.default_model import resolve_default_model
+from app.llm.models import LLMModel
 
 
 class OutputLanguage(StrEnum):
@@ -164,7 +165,7 @@ class ScenarioAgentRequest(BaseModel):
     # The run's current scenarios (ARTEL-206 Step 6). Lets the agent target an
     # existing scenario for edits by echoing its `scenario_id`. Empty for a fresh run.
     current_scenarios: list["ScenarioPlan"] = Field(default_factory=list)
-    model: LLMModel = DEFAULT_MODEL
+    model: LLMModel = Field(default_factory=resolve_default_model)
     # Locale for the natural-language output (message + scenario text).
     locale: OutputLanguage = DEFAULT_LANGUAGE
     # Which run this turn belongs to (ARTEL-650). Carried for one reason: the

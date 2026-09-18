@@ -2,12 +2,12 @@ import asyncio
 import contextlib
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from app.agents.qa.arch import DEFAULT_ARCH, QaArchSpec, resolve_arch
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage
+from app.llm.default_model import resolve_default_model
 from app.llm.models import (
-    DEFAULT_MODEL,
     LLMModel,
     ReasoningConfig,
     validate_reasoning,
@@ -74,7 +74,7 @@ class QaContext(BaseModel):
 
 class OpenQaSessionRequest(BaseModel):
     context: QaContext
-    model: LLMModel = DEFAULT_MODEL
+    model: LLMModel = Field(default_factory=resolve_default_model)
     language: OutputLanguage = DEFAULT_LANGUAGE
     # Pins this run to one prompt version (a directory under
     # app/prompts/qa_run/), so two runs can be compared. Omit it to take
