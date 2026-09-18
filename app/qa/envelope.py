@@ -140,6 +140,23 @@ class MessageType(StrEnum):
     # 답인지는 payload 의 `type` 이 말한다. 저쪽은 제안에 대한 답(`SCREEN_SELECTOR_VERDICT`)
     # 에도 이 타입으로 답하므로, 그 `type` 을 확인하지 않으면 남의 답을 제 것으로 읽는다.
     SCREEN_SELECTOR_RESULT = "SCREEN_SELECTOR_RESULT"
+    # Orchestration -> Agent
+    #
+    # 새로 굳은 `screen` 행 하나에 이름을 지어 달라는 요청 (ARTEL-909). 답은
+    # [SCREEN_NAME] 이고 봉투의 `correlationId` 가 이 frame 의 `messageId` 다.
+    #
+    # [SCREEN_SELECTOR_PROPOSAL] 과 겸하지 않는다. 제안은 `(scene, selector)` 마다 평생
+    # 한 번만 나가서 대부분의 `screen` 은 제안 없이 생기고, 이름 짓기를 판정에 얹으면 그
+    # screen 들이 이름 없이 남는다 (ARTEL-908). 언제 물어볼지는 orchestration 이 정한다.
+    SCREEN_NAME_REQUEST = "SCREEN_NAME_REQUEST"
+    # Agent -> Orchestration
+    #
+    # [SCREEN_NAME_REQUEST] 하나에 대한 답 (ARTEL-909).
+    #
+    # QA agent 가 보내지 않는다. 판정과 같은 이유다 — 게임을 하고 있는 agent 를 세워
+    # 이름을 짓게 하면 기다리는 동안 게임이 흘러간다. 답하는 것은 QA 런 밖에서 도는 단발
+    # agent 다(`app/qa/screen_name.py`).
+    SCREEN_NAME = "SCREEN_NAME"
     # Agent -> Orchestration
     #
     # 이 런이 capability 하나에 대해 배운 것을 지도에 적는다 (ARTEL-644).
@@ -993,6 +1010,55 @@ class ScreenSelectorResultPayload(BaseModel):
     rejected: list[ScreenSelectorRejectedEntry] = Field(default_factory=list)
     folded_screens: int = 0
 
+
+
+# --- screen name frames (ARTEL-909 의 계약) ------------------------------------
+#
+# frame 둘이다. orchestration 이 새로 굳은 `screen` 하나를 들고 물어보고
+# (`SCREEN_NAME_REQUEST`), 이쪽이 이름 하나로 답한다(`SCREEN_NAME`). 그 사이에 왕복이
+# 더 없다.
+#
+# `screen` 과 `scene` 이 판정 frame 의 것과 **같은 모델**이다. 저쪽이 같은 철자로 싣기로
+# 정했고, 같은 값의 두 번째 모델을 두면 한쪽만 필드가 늘어도 아무도 모른다 — `SCREEN_SETTLED`
+# 가 [ScreenSelectorProposalPayload] 를 그대로 쓰는 것과 같은 판단이다.
+
+# 이름 길이 상한. 넘으면 버리고 이름 없이 답한다 (자르지 않는다 — 잘린 이름은 틀린 이름이고,
+# 이름 없는 `screen` 은 그냥 이름이 없을 뿐이다).
+MAX_SCREEN_NAME_LENGTH = 60
+
+
+class ScreenNameRequestPayload(BaseModel):
+    """`SCREEN_NAME_REQUEST` 의 payload. 이름을 물어보는 `screen` 하나.
+
+    `request_id` 가 답의 `correlation_id` 가 된다. 봉투의 `messageId` 와 같은 값이지만
+    payload 에도 싣는다 — 봉투를 안 보는 경로가 생겨도 답이 미아가 되지 않는다.
+
+    필드가 전부 기본값을 갖는다. 판정 frame 과 같은 이유다: 한 칸이 비었다고 frame 을
+    통째로 버리면 그 `screen` 은 영영 이름을 못 받는다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    request_id: str = ""
+    screen: ScreenSelectorScreenRef = Field(default_factory=ScreenSelectorScreenRef)
+    scene: ScreenSelectorSceneRef = Field(default_factory=ScreenSelectorSceneRef)
+
+
+class ScreenNamePayload(BaseModel):
+    """`SCREEN_NAME` 의 payload. 요청 하나에 대한 답이다 (ARTEL-909).
+
+    **`name` 이 `null` 인 답이 정상이다.** 모델이 형식을 어겼을 때도, 상한을 넘겼을 때도,
+    근거가 없어 못 지었을 때도 같은 모양으로 나간다. 이름은 표시값이라 없으면 `screen` 이
+    이름 없이 남을 뿐이고, 스키마를 채우려고 지어낸 이름은 사람이 content map 에서 그
+    화면을 계속 잘못 찾게 만든다.
+
+    `note` 는 한 문장이거나 `null` 이다. frame 이 `qa_log` 에 남으므로, 이름이 없는 답에서
+    이 문장이 "왜 이 `screen` 은 이름이 없나" 에 답하는 유일한 기록이다.
+    """
+
+    request_id: str
+    name: str | None = None
+    note: str | None = None
 
 
 # --- capability write frames (ARTEL-644 의 계약) -------------------------------
