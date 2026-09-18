@@ -36,6 +36,7 @@ class StubSettings:
         self.screen_verdict_prompt_version = versions.get(
             "screen_verdict_prompt_version"
         )
+        self.screen_name_prompt_version = versions.get("screen_name_prompt_version")
 
 
 @pytest.fixture
@@ -311,6 +312,7 @@ def test_every_live_agent_has_a_v1(monkeypatch) -> None:
             "game_context",
             "knowledge_query",
             "screen_verdict",
+            "screen_name",
             "step_phrasing",
         }
         for agent in known_agents():

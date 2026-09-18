@@ -50,6 +50,7 @@ SETTINGS_VERSION_KEYS: dict[str, str] = {
     "game_context": "game_context_prompt_version",
     "knowledge_query": "knowledge_query_prompt_version",
     "screen_verdict": "screen_verdict_prompt_version",
+    "screen_name": "screen_name_prompt_version",
 }
 
 _FRONTMATTER_FENCE = "---"
