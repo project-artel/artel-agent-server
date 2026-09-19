@@ -11,6 +11,7 @@ import logging
 import pytest
 
 from app.agents.qa import runner as runner_module
+from app.agents.qa.arch import PhaseCycleMode, QaArchError, QaArchSpec
 from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState, build_tools
 from app.api.qa_sessions import OpenQaSessionRequest
@@ -87,7 +88,9 @@ class RecordingRunner:
         return None, None
 
 
-async def _run_session(prompt_version: str | None) -> str | None:
+async def _run_session(
+    prompt_version: str | None, arch: QaArchSpec | None = None
+) -> str | None:
     seen: list[str | None] = []
     runner = RecordingRunner()
 
@@ -105,6 +108,7 @@ async def _run_session(prompt_version: str | None) -> str | None:
             QaRunScenario(qa_try_id=7, test_scenario_id=1, scenario=make_scenario())
         ],
         prompt_version=prompt_version,
+        **({"arch": arch} if arch is not None else {}),
     )
 
     async def send(_frame: dict) -> None:
@@ -116,7 +120,10 @@ async def _run_session(prompt_version: str | None) -> str | None:
 
 
 def test_the_requested_version_reaches_the_runner() -> None:
-    assert asyncio.run(_run_session("v1")) == "v1"
+    # `v1` predates the phase cycle, so the rung that reads no `phase_directive`
+    # travels with it. What is under test is which version the runner was handed.
+    off = QaArchSpec(phase_cycle=PhaseCycleMode.off)
+    assert asyncio.run(_run_session("v1", off)) == "v1"
 
 
 def test_omitting_the_version_resolves_it_before_the_run() -> None:
@@ -176,9 +183,14 @@ def test_the_run_start_log_names_the_prompt_version(stubbed_agent, caplog) -> No
 
     with caplog.at_level(logging.INFO, logger="app.agents.qa.runner"):
         asyncio.run(
-            QaRunner(resolve_run_config(prompt_version="v1")).run(
-                channel, scenario, QaRunState(total_steps=1)
-            )
+            QaRunner(
+                # `v1` predates the phase cycle and has no `phase_directive`; the
+                # rung that needs none comes with it. The log line under test
+                # names the prompt version either way.
+                resolve_run_config(
+                    prompt_version="v1", arch=QaArchSpec(phase_cycle=PhaseCycleMode.off)
+                )
+            ).run(channel, scenario, QaRunState(total_steps=1))
         )
 
     starting = [
@@ -270,9 +282,16 @@ def test_the_default_qa_version_is_v18() -> None:
     exist only when `phase_cycle` is past `off`, so the text describing them is
     not in `system.md` at all: it is the `memory_directive` role, injected by
     `QaRunner.run` only on a run that has them, exactly as `vision_directive` is
-    injected only on a run that can see. On a default run the placeholder renders
-    empty and the body is the v17 text, which is why moving the default here is
-    safe rather than a silent repointing.
+    injected only on a run that can see. With all three placeholders empty the
+    body is byte for byte the v17 text, which is what the test below pins and
+    what makes `phase_cycle=off` on v18 the same prompt an `off` run read before
+    v18 existed.
+
+    The default rung is `lite`, so a default run does read the injected text. The
+    two defaults move together on purpose: a version that carries these roles is
+    the only one a gated run can be honestly given, which
+    `test_an_old_prompt_version_is_refused_rather_than_gated_in_silence` below
+    holds the other end of.
     """
     assert resolve_version("qa_run") == "v18"
 
@@ -296,6 +315,62 @@ def test_v18_without_the_memory_directive_renders_the_v17_text() -> None:
     v17 = load_prompt("qa_run", "system", "v17").body.format(**filled)
     v18 = load_prompt("qa_run", "system", "v18").body.format(**filled, **empty)
     assert v18 == v17
+
+
+def test_an_old_prompt_version_is_refused_rather_than_gated_in_silence() -> None:
+    """A version that predates a rung cannot be run at that rung.
+
+    `phase_directive`, `decide_directive` and `memory_directive` arrived in v18;
+    v1 through v17 have `system` and `vision_directive` and nothing else. So a
+    run pinned to one of those and asked for `lite` wants a phase gate whose
+    rules the prompt never states — the state machine refuses an out-of-phase
+    call and the model was never told there were phases.
+
+    Filling the missing role with an empty string would make that run start and
+    look normal, and the record would file it under `phase_cycle=lite` beside
+    runs that did read the text. Refusing puts the choice back where it can be
+    made: pin a newer version, or ask for the rung the old one can carry.
+
+    The refusal has to name both halves, because either one can be the mistake.
+    """
+    with pytest.raises(QaArchError) as refused:
+        resolve_run_config(
+            prompt_version="v1", arch=QaArchSpec(phase_cycle=PhaseCycleMode.lite)
+        )
+
+    message = str(refused.value)
+    assert "v1" in message
+    assert "phase_directive" in message
+    assert "phase_cycle=lite" in message
+
+    # The same version at the rung that needs none of those roles is fine, and
+    # that is the way out the message points at.
+    assert (
+        resolve_run_config(
+            prompt_version="v1", arch=QaArchSpec(phase_cycle=PhaseCycleMode.off)
+        ).prompt_version
+        == "v1"
+    )
+
+
+def test_every_version_carries_the_roles_its_rungs_need() -> None:
+    """`v18` is the newest, so an unpinned run at any rung has to resolve.
+
+    This is what makes the refusal above a narrow rule rather than a trap: the
+    default `prompt_version` is the newest directory, and the newest directory
+    has every role. A new version that forgot to copy one of these files would
+    break the default run of a rung, which is the failure this catches on the
+    day the directory is added rather than on the day someone runs `full`.
+    """
+    roles = roles_in("qa_run", resolve_version("qa_run"))
+
+    for role in ("system", "vision_directive", "memory_directive",
+                 "phase_directive", "decide_directive"):
+        assert role in roles
+
+    for mode in PhaseCycleMode:
+        config = resolve_run_config(arch=QaArchSpec(phase_cycle=mode))
+        assert config.arch.phase_cycle is mode
 
 
 def test_v18_with_the_memory_directive_adds_the_report_step_arguments() -> None:

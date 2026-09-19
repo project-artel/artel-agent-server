@@ -138,7 +138,30 @@ from app.llm.models import LLMModel, get_model_spec
 # argument does not reach here: at three of this field's four values the default
 # run's shape does move, and a label that named only the `off` shape would leave
 # `lite` and `full` filed under the name of the free tool loop they replace.
-QA_ARCH_LABEL = "v6-phase-cycle"
+#
+# v7 because the default moved from `off` to `lite`, so every run that names
+# nothing gets the shape v6 described as opt-in: 38 tools instead of 37
+# (`skip_memory_update` joins), `report_step` carrying `capability_key` and
+# `learned`, the phase state machine refusing out-of-phase calls, and three more
+# system prompt roles. The fingerprint moves with it.
+#
+# Moved on the record it leaves, not on the score. Over 16 L1 runs on 2026-09-18,
+# 8 per arm, `lite` agreed with the answer key on 19.1 of 24 steps against `off`'s
+# 18.3 — ranges 16-21 and 12-21, which overlap, so that gap is not a result. What
+# is not close: `lite` left 105 `learned` lines and 10 `capability_key` citations,
+# `off` left 0 of each, for 13% more cost ($9.89 against $8.76). An `off` run
+# finishes knowing exactly what it knew when it started.
+#
+# **Those runs used an older phase table than the one `phase.py` now holds.** They
+# were measured with `ACT` as the only repeating phase; `OBSERVE` and
+# `UPDATE_MEMORY` repeat as well now, which removes refusals the measured arm
+# paid for. The direction of that change is known — strictly fewer refusals, so
+# `lite` costs less and is interrupted less than the numbers above say — but the
+# size is not, because it has not been run. The honest reading is that the
+# measurement supports "`lite` does not score worse and writes things down", and
+# that its cost and refusal figures are an upper bound rather than a reading of
+# this table.
+QA_ARCH_LABEL = "v7-phase-cycle-default"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
@@ -322,10 +345,13 @@ class QaArchSpec(BaseModel):
     max_issues_per_run: int = Field(default=MAX_ISSUES_PER_RUN, ge=0, le=1_000_000)
     vision: VisionMode = VisionMode.auto
     screen_capture: ScreenCaptureMode = ScreenCaptureMode.on_demand
-    # `off` is the whole compatibility story of this axis: at that value the tool
-    # set, every tool schema, the middleware list and every other knob are what
-    # they were, so a run that names nothing here behaves exactly as it did.
-    phase_cycle: PhaseCycleMode = PhaseCycleMode.off
+    # `off` is the compatibility value: at it the tool set, every tool schema, the
+    # middleware list and every other knob are what they were before this axis
+    # existed. It is no longer the default, so that shape has to be asked for by
+    # name now — including by a run pinned to a prompt version older than `v18`,
+    # which carries no `phase_directive` for the gate's refusals to rest on and is
+    # refused in `resolve_run_config` rather than gated in silence.
+    phase_cycle: PhaseCycleMode = PhaseCycleMode.lite
     fold_stale_scenes: bool = True
     # Folds the neighbour blocks the search volunteers, and only those (ARTEL-277).
     # Separate from `fold_stale_scenes` because the two are independently useful

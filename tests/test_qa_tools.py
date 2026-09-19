@@ -11,12 +11,23 @@ import json
 
 import pytest
 
-from app.agents.qa.arch import default_resolved_arch
+from app.agents.qa.arch import PhaseCycleMode, default_resolved_arch
 from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.tools.action_tools import parse_target
 from app.agents.qa.vision import MAX_CAPTURES_PER_RUN
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import MessageType
+
+
+# 이 파일은 tool 하나하나가 무엇을 하는지 본다. phase gate 는 그 위층이고, 켜 두면 거의 모든
+# 테스트가 gate 를 지나느라 한 왕복씩 더 쓰게 된다 — ARTEL-667 이 `finish_run` 한 곳에서 겪은
+# 일이다. 그래서 여기서는 명시적으로 끈다.
+#
+# **기본값이 무엇인지는 `tests/test_qa_arch.py` 가 지킨다.** 이 파일이 `off` 를 명시하는 순간
+# 기본값 변화를 여기서는 못 잡으므로, 그 핀이 그 역할을 대신한다.
+_NO_PHASE_GATE = default_resolved_arch().model_copy(
+    update={"phase_cycle": PhaseCycleMode.off}
+)
 
 
 def make(total_steps: int = 1, timeout: float = 0.05):
@@ -27,7 +38,7 @@ def make(total_steps: int = 1, timeout: float = 0.05):
 
     channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=timeout, write_timeout=timeout)
     state = QaRunState(total_steps=total_steps)
-    tools = {tool.name: tool for tool in build_tools(channel, state)}
+    tools = {tool.name: tool for tool in build_tools(channel, state, arch=_NO_PHASE_GATE)}
     return channel, state, tools, sent
 
 

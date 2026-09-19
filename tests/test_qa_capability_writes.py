@@ -22,11 +22,18 @@ import asyncio
 import pytest
 
 from app.agents.qa.capability import CAPABILITY_PAGE
+from app.agents.qa.arch import PhaseCycleMode, default_resolved_arch
 from app.agents.qa.tools import QaRunState, build_tools
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import MessageType
 from app.qa.scene_context import SceneContext
 
+
+# phase gate 를 끈다. 이 파일은 tool 하나하나가 무엇을 하는지 보는 자리이고, gate 는 그 위층
+# 이다. 기본값이 무엇인지는 `tests/test_qa_arch.py` 가 지킨다.
+_NO_PHASE_GATE = default_resolved_arch().model_copy(
+    update={"phase_cycle": PhaseCycleMode.off}
+)
 
 def make(timeout: float = 0.05):
     sent: list[dict] = []
@@ -42,7 +49,7 @@ def make(timeout: float = 0.05):
         screen_selector_timeout=timeout,
     )
     state = QaRunState(total_steps=1)
-    tools = {tool.name: tool for tool in build_tools(channel, state)}
+    tools = {tool.name: tool for tool in build_tools(channel, state, arch=_NO_PHASE_GATE)}
     return channel, state, tools, sent
 
 
