@@ -16,6 +16,7 @@ from app.agents.qa import arch as arch_module
 from app.agents.qa.arch import (
     BASE_TOOL_CALLS,
     DEFAULT_ARCH,
+    PhaseCycleMode,
     MAX_EXPANDS_PER_RUN,
     MAX_FORGETS_PER_RUN,
     MAX_LINKS_PER_RUN,
@@ -99,9 +100,16 @@ def test_the_fingerprint_ignores_the_model_and_the_prompt() -> None:
     """The axes are independent, and a digest that moved with all of them could
     not group "the same structure under two models" — the comparison this exists
     to make possible."""
-    sonnet = resolve_run_config(model=LLMModel.claude_sonnet_5)
-    gpt = resolve_run_config(model=LLMModel.gpt_chat_latest)
-    pinned = resolve_run_config(model=LLMModel.gpt_chat_latest, prompt_version="v1")
+    # `v1` predates the phase cycle and carries no `phase_directive`, so the
+    # pinned side is asked for with the rung that needs none — and then so are
+    # the other two, because a structure that differed between them is the one
+    # thing that would make this comparison say nothing.
+    old_shape = QaArchSpec(phase_cycle=PhaseCycleMode.off)
+    sonnet = resolve_run_config(model=LLMModel.claude_sonnet_5, arch=old_shape)
+    gpt = resolve_run_config(model=LLMModel.gpt_chat_latest, arch=old_shape)
+    pinned = resolve_run_config(
+        model=LLMModel.gpt_chat_latest, prompt_version="v1", arch=old_shape
+    )
 
     assert sonnet.agent_fingerprint == gpt.agent_fingerprint == pinned.agent_fingerprint
     assert pinned.prompt_version != gpt.prompt_version
@@ -381,6 +389,67 @@ def test_a_pinned_summarizer_stays_apart_from_the_run_model() -> None:
     assert resolved.model is LLMModel.gpt_5_6_luna
 
 
+# --- the phase cycle as an axis -----------------------------------------------
+
+
+def test_the_off_rung_is_the_run_that_existed_before_the_axis() -> None:
+    """`off` has to stay the run that existed before the field did.
+
+    It is not the default any more, which is exactly why this is still checked.
+    `off` is what a caller reaches for to get the old shape back — a pinned
+    prompt version, a rollback, the arm the pilot measured against — and it is
+    worth nothing if it has drifted in the meantime. The three things that decide
+    what a run does are the tool set, each tool's argument schema and the
+    middleware; they are compared against the `in_verdict` rung, the nearest
+    value that does change `report_step`, so this asserts identity in two of them
+    and a difference in the third.
+    """
+    off = resolved(phase_cycle=PhaseCycleMode.off, vision=VisionMode.on)
+    in_verdict = resolved(phase_cycle=PhaseCycleMode.remember_in_verdict, vision=VisionMode.on)
+
+    # Same tools and same middleware as the rung above; only `report_step`'s
+    # schema and the knob itself separate them.
+    assert structure_of(off)[0] == structure_of(in_verdict)[0]
+    assert structure_of(off)[1] == structure_of(in_verdict)[1]
+    assert structure_of(off)[2] != structure_of(in_verdict)[2]
+
+
+def test_each_rung_of_the_ladder_is_its_own_structure() -> None:
+    """Four values, four digests, or `agent_fingerprint` averages the arms.
+
+    The pilot compares arms that run from one image against one game. If two of
+    them hashed the same, `/api/qa-stats` would put them in one cell and the
+    comparison would read as noise inside a single structure.
+    """
+    digests = {
+        mode: structure_of(resolved(phase_cycle=mode, vision=VisionMode.on))[2]
+        for mode in PhaseCycleMode
+    }
+    assert len(set(digests.values())) == len(PhaseCycleMode)
+
+
+def test_the_default_structure_holds_the_run_to_the_phase_cycle() -> None:
+    """기본값이 `lite` 라는 것을, 기본값을 안 적은 자리에서 지킨다.
+
+    `tests/test_qa_tools.py` 는 `make()` 에서 `phase_cycle=off` 를 명시한다 — 그 파일은 tool
+    하나하나를 보는 자리이고, gate 를 켜 두면 거의 모든 테스트가 한 왕복씩 더 쓴다. 그래서
+    기본값이 바뀌어도 저쪽은 안 깨진다. **이 테스트가 그 자리를 대신한다.**
+
+    아래 `_EXPECTED_DEFAULT_TOOL_NAMES` 와 fingerprint 핀도 같은 것을 지키지만, 그 둘은 값이
+    맞는지만 말한다. 기본 런이 실제로 phase 를 강제하는지는 이 줄이 말한다.
+    """
+    # 요청이 아무 말도 안 했을 때 무엇이 되는지를 두 자리에서 본다 — spec 의 기본값과,
+    # 그 spec 이 실제 런 설정으로 풀린 결과.
+    assert DEFAULT_ARCH.phase_cycle is PhaseCycleMode.lite
+    mode = resolve_run_config().arch.phase_cycle
+    assert mode is PhaseCycleMode.lite
+
+    assert mode.gates_phases
+    assert mode.remembers_in_verdict
+    # `decide_next_action` 은 `full` 만의 것이고 기본값은 그 왕복을 안 쓴다.
+    assert not mode.decides_in_its_own_turn
+
+
 # --- the label stays paired with the structure it names ------------------------
 
 # Pinned next to the label they were computed under, so a diff to either one
@@ -395,7 +464,7 @@ def test_a_pinned_summarizer_stays_apart_from_the_run_model() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v5-pointer-target"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v7-phase-cycle-default"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -452,14 +521,22 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
     "finish_run",
     "reply_to_operator",
     "capture_screen",
+    "skip_memory_update",
     "compact_context",
 )
-# Moved twice since it was last pinned: `screen_capture` joined `QaArchSpec`
-# (ARTEL-868), which every structure's digest follows because the dump gained a
-# key, and then three pointer tool names and four tool schemas changed
-# (ARTEL-880). Only the second is a change of shape, and it is why the label
-# above moved with the digest this time.
-_EXPECTED_DEFAULT_FINGERPRINT = "83bc272fee58"
+# Moved twice since `83bc272fee58`, which was the last digest taken before this
+# axis existed. First to `7235b9a26d43`, by the smallest thing that can move a
+# digest: `phase_cycle` joined `QaArchSpec`, so `arch.model_dump()` gained a key
+# and every structure followed, the default's shape included, while nothing the
+# default run did had moved at all.
+#
+# Then here, by the largest thing on this axis: the default itself moved from
+# `off` to `lite`. This is the first bullet of the docstring below, not the
+# third — `skip_memory_update` is in the list above now, `report_step` carries
+# `capability_key` and `learned`, and the phase state machine sits in front of
+# every call. A run that names nothing is a different agent than it was, so the
+# label was bumped with it.
+_EXPECTED_DEFAULT_FINGERPRINT = "2a87923211b7"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:

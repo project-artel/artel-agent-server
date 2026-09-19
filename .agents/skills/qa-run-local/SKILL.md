@@ -68,8 +68,23 @@ Two run rules that decide whether repetition means anything:
 
 ## Reading the result
 
+**`steps_passed` is not a score.** L1 is 24 steps of which **6 are expected to
+fail**, so an honest perfect run scores 18 and **`24/24` means the agent reported
+every false expectation as passed** — the one behaviour the benchmark exists to
+catch. Score against `test_scenario.steps[].expected_passed` instead, take the
+**last** verdict per step (some runs report a step twice and the stored
+`steps_passed` is then inflated by it, silently — other batches show none), and
+report both `agree` out of the step total and
+accuracy among the steps actually judged. The canonical query is in the
+workspace skill's `## Reading the result — and what you cannot read`.
+
+Reading `steps_passed` as depth has already put wrong tables into a pull request
+and a Notion page (2026-09-18).
+
+The axes a comparison holds still:
+
 ```sql
-SELECT qr.id, qr.label, qt.status, qt.steps_passed || '/' || qt.steps_total,
+SELECT qr.id, qr.label, qt.status,
        qt.completed_at - qt.started_at AS took,
        qt.run_config->>'agent_arch', qt.run_config->>'agent_fingerprint',
        qt.run_config->>'prompt_version'

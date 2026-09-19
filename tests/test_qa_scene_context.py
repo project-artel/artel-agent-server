@@ -28,6 +28,8 @@ from app.agents.qa.context import FOLDED_VIEW_PREFIX
 from app.api.qa_sessions import OpenQaSessionRequest
 from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState
+from app.agents.qa.arch import PhaseCycleMode, QaArchSpec
+from app.qa.run_config import resolve_run_config
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import MessageType
 from app.qa.scene import SCENE_VIEW_END, SCENE_VIEW_START_PREFIX
@@ -578,7 +580,10 @@ def drive(
     model.before_turn(1)
     state = QaRunState(total_steps=1)
 
-    asyncio.run(QaRunner().run(channel, scenario(), state))
+    asyncio.run(
+        QaRunner(resolve_run_config(arch=QaArchSpec(phase_cycle=PhaseCycleMode.off)))
+        .run(channel, scenario(), state)
+    )
 
     assert state.finished
     return model, channel

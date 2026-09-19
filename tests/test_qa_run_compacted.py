@@ -16,7 +16,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
-from app.agents.qa.arch import QaArchSpec
+from app.agents.qa.arch import PhaseCycleMode, QaArchSpec
 from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState
 from app.qa.schemas import QaCaseRef, QaScenario, QaStep
@@ -165,11 +165,14 @@ def compacted_run(monkeypatch: pytest.MonkeyPatch) -> tuple[ScriptedModel, QaRun
 
     # Only the agent's own request should compact: the trigger is set to the
     # model's whole budget, which this short run comes nowhere near.
+    # phase gate 를 끈다. 이 파일이 보는 것은 압축이 런을 끊어 먹는가이고, 대본의 tool
+    # 순서는 그 축이 생기기 전에 쓰였다 — gate 를 켜면 재는 것이 둘이 된다.
     config = resolve_run_config(
         arch=QaArchSpec(
             compaction_trigger_fraction=1.0,
             compaction_keep_messages=4,
             compaction_min_new_messages=2,
+            phase_cycle=PhaseCycleMode.off,
         )
     )
 
@@ -254,7 +257,11 @@ def test_compaction_off_leaves_both_the_middleware_and_the_tool_out(
 
     monkeypatch.setattr("app.agents.qa.runner.build_chat_model", build)
 
-    config = resolve_run_config(arch=QaArchSpec(compaction=False))
+    # phase gate 를 끈다. 이 파일이 보는 것은 압축이 런을 끊어 먹는가이고, 대본의 tool
+    # 순서는 그 축이 생기기 전에 쓰였다 — gate 를 켜면 재는 것이 둘이 된다.
+    config = resolve_run_config(
+        arch=QaArchSpec(compaction=False, phase_cycle=PhaseCycleMode.off)
+    )
     channel, _sent = make_channel()
     state = QaRunState(total_steps=2)
     asyncio.run(QaRunner(config).run(channel, scenario(), state))
