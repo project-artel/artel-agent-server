@@ -7,7 +7,9 @@
 
 모델에게 "이 전환이 의미 있나" 를 묻지 않는다. 물으면 재려는 축이 둘이 된다 — phase 가
 도움이 되는가와 모델이 phase 를 옳게 고르는가. 아래 `_TOOL_PHASE` 표가 tool 이름 하나를
-phase 하나에 붙이고, 그 tool 이 자기 phase 에서 돌면 다음 phase 로 넘어간다.
+phase 하나에 붙이고, 런은 **더 뒤 phase 의 tool 을 불러서** 앞으로 간다. `VERIFY` 와
+`DECIDE` 는 자기 tool 로 끝나지만 `OBSERVE`·`ACT`·`UPDATE_MEMORY` 는 안 끝난다 — 한 step 이
+보는 것도 누르는 것도 적는 것도 한 번으로 안 끝나기 때문이다(`_REPEATABLE`).
 
 ## 거절은 tool result 한 줄이다
 
@@ -140,20 +142,29 @@ _FULL_ORDER = (
 MAX_CONSECUTIVE_REFUSALS = 2
 
 
-# 자기 tool 이 돌아도 안 끝나는 phase. **`ACT` 하나다.**
+# 자기 tool 이 돌아도 phase 가 안 넘어가는 자리. **셋이다 — `OBSERVE`, `ACT`, `UPDATE_MEMORY`.**
 #
-# 한 시나리오 step 이 동작 하나라는 가정이 틀렸다. `benchmarks/wordventure` L1 의 step 3 은
-# "오프닝 스토리를 끝까지 진행한다" 하나이고, 그러려면 키를 여러 번 눌러야 한다. 동작 하나에
-# phase 를 넘기면 두 번째 누름이 거절당한다 — 2026-09-18 파일럿에서 거절 147 회 중 51 회가
-# `VERIFY` 에서 `press_key` 를 부른 것이었고, 그 한 자리가 전체의 3분의 1이다.
+# 한 시나리오 step 이 tool 호출 하나라는 가정이 세 자리에서 다 틀렸다.
 #
-# 그래서 `ACT` 는 자기 tool 로 안 끝난다. 끝내는 것은 **다음 phase 의 tool** 인 `report_step`
-# 이고, 그 호출이 `ACT` 와 `VERIFY` 를 함께 닫는다 — 판정하는 행위가 곧 "그만 조작한다" 는
-# 선언이기 때문이다. 다른 phase 는 종전 그대로다.
-_REPEATABLE = frozenset({RunPhase.act})
+# `ACT` — L1 의 step 3 은 "오프닝 스토리를 끝까지 진행한다" 하나이고, 그러려면 키를 여러 번
+# 눌러야 한다. 2026-09-18 파일럿에서 거절 147 회 중 51 회가 `VERIFY` 에서 `press_key` 를
+# 부른 것이었다.
+#
+# `OBSERVE` — 읽는 일도 한 번에 안 끝난다. `search_knowledge` 로 찾은 것을
+# `expand_knowledge` 로 펴 보고, `capture_screen` 을 다시 찍고, `inspect_object` 로 하나를
+# 더 들여다보는 것이 한 자리에서 일어난다. 첫 호출에 phase 를 넘기면 둘째부터 거절이다.
+#
+# `UPDATE_MEMORY` — 한 스텝이 남기는 것이 하나가 아니다. 틀린 항목을 `forget_knowledge` 로
+# 지우고 `record_knowledge` 로 다시 적는 것이 한 번의 정정이고, capability 판정과 지식을
+# 같이 남기는 스텝도 있다.
+#
+# 반복 phase 를 끝내는 것은 자기 tool 이 아니라 **다음으로 가는 tool** 이다. `report_step`
+# 이 `ACT` 와 `VERIFY` 를 함께 닫는 것이 그 예다 — 판정하는 행위가 곧 "그만 조작한다" 는
+# 선언이기 때문이다.
+_REPEATABLE = frozenset({RunPhase.observe, RunPhase.act, RunPhase.update_memory})
 
-# 건너뛸 수 있는 phase. **`UPDATE_MEMORY` 만 건너뛸 수 없다** — 이 축이 존재하는 이유가
-# 그것이고 나머지는 그 둘레의 비계다.
+# 안 들러도 되는 phase. **`UPDATE_MEMORY` 는 여기 없다** — 이 축이 존재하는 이유가 그것이고
+# 나머지는 그 둘레의 비계다.
 #
 # `OBSERVE` 가 여기 있는 것은 prompt 가 이미 참이라고 가르치는 것을 gate 가 몰랐기 때문이다.
 # `system.md` 는 action tool 이 "returns the outcome AND the scene it produced" 이므로
@@ -168,17 +179,17 @@ _REPEATABLE = frozenset({RunPhase.act})
 # `lite` 와 같아진다.
 _SKIPPABLE = frozenset({RunPhase.observe, RunPhase.act})
 
+# 반복이면서 건너뛸 수는 없는 자리가 `UPDATE_MEMORY` 하나뿐이라는 것이, 이 파일이 `_satisfied`
+# 를 세는 이유다. 반복만으로 두면 자기 tool 이 phase 를 안 닫으니 아무것도 안 적고 다음
+# 바퀴로 넘어갈 수 있고, 그러면 gate 가 지키는 것이 없어진다. 그래서 떠나는 조건이 둘로
+# 갈린다 — 건너뛸 수 있는 phase 는 언제든, 아닌 phase 는 자기 tool 이 한 번은 돈 뒤에.
+assert not (_SKIPPABLE & {RunPhase.update_memory})
+
 
 def _tools_that_end(phase: RunPhase) -> str:
     """그 phase 를 끝내는 tool 이름을, 거절 문구에 넣을 한 줄로."""
     names = sorted(name for name, at in _TOOL_PHASE.items() if at is phase)
     return ", ".join(f"`{name}`" for name in names)
-
-
-def _ends_repeatable(phase: RunPhase, order: tuple[RunPhase, ...]) -> str:
-    """반복 phase 를 끝내는 것은 자기 tool 이 아니라 다음 phase 의 tool 이다."""
-    following = order[(order.index(phase) + 1) % len(order)]
-    return _tools_that_end(following)
 
 
 class PhaseCycle:
@@ -202,36 +213,53 @@ class PhaseCycle:
         self.forced_passes = 0
         self._consecutive_refusals = 0
         self._held = False
+        # 지금 phase 의 tool 이 이 바퀴에서 한 번이라도 돌았나. 반복 phase 를 떠나도 되는지가
+        # 여기 달렸다 — `_may_leave` 를 보라.
+        self._satisfied = False
 
     def _after(self, phase: RunPhase) -> RunPhase:
         return self._order[(self._order.index(phase) + 1) % len(self._order)]
 
-    def _closes_repeatable(self, at: RunPhase | None) -> bool:
-        """지금이 반복 phase 이고, 이 tool 이 그것을 끝내는 다음 phase 의 것인가."""
-        return (
-            at is not None
-            and self.phase in _REPEATABLE
-            and at is self._after(self.phase)
-        )
+    def _enter(self, phase: RunPhase) -> None:
+        """phase 를 옮기고, 그 자리의 일이 아직 안 됐다고 표시한다.
+
+        고리이므로 옮긴 결과가 지금과 같은 이름일 수 있다 — `UPDATE_MEMORY` 에 앉은 채
+        다음 스텝의 `report_step` 을 부르면 한 바퀴 돌아 다시 `UPDATE_MEMORY` 다. 그때도
+        `_satisfied` 는 풀려야 한다. 안 그러면 첫 스텝에 적어 둔 것 하나로 남은 스텝이
+        전부 기록 없이 지나간다.
+        """
+        self.phase = phase
+        self._satisfied = False
+
+    def _ahead(self, at: RunPhase) -> int:
+        """지금 자리에서 저기까지 몇 칸 앞인가. 고리이므로 뒤란 없다."""
+        here = self._order.index(self.phase)
+        return (self._order.index(at) - here) % len(self._order)
+
+    def _may_leave(self) -> bool:
+        """지금 phase 를 떠날 수 있나 — 건너뛸 수 있거나, 자기 tool 이 한 번은 돌았거나."""
+        return self.phase in _SKIPPABLE or self._satisfied
+
+    def _blocking_phase(self, at: RunPhase) -> RunPhase | None:
+        """저기로 못 가게 막고 있는 phase, 갈 수 있으면 `None`.
+
+        둘 중 하나다 — 지금 앉은 자리가 아직 할 일을 안 했거나, 가는 길에 건너뛸 수 없는
+        phase 가 끼어 있거나. 거절 문구가 이름을 대는 자리가 여기다.
+        """
+        if not self._may_leave():
+            return self.phase
+        here = self._order.index(self.phase)
+        for step in range(1, self._ahead(at)):
+            between = self._order[(here + step) % len(self._order)]
+            if between not in _SKIPPABLE:
+                return between
+        return None
 
     def _reachable(self, at: RunPhase | None) -> bool:
-        """지금 자리에서 저 phase 까지, 건너뛸 수 있는 것만 지나서 갈 수 있나.
-
-        뒤로 가는 것은 안 된다. 사이에 `UPDATE_MEMORY` 같은 필수 phase 가 하나라도 있으면
-        안 된다 — 그것을 건너뛰게 하려고 이 검사를 두는 것이 아니다.
-        """
+        """지금 자리에서 저 phase 로 바로 갈 수 있나."""
         if at is None or at is self.phase:
             return False
-        here = self._order.index(self.phase)
-        there = self._order.index(at)
-        if there < here:
-            return False
-        return all(self._order[i] in _SKIPPABLE for i in range(here, there))
-
-    def _ending_tools(self) -> str:
-        if self.phase in _REPEATABLE:
-            return _ends_repeatable(self.phase, self._order)
-        return _tools_that_end(self.phase)
+        return self._blocking_phase(at) is None
 
     def hold(self) -> None:
         """이 호출은 자기 phase 를 끝낸 것으로 치지 말라고 tool 이 말하는 자리.
@@ -260,51 +288,60 @@ class PhaseCycle:
             return None
 
         at = _TOOL_PHASE.get(tool_name)
-        if at is None or at is self.phase or self._closes_repeatable(at) or self._reachable(at):
+        if at is None or at is self.phase or self._reachable(at):
             self._consecutive_refusals = 0
             return None
 
         if self._consecutive_refusals >= self._max_consecutive_refusals:
             self.forced_passes += 1
             self._consecutive_refusals = 0
-            self.phase = at
+            self._enter(at)
             return None
 
         self._consecutive_refusals += 1
         self.refusals += 1
+        # 막고 있는 자리를 문구가 직접 댄다. 지금 앉은 phase 일 때도 있고, 가는 길에 낀 다른
+        # phase 일 때도 있다 — `OBSERVE` 에서 지식을 적으려 하면 막는 것은 사이의 `VERIFY`
+        # 다. 앉은 자리만 대면 그 경우에 시키는 대로 해도 또 거절당한다.
+        blocking = self._blocking_phase(at) or self.phase
         return (
             f"Not now — this run is in the {self.phase.value} phase and `{tool_name}` "
             f"belongs to {at.value}. Nothing ran and nothing was recorded. "
-            f"{self.phase.value} ends when you call one of: "
-            f"{self._ending_tools()}. Do that first; `{tool_name}` will be "
+            f"{blocking.value} ends when you call one of: "
+            f"{_tools_that_end(blocking)}. Do that first; `{tool_name}` will be "
             "waiting on the other side of it."
         )
 
     def advance(self, tool_name: str) -> None:
-        """실행된 tool 하나를 반영한다. 자기 phase 를 끝내는 tool 이면 다음으로 넘어간다.
+        """실행된 tool 하나를 반영한다.
 
-        `observe_scene` 은 `ALWAYS_ALLOWED` 이면서 `OBSERVE` 를 끝내는 tool 이기도 하다.
-        `ACT` 한가운데서 다시 봐도 phase 가 `OBSERVE` 로 돌아가지 않는 것은 이 함수가
-        **지금 phase 를 끝내는가**만 보기 때문이다.
+        `ACT` 한가운데서 `observe_scene` 을 불러도 `OBSERVE` 로 돌아가지 않는다. 뒤로 가는
+        전이가 아예 없기 때문이다 — `_ahead` 가 고리를 한 방향으로만 세고, `OBSERVE` 는
+        `ACT` 에서 세 칸 앞이라 사이에 낀 `VERIFY` 가 막는다.
         """
         if self._held:
             self._held = False
             return
         at = _TOOL_PHASE.get(tool_name)
         if at is self.phase:
-            # 반복 phase 는 자기 tool 로 안 끝난다. 같은 step 안에서 몇 번이고 더 부를 수 있다.
+            # 반복 phase 는 자기 tool 로 안 끝난다. 같은 step 안에서 몇 번이고 더 부를 수
+            # 있고, 돈 것은 `_satisfied` 로만 남는다 — `UPDATE_MEMORY` 를 떠나도 되는지가
+            # 그 한 칸에 달렸다.
             if self.phase in _REPEATABLE:
+                self._satisfied = True
                 return
-            self.phase = self._after(self.phase)
+            self._enter(self._after(self.phase))
             return
-        if self._closes_repeatable(at) or self._reachable(at):
+        if self._reachable(at):
             # `report_step` 이 `ACT` 와 `VERIFY` 를 함께 닫는다 — 판정이 곧 조작을 그만둔다는
             # 선언이고, 그 호출 자체가 `VERIFY` 가 요구하는 바로 그것이다. 건너뛰어 온 경우도
             # 같다: 지나온 phase 는 건너뛸 수 있는 것뿐이었고, 이 tool 이 자기 phase 를 닫는다.
+            #
+            # 반복 phase 로 들어갈 때는 그 자리에 앉는다. 자기 tool 이 안 닫는 자리이므로,
+            # 이 한 호출로 끝났다고 치고 넘기면 두 번째 호출이 거절당한다.
+            self._enter(at if at in _REPEATABLE else self._after(at))
             if at in _REPEATABLE:
-                self.phase = at
-            else:
-                self.phase = self._after(at)
+                self._satisfied = True
 
 
 def build_phase_cycle(mode: PhaseCycleMode) -> PhaseCycle | None:
