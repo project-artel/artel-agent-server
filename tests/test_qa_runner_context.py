@@ -21,6 +21,8 @@ from app.agents.qa.context import DEFAULT_KEEP_SCENES
 from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState
 from app.qa.schemas import QaCaseRef, QaScenario, QaStep
+from app.agents.qa.arch import PhaseCycleMode, QaArchSpec
+from app.qa.run_config import resolve_run_config
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import MessageType
 
@@ -141,7 +143,8 @@ def scripted_run(monkeypatch: pytest.MonkeyPatch) -> tuple[ScriptedModel, QaRunC
 
     channel, sent = make_channel()
     state = QaRunState(total_steps=1)
-    runner = QaRunner()
+    # phase gate 를 끈다. 이 파일이 보는 것은 model 이 무엇을 읽느냐이지 phase 가 아니다.
+    runner = QaRunner(resolve_run_config(arch=QaArchSpec(phase_cycle=PhaseCycleMode.off)))
 
     asyncio.run(runner.run(channel, scenario(), state))
 

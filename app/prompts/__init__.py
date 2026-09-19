@@ -12,6 +12,7 @@ from app.prompts.loader import (
     parse_prompt_file,
     placeholders_in,
     resolve_version,
+    roles_in,
     validate_prompts,
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     "parse_prompt_file",
     "placeholders_in",
     "resolve_version",
+    "roles_in",
     "validate_prompts",
 ]
