@@ -103,6 +103,12 @@ def _result_event(result: ScenarioAgentResult) -> dict:
     # rollback path — not an empty object, which would read as "reviewed nothing".
     if result.reviewed is not None:
         event["reviewed"] = result.reviewed.model_dump(by_alias=True)
+    # Same rule for the split answer and the questions (ARTEL-927): absent on a plain
+    # reply, so the receiving side keeps reading `message` alone exactly as before.
+    if result.reply is not None:
+        event["reply"] = result.reply.model_dump()
+    if result.questions:
+        event["questions"] = [question.model_dump() for question in result.questions]
     return event
 
 

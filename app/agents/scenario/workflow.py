@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
@@ -39,11 +40,14 @@ from app.llm.chat_model import CACHE_POINT
 from app.prompts import load_prompt
 from app.agents.scenario.cases import render_game_shape, render_test_case_list
 from app.agents.scenario.schemas import (
+    AgentReply,
     AuthoredStep,
+    QuestionOption,
     ReviewedCases,
     ScenarioAgentRequest,
     ScenarioAgentResult,
     ScenarioPlan,
+    ScenarioQuestion,
 )
 from app.llm.chat_model import build_chat_model
 from app.llm.models import LLMModel, ReasoningConfig
@@ -83,34 +87,60 @@ class Group(BaseModel):
     )
 
 
+class Ask(BaseModel):
+    """모델이 사용자에게 묻는 것 하나 — 답할 수 있는 모양으로 (ARTEL-927).
+
+    번호는 모델이 짓지 않는다. 답이 어느 질문의 것인지 잇는 열쇠라, 겹치거나 비면 답이
+    엉뚱한 질문에 붙는다 — 코드가 [_questions] 에서 붙인다.
+    """
+
+    text: str = Field(description="The question, one sentence in the user's language.")
+    why: str = Field(
+        default="",
+        description="One short sentence: what changes depending on the answer.",
+    )
+    options: list[str] = Field(
+        default_factory=list,
+        description=(
+            "2-4 short choices, each written as the user's own instruction"
+            " (\"구매 실패도 넣어 줘\", \"지금처럼 둬\"). The user can always type"
+            " their own answer instead, so do not add an \"other\" choice."
+        ),
+    )
+
+
+_DETAIL_DESCRIPTION = (
+    "Why you did it this way, for the user to read — how you read the request, why this"
+    " order or split, what you left out and why. Plain words in the user's language."
+    " Shape it for the reader: a sentence or two when that is enough, a short `- ` list"
+    " for three or more points, a `| a | b |` table when comparing or mapping things."
+    " Do not repeat what was saved — the result line already says that."
+    " NEVER write a scenario id or case id — name things by their title."
+)
+_QUESTIONS_DESCRIPTION = (
+    "What the user should decide, if anything — each one answerable, with choices."
+    " Empty when there is nothing to decide; never ask for the sake of asking."
+    " NEVER write an id in a question — name things by their title."
+)
+
+
 class GroupingPlan(BaseModel):
     """B 의 출력 — 묶기·순서·범위 해석까지. 문장은 C 의 일이다."""
 
     groups: list[Group] = Field(default_factory=list)
-    # 마무리 문구에 그대로 실리는 칸이라 **사용자가 읽을 문장**이어야 한다. 코드가 조립하는
-    # 나머지 문장은 사실(몇 개 저장, 무엇을 뺐는지)만 말할 수 있고, "왜 그렇게 나눴는지"는
-    # 판단한 쪽만 답할 수 있다 — 그 답이 여기 들어간다.
-    note: str = Field(
+    # 답의 설명 칸에 그대로 실린다(ARTEL-927). 코드가 쓰는 결과 칸은 사실(몇 개를 몇
+    # 스텝으로 저장)만 말할 수 있고, "왜 그렇게 나눴는지"는 판단한 쪽만 답할 수 있다.
+    detail: str = Field(
         default="",
-        description=(
-            "What you did and why, for the user to read: how you read their request, how"
-            " you split it into journeys and why, what you left out and why. One or two"
-            " plain sentences in the user's language, as a helpful teammate would say it."
-            " NEVER write a scenario id or case id — name things by their title."
-        ),
+        description=_DETAIL_DESCRIPTION,
     )
-    question: str = Field(
-        default="",
-        description=(
-            "범위 해석이 진짜로 갈릴 때만: 묻고 싶은 것 한 문장. 이 칸을 쓰면 groups 는"
-            " 비워라. 합리적으로 읽히면 묻지 말고 note 에 읽은 대로 밝히고 진행하라."
-            " 여기에도 id 는 절대 쓰지 말고 제목으로 가리켜라."
-        ),
-    )
+    # 범위가 정말 갈릴 때는 groups 를 비우고 이것만 채운다. 저장하면서 물을 수도 있다 —
+    # 확실한 부분은 쓰고 갈리는 부분만 묻는 것이 사용자의 시간을 덜 쓴다.
+    questions: list[Ask] = Field(default_factory=list, description=_QUESTIONS_DESCRIPTION)
 
 
 class ModifyPlan(BaseModel):
-    """E 의 출력 — 고칠 시나리오 하나의 완성본. 대상을 못 가리면 question 만 채운다."""
+    """E 의 출력 — 고칠 시나리오 하나의 완성본. 대상을 못 가리면 questions 만 채운다."""
 
     scenario_id: int | None = None
     title: str = ""
@@ -129,15 +159,8 @@ class ModifyPlan(BaseModel):
             " empty. Empty for any request that is not a merge."
         ),
     )
-    note: str = Field(
-        default="",
-        description=(
-            "What you changed and why, for the user to read: what you understood the"
-            " request to be and what you did to the scenario. One or two plain sentences"
-            " in the user's language. NEVER write a scenario id or case id — use titles."
-        ),
-    )
-    question: str = Field(default="")
+    detail: str = Field(default="", description=_DETAIL_DESCRIPTION)
+    questions: list[Ask] = Field(default_factory=list, description=_QUESTIONS_DESCRIPTION)
 
 
 def _render_current(request: ScenarioAgentRequest) -> str:
@@ -201,6 +224,56 @@ def _listed(names: list[str], limit: int = 3) -> str:
     if len(names) <= limit:
         return " · ".join(names)
     return " · ".join(names[:limit]) + f" 외 {len(names) - limit}개"
+
+
+def _bold(names: list[str]) -> str:
+    """이름을 화면의 강조로. 따옴표로 감싸지 않는다 — 제목 안의 따옴표와 섞이고, 화면은
+    굵게 그리는 법을 이미 안다(ARTEL-927)."""
+    return " · ".join(f"**{name}**" for name in names)
+
+
+def _questions(asks: list[Ask]) -> list[ScenarioQuestion]:
+    """모델이 낸 질문에 번호를 붙여 답할 수 있는 모양으로.
+
+    번호가 겹치면 답이 엉뚱한 질문에 붙는다. 그래서 모델이 아니라 여기서, 매번 새로 짓는다.
+    빈 문장은 묻지 않는다 — 답할 수 없는 것을 내미는 일이다.
+    """
+    asked: list[ScenarioQuestion] = []
+    for ask in asks:
+        text = ask.text.strip()
+        if not text:
+            continue
+        asked.append(ScenarioQuestion(
+            id=f"agent:{uuid.uuid4().hex[:12]}",
+            text=text,
+            why=ask.why.strip() or None,
+            options=[
+                QuestionOption(id=f"o{index}", label=label.strip())
+                for index, label in enumerate(ask.options, start=1)
+                if label.strip()
+            ],
+        ))
+    return asked
+
+
+def _answer(
+    result: str,
+    detail: str = "",
+    questions: list[ScenarioQuestion] | None = None,
+    reviewed: ReviewedCases | None = None,
+) -> ScenarioAgentResult:
+    """세 칸 답을 만든다. `message` 는 세 칸을 이은 글 — Redis 대화 기록과 구형 화면이
+    그것만 읽으므로, 물은 것까지 들어 있어야 다음 턴이 "그거"를 풀 수 있다."""
+    questions = questions or []
+    detail = detail.strip()
+    message = "\n".join(part for part in (result, detail, *(q.text for q in questions)) if part)
+    return ScenarioAgentResult(
+        message=message,
+        scenarios=[],
+        reviewed=reviewed,
+        reply=AgentReply(result=result, detail=detail),
+        questions=questions,
+    )
 
 
 def _existing_scenarios(request: ScenarioAgentRequest) -> str:
@@ -351,19 +424,27 @@ async def run_authoring_workflow(
     groups = [g for g in groups if g.case_ids]
     trace.record(
         run_id, "워크플로 B — 묶기·순서",
-        f"묶음 {len(groups)}개" + (f" · 질문: {plan.question}" if plan.question else "")
-        + (f"\n{plan.note}" if plan.note else "")
+        f"묶음 {len(groups)}개"
+        + "".join(f" · 질문: {q.text}" for q in plan.questions)
+        + (f"\n{plan.detail}" if plan.detail else "")
         + "".join(
             f"\n  · {g.title} — {len(g.case_ids)}케이스"
             + (f" (기존 id {g.scenario_id} 에 잇기)" if g.scenario_id is not None else "")
             for g in groups
         ),
     )
-    if plan.question and not groups:
-        return ScenarioAgentResult(message=plan.question, scenarios=[])
+    ko = request.locale.value == "ko"
+    if plan.questions and not groups:
+        return _answer(
+            "먼저 확인할 게 있어서 아직 저장하지 않았어요."
+            if ko else "Nothing saved yet — I need to check something first.",
+            plan.detail, _questions(plan.questions),
+        )
     if not groups:
-        return ScenarioAgentResult(
-            message=plan.note or "요청과 맞는 케이스를 찾지 못했습니다.", scenarios=[]
+        return _answer(
+            "요청에 맞는 TC를 찾지 못해서 아무것도 저장하지 않았어요."
+            if ko else "No test case matched the request, so nothing was saved.",
+            plan.detail,
         )
 
     # ── B 미니 루프: 걷기 검증 (코드 잣대 → 어긋나면 B 1회 재작성) ────────────────
@@ -388,8 +469,11 @@ async def run_authoring_workflow(
         retried_groups = [g for g in retried_groups if g.case_ids]
         if retried_groups:
             groups = retried_groups
-            if retried_plan.note:
-                plan = plan.model_copy(update={"note": retried_plan.note})
+            if retried_plan.detail or retried_plan.questions:
+                plan = plan.model_copy(update={
+                    "detail": retried_plan.detail or plan.detail,
+                    "questions": retried_plan.questions or plan.questions,
+                })
         remaining = await _score_groups(request, groups)
         trace.record(
             run_id, "워크플로 B — 걷기 검증",
@@ -503,58 +587,60 @@ async def run_authoring_workflow(
     reviewed = ReviewedCases(
         included=sorted(covered), excluded=sorted(known_ids - covered)
     )
-    # 문구는 **사실만 코드가, 이유는 모델이**(`plan.note`). 코드는 몇 개를 어떤 이름으로
-    # 저장했고 무엇이 빠졌는지만 말할 수 있고, "왜 이렇게 나눴는지" 는 나눈 쪽만 안다.
-    # 그리고 어느 줄에도 번호는 없다 — `_case_names` 주석 참고.
-    lines: list[str] = []
-    if request.locale.value == "ko":
-        # 조사를 붙이지 않는다 — 제목의 마지막 글자에 받침이 있는지로 은/는·이/가가 갈리는데,
-        # 제목은 모델이 쓰는 말이라 코드가 알 수 없다. 줄표와 명사로 끊어 그 자리를 피한다.
-        count = f" (스텝 {saved_steps}개)" if saved_steps else ""
+    # 답은 세 칸이다(ARTEL-927). **결과는 코드가 센 사실만**(무엇을 몇 스텝으로 저장),
+    # **설명은 판단한 모델이**(`plan.detail`), **질문은 고를 수 있게.** 코드가 아는
+    # 미반영분(저장 못 한 시나리오, 자리를 못 찾은 TC)도 설명에 사과문으로 섞지 않고
+    # 질문으로 낸다 — 사용자가 정할 일이기 때문이다. 어느 칸에도 번호는 없다.
+    #
+    # 조사를 붙이지 않는다 — 은/는·이/가는 제목 끝 글자의 받침으로 갈리는데, 제목은 모델이
+    # 쓰는 말이라 코드가 알 수 없다. 이름은 콜론 뒤에 두어 그 자리를 피한다.
+    if ko:
         if len(saved) == 1:
-            lines.append(f"'{saved[0]}' — 이렇게 한 갈래로 정리해서 저장했어요{count}.")
+            result = f"시나리오를 저장했어요: {_bold(saved)}" + (f" ({saved_steps}스텝)" if saved_steps else "")
         elif saved:
-            lines.append(
-                f"{len(saved)}개 갈래로 나눠 저장했어요 — {' · '.join(saved)}"
-                + (f" (스텝 모두 {saved_steps}개)" if saved_steps else "")
-                + "."
+            result = (
+                f"시나리오 {len(saved)}개를 저장했어요: {_bold(saved)}"
+                + (f" (모두 {saved_steps}스텝)" if saved_steps else "")
             )
         else:
-            lines.append("이번에는 저장한 시나리오가 없어요.")
-        if plan.note:
-            lines.append(plan.note)
-        if dropped:
-            lines.append(
-                f"{' · '.join(dropped)} — 이건 검수를 통과하지 못해서 이번엔 빼 두었어요."
-            )
-        if unplaced:
-            lines.append(
-                "이번 흐름 안에 넣을 자리를 찾지 못한 게 있어요 — "
-                f"{_listed(_case_names(request, unplaced))}. 따로 한 갈래로 만들어 드릴까요?"
-            )
+            result = "이번에는 저장한 시나리오가 없어요."
     else:
         if len(saved) == 1:
-            lines.append(f"Saved '{saved[0]}' as one journey ({saved_steps} steps).")
+            result = f"Saved the scenario {_bold(saved)}" + (f" ({saved_steps} steps)." if saved_steps else ".")
         elif saved:
-            lines.append(
-                f"Split this into {len(saved)} journeys and saved them — "
-                f"{', '.join(saved)} ({saved_steps} steps in total)."
+            result = (
+                f"Saved {len(saved)} scenarios: {_bold(saved)}"
+                + (f" ({saved_steps} steps in total)." if saved_steps else ".")
             )
         else:
-            lines.append("Nothing was saved this time.")
-        if plan.note:
-            lines.append(plan.note)
-        if dropped:
-            lines.append(f"{', '.join(dropped)} — left out, it did not pass review.")
-        if unplaced:
-            lines.append(
-                f"{_listed(_case_names(request, unplaced))} did not fit anywhere in this"
-                " flow, so it is not in there yet. Want it as its own journey?"
-            )
-    message = "\n".join(lines)
+            result = "Nothing was saved this time."
+
+    asks = list(plan.questions)
+    if dropped:
+        asks.append(Ask(
+            text=(
+                f"실행 확인을 통과하지 못해 저장하지 못한 시나리오가 있어요: {_bold(dropped)}. 다시 써 볼까요?"
+                if ko else
+                f"These did not pass the run check and were not saved: {_bold(dropped)}. Try again?"
+            ),
+            options=["다시 써 줘", "그냥 둬"] if ko else ["Write them again", "Leave them out"],
+        ))
+    if unplaced:
+        names = _listed(_case_names(request, unplaced))
+        asks.append(Ask(
+            text=(
+                f"이 흐름에 넣을 자리가 없던 TC가 있어요: {names}. 따로 시나리오로 만들까요?"
+                if ko else
+                f"No place in this flow for: {names}. Make a separate scenario for them?"
+            ),
+            options=(
+                ["따로 시나리오로 만들어 줘", "그냥 둬"] if ko
+                else ["Make a separate scenario", "Leave them out"]
+            ),
+        ))
     # scenarios 는 비운다 — 하나씩 제출 계약에서 저장은 이미 끝났고, 결과 봉투에 다시
     # 실으면 두 벌이 된다(런 12 의 그 사고). 턴끝 검수는 reviewed 로 커버리지만 본다.
-    return ScenarioAgentResult(message=message, scenarios=[], reviewed=reviewed)
+    return _answer(result, plan.detail, _questions(asks), reviewed)
 
 
 async def run_modify_workflow(
@@ -594,8 +680,8 @@ async def run_modify_workflow(
         run_id, "워크플로 E — 수정",
         "호출 실패" if plan is None else (
             f"대상 id {plan.scenario_id} · 스텝 {len(plan.steps)}"
-            + (f" · 질문: {plan.question}" if plan.question else "")
-            + (f"\n{plan.note}" if plan.note else "")
+            + "".join(f" · 질문: {q.text}" for q in plan.questions)
+            + (f"\n{plan.detail}" if plan.detail else "")
         ),
     )
     if plan is None:
@@ -604,22 +690,24 @@ async def run_modify_workflow(
             if ko else "The modify request could not be processed. Please try again."
         )
         return ScenarioAgentResult(message=message, scenarios=[])
-    if plan.question and not plan.steps:
-        return ScenarioAgentResult(message=plan.question, scenarios=[])
+    if plan.questions and not plan.steps:
+        return _answer(
+            "먼저 확인할 게 있어서 아직 아무것도 고치지 않았어요."
+            if ko else "Nothing changed yet — I need to check something first.",
+            plan.detail, _questions(plan.questions),
+        )
     if plan.scenario_id not in known_scenario_ids or not plan.steps:
         # 대상을 못 가리키면 고치지 않는다 — 짐작으로 남의 시나리오를 갈아끼우는 것이
-        # 최악이다. 어느 것인지 사용자에게 묻는다.
-        titles = " · ".join(
-            s.title for s in request.current_scenarios if s.scenario_id is not None
+        # 최악이다. 어느 것인지 사용자에게 묻고, 고를 것은 이 런의 시나리오 제목이다.
+        titles = [s.title for s in request.current_scenarios if s.scenario_id is not None]
+        return _answer(
+            "어느 시나리오를 고칠지 확실하지 않아서 모두 그대로 두었어요."
+            if ko else "I wasn't sure which scenario you meant, so everything is as it was.",
+            questions=_questions([Ask(
+                text="어느 시나리오를 고칠까요?" if ko else "Which scenario should I change?",
+                options=[f"{title} 고쳐 줘" if ko else f"Change {title}" for title in titles],
+            )]),
         )
-        message = (
-            f"어느 걸 고쳐야 할지 확신이 안 서서 아무것도 건드리지 않았어요. "
-            f"지금 이 런에 있는 건 {titles} — 어느 쪽인지 알려주시면 바로 고칠게요."
-            if ko else
-            f"I wasn't sure which one you meant, so I left everything as it is. "
-            f"This run has {titles} — tell me which and I'll fix it."
-        )
-        return ScenarioAgentResult(message=message, scenarios=[])
 
     original = next(
         s for s in request.current_scenarios if s.scenario_id == plan.scenario_id
@@ -685,7 +773,8 @@ async def run_modify_workflow(
                 " returning the same body is not an answer. Apply what they asked — or,"
                 " if it truly cannot be applied (no case covers it, it contradicts the"
                 " journey's start, it is already true), leave steps empty and say that"
-                " in `question`, naming the part you could not do and why."
+                " in `detail`, naming the part you could not do and why — and put what the"
+                " user could decide in `questions`."
             )
         )
         if retried is not None and retried.scenario_id == plan.scenario_id:
@@ -693,19 +782,24 @@ async def run_modify_workflow(
         # 두 번째도 그대로면 저장하지 않는다. 같은 것을 다시 저장하면 사용자는 고쳐진 줄 안다.
         if unchanged(plan):
             trace.record(run_id, "워크플로 E — 그대로", "요청을 받고 본문이 안 바뀌었다 — 저장하지 않음")
-            asked = (plan.question or "").strip()
-            message = (
-                (f"말씀하신 것을 반영하지 못했습니다 — '{title_of(plan)}' 본문이 그대로입니다.\n{asked}"
-                 if asked else
-                 f"말씀하신 것을 '{title_of(plan)}' 에 반영하지 못했습니다 — 본문이 그대로라 저장하지"
-                 " 않았어요. 어느 스텝을 어떻게 바꿀지 짚어 주시면 그대로 고치겠습니다.")
+            # 모델이 묻지 않았으면 코드가 묻는다 — 어디를 어떻게 바꿀지 짚어 달라고. 고를 것이
+            # 없는 질문이라 선택지 없이 직접 입력만 받는다.
+            asks = plan.questions or [Ask(
+                text=(
+                    "어느 스텝을 어떻게 바꿀지 짚어 주시겠어요?"
+                    if ko else "Which step should change, and to what?"
+                ),
+                why=(
+                    "짚어 주신 자리를 그대로 고칠게요."
+                    if ko else "I will change exactly the place you point at."
+                ),
+            )]
+            return _answer(
+                f"말씀하신 내용을 반영하지 못해서 저장하지 않았어요. {_bold([title_of(plan)])} 본문은 그대로예요."
                 if ko else
-                (f"I could not apply that — '{title_of(plan)}' is unchanged.\n{asked}"
-                 if asked else
-                 f"I could not apply that to '{title_of(plan)}', so I saved nothing. "
-                 "Point at the step and what it should say, and I will change exactly that.")
+                f"I could not apply that, so nothing was saved. {_bold([title_of(plan)])} is unchanged.",
+                plan.detail, _questions(asks),
             )
-            return ScenarioAgentResult(message=message, scenarios=[])
 
     answer = await channel.submit_scenario(
         to_scenario(plan).model_dump(by_alias=True), absorbed_of(plan)
@@ -732,27 +826,26 @@ async def run_modify_workflow(
         # **스텝 수는 저쪽이 센 것만 말한다.** 우리가 낸 수는 검수의 나누기·메우기와 코드가
         # 끼운 `bridge` 를 지나기 전 수라 화면에 뜬 것과 다르다(실측: 37개라 말했다).
         count = answer.steps or len(plan.steps)
-        lines = [
-            f"'{title}' — 이렇게 고쳐서 저장했어요. 지금 스텝 {count}개예요."
-            if ko else f"Updated '{title}' — it now has {count} steps."
-        ]
-        if plan.note:
-            lines.append(plan.note)
+        result = (
+            f"고쳐서 저장했어요: {_bold([title])} (지금 {count}스텝)"
+            if ko else f"Updated {_bold([title])} — it now has {count} steps."
+        )
         if answer.absorbed:
-            lines.append(
-                f"이 안으로 들어온 {' · '.join(answer.absorbed)} 쪽은 목록에서 걷어냈어요."
+            result += (
+                f"\n합친 시나리오는 목록에서 뺐어요: {_bold(answer.absorbed)}"
                 if ko else
-                f"{', '.join(answer.absorbed)} folded into this one, so I took them off the list."
+                f"\nFolded in and taken off the list: {_bold(answer.absorbed)}"
             )
         # 남긴 이유는 저쪽 문장을 그대로 옮긴다 — 왜 못 지웠는지는 센 쪽만 안다.
-        lines.extend(answer.kept)
-        message = "\n".join(lines)
-    else:
-        message = (
-            f"'{title}' — 고쳐 봤는데 검수를 통과하지 못해서 저장하지 않았어요. "
-            "기존 본문이 그대로 남아 있습니다."
-            if ko else
-            f"My edit to '{title}' didn't pass review, so I didn't save it — "
-            "the original is untouched."
-        )
-    return ScenarioAgentResult(message=message, scenarios=[])
+        detail = "\n".join(part for part in (plan.detail.strip(), *answer.kept) if part)
+        return _answer(result, detail, _questions(plan.questions))
+    # 저장되지 않은 수정의 설명은 싣지 않는다 — 일어나지 않은 변경을 설명하게 된다.
+    return _answer(
+        f"고친 내용이 실행 확인을 통과하지 못해서 저장하지 않았어요. {_bold([title])} 본문은 그대로예요."
+        if ko else
+        f"My edit did not pass the run check, so nothing was saved. {_bold([title])} is unchanged.",
+        questions=_questions([Ask(
+            text="다시 고쳐 볼까요?" if ko else "Try the edit again?",
+            options=["다시 고쳐 줘", "그냥 둬"] if ko else ["Try again", "Leave it"],
+        )]),
+    )

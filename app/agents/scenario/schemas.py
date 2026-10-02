@@ -398,6 +398,20 @@ class ScenarioQuestion(BaseModel):
     allow_free_text: bool = True
 
 
+class AgentReply(BaseModel):
+    """한 턴의 답을 사람이 읽는 두 칸으로 (ARTEL-927).
+
+    한 덩어리 글이던 답에서는 무엇을 했는지와 왜 그랬는지가 섞여, 사용자가 반박하거나
+    결정할 자리가 보이지 않았다. 세 번째 칸인 질문은 [ScenarioAgentResult.questions] 다 —
+    답할 수 있어야 하는 것이라 선택지까지 따로 실린다.
+    """
+
+    # 코드가 센 사실만. 무엇을 몇 스텝으로 저장했는지 — 짧게, 이름은 `**굵게**`.
+    result: str
+    # 판단한 모델의 말. 마크다운(문단·목록·표)이고, 모양은 읽기 쉬운 쪽으로 모델이 고른다.
+    detail: str = ""
+
+
 class ScenarioAgentResult(BaseModel):
     message: str
     # The run goal, decomposed. Empty when no matching cases were found: the agent
@@ -409,11 +423,14 @@ class ScenarioAgentResult(BaseModel):
     # population to be exhaustive over. Orchestration reads None as "skip the check",
     # which is also the rollback path: stop emitting this and the checking stops.
     reviewed: ReviewedCases | None = None
-    # One thing to ask the user (ARTEL-487). None on an ordinary turn.
+    # The answer split for the screen (ARTEL-927). None for a plain reply — a greeting,
+    # an off-topic decline, a failure — which stays `message` alone.
+    reply: AgentReply | None = None
+    # What the user can decide (ARTEL-487, ARTEL-927). Empty on an ordinary turn.
     #
-    # **One at a time.** Two questions leave the user no way to say which one they
-    # answered, and the screen no way to route the reply.
-    question: ScenarioQuestion | None = None
+    # Several are allowed: each carries its own id, so the screen shows them as a batch
+    # and an answer comes back naming the one it belongs to.
+    questions: list[ScenarioQuestion] = Field(default_factory=list)
 
 
 # ScenarioAgentRequest references ScenarioPlan (defined after it) via a forward
