@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from typing import TYPE_CHECKING
 
@@ -43,6 +44,7 @@ from app.agents.scenario.schemas import (
     AgentReply,
     AuthoredStep,
     QuestionOption,
+    Ref,
     ReviewedCases,
     ScenarioAgentRequest,
     ScenarioAgentResult,
@@ -115,12 +117,14 @@ _DETAIL_DESCRIPTION = (
     " Shape it for the reader: a sentence or two when that is enough, a short `- ` list"
     " for three or more points, a `| a | b |` table when comparing or mapping things."
     " Do not repeat what was saved — the result line already says that."
-    " NEVER write a scenario id or case id — name things by their title."
+    " Point at a TC as [[tc:<case_id>]] and a scenario as [[ts:<scenario_id>]] — the"
+    " screen turns the marker into a chip with its name. Never a bare id outside one."
 )
 _QUESTIONS_DESCRIPTION = (
     "What the user should decide, if anything — each one answerable, with choices."
     " Empty when there is nothing to decide; never ask for the sake of asking."
-    " NEVER write an id in a question — name things by their title."
+    " `text` may point with [[tc:<case_id>]] / [[ts:<scenario_id>]]; `options` never —"
+    " an option comes back as the user's own words."
 )
 
 
@@ -201,24 +205,6 @@ def _modify_prompt(request: ScenarioAgentRequest, feedback: str = "") -> tuple[s
     return prefix, tail
 
 
-def _case_names(request: ScenarioAgentRequest, ids: list[int]) -> list[str]:
-    """케이스를 사람이 부르는 이름으로. **번호는 사용자에게 나가지 않는다.**
-
-    `case_id`·`scenario_id` 는 계약의 내부 식별자라 제출 인자에만 실린다. 구 루프 프롬프트
-    (`scenario/v9`)에는 이 금지가 절대 규칙으로 박혀 있었는데, 워크플로로 옮기면서 마무리
-    문구를 코드가 조립하게 되자 그 규칙이 딸려 오지 않아 "케이스 12, 31번" 같은 문장이
-    나갔다. 부를 이름이 없으면 하는 일로 부른다.
-    """
-    by_id = {case.id: case for case in request.test_case_list}
-    names: list[str] = []
-    for i in ids:
-        case = by_id.get(i)
-        if case is None:
-            continue
-        names.append(f"{case.scene} — {case.step}" if case.scene else case.step)
-    return names
-
-
 def _listed(names: list[str], limit: int = 3) -> str:
     """사람이 읽을 목록. 길면 앞 몇 개만 세어 말한다 — 스무 줄짜리 문장은 안 읽힌다."""
     if len(names) <= limit:
@@ -256,23 +242,107 @@ def _questions(asks: list[Ask]) -> list[ScenarioQuestion]:
     return asked
 
 
+# `[[tc:153]]` / `[[ts:615]]` — 모델과 코드가 TC·TS 를 가리키는 표식(ARTEL-931).
+_MARKER = re.compile(r"\[\[(tc|ts):(\d+)\]\]")
+
+
+def _tc(case_id: int) -> str:
+    return f"[[tc:{case_id}]]"
+
+
+def _ref_of(request: ScenarioAgentRequest, kind: str, ref_id: int) -> Ref | None:
+    """표식이 가리키는 것. 이 프로젝트의 TC·이 런의 TS 가 아니면 None — 지어낸 번호다."""
+    if kind == "tc":
+        case = next((c for c in request.test_case_list if c.id == ref_id), None)
+        if case is None:
+            return None
+        detail = "\n".join(
+            part for part in (
+                f"사전조건: {case.precondition}" if case.precondition else "",
+                f"기대값: {case.expected_value}" if case.expected_value else "",
+            ) if part
+        )
+        return Ref(
+            kind="tc", id=ref_id,
+            label=f"{case.scene} — {case.step}" if case.scene else case.step,
+            detail=detail or None,
+        )
+    scenario = next(
+        (s for s in request.current_scenarios if s.scenario_id == ref_id), None
+    )
+    if scenario is None:
+        return None
+    return Ref(kind="ts", id=ref_id, label=scenario.title, detail=scenario.description or None)
+
+
+def _checked(text: str, request: ScenarioAgentRequest, found: dict[tuple[str, int], Ref]) -> str:
+    """아는 번호의 표식만 남긴다. 모르는 번호는 지운다 — 누를 곳이 없는 칩이 된다."""
+
+    def keep(match: re.Match) -> str:
+        key = (match.group(1), int(match.group(2)))
+        ref = found.get(key) or _ref_of(request, *key)
+        if ref is None:
+            return ""
+        found[key] = ref
+        return match.group(0)
+
+    return re.sub(r"[ \t]{2,}", " ", _MARKER.sub(keep, text)).strip()
+
+
+def _spoken(text: str, found: dict[tuple[str, int], Ref], prefix: bool) -> str:
+    """표식을 이름 글자로. 대화 기록에는 `@TC 이름`, 보기에는 이름만 — 보기는 누르면
+    사용자의 말로 돌아오므로 표식도 `@` 도 남기지 않는다."""
+
+    def name(match: re.Match) -> str:
+        ref = found.get((match.group(1), int(match.group(2))))
+        if ref is None:
+            return ""
+        return f"@{ref.kind.upper()} {ref.label}" if prefix else ref.label
+
+    return _MARKER.sub(name, text)
+
+
 def _answer(
+    request: ScenarioAgentRequest,
     result: str,
     detail: str = "",
     questions: list[ScenarioQuestion] | None = None,
     reviewed: ReviewedCases | None = None,
 ) -> ScenarioAgentResult:
     """세 칸 답을 만든다. `message` 는 세 칸을 이은 글 — Redis 대화 기록과 구형 화면이
-    그것만 읽으므로, 물은 것까지 들어 있어야 다음 턴이 "그거"를 풀 수 있다."""
-    questions = questions or []
-    detail = detail.strip()
-    message = "\n".join(part for part in (result, detail, *(q.text for q in questions)) if part)
+    그것만 읽으므로, 물은 것까지 들어 있어야 다음 턴이 "그거"를 풀 수 있다.
+
+    표식(ARTEL-931)은 여기서 한 번에 검사한다. 화면이 읽는 칸(결과·설명·질문 문장)에는
+    표식을 남기고 `refs` 로 이름을 붙이며, 사람이 읽는 글(`message`·보기)에는 이름을 쓴다.
+    """
+    found: dict[tuple[str, int], Ref] = {}
+    result = _checked(result, request, found)
+    detail = _checked(detail, request, found)
+    asked = [
+        question.model_copy(update={
+            "text": _checked(question.text, request, found),
+            "why": _checked(question.why, request, found) if question.why else question.why,
+        })
+        for question in questions or []
+    ]
+    asked = [
+        question.model_copy(update={"options": [
+            option.model_copy(update={"label": _spoken(_checked(option.label, request, found), found, prefix=False)})
+            for option in question.options
+        ]})
+        for question in asked
+    ]
+    message = "\n".join(
+        _spoken(part, found, prefix=True)
+        for part in (result, detail, *(q.text for q in asked)) if part
+    )
     return ScenarioAgentResult(
         message=message,
         scenarios=[],
         reviewed=reviewed,
         reply=AgentReply(result=result, detail=detail),
-        questions=questions,
+        questions=asked,
+        refs=list(found.values()),
     )
 
 
@@ -436,12 +506,14 @@ async def run_authoring_workflow(
     ko = request.locale.value == "ko"
     if plan.questions and not groups:
         return _answer(
+            request,
             "먼저 확인할 게 있어서 아직 저장하지 않았어요."
             if ko else "Nothing saved yet — I need to check something first.",
             plan.detail, _questions(plan.questions),
         )
     if not groups:
         return _answer(
+            request,
             "요청에 맞는 TC를 찾지 못해서 아무것도 저장하지 않았어요."
             if ko else "No test case matched the request, so nothing was saved.",
             plan.detail,
@@ -626,7 +698,8 @@ async def run_authoring_workflow(
             options=["다시 써 줘", "그냥 둬"] if ko else ["Write them again", "Leave them out"],
         ))
     if unplaced:
-        names = _listed(_case_names(request, unplaced))
+        # 맨 이름이 아니라 표식으로 — 화면이 이름 칩으로 그리고 누르면 그 TC 의 내용을 보인다.
+        names = _listed([_tc(i) for i in unplaced if i in known_ids])
         asks.append(Ask(
             text=(
                 f"이 흐름에 넣을 자리가 없던 TC가 있어요: {names}. 따로 시나리오로 만들까요?"
@@ -640,7 +713,7 @@ async def run_authoring_workflow(
         ))
     # scenarios 는 비운다 — 하나씩 제출 계약에서 저장은 이미 끝났고, 결과 봉투에 다시
     # 실으면 두 벌이 된다(런 12 의 그 사고). 턴끝 검수는 reviewed 로 커버리지만 본다.
-    return _answer(result, plan.detail, _questions(asks), reviewed)
+    return _answer(request, result, plan.detail, _questions(asks), reviewed)
 
 
 async def run_modify_workflow(
@@ -692,6 +765,7 @@ async def run_modify_workflow(
         return ScenarioAgentResult(message=message, scenarios=[])
     if plan.questions and not plan.steps:
         return _answer(
+            request,
             "먼저 확인할 게 있어서 아직 아무것도 고치지 않았어요."
             if ko else "Nothing changed yet — I need to check something first.",
             plan.detail, _questions(plan.questions),
@@ -701,6 +775,7 @@ async def run_modify_workflow(
         # 최악이다. 어느 것인지 사용자에게 묻고, 고를 것은 이 런의 시나리오 제목이다.
         titles = [s.title for s in request.current_scenarios if s.scenario_id is not None]
         return _answer(
+            request,
             "어느 시나리오를 고칠지 확실하지 않아서 모두 그대로 두었어요."
             if ko else "I wasn't sure which scenario you meant, so everything is as it was.",
             questions=_questions([Ask(
@@ -795,6 +870,7 @@ async def run_modify_workflow(
                 ),
             )]
             return _answer(
+                request,
                 f"말씀하신 내용을 반영하지 못해서 저장하지 않았어요. {_bold([title_of(plan)])} 본문은 그대로예요."
                 if ko else
                 f"I could not apply that, so nothing was saved. {_bold([title_of(plan)])} is unchanged.",
@@ -838,9 +914,10 @@ async def run_modify_workflow(
             )
         # 남긴 이유는 저쪽 문장을 그대로 옮긴다 — 왜 못 지웠는지는 센 쪽만 안다.
         detail = "\n".join(part for part in (plan.detail.strip(), *answer.kept) if part)
-        return _answer(result, detail, _questions(plan.questions))
+        return _answer(request, result, detail, _questions(plan.questions))
     # 저장되지 않은 수정의 설명은 싣지 않는다 — 일어나지 않은 변경을 설명하게 된다.
     return _answer(
+        request,
         f"고친 내용이 실행 확인을 통과하지 못해서 저장하지 않았어요. {_bold([title])} 본문은 그대로예요."
         if ko else
         f"My edit did not pass the run check, so nothing was saved. {_bold([title])} is unchanged.",

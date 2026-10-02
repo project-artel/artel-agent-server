@@ -412,6 +412,19 @@ class AgentReply(BaseModel):
     detail: str = ""
 
 
+class Ref(BaseModel):
+    """답 속 `[[tc:N]]`·`[[ts:N]]` 표식이 가리키는 것 (ARTEL-931).
+
+    번호는 표식 안에서 기계만 읽는다. 화면은 [label] 로 칩을 그리고, TC 칩을 누르면
+    [detail](사전조건·기대값)을 보여 준다 — TC 를 따로 볼 화면이 없어서다.
+    """
+
+    kind: Literal["tc", "ts"]
+    id: int
+    label: str
+    detail: str | None = None
+
+
 class ScenarioAgentResult(BaseModel):
     message: str
     # The run goal, decomposed. Empty when no matching cases were found: the agent
@@ -431,6 +444,9 @@ class ScenarioAgentResult(BaseModel):
     # Several are allowed: each carries its own id, so the screen shows them as a batch
     # and an answer comes back naming the one it belongs to.
     questions: list[ScenarioQuestion] = Field(default_factory=list)
+    # What every `[[tc:N]]`/`[[ts:N]]` marker in `reply` and `questions` points at
+    # (ARTEL-931). Only markers that resolved are listed; the rest were removed.
+    refs: list[Ref] = Field(default_factory=list)
 
 
 # ScenarioAgentRequest references ScenarioPlan (defined after it) via a forward

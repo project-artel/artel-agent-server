@@ -114,8 +114,8 @@ def test_an_unplaced_case_becomes_a_question_with_choices(monkeypatch) -> None:
 
     assert len(out.questions) == 1
     asked = out.questions[0]
-    assert "Shop — 상점을 연다" in asked.text  # 번호가 아니라 이름으로
-    assert "1" not in asked.text.replace("Shop — 상점을 연다", "")
+    assert "[[tc:1]]" in asked.text  # 맨 번호가 아니라 표식 — 화면이 이름 칩으로 그린다
+    assert "1" not in asked.text.replace("[[tc:1]]", "")
     assert len(asked.options) == 2
 
 
@@ -265,3 +265,92 @@ def test_workflow_lines_use_the_words_on_screen(monkeypatch) -> None:
     for text in said:
         # 시나리오 제목은 사용자가 지은 말이라 빼고 본다.
         _no_internal_words(text.replace("상점 여정", "").replace("상점 열기", ""))
+
+
+# --- TC·TS 참조 (ARTEL-931) ------------------------------------------------------
+#
+# 모델은 TC·TS 를 `[[tc:N]]`·`[[ts:N]]` 표식으로만 가리킨다. 번호는 표식 안에서 기계만
+# 읽고, 화면은 refs 의 이름으로 칩을 그린다. 대화 기록(`message`)에는 이름 글자로 남는다.
+
+
+def test_a_known_tc_marker_is_kept_and_named(monkeypatch) -> None:
+    import app.agents.scenario.workflow as wf
+
+    plan = wf.GroupingPlan(
+        groups=[wf.Group(title="상점 열기", case_ids=[1])],
+        detail="[[tc:1]] 하나로 충분해서 그것만 넣었어요.",
+    )
+    out, _, _ = _author(monkeypatch, plan, [wf._Writer(steps=[_case_step()])])
+
+    assert "[[tc:1]]" in out.reply.detail
+    assert len(out.refs) == 1
+    ref = out.refs[0]
+    assert (ref.kind, ref.id, ref.label) == ("tc", 1, "Shop — 상점을 연다")
+    assert "상점이 열린다" in (ref.detail or "")  # 기대값이 카드에 실린다
+    # 대화 기록은 사람이 읽는 글 — 표식 대신 이름이다.
+    assert "@TC Shop — 상점을 연다" in out.message and "[[" not in out.message
+
+
+def test_an_unknown_marker_is_dropped(monkeypatch) -> None:
+    import app.agents.scenario.workflow as wf
+
+    plan = wf.GroupingPlan(
+        groups=[wf.Group(title="상점 열기", case_ids=[1])],
+        detail="[[tc:999]] 는 빼고 [[ts:42]] 와 겹치지 않게 했어요.",
+    )
+    out, _, _ = _author(monkeypatch, plan, [wf._Writer(steps=[_case_step()])])
+
+    # 이 프로젝트에 없는 번호는 지운다 — 지어낸 번호가 칩이 되면 누를 곳이 없다.
+    assert "999" not in out.reply.detail and "42" not in out.reply.detail
+    assert out.refs == []
+
+
+def test_a_ts_marker_names_the_current_scenario(monkeypatch) -> None:
+    import app.agents.scenario.workflow as wf
+
+    plans = [wf.ModifyPlan(
+        scenario_id=7, steps=[_case_step(), _case_step()],
+        detail="[[ts:7]] 마지막에 한 스텝을 더했어요.",
+    )]
+    out, _ = _modify(monkeypatch, plans)
+
+    assert [(r.kind, r.id, r.label) for r in out.refs] == [("ts", 7, "상점 여정")]
+    assert "@TS 상점 여정" in out.message
+
+
+def test_the_unplaced_question_points_with_a_marker(monkeypatch) -> None:
+    import app.agents.scenario.workflow as wf
+
+    plan = wf.GroupingPlan(groups=[wf.Group(title="여정", case_ids=[1])])
+    out, _, _ = _author(monkeypatch, plan, [wf._Writer(steps=[]), wf._Writer(steps=[])])
+
+    asked = out.questions[0]
+    assert "[[tc:1]]" in asked.text
+    assert ("tc", 1) in {(r.kind, r.id) for r in out.refs}
+
+
+def test_options_never_carry_a_marker(monkeypatch) -> None:
+    """보기는 누르면 사용자의 말로 돌아온다 — 표식이 그대로 말풍선에 찍히면 안 된다."""
+    import app.agents.scenario.workflow as wf
+
+    plan = wf.GroupingPlan(
+        groups=[wf.Group(title="상점 열기", case_ids=[1])],
+        questions=[wf.Ask(text="[[tc:1]] 도 따로 볼까요?", options=["[[tc:1]] 따로 만들어 줘", "그냥 둬"])],
+    )
+    out, _, _ = _author(monkeypatch, plan, [wf._Writer(steps=[_case_step()])])
+
+    labels = [o.label for o in out.questions[0].options]
+    assert labels[0] == "Shop — 상점을 연다 따로 만들어 줘"
+    assert all("[[" not in label for label in labels)
+
+
+def test_the_result_frame_carries_refs() -> None:
+    from app.agents.scenario.schemas import AgentReply, Ref, ScenarioAgentResult
+    from app.api.sessions import _result_event
+
+    event = _result_event(ScenarioAgentResult(
+        message="m", reply=AgentReply(result="r"),
+        refs=[Ref(kind="tc", id=1, label="Shop — 상점을 연다", detail="상점이 열린다")],
+    ))
+
+    assert event["refs"] == [{"kind": "tc", "id": 1, "label": "Shop — 상점을 연다", "detail": "상점이 열린다"}]

@@ -109,6 +109,8 @@ def _result_event(result: ScenarioAgentResult) -> dict:
         event["reply"] = result.reply.model_dump()
     if result.questions:
         event["questions"] = [question.model_dump() for question in result.questions]
+    if result.refs:
+        event["refs"] = [ref.model_dump() for ref in result.refs]
     return event
 
 
