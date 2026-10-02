@@ -223,3 +223,45 @@ def test_a_plain_reply_leaves_both_keys_out() -> None:
     event = _result_event(ScenarioAgentResult(message="안녕하세요"))
 
     assert "reply" not in event and "questions" not in event
+
+
+# --- 말투 (ARTEL-930) -------------------------------------------------------------
+#
+# 사용자의 화면에 없는 이 도구의 말 — 대화창에 나가면 사용자는 무엇을 가리키는지 모른다.
+_INTERNAL_WORDS = ("갈래", "여정", "묶음", "검수", "판정", "저작", "케이스")
+
+
+def _no_internal_words(text: str) -> None:
+    found = [word for word in _INTERNAL_WORDS if word in text]
+    assert not found, f"내부 용어 {found}: {text}"
+
+
+def test_canned_replies_use_the_words_on_screen() -> None:
+    from app.agents.scenario.agent import _CANNED
+
+    for reply in _CANNED.values():
+        _no_internal_words(reply)
+
+
+def test_workflow_lines_use_the_words_on_screen(monkeypatch) -> None:
+    """코드가 쓰는 결과 줄과 질문 — 저장·미저장·자리 못 찾음·대상 불분명을 한 번씩 지난다."""
+    import app.agents.scenario.workflow as wf
+
+    said: list[str] = []
+
+    def collect(out) -> None:
+        said.append(out.message)
+        said.extend(o.label for q in out.questions for o in q.options)
+
+    plan = wf.GroupingPlan(groups=[wf.Group(title="상점 열기", case_ids=[1])])
+    collect(_author(monkeypatch, plan, [wf._Writer(steps=[_case_step()])])[0])
+    plan = wf.GroupingPlan(groups=[wf.Group(title="상점 열기", case_ids=[1])])
+    collect(_author(monkeypatch, plan, [wf._Writer(steps=[]), wf._Writer(steps=[])])[0])
+    plan = wf.GroupingPlan(groups=[])
+    collect(_author(monkeypatch, plan, [])[0])
+    collect(_modify(monkeypatch, [wf.ModifyPlan()])[0])
+    collect(_modify(monkeypatch, [wf.ModifyPlan(scenario_id=7, steps=[_case_step(), _case_step()])])[0])
+
+    for text in said:
+        # 시나리오 제목은 사용자가 지은 말이라 빼고 본다.
+        _no_internal_words(text.replace("상점 여정", "").replace("상점 열기", ""))
