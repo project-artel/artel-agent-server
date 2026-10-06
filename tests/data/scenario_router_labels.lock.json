@@ -1,9 +1,9 @@
 {
   "counts": {
     "handwritten": {
-      "authoring": 8,
-      "modify": 1,
-      "offtopic": 5
+      "authoring": 19,
+      "modify": 2,
+      "offtopic": 12
     },
     "traffic": {
       "authoring": 134,
@@ -13,16 +13,26 @@
       "underspecified": 4
     }
   },
-  "labels_sha256": "da3dca5dbcaacdf1321a5cf91a59ecfd7b1a8388dac2daed7e866fc7c349b613",
+  "handwritten_families": {
+    "chitchat": 4,
+    "defect": 6,
+    "defect_on_existing": 2,
+    "dev_team_bait": 5,
+    "game_behaviour": 4,
+    "other_product": 5,
+    "technical": 4,
+    "weather": 3
+  },
+  "labels_sha256": "a62f4bab3f4465ea6e48e3779bdca09e0d64c374d80e3a9be248295bcb8221bd",
   "minimum_per_route": {
     "authoring": 100,
     "greeting": 2,
     "modify": 15,
-    "offtopic": 5,
+    "offtopic": 12,
     "question": 8
   },
   "note": "라벨은 프롬프트 판본에 상대적이다. 명세가 바뀌면 라벨을 재검토해야 하므로 그 해시를 여기 박는다 — 조용히 진리가 재정의되는 대신 검사가 터진다.",
-  "rows": 182,
+  "rows": 201,
   "scored_denominator": 163,
   "spec": {
     "scenario_router/v6/system": "5c9c84acf76a3bfe3e62f5e66563ee9fccff8acca39ec4a7ae3d5801a5646221"
