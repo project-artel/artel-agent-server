@@ -203,6 +203,29 @@ def test_under_narrows_by_prefix_with_or_without_the_scene_name() -> None:
         assert found.record.selector == "Root[0]/Hand[2]/Card(Clone)[3]"
 
 
+def test_under_stops_at_a_segment_boundary() -> None:
+    """글자 prefix 로만 보면 범위 제한이 조용히 없는 것이 된다.
+
+    걸린 것이 하나뿐일 때는 `SELECTOR_AMBIGUOUS` 도 안 나므로, macro 는 범위를 좁힌
+    것처럼 읽히면서 실제로는 씬 전체를 뒤진다.
+    """
+    held = memories(card("Root[0]/HandSlot[3]/Card(Clone)[1]", text="shoot"))
+
+    # `Hand` 는 `HandSlot` 의 글자 prefix 지만 마디가 아니다.
+    with pytest.raises(MacroFailure) as failed:
+        resolve_find(held, MacroScope(), find(label="shoot", under="Root[0]/Hand"))
+    assert failed.value.code == SELECTOR_NOT_FOUND
+
+    # 씬 이름의 앞글자도 안 맞춘다. 맞추면 씬 안의 모든 객체가 통과한다.
+    with pytest.raises(MacroFailure):
+        resolve_find(held, MacroScope(), find(label="shoot", under="B"))
+
+    # 마디로 맞는 것은 통과한다.
+    assert resolve_find(
+        held, MacroScope(), find(label="shoot", under="Root[0]/HandSlot[3]")
+    ).record.id == 1
+
+
 def test_name_matches_the_last_segment_with_or_without_its_index() -> None:
     held = memories(card("Root[0]/Canvas[1]/Combine[2]", text=None))
 
@@ -437,6 +460,63 @@ def test_two_sides_of_different_shapes_are_refused_with_both_named() -> None:
 def test_an_int_and_a_float_are_one_shape_and_compare() -> None:
     """wire 가 네 자리로 반올림해 `3.0` 을 `3` 으로 보낸다. 값만 보고는 가릴 수 없다."""
     assert compare(_HELD, 3, MacroOperator.equal, 3.0) is True
+
+
+def test_a_reference_member_equals_the_object_it_points_at() -> None:
+    """참조는 `path` 를, memory 의 key 는 `selector` 를 쓴다. 조립하면 영원히 안 맞는다.
+
+    한 객체가 `path` `Canvas/continue` 와 `selector` `Canvas[2]/continue[1]` 을 동시에
+    드는 것이 실측 모양이다. 주소에서 키를 직접 조립하면 같은 객체를 가리키는 두 값이
+    서로 다른 키가 되고, `require(member(slot, "T.occupant") == card, ...)` 가 영원히
+    거짓인 채 `REQUIRE_FAILED` 로 나가 agent 가 게임 결함을 적는다 — 이 설계가 막겠다고
+    한 바로 그 실패다.
+    """
+    memory = SceneMemory()
+    memory.pulse.apply(
+        PulseReading.model_validate(
+            {
+                "scene": "Battle",
+                "whole": True,
+                "active": [
+                    {
+                        "selector": "Canvas[2]/continue[1]",
+                        "path": "Canvas/continue",
+                        "id": 90,
+                    },
+                    {
+                        "selector": "Canvas[2]/Slot[3]",
+                        "path": "Canvas/Slot",
+                        "id": 91,
+                        "members": [
+                            {
+                                "on": "Game.Slot",
+                                "member": "occupant",
+                                "value": {
+                                    "path": "Canvas/continue",
+                                    "world": {"x": 1.0},
+                                },
+                            }
+                        ],
+                    },
+                ],
+            }
+        )
+    )
+    held = MacroMemories(scene=memory)
+    scope = MacroScope()
+    card = resolve_find(held, scope, find(name="continue"))
+    occupant = read(
+        held,
+        scope,
+        reader("member", MacroSelectorTarget(selector="Canvas[2]/Slot[3]"), "Slot.occupant"),
+    )
+
+    assert shape_of(occupant) is MacroShape.object_
+    assert compare(held, occupant, MacroOperator.equal, card) is True
+    assert compare(held, occupant, MacroOperator.not_equal, card) is False
+    # 다른 객체는 여전히 다르다.
+    other = resolve_find(held, scope, find(name="Slot"))
+    assert compare(held, occupant, MacroOperator.equal, other) is False
 
 
 def test_two_objects_are_told_apart_by_pulse_key_even_with_no_id() -> None:

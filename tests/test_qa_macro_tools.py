@@ -214,6 +214,45 @@ def test_edit_macro_refuses_old_text_that_appears_more_than_once() -> None:
     assert state.macros.draft("twice") == twice
 
 
+def test_a_refused_edit_of_a_registered_macro_leaves_no_draft_behind() -> None:
+    """거절은 아무 자취도 남기지 않는다.
+
+    등록된 것을 초안으로 복사하는 것은 상태를 바꾸는 일이라, 거절로 끝날 호출이 그것을
+    하고 나면 `read_macro` 가 등록된 것과 같은 글을 초안이라고 돌려준다 — agent 는
+    그것을 아직 등록 안 된 것으로 읽는다.
+    """
+    channel, state, tools, _ = make()
+    with_cards(channel)
+    call(tools["write_macro"], name="deal_a_card", source=SIMPLE)
+    call(tools["register_macro"], name="deal_a_card")
+    call(tools["read_macro"], name="deal_a_card")
+
+    for old_text, new_text in (
+        ("press_key(\"Space\", 0.1)", "click(card)"),
+        ("drag(card, slot)", "for _ in card:\n        click(card)"),
+    ):
+        answer = call(
+            tools["edit_macro"],
+            name="deal_a_card",
+            old_text=old_text,
+            new_text=new_text,
+        )
+        assert "not changed" in answer or "does not appear" in answer
+        assert state.macros.draft("deal_a_card") is None
+        assert "registered" in call(tools["read_macro"], name="deal_a_card")
+
+
+def test_edit_macro_names_a_macro_that_does_not_exist_before_asking_if_it_was_read() -> None:
+    """이름을 잘못 적은 호출이 "읽지 않았다" 는 답을 받으면 엉뚱한 것을 고치러 간다."""
+    _, _, tools, _ = make()
+
+    answer = call(
+        tools["edit_macro"], name="typo", old_text="a", new_text="b"
+    )
+
+    assert "no macro called typo" in answer
+
+
 def test_an_edit_that_breaks_the_macro_leaves_the_draft_alone() -> None:
     _, state, tools, _ = make()
     call(tools["write_macro"], name="deal_a_card", source=SIMPLE)
@@ -612,6 +651,25 @@ def test_every_tool_and_reader_is_named_in_the_write_macro_description() -> None
     assert "click_button" in description and "reset_game" in description
     # 연속값 권고. 거절이 아니라 관용구를 주는 자리다.
     assert "==" in description and "rounds a number to four" in description
+
+
+def test_the_operator_table_the_model_reads_is_the_table_the_parser_enforces() -> None:
+    """설명이 표를 손으로 다시 적으면, 한 칸이 바뀔 때 조용히 늙는다.
+
+    그 늙음은 모델이 거절을 받을 때까지 아무 데도 안 보인다. 그래서 설명은
+    `grammar.py` 에서 조립하고, 이 테스트가 조립된 결과를 표와 맞춘다.
+    """
+    from app.agents.qa.macro.grammar import (
+        MacroShape,
+        allowed_operators,
+        operator_names,
+    )
+
+    _, _, tools, _ = make()
+    description = tools["write_macro"].description
+
+    for shape in MacroShape:
+        assert operator_names(allowed_operators(shape)) in description, shape.value
 
 
 def test_the_macro_tools_sit_beside_the_action_tools_in_the_offered_list() -> None:

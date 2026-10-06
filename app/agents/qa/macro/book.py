@@ -79,16 +79,6 @@ class MacroBook:
         """초안을 만들거나 통째로 바꾼다. 등록된 행은 건드리지 않는다."""
         self.drafts[name] = source
 
-    def start_draft_from_registered(self, name: str) -> str | None:
-        """등록된 것을 초안으로 복사한다. 이미 초안이 있으면 그것을 그대로 쓴다."""
-        if name in self.drafts:
-            return self.drafts[name]
-        found = self.registrations.get(name)
-        if found is None:
-            return None
-        self.drafts[name] = found.definition.source
-        return self.drafts[name]
-
     def register(
         self, definition: MacroDefinition, screens: tuple[str, ...]
     ) -> RegisteredMacro:

@@ -197,8 +197,23 @@ def _under(key: str, scene: str, under: str) -> bool:
     key 는 씬 이름 뒤에 `selector`(없으면 `path`)를 붙인 전체 경로다. 그런데 agent 가
     화면에서 읽는 주소에는 씬 이름이 안 붙어 있으므로, 씬을 안 적은 prefix 도 받는다 —
     안 받으면 `under="Root[0]/Hand[2]"` 가 언제나 아무것도 안 맞춘다.
+
+    **마디 경계에서 끊는다.** 글자 prefix 로만 보면 `under="Root[0]/Hand"` 가
+    `Root[0]/HandSlot[3]/...` 까지 끌고 오고, 더 나쁘게는 씬 이름의 앞글자가 그 씬의
+    모든 객체를 맞춘다 — `scene="TurnBattleScene"` 에서 `under="T"` 가 전부 통과한다.
+    그러면 걸린 것이 하나뿐일 때 범위 제한이 조용히 없는 것이 되고, macro 는 범위를
+    좁힌 것처럼 읽힌다.
     """
-    return key.startswith(under) or key.startswith(f"{scene}/{under}")
+    return any(
+        candidate == under or candidate.startswith(f"{under.rstrip('/')}/")
+        for candidate in (key, _without_scene(key, scene))
+    )
+
+
+def _without_scene(key: str, scene: str) -> str:
+    """key 에서 씬 이름 마디를 뗀 나머지. 화면에서 읽는 주소가 이 모양이다."""
+    prefix = f"{scene}/"
+    return key[len(prefix) :] if scene and key.startswith(prefix) else key
 
 
 def resolve_find(
@@ -471,17 +486,26 @@ def _object_key(memories: MacroMemories, value: Any) -> str:
     `id` 로 가르지 않는 이유는 `PulseObject.id` 가 `int | None` 이라 `None` 인 기록에
     규칙이 없기 때문이고, `PulseMemory` 자신이 객체를 가르는 기준이 이 키이기 때문이다.
 
-    memory 에 없는 주소도 키로 적는다. 주소 둘을 견주는 것이 그 자체로 답이고, 없는
-    것을 조회 실패로 돌리면 `t == selector("...")` 가 거짓 대신 멈추게 된다.
+    **주소는 반드시 memory 를 거쳐 키로 바꾼다.** 주소에서 키를 직접 조립하면 안 된다 —
+    memory 의 키는 `selector`(번호가 붙은 전체 경로)로 세워지는데, 멤버에 실려 오는
+    참조는 `path`(번호가 없는 이름 경로)를 든다. 한 객체가 `path` `Canvas/continue` 와
+    `selector` `Canvas[2]/continue[1]` 을 동시에 들고 있으므로, 조립한 키는 같은 객체를
+    가리키면서도 영원히 안 맞는다. `_by_selector` 가 둘 다 보고 하나의 키로 답한다.
+
+    못 찾으면 적힌 주소를 그대로 키 자리에 쓴다. 주소 둘을 견주는 것이 그 자체로 답이고,
+    없는 것을 조회 실패로 돌리면 `t == selector("...")` 가 거짓 대신 멈추게 된다.
     """
     if isinstance(value, FoundObject):
         return value.key
-    if isinstance(value, LateSelector):
-        found = _by_selector(memories, value.selector)
-        return found.key if found else f"{memories.pulse.scene or ''}/{value.selector}"
-    if isinstance(value, dict):
-        return f"{memories.pulse.scene or ''}/{value.get('path') or ''}"
-    return str(value)  # pragma: no cover - `shape_of` 가 object 로 세는 것은 위 셋뿐이다
+    address = (
+        value.selector
+        if isinstance(value, LateSelector)
+        else (value.get("path") or "")
+        if isinstance(value, dict)
+        else str(value)
+    )
+    found = _by_selector(memories, address)
+    return found.key if found else f"{memories.pulse.scene or ''}/{address}"
 
 
 # --- 비교 ----------------------------------------------------------------------

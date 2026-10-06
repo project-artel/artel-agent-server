@@ -10,14 +10,44 @@
 
 from app.agents.qa.macro.grammar import (
     DECLARABLE_TYPE_NAMES,
+    FORBIDDEN_TOOLS,
     MAX_CALL_DEPTH,
     MAX_STATEMENTS,
+    PAIRED_TOOLS,
     READER_NAMES,
+    REPORTING_NAMES,
     TOOL_NAMES,
+    MacroShape,
+    allowed_operators,
+    operator_names,
 )
 
 _TOOLS = ", ".join(f"`{name}`" for name in TOOL_NAMES)
 _READERS = ", ".join(f"`{name}()`" for name in READER_NAMES)
+
+# 표를 손으로 다시 적지 않는다. 한 칸이 바뀌면 모델이 읽는 글도 함께 바뀌어야 하는데,
+# 손으로 적은 표는 그때 조용히 늙는다 — 그 늙음은 모델이 거절을 받을 때까지 아무 데도
+# 안 보인다.
+#
+# 모양 이름 앞에 붙는 관사만 여기서 정한다. `other` 는 열거된 모양 어디에도 안 맞는
+# 것 전부라 이름이 아니라 설명으로 읽혀야 한다.
+_SHAPE_READS_AS = {
+    MacroShape.object_: "an object",
+    MacroShape.other: "any other shape",
+}
+_OPERATOR_TABLE = "\n".join(
+    f"- {_SHAPE_READS_AS.get(shape, f'a {shape.value}')} takes "
+    f"{operator_names(allowed_operators(shape))}"
+    for shape in MacroShape
+)
+
+_PAIRS = ", ".join(f"`{pair.opens}` / `{pair.closes}`" for pair in PAIRED_TOOLS)
+
+# 일부러 뺀 이름들의 이유도 `grammar.py` 가 든다. 거절 문장이 그것을 그대로 쓰므로,
+# 설명과 거절이 다른 말을 할 자리가 없다.
+_FORBIDDEN = "\n".join(
+    f"- {why}" for why in (*FORBIDDEN_TOOLS.values(), *REPORTING_NAMES.values())
+)
 
 # 문법 전체를 한 번 적는 자리. `write_macro` 와 `edit_macro` 가 같은 것을 받으므로 두
 # 설명이 이것을 공유한다.
@@ -57,25 +87,28 @@ thing, is reported where it happened and nothing is sent to the game.
 are: {_READERS}. A condition written without a comparison has to be a bool, so
 only `actionable()`, `exists()` and `absent()` stand alone.
 
-**What each type can be compared with.** Ordering (`>`, `<`, `>=`, `<=`) works
-on numbers only. A string, a bool and an object take `==` and `!=`. A vector
-takes nothing. Comparing two different shapes is refused rather than being
-false forever.
+**What each shape of value can be compared with.** The shape is the shape the
+value ARRIVES as, not the type you declared: `int` and `float` both arrive as a
+number, because the SDK rounds before sending. Comparing two different shapes is
+refused rather than being false forever.
+
+{_OPERATOR_TABLE}
+
+An object's `==` is decided by which object it is, not by what it holds. Every
+other shape — a sprite, an animator state, a number the game could not read —
+refuses every operator rather than quietly answering false.
 
 **Refused outright:** `for`, `while`, `and`, `or`, `not`, a dot (`card.id`), a
 nested `def`, `import`, `lambda`, an f-string, `return`, a docstring,
-re-assignment, arithmetic, `click_button` (deprecated), `reset_game` (a stored
-script must not be able to throw the run's progress away), and `report_step` /
-`report_issue` (a verdict needs the scenario and the operator's words, which a
-macro does not hold).
+re-assignment and arithmetic. And these, each for its own reason:
 
-**What you hold, you release.** `hold_key` / `release_key`,
-`hold_mouse_button` / `release_mouse_button` and `pause_game_time` /
-`resume_game_time` are counted along every path through the macro, and a macro
-that ends any path still holding one is refused when you register it. That
-includes holding inside one branch of an `if` and releasing outside it: hold and
-release in the same branch, or in neither. Nothing releases these for you, and a
-key left down changes every step after the macro.
+{_FORBIDDEN}
+
+**What you hold, you release.** {_PAIRS} are counted along every path through
+the macro, and a macro that ends any path still holding one is refused when you
+register it. That includes holding inside one branch of an `if` and releasing
+outside it: hold and release in the same branch, or in neither. Nothing releases
+these for you, and a key left down changes every step after the macro.
 
 **The limits, checked when you register rather than while it runs:** at most
 {MAX_STATEMENTS} statements along the longest path, and a call chain at most

@@ -26,6 +26,7 @@ batch 하나에 대응시켜야 "이 statement 는 안 나갔다" 는 말이 참
 은 `def` 마다 1부터 세고, payload 가 어느 `def` 의 몇 번인지와 호출 사슬을 함께 싣는다.
 """
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -44,7 +45,7 @@ from app.agents.qa.macro.errors import (
     SCENE_MISMATCH,
     MacroFailure,
 )
-from app.agents.qa.macro.grammar import TOOLS_BY_NAME, ToolSpec
+from app.agents.qa.macro.grammar import TOOLS_BY_NAME, ToolParameter, ToolSpec
 from app.agents.qa.macro.model import (
     MacroActionStatement,
     MacroAskVerdictStatement,
@@ -56,6 +57,7 @@ from app.agents.qa.macro.model import (
     MacroHelperCallStatement,
     MacroIfStatement,
     MacroLiteralValue,
+    MacroParameter,
     MacroRequireStatement,
     MacroSelectorValue,
     MacroStatement,
@@ -482,7 +484,7 @@ def _helper_arguments(
     statement: MacroHelperCallStatement,
     frame: _Frame,
     runner: "_Runner",
-):
+) -> Iterator[tuple[MacroParameter, Any]]:
     """helper 의 parameter 마다 (parameter, 값). 안 적힌 자리는 `def` 줄의 기본값."""
     written = {argument.parameter: argument for argument in statement.arguments}
     for parameter in helper.parameters:
@@ -519,7 +521,7 @@ def _actions(spec: ToolSpec, values: dict[str, Any]) -> list[JsonRpcAction]:
     return actions
 
 
-def _aim(parameter, found: FoundObject) -> list[Any]:
+def _aim(parameter: ToolParameter, found: FoundObject) -> list[Any]:
     """묶인 기록을 그 tool 이 받는 조준값으로.
 
     `enter_text` 는 `target_id: int` 를 받으므로 기록에서 `id` 를 꺼낸다. `id` 는

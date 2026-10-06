@@ -404,6 +404,25 @@ def test_find_takes_keywords_only() -> None:
     )
 
 
+def test_a_find_keyword_takes_a_string_name_and_refuses_an_object_one() -> None:
+    """`label=` 은 `PulseObject.text` 를 맞추는 글자다. 객체를 그 자리에 넣을 수 없다.
+
+    `ARTEL-923` 의 예시가 `find(label=card_a)` 를 적는데 `ARTEL-917` 의 예시에서
+    `card_a: object` 다. 두 이슈가 어긋난 자리이고, 여기서는 `string` 만 받는다.
+    """
+    parse(
+        'def m(wanted: string) -> None:\n'
+        "    card: object = find(label=wanted)\n"
+        "    click(card)\n"
+    )
+    reason = rejection(
+        "def m(card_a: object) -> None:\n"
+        "    card: object = find(label=card_a)\n"
+        "    click(card)\n"
+    )
+    assert "string" in reason and "object" in reason
+
+
 def test_a_selector_in_a_comparison_needs_an_object_on_the_other_side() -> None:
     parse(
         'def m(card: object) -> None:\n'
@@ -581,6 +600,32 @@ def test_a_chain_at_the_depth_limit_passes_and_one_deeper_is_refused() -> None:
     reason = rejection(_chain(MAX_CALL_DEPTH + 1))
 
     assert str(MAX_CALL_DEPTH + 1) in reason
+    assert str(MAX_CALL_DEPTH) in reason
+
+
+def test_a_wide_call_graph_is_judged_without_walking_every_path() -> None:
+    """같은 helper 를 두 번 부르는 macro 가 층마다 일을 두 배로 늘리면 안 된다.
+
+    memo 가 빠지면 이것이 2^n 이 된다. helper 스물넷(99줄)에서 5초, 서른에서 5분이
+    걸렸고 그것이 `write_macro` tool 호출 안이라 서버 coroutine 을 그만큼 막는다.
+    모델이 helper 를 단계마다 하나씩 쓰는 macro 를 내놓는 것은 평범한 경우다.
+
+    벽시계를 재는 테스트가 아니다. 상한을 넘겨 거절되는 것까지가 **끝난다**는 것을 재고,
+    memo 가 빠지면 이 테스트는 통과하지 않고 그냥 돌아오지 않는다.
+    """
+    helpers = 40
+    parts = ["def top(card: object) -> None:\n    h0(card)\n    h0(card)\n"]
+    for index in range(helpers):
+        inner = (
+            f"    h{index + 1}(card)\n    h{index + 1}(card)\n"
+            if index + 1 < helpers
+            else "    click(card)\n"
+        )
+        parts.append(f"def h{index}(card: object) -> None:\n{inner}")
+
+    reason = rejection("\n".join(parts), "top")
+
+    assert str(helpers + 1) in reason
     assert str(MAX_CALL_DEPTH) in reason
 
 

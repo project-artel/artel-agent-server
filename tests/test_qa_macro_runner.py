@@ -10,9 +10,10 @@ import asyncio
 
 import pytest
 
-from app.agents.qa.macro.binding import MacroMemories
+from app.agents.qa.macro.binding import LateSelector, MacroMemories
 from app.agents.qa.macro.errors import (
     ACTION_REJECTED,
+    COMPARISON_REJECTED,
     REQUIRE_FAILED,
     SCENE_MISMATCH,
     SELECTOR_NOT_FOUND,
@@ -379,6 +380,44 @@ def test_a_statement_with_no_enclosing_if_still_stands_with_an_empty_observed() 
 
     assert [one.message for one in result.flags] == ["the macro ran"]
     assert result.flags[0].observed == {}
+
+
+def test_an_if_whose_condition_was_refused_puts_both_branches_in_pending() -> None:
+    """거절된 `if` 조건을 거짓으로 읽어 분기를 조용히 넘기면 안 된다.
+
+    조건이 판정되지 않았으므로 어느 쪽도 "원래 안 간다" 가 아니다. 둘 다 `pending` 이고
+    `skipped` 는 비어야 한다 — `skipped` 에 넣으면 읽는 쪽이 그 분기가 판정됐다고 읽는다.
+    """
+    host = FakeHost(
+        scene_with(
+            card("Root[0]/Go[1]", instance_id=1),
+            statics=[
+                {
+                    "declaring": "Game.X",
+                    "member": "y",
+                    "value": {"unread": "not-a-number"},
+                }
+            ],
+        )
+    )
+    source = (
+        "def m(card: object) -> None:\n"
+        '    if static("X.y") > 5:\n'
+        "        click(card)\n"
+        "    else:\n"
+        "        move_pointer(card)\n"
+        '    press_key("Space", 0.1)\n'
+    )
+    result = drive(
+        host, source, "m", {"card": LateSelector(selector="Root[0]/Go[1]")}
+    )
+
+    assert result.failure.code == COMPARISON_REJECTED
+    assert result.skipped == []
+    # 1 `if`, 2 click, 3 move_pointer, 4 press_key. `if` 뒤의 전부가 `pending` 이다.
+    assert [place.number for place in result.pending] == [2, 3, 4]
+    assert result.applied == []
+    assert host.sent == []
 
 
 def _found(host: FakeHost, enemy_text: str):

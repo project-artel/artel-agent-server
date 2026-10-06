@@ -27,8 +27,13 @@ from app.agents.qa.macro.errors import MacroFailure, MacroRejection
 from app.agents.qa.macro.grammar import DECLARABLE_TYPE_NAMES, MacroType
 from app.agents.qa.macro.model import MacroDefinition, MacroParameter
 from app.agents.qa.macro.parser import macro_definition_from_source
-from app.agents.qa.macro.runner import MacroRunResult, run_macro as execute_macro
+from app.agents.qa.macro.runner import (
+    MacroPlace,
+    MacroRunResult,
+    run_macro as execute_macro,
+)
 from app.agents.qa.tools.action_tools import parse_target
+from app.agents.qa.tools.state import QaRunState
 from app.agents.qa.tools.tool_context import ToolContext
 
 
@@ -104,6 +109,18 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         macro_name = (name or "").strip()
         book = state.macros
 
+        # **아무것도 안 고칠 수 있는 경우를 전부 먼저 본다.** 등록된 것을 초안으로
+        # 복사하는 것은 상태를 바꾸는 일이라, 거절로 끝날 호출이 그것을 하고 나면
+        # `read_macro` 가 등록된 것과 같은 글을 초안이라고 돌려준다 — agent 는 그것을
+        # 아직 등록 안 된 것으로 읽는다. 거절은 아무 자취도 남기지 않는다.
+        draft = book.source(macro_name)
+        if draft is None:
+            # 없는 이름을 먼저 말한다. 읽었는지를 먼저 보면, 이름을 잘못 적은 호출이
+            # "읽지 않았다" 는 답을 받고 엉뚱한 것을 고치러 간다.
+            return (
+                f"There is no macro called {macro_name}, as a draft or registered, so "
+                "nothing was changed. `write_macro` is where a new one starts."
+            )
         if not book.was_read(macro_name):
             # 고치려면 먼저 읽어야 한다. 안 읽고 고치는 것은 무엇을 지우는지 모르고
             # 지우는 것이다.
@@ -111,13 +128,6 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
                 f"This run has not read {macro_name} yet, so nothing was changed. Call "
                 "`read_macro` first — changing text you have not seen is changing text "
                 "you cannot check."
-            )
-
-        draft = book.start_draft_from_registered(macro_name)
-        if draft is None:
-            return (
-                f"There is no macro called {macro_name}, as a draft or registered, so "
-                "nothing was changed. `write_macro` is where a new one starts."
             )
         if not old_text:
             return (
@@ -148,6 +158,8 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
                 f"{problem}"
             )
 
+        # 여기까지 와서야 상태를 바꾼다. 등록된 것만 있었으면 이 자리에서 초안이 생기고,
+        # 등록된 행은 `register_macro` 가 성공할 때까지 그대로다.
         book.write(macro_name, changed)
         return _draft_report(macro_name, definition)
 
@@ -265,7 +277,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
     return [write_macro, edit_macro, read_macro, register_macro, run_macro]
 
 
-def _known(state) -> set[str]:
+def _known(state: QaRunState) -> set[str]:
     return set(state.macros.drafts) | set(state.macros.registrations)
 
 
@@ -456,7 +468,7 @@ def _render(result: MacroRunResult) -> str:
     return "\n".join(line for line in lines if line)
 
 
-def _places(what: str, places) -> str:
+def _places(what: str, places: list[MacroPlace]) -> str:
     if not places:
         return ""
     return f"{what}: " + ", ".join(str(one) for one in places)

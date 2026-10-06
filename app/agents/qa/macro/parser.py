@@ -36,8 +36,10 @@ from app.agents.qa.macro.grammar import (
     MAX_CALL_DEPTH,
     MAX_STATEMENTS,
     PAIRED_TOOLS,
+    PairedTools,
     READER_NAME_LIST,
     READERS_BY_NAME,
+    ReaderSpec,
     REPORTING_NAMES,
     REQUIRE,
     SELECTOR,
@@ -218,10 +220,13 @@ def macro_definition_from_source(name: str, source: str) -> MacroDefinition:
     definition = MacroDefinition(
         name=name, source=source, entry=entry, helpers=tuple(helpers)
     )
-    _reject_recursion(definition)
-    _reject_over_depth(definition)
-    _reject_over_statements(definition)
-    _reject_unpaired(definition)
+    # 네 검사가 같은 호출 그래프에 묻는다. 그래프를 네 번 다시 세우고 memo 를 네 번
+    # 손으로 달면, 빠뜨린 하나가 지수로 터진다.
+    graph = _CallGraph(definition)
+    graph.reject_recursion()
+    graph.reject_over_depth()
+    graph.reject_over_statements()
+    graph.reject_unpaired()
     return definition
 
 
@@ -1406,7 +1411,7 @@ def _parameter_list(parameters: tuple[ToolParameter, ...]) -> str:
     )
 
 
-def _reader_arguments(spec) -> str:
+def _reader_arguments(spec: ReaderSpec) -> str:
     parts: list[str] = []
     if spec.takes_target:
         parts.append("one target")
@@ -1416,10 +1421,24 @@ def _reader_arguments(spec) -> str:
 
 
 # --- 저장 시점에 정적으로 세는 것 ------------------------------------------------
+#
+# 네 가지를 센다. 재귀, 호출 깊이, 가장 많이 도는 경로의 statement 수, 그리고 눌렀으면
+# 풀어야 하는 tool 의 카운터. 넷 다 같은 호출 그래프를 걷는다.
+#
+# **걷는 자리를 하나로 둔다.** 네 검사가 각자 그래프를 다시 세우고 각자 memo 를 손으로
+# 달면, memo 를 빠뜨린 검사 하나가 지수로 터진다 — 실제로 `depth` 하나가 그랬다. helper
+# 하나를 두 번 부르는 macro 는 층마다 일이 두 배가 되어 helper 스물넷(99줄)에서 5초,
+# 서른에서 5분이 걸렸고, 그것이 `write_macro` tool 호출 안이라 서버 coroutine 을 그만큼
+#막는다. 모델이 helper 를 단계마다 하나씩 쓰는 macro 를 내놓는 것은 공격이 아니라
+# 평범한 경우다.
 
 
 def _called_helpers(statements: tuple[MacroStatement, ...]) -> list[str]:
-    """그 몸통이 부르는 helper 이름 전부. 분기 안쪽까지 센다."""
+    """그 몸통이 부르는 helper 이름 전부, 부른 순서대로. 분기 안쪽까지 센다.
+
+    같은 helper 를 두 번 부르면 두 번 적힌다. 세는 쪽이 그것을 알아야 statement 총수가
+    맞는다.
+    """
     names: list[str] = []
     for statement in statements:
         if isinstance(statement, MacroHelperCallStatement):
@@ -1430,196 +1449,213 @@ def _called_helpers(statements: tuple[MacroStatement, ...]) -> list[str]:
     return names
 
 
-def _call_graph(definition: MacroDefinition) -> dict[str, list[str]]:
-    graph = {definition.entry.name: _called_helpers(definition.entry.statements)}
-    for helper in definition.helpers:
-        graph[helper.name] = _called_helpers(helper.statements)
-    return graph
+class _CallGraph:
+    """`def` 들이 서로를 부르는 모양. 네 검사가 여기에 묻는다.
 
-
-def _reject_recursion(definition: MacroDefinition) -> None:
-    """자기 호출도 상호 재귀도 저장 시점에 거절한다.
-
-    먼저 하는 이유는 아래 두 판정이 호출 트리를 걷기 때문이다. 고리가 남아 있으면
-    세는 쪽이 영원히 돈다.
+    답을 전부 memo 한다. 그래프는 저장 시점에 고정이고 질문은 되풀이되므로, 같은 답을
+    두 번 세는 것은 그대로 지수가 된다.
     """
-    graph = _call_graph(definition)
-    walking: list[str] = []
-    done: set[str] = set()
 
-    def walk(name: str) -> None:
-        if name in walking:
-            cycle = " → ".join(walking[walking.index(name) :] + [name])
+    def __init__(self, definition: MacroDefinition) -> None:
+        self.definition = definition
+        self.calls: dict[str, list[str]] = {
+            definition.entry.name: _called_helpers(definition.entry.statements)
+        }
+        for helper in definition.helpers:
+            self.calls[helper.name] = _called_helpers(helper.statements)
+        self._depth: dict[str, int] = {}
+        self._statements: dict[str, int] = {}
+        self._tally: dict[tuple[str, str], _Tally] = {}
+
+    def statements_of(self, name: str) -> tuple[MacroStatement, ...]:
+        function = self.definition.function(name)
+        return () if function is None else function.statements
+
+    # -- 재귀 --
+
+    def reject_recursion(self) -> None:
+        """자기 호출도 상호 재귀도 거절한다.
+
+        제일 먼저 묻는다. 아래 셋이 호출 트리를 걷기 때문이다 — 고리가 남아 있으면
+        세는 쪽이 영원히 돈다.
+        """
+        walking: list[str] = []
+        settled: set[str] = set()
+
+        def walk(name: str) -> None:
+            if name in walking:
+                cycle = " → ".join(walking[walking.index(name) :] + [name])
+                raise MacroRejection(
+                    f"this macro calls itself: {cycle}. A macro has no recursion — how "
+                    "many statements it would turn through could not be counted when it "
+                    "is stored, and that count is what the 128-statement limit is "
+                    "checked against."
+                )
+            if name in settled:
+                return
+            walking.append(name)
+            for called in self.calls.get(name, ()):
+                walk(called)
+            walking.pop()
+            settled.add(name)
+
+        for name in self.calls:
+            walk(name)
+
+    # -- 호출 깊이 --
+
+    def depth_of(self, name: str) -> int:
+        if name not in self._depth:
+            called = self.calls.get(name, ())
+            # 먼저 넣어 두지 않는다. 고리는 `reject_recursion` 이 이미 걸렀으므로 여기
+            # 닿는 그래프는 비순환이다.
+            self._depth[name] = 1 + max(
+                (self.depth_of(one) for one in called), default=0
+            )
+        return self._depth[name]
+
+    def reject_over_depth(self) -> None:
+        measured = self.depth_of(self.definition.entry.name)
+        if measured > MAX_CALL_DEPTH:
             raise MacroRejection(
-                f"this macro calls itself: {cycle}. A macro has no recursion — how many "
-                "statements it would turn through could not be counted when it is "
-                "stored, and that count is what the 128-statement limit is checked "
-                "against."
+                f"the call chain in this macro is {measured} deep, and the limit is "
+                f"{MAX_CALL_DEPTH} counting the entry point. A failure payload prints "
+                "the chain it happened in, and four links do not read in one payload. "
+                "Flatten a helper into its caller."
             )
-        if name in done:
-            return
-        walking.append(name)
-        for called in graph.get(name, ()):
-            walk(called)
-        walking.pop()
-        done.add(name)
 
-    for name in graph:
-        walk(name)
+    # -- statement 총수 --
 
+    def statements_in(self, name: str) -> int:
+        if name not in self._statements:
+            self._statements[name] = self._count(self.statements_of(name))
+        return self._statements[name]
 
-def _reject_over_depth(definition: MacroDefinition) -> None:
-    graph = _call_graph(definition)
+    def _count(self, statements: tuple[MacroStatement, ...]) -> int:
+        """그 몸통에서 가장 많이 도는 경로의 statement 수.
 
-    def depth(name: str) -> int:
-        called = graph.get(name, ())
-        return 1 + max((depth(one) for one in called), default=0)
+        `if` 는 적힌 statement 를 세는 것을 바꾸지 않는다 — 최대값은 가지들 중 큰 쪽이라
+        여전히 정적이다. helper 호출은 호출 그 자체 하나에 그 helper 의 총수를 더한다.
 
-    measured = depth(definition.entry.name)
-    if measured > MAX_CALL_DEPTH:
-        raise MacroRejection(
-            f"the call chain in this macro is {measured} deep, and the limit is "
-            f"{MAX_CALL_DEPTH} counting the entry point. A failure payload prints the "
-            "chain it happened in, and four links do not read in one payload. Flatten a "
-            "helper into its caller."
-        )
+        세는 것만 편다, 실행은 안 편다. 상한을 세려고 호출 트리를 펴는 것이지 실행할 때
+        펴는 것이 아니다.
+        """
+        total = 0
+        for statement in statements:
+            if isinstance(statement, MacroIfStatement):
+                total += 1 + max(
+                    self._count(statement.body), self._count(statement.orelse)
+                )
+            elif isinstance(statement, MacroHelperCallStatement):
+                total += 1 + self.statements_in(statement.callee)
+            else:
+                total += 1
+        return total
 
-
-def _statement_cost(statements: tuple[MacroStatement, ...], cost) -> int:
-    """그 몸통에서 가장 많이 도는 경로의 statement 수.
-
-    `if` 는 적힌 statement 를 세는 것을 바꾸지 않는다 — 최대값은 가지들 중 큰 쪽이라
-    여전히 정적이다. helper 호출은 호출 그 자체 하나에 그 helper 의 총수를 더한다.
-
-    세는 것만 편다, 실행은 안 편다. 상한을 세려고 호출 트리를 펴는 것이지 실행할 때
-    펴는 것이 아니다.
-    """
-    total = 0
-    for statement in statements:
-        if isinstance(statement, MacroIfStatement):
-            total += 1 + max(
-                _statement_cost(statement.body, cost),
-                _statement_cost(statement.orelse, cost),
+    def reject_over_statements(self) -> None:
+        measured = self.statements_in(self.definition.entry.name)
+        if measured > MAX_STATEMENTS:
+            raise MacroRejection(
+                f"the longest path through this macro turns {measured} statements, and "
+                f"the limit is {MAX_STATEMENTS}. Caught here rather than part-way "
+                "through a run: once an action has gone to the game it cannot be taken "
+                "back. Split the macro, or drop statements from the heaviest branch."
             )
-        elif isinstance(statement, MacroHelperCallStatement):
-            total += 1 + cost(statement.callee)
-        else:
-            total += 1
-    return total
+
+    # -- 눌렀으면 풀어야 하는 tool --
+
+    def tally_of(self, name: str, pair: PairedTools) -> "_Tally":
+        if (name, pair.counter) not in self._tally:
+            self._tally[(name, pair.counter)] = self._tally_body(
+                self.statements_of(name), pair
+            )
+        return self._tally[(name, pair.counter)]
+
+    def _tally_body(
+        self, statements: tuple[MacroStatement, ...], pair: PairedTools
+    ) -> "_Tally":
+        """그 몸통의 카운터 합과, 지나는 동안 내려간 최저값.
+
+        `if` 의 두 가지가 서로 다른 `delta` 를 내면 거기서 거절한다. 경로를 하나하나
+        펼치지 않는 이유는 `if` 하나당 경로가 둘로 갈려 128 statement 면 경로가
+        천문학적인 수가 되기 때문이고, 두 가지가 같은 값을 남기면 모든 경로의 합이
+        하나로 정해지므로 합 하나로 판정할 수 있다.
+
+        그리고 **한 분기에서만 누르고 다른 분기에서 푸는 macro** 가 정확히 두 가지가
+        다른 값을 내는 경우다. 그것이 맞는 거절이다.
+        """
+        delta = 0
+        lowest = 0
+        for statement in statements:
+            if isinstance(statement, MacroActionStatement):
+                step = (
+                    1
+                    if statement.callee == pair.opens
+                    else -1
+                    if statement.callee == pair.closes
+                    else 0
+                )
+                delta += step
+                lowest = min(lowest, delta)
+                continue
+            if isinstance(statement, MacroHelperCallStatement):
+                inner = self.tally_of(statement.callee, pair)
+            elif isinstance(statement, MacroIfStatement):
+                taken = self._tally_body(statement.body, pair)
+                other = self._tally_body(statement.orelse, pair)
+                if taken.delta != other.delta:
+                    raise MacroRejection(
+                        f"{pair.counter} is left in a different state by the two "
+                        f"branches of `{statement.source}`: one leaves "
+                        f"{taken.delta:+d} and the other {other.delta:+d}. Hold and "
+                        "release it inside the same branch, or in neither — a macro "
+                        "that presses in one branch and lets go in the other leaves "
+                        "the game holding it whenever the condition goes the other way."
+                    )
+                inner = _Tally(
+                    delta=taken.delta, lowest=min(taken.lowest, other.lowest)
+                )
+            else:
+                continue
+            lowest = min(lowest, delta + inner.lowest)
+            delta += inner.delta
+        return _Tally(delta=delta, lowest=lowest)
+
+    def reject_unpaired(self) -> None:
+        """누른 것을 안 푼 macro 를 거절한다.
+
+        tool 을 직접 부르는 agent 는 그 tool 의 docstring("Nothing releases this for
+        you.")을 다음 턴에 다시 읽는다. macro 는 글이 저작 시점에 고정이라 읽어 줄 다음
+        턴이 없고, 눌린 채로 남은 키는 그 뒤의 모든 step 을 조용히 바꾼다. 반복이 없어
+        경로가 유한하므로 여기서 셀 수 있다.
+        """
+        for pair in PAIRED_TOOLS:
+            total = self.tally_of(self.definition.entry.name, pair)
+            if total.delta > 0:
+                raise MacroRejection(
+                    f"this macro leaves {pair.counter} behind: it calls "
+                    f"`{pair.opens}` {total.delta} more time(s) than "
+                    f"`{pair.closes}`. Nothing releases it for you, so every step after "
+                    f"this macro would run with it still held. Add the matching "
+                    f"`{pair.closes}`."
+                )
+            if total.delta < 0 or total.lowest < 0:
+                raise MacroRejection(
+                    f"this macro releases {pair.counter} it never took: "
+                    f"`{pair.closes}` is reached without a `{pair.opens}` before it. "
+                    f"Either the `{pair.opens}` is missing or the two are the wrong way "
+                    "round."
+                )
 
 
 @dataclass(frozen=True)
 class _Tally:
-    """한 몸통이 카운터 하나에 하는 일. 경로마다 따로 센 결과다.
+    """한 몸통이 카운터 하나에 하는 일.
 
     `delta` 는 그 몸통을 지나면 카운터가 얼마나 달라지나, `lowest` 는 그 몸통을 지나는
     동안 카운터가 내려간 최저값이다. 둘을 함께 들면 분기가 있어도 경로를 하나하나
-    펼치지 않고 셀 수 있다 — `if` 하나당 경로가 둘로 갈려 128 statement 면 경로가
-    천문학적인 수가 되므로, 펼치는 셈은 집행이 안 된다.
+    펼치지 않고 셀 수 있다.
     """
 
     delta: int
     lowest: int
-
-
-def _tally(statements: tuple[MacroStatement, ...], pair, cost) -> _Tally:
-    """그 몸통의 카운터 합과 최저값.
-
-    `if` 의 두 가지가 서로 다른 `delta` 를 내면 거기서 거절한다. 그래야 "어느 경로에서든
-    끝에 0 이 남는다" 를 합 하나로 판정할 수 있고, 무엇보다 **한 분기에서만 누르고 다른
-    분기에서 푸는 macro** 가 바로 그 경우다 — 그것이 맞는 거절이다.
-    """
-    delta = 0
-    lowest = 0
-    for statement in statements:
-        if isinstance(statement, MacroActionStatement):
-            step = (
-                1
-                if statement.callee == pair.opens
-                else -1
-                if statement.callee == pair.closes
-                else 0
-            )
-            delta += step
-            lowest = min(lowest, delta)
-            continue
-        if isinstance(statement, MacroHelperCallStatement):
-            inner = cost(statement.callee)
-        elif isinstance(statement, MacroIfStatement):
-            taken = _tally(statement.body, pair, cost)
-            other = _tally(statement.orelse, pair, cost)
-            if taken.delta != other.delta:
-                raise MacroRejection(
-                    f"{pair.counter} is left in a different state by the two branches of "
-                    f"`{statement.source}`: one leaves {taken.delta:+d} and the other "
-                    f"{other.delta:+d}. Hold and release it inside the same branch, or "
-                    "in neither — a macro that presses in one branch and lets go in the "
-                    "other leaves the game holding it whenever the condition goes the "
-                    "other way."
-                )
-            inner = _Tally(
-                delta=taken.delta, lowest=min(taken.lowest, other.lowest)
-            )
-        else:
-            continue
-        lowest = min(lowest, delta + inner.lowest)
-        delta += inner.delta
-    return _Tally(delta=delta, lowest=lowest)
-
-
-def _reject_unpaired(definition: MacroDefinition) -> None:
-    """누른 것을 안 푼 macro 를 저장 시점에 거절한다.
-
-    tool 을 직접 부르는 agent 는 그 tool 의 docstring 을 다음 턴에 다시 읽는다. macro
-    는 글이 저작 시점에 고정이라 읽어 줄 다음 턴이 없고, 눌린 채로 남은 키는 그 뒤의
-    모든 step 을 조용히 바꾼다. 반복이 없어 경로가 유한하므로 여기서 셀 수 있다.
-    """
-    for pair in PAIRED_TOOLS:
-        memo: dict[str, _Tally] = {}
-
-        def cost(name: str, pair=pair, memo=memo) -> _Tally:
-            if name not in memo:
-                function = definition.function(name)
-                memo[name] = (
-                    _Tally(0, 0)
-                    if function is None
-                    else _tally(function.statements, pair, cost)
-                )
-            return memo[name]
-
-        total = _tally(definition.entry.statements, pair, cost)
-        if total.delta > 0:
-            raise MacroRejection(
-                f"this macro leaves {pair.counter} behind: it calls `{pair.opens}` "
-                f"{total.delta} more time(s) than `{pair.closes}`. Nothing releases it "
-                f"for you, so every step after this macro would run with it still held. "
-                f"Add the matching `{pair.closes}`."
-            )
-        if total.delta < 0 or total.lowest < 0:
-            raise MacroRejection(
-                f"this macro releases {pair.counter} it never took: `{pair.closes}` is "
-                f"reached without a `{pair.opens}` before it. Either the `{pair.opens}` "
-                "is missing or the two are the wrong way round."
-            )
-
-
-def _reject_over_statements(definition: MacroDefinition) -> None:
-    memo: dict[str, int] = {}
-
-    def cost(name: str) -> int:
-        if name not in memo:
-            function = definition.function(name)
-            # `_reject_recursion` 이 이미 돌았으므로 고리가 없고, 이름은 전부 있다.
-            memo[name] = (
-                0 if function is None else _statement_cost(function.statements, cost)
-            )
-        return memo[name]
-
-    measured = cost(definition.entry.name)
-    if measured > MAX_STATEMENTS:
-        raise MacroRejection(
-            f"the longest path through this macro turns {measured} statements, and the "
-            f"limit is {MAX_STATEMENTS}. Caught here rather than part-way through a run: "
-            "once an action has gone to the game it cannot be taken back. Split the "
-            "macro, or drop statements from the heaviest branch."
-        )

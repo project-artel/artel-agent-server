@@ -258,13 +258,30 @@ QA agent 가 성공한 조작 묶음을 macro 로 적어 두고 다시 부를 �
   확인한다" 를 AC 로 적는다. 다만 pydantic 을 검사하는 데서 그치지 않게, tool 과
   runner 가 `model_validate` 로 정의를 만들지 않는다는 것까지 본다.
 
-## Open Questions
+## Settled during implementation
 
-- `find` 의 keyword 값으로 맨이름을 받을 때 그 이름의 선언 타입. `ARTEL-923` 의 예시가
-  `find(label=card_a)` 인데 `ARTEL-917` 의 예시에서 `card_a: object` 다. `label` 은
-  `PulseObject.text` 를 맞추는 문자열이므로 `string` 선언만 받고 `object` 는 거절한다.
-  어긋나는 자리로 보고한다.
-- 조건이 비교 없이 reader 호출 하나뿐일 때. 이슈가 여덟 전부를 허용한다고 적으므로
-  전부 허용하고 Python 의 truthiness 로 평가한다. `text(t)` 같은 문자열 reader 를
-  진리값으로 쓰는 것을 거절하지 않는다 — 이슈에 그 거절이 없다. 어긋나는 자리로
-  보고한다.
+- **`find` 의 keyword 값으로 맨이름을 받을 때 그 이름의 선언 타입.** `ARTEL-923` 의
+  예시가 `find(label=card_a)` 인데 `ARTEL-917` 의 예시에서 `card_a: object` 다. `label`
+  은 `PulseObject.text` 를 맞추는 문자열이므로 `string` 선언만 받고 `object` 는
+  거절한다. 두 이슈가 어긋난 자리이고 PR 본문에 적는다.
+- **조건이 비교 없이 reader 호출 하나뿐일 때.** 계획은 여덟 전부를 허용하고 Python 의
+  truthiness 로 평가하기로 했었다. **그것을 뒤집었다.** 그 모양이면 빈 문자열이 거짓,
+  아무 사전이 참이 되어 조용히 틀리는데, 그것이 이 이슈가 거절로 막겠다고 적은 바로 그
+  경우다. 모양을 저장 시점에 아는 다섯은 parser 가 거절하고(`actionable`·`exists`·
+  `absent` 만 통과), 모르는 셋은 값이 도착한 뒤 `binding.evaluate` 가 같은 거절을 한다.
+  이슈가 적지 않은 거절을 더한 것이므로 PR 본문에 적는다.
+- **눌렀으면 풀어야 하는 tool 의 카운터.** 이슈 다섯 중 어디에도 없고, 진행 중에 받은
+  지시로 더했다. 경로마다 따로 세고 어느 경로에서든 끝에 0 이 아니면 거절한다. 경로를
+  펼치는 대신 `if` 의 두 가지가 다른 값을 남기면 거기서 거절한다 — 128 statement 면
+  경로가 천문학적인 수가 되고, 두 가지가 다르면 그런 경로가 반드시 하나 생긴다.
+- **`run_macro` 의 인자 이름이 `args` 가 아니라 `arguments` 다.** langchain 이 함수
+  서명에서 argument schema 를 떠낼 때 pydantic 이 `args` 를 내부 이름과 부딪히는 것으로
+  보고 `v__args` 로 바꾸므로 호출이 통째로 깨진다.
+- **호출 그래프를 걷는 자리를 하나로 뒀다.** `_CallGraph` 하나가 네 검사(재귀·깊이·
+  statement 총수·카운터)의 질문을 받고 답을 전부 memo 한다. 네 검사가 각자 그래프를
+  세우고 memo 를 손으로 달았더니 `depth` 하나가 memo 를 빠뜨려 2^n 이 됐다 — helper
+  스물넷(99줄)에서 5초, 서른에서 5분이었고 그것이 `write_macro` tool 호출 안이다.
+- **`grammar.py` 의 tool 표를 `action_tools.py` 와 맞추는 테스트.** 계획의 Risks 가
+  그것을 유일한 연결로 적었는데 첫 구현에 없었다. `tests/test_qa_macro_grammar.py` 가
+  열넷 각각에 대해 같은 조작을 두 길로 보내고 나간 `method` 순서와 `params` 순서를
+  견준다. `params` 순서를 일부러 뒤집어 보고 실제로 걸리는 것을 확인했다.
