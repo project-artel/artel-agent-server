@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from app.agents.scenario.router import router_model
 from app.config import Settings, get_settings
-from app.llm.models import LLMModel, required_openrouter_slugs
+from app.llm.models import DEFAULT_MODEL, LLMModel, required_openrouter_slugs
 
 BEDROCK_ENVIRONMENT = [
     "ROUTER_MODEL",
@@ -28,8 +28,9 @@ def no_bedrock(monkeypatch):
 
 
 def test_router_defaults_to_an_openrouter_model(no_bedrock):
-    assert Settings(_env_file=None).router_model == "openai/gpt-5.6-luna"
-    assert router_model() is LLMModel.gpt_5_6_luna
+    assert Settings(_env_file=None).router_model == ""
+    assert router_model() is DEFAULT_MODEL
+    assert not router_model().value.startswith("bedrock/")
 
 
 def test_router_model_can_be_set_to_bedrock_by_an_operator(no_bedrock, monkeypatch):
@@ -59,7 +60,7 @@ def test_required_slugs_cover_catalog_and_embeddings_without_bedrock():
 
     assert len(slugs) == 13
     assert "openai/text-embedding-3-large" in slugs
-    assert LLMModel.gpt_5_6_luna.value in slugs
+    assert DEFAULT_MODEL.value in slugs
     assert not any(slug.startswith("bedrock/") for slug in slugs)
     assert len(slugs) == len(set(slugs))
 

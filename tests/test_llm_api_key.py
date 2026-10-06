@@ -184,7 +184,7 @@ def test_chat_client_sends_the_key_the_provider_currently_holds(monkeypatch):
     from app.config import get_settings
     from app.llm import api_key as api_key_module
     from app.llm.chat_model import build_chat_model
-    from app.llm.models import LLMModel
+    from app.llm.models import DEFAULT_MODEL
 
     keys = iter(["first-key", "second-key"])
     provider, _ = build_provider(lambda request: httpx.Response(200, json={"apiKey": next(keys)}))
@@ -199,7 +199,7 @@ def test_chat_client_sends_the_key_the_provider_currently_holds(monkeypatch):
         seen.append(request.headers["authorization"])
         return httpx.Response(401, json={"error": {"message": "bad key"}})
 
-    chat = build_chat_model(LLMModel.gpt_5_6_luna)
+    chat = build_chat_model(DEFAULT_MODEL)
     chat.root_async_client._client = httpx.AsyncClient(transport=httpx.MockTransport(reply))
     chat.async_client._client = chat.root_async_client._client
     chat.root_async_client.max_retries = 0

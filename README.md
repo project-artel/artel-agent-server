@@ -65,7 +65,7 @@ embedding 모델(`EMBEDDING_MODEL`) 이고, `app/llm/models.py` 의 catalog 에�
 ### Bedrock 은 선택
 
 기본 설치는 Bedrock 을 부르지 않고 `BEDROCK_*` 값이 하나도 없어도 기동함. 시나리오 router 는
-`ROUTER_MODEL` (기본 `openai/gpt-5.6-luna`) 을 씀. Bedrock 자격이 있으면 `ROUTER_MODEL` 에
+`ROUTER_MODEL` 을 쓰고, 비우면 catalog 의 `DEFAULT_MODEL` 을 씀. Bedrock 자격이 있으면 `ROUTER_MODEL` 에
 `bedrock/...` catalog 값을 넣고 `BEDROCK_REGION`, `BEDROCK_API_KEY` (또는 AWS 기본 자격 증명) 를 설정함
 
 ## 신뢰 경계

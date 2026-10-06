@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.llm.chat_model import build_chat_model
-from app.llm.models import LLMModel, ReasoningConfig
+from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig
 from app.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
@@ -47,10 +47,11 @@ def router_model() -> LLMModel:
 
     Fixed regardless of the session's model, since the classification is shallow
     and wants the cheapest option: the first case of mixing models per node. The
-    default is an OpenRouter slug; a Bedrock model is used only when an operator
-    sets it.
+    default is the catalog's `DEFAULT_MODEL`, an OpenRouter slug; a Bedrock model
+    is used only when an operator sets it.
     """
-    return LLMModel(get_settings().router_model)
+    configured = get_settings().router_model
+    return LLMModel(configured) if configured else DEFAULT_MODEL
 
 RouterCall = Callable[[str], Awaitable[RouteVerdict]]
 

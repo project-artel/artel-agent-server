@@ -145,17 +145,20 @@ class Settings(BaseSettings):
             ) from error
         return value
     scenario_prompt_version: str | None = None
-    # Model for the scenario router's one-shot classification. The default is the
-    # catalog's default model, an OpenRouter slug, so a default install needs no
-    # AWS credential. An operator who has Bedrock credentials can set the
-    # `bedrock/...` catalog value here to keep the cheaper Haiku route.
-    router_model: str = "openai/gpt-5.6-luna"
+    # Model for the scenario router's one-shot classification. Empty means the
+    # catalog's `DEFAULT_MODEL`, an OpenRouter slug, so a default install needs no
+    # AWS credential and a catalog update cannot leave a stale slug here. An
+    # operator who has Bedrock credentials can set the `bedrock/...` catalog value
+    # to keep the cheaper Haiku route.
+    router_model: str = ""
 
     @field_validator("router_model")
     @classmethod
     def known_router_model(cls, value: str) -> str:
         from app.llm.models import LLMModel
 
+        if not value:
+            return value
         try:
             LLMModel(value)
         except ValueError as error:
