@@ -398,6 +398,15 @@ class ScenarioQuestion(BaseModel):
     allow_free_text: bool = True
 
 
+class ScenarioChange(BaseModel):
+    """이번 턴에 바뀐 시나리오 하나 (ARTEL-936). 화면이 결과 박스에 색으로 나눠 그린다."""
+
+    action: Literal["created", "updated", "removed"]
+    title: str
+    # 지운 것은 이제 없으므로 번호가 없을 수 있다. 있으면 화면이 그 시나리오로 잇는다.
+    scenario_id: int | None = None
+
+
 class AgentReply(BaseModel):
     """한 턴의 답을 사람이 읽는 두 칸으로 (ARTEL-927).
 
@@ -406,10 +415,12 @@ class AgentReply(BaseModel):
     답할 수 있어야 하는 것이라 선택지까지 따로 실린다.
     """
 
-    # 코드가 센 사실만. 무엇을 몇 스텝으로 저장했는지 — 짧게, 이름은 `**굵게**`.
+    # 코드가 센 한 줄. 몇 건을 생성·수정·삭제했는지(ARTEL-936) — 무엇이 바뀌었는지는 [changes].
     result: str
     # 판단한 모델의 말. 마크다운(문단·목록·표)이고, 모양은 읽기 쉬운 쪽으로 모델이 고른다.
     detail: str = ""
+    # 바뀐 시나리오 목록(ARTEL-936). [result] 는 이것을 센 한 줄이다.
+    changes: list[ScenarioChange] = Field(default_factory=list)
 
 
 class Ref(BaseModel):

@@ -42,13 +42,14 @@ def test_authoring_reply_splits_result_from_detail(monkeypatch) -> None:
     out, _, _ = _author(monkeypatch, plan, [wf._Writer(steps=[_case_step()])])
 
     assert out.reply is not None
-    # 결과는 코드가 센 사실 — 무엇을 몇 스텝으로 저장했는지. 이름은 따옴표가 아니라 강조.
-    assert "**상점 열기**" in out.reply.result and "1스텝" in out.reply.result
-    assert "'" not in out.reply.result
+    # 결과는 코드가 센 사실 — 몇 건을 새로 만들고 고쳤는지(ARTEL-936). 스텝 수는 없다.
+    assert out.reply.result == "총 1건의 시나리오를 생성했습니다."
+    assert [(c.action, c.title) for c in out.reply.changes] == [("created", "상점 열기")]
     # 설명은 판단한 쪽(모델)의 말 그대로.
     assert out.reply.detail == "상점으로 가는 길이 하나라 그 길로만 묶었어요."
     # 대화 기록용 글은 두 칸을 다 담는다.
     assert out.reply.result in out.message and out.reply.detail in out.message
+    assert "- 상점 열기" in out.message  # 대화 기록에도 무엇이 바뀌었는지 남는다
     assert out.questions == []
 
 
@@ -62,9 +63,9 @@ def test_authoring_reply_counts_several_scenarios(monkeypatch) -> None:
     writers = [wf._Writer(steps=[_case_step()]), wf._Writer(steps=[_case_step()])]
     out, _, _ = _author(monkeypatch, plan, writers)
 
-    assert "2개" in out.reply.result
-    assert "**첫 여정**" in out.reply.result and "**둘째 여정**" in out.reply.result
-    assert "2스텝" in out.reply.result  # 저쪽이 센 스텝 합
+    assert out.reply.result == "총 2건의 시나리오를 생성했습니다."
+    assert [c.title for c in out.reply.changes] == ["첫 여정", "둘째 여정"]
+    assert "스텝" not in out.reply.result
 
 
 def test_model_questions_become_answerable_questions(monkeypatch) -> None:
@@ -159,8 +160,8 @@ def test_modify_reply_splits_result_from_detail(monkeypatch) -> None:
     )]
     out, _ = _modify(monkeypatch, plans)
 
-    assert "**상점 여정**" in out.reply.result and "2스텝" in out.reply.result
-    assert "'" not in out.reply.result
+    assert out.reply.result == "총 1건의 시나리오를 수정했습니다."
+    assert [(c.action, c.title, c.scenario_id) for c in out.reply.changes] == [("updated", "상점 여정", 7)]
     assert out.reply.detail == "3번 스텝을 나눴어요."
 
 
@@ -210,7 +211,7 @@ def test_the_result_frame_carries_reply_and_questions() -> None:
     )
     event = _result_event(result)
 
-    assert event["reply"] == {"result": "저장했어요", "detail": "이유"}
+    assert event["reply"] == {"result": "저장했어요", "detail": "이유", "changes": []}
     assert event["questions"][0]["id"] == "agent:1"
     assert event["questions"][0]["options"][0]["label"] == "넣어 줘"
 
@@ -354,3 +355,47 @@ def test_the_result_frame_carries_refs() -> None:
     ))
 
     assert event["refs"] == [{"kind": "tc", "id": 1, "label": "Shop — 상점을 연다", "detail": "상점이 열린다"}]
+
+
+# --- 바뀐 시나리오 목록 (ARTEL-936) ---------------------------------------------------
+
+
+def test_changes_follow_what_orche_actually_saved(monkeypatch) -> None:
+    """무엇을 새로 만들고 고쳤는지는 저장한 쪽이 센다. 하나를 냈는데 둘로 나뉘어 저장되거나,
+    같은 제목이라 기존 것을 고쳤으면 그대로 따른다."""
+    import app.agents.scenario.workflow as wf
+    from app.sessions.channel import SavedScenario
+
+    plan = wf.GroupingPlan(groups=[wf.Group(title="상점 열기", case_ids=[1])])
+    channel = _FakeChannel(answers=[ScenarioAccepted(
+        accepted=True, written=1, steps=3,
+        saved=[
+            SavedScenario(scenario_id=40, title="상점 열기", created=False),
+            SavedScenario(scenario_id=41, title="상점 열기 (2)", created=True),
+        ],
+    )])
+    out, _, _ = _author(monkeypatch, plan, [wf._Writer(steps=[_case_step()])], channel)
+
+    assert [(c.action, c.title, c.scenario_id) for c in out.reply.changes] == [
+        ("updated", "상점 열기", 40), ("created", "상점 열기 (2)", 41),
+    ]
+    assert out.reply.result == "총 1건의 시나리오를 생성하고 1건을 수정했습니다."
+
+
+def test_a_merge_lists_the_absorbed_ones_as_removed(monkeypatch) -> None:
+    import app.agents.scenario.workflow as wf
+
+    plans = [wf.ModifyPlan(scenario_id=7, steps=[_case_step(), _case_step()], absorbed_scenario_ids=[8])]
+    channel = _FakeChannel(answers=[ScenarioAccepted(accepted=True, steps=2, absorbed=["`전투` 여정"])])
+    current = [_current_scenario(7, "상점 여정"), _current_scenario(8, "`전투` 여정")]
+    out, _ = _modify(monkeypatch, plans, channel=channel, current=current)
+
+    assert [(c.action, c.title) for c in out.reply.changes] == [("updated", "상점 여정"), ("removed", "전투 여정")]
+    assert out.reply.result == "총 1건의 시나리오를 수정하고 1건을 삭제했습니다."
+
+
+def test_titles_lose_backticks() -> None:
+    """제목에 섞여 오는 `Canvas/continue` 같은 코드 표시는 목록에서 글자로만 보인다."""
+    import app.agents.scenario.workflow as wf
+
+    assert wf._plain_title("게임 시작 후 `Canvas/continue`로 진행") == "게임 시작 후 Canvas/continue로 진행"

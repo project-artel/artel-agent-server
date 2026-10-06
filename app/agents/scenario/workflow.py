@@ -48,6 +48,7 @@ from app.agents.scenario.schemas import (
     ReviewedCases,
     ScenarioAgentRequest,
     ScenarioAgentResult,
+    ScenarioChange,
     ScenarioPlan,
     ScenarioQuestion,
 )
@@ -212,6 +213,39 @@ def _listed(names: list[str], limit: int = 3) -> str:
     return " · ".join(names[:limit]) + f" 외 {len(names) - limit}개"
 
 
+def _plain_title(title: str) -> str:
+    """목록에 쓸 제목. 모델이 제목에 섞는 `Canvas/continue` 같은 코드 표시는 글자로만 남긴다."""
+    return title.replace("`", "").strip()
+
+
+def _change_of(action: str, title: str, scenario_id: int | None = None) -> ScenarioChange:
+    return ScenarioChange(action=action, title=_plain_title(title), scenario_id=scenario_id)
+
+
+def _summary(changes: list[ScenarioChange], ko: bool) -> str:
+    """결과 칸의 한 줄 — 몇 건을 생성·수정·삭제했는지(ARTEL-936). 스텝 수는 세지 않는다.
+
+    0건인 종류는 문장에서 뺀다. "0건을 삭제했습니다" 는 읽는 사람이 무엇이 지워졌나 찾게 만든다.
+    """
+    counts = [
+        (sum(1 for c in changes if c.action == action), verb)
+        for action, verb in (
+            ("created", "생성" if ko else "created"),
+            ("updated", "수정" if ko else "updated"),
+            ("removed", "삭제" if ko else "removed"),
+        )
+    ]
+    counts = [(n, verb) for n, verb in counts if n]
+    if not counts:
+        return "이번에는 저장한 시나리오가 없어요." if ko else "Nothing was saved this time."
+    if ko:
+        (first, verb), rest = counts[0], counts[1:]
+        parts = [f"총 {first}건의 시나리오를 {verb}"] + [f"{n}건을 {v}" for n, v in rest]
+        return "하고 ".join(parts) + "했습니다."
+    words = [f"{verb} {n}" for n, verb in counts]
+    return ("Scenarios " + ", ".join(words) + ".").capitalize()
+
+
 def _bold(names: list[str]) -> str:
     """이름을 화면의 강조로. 따옴표로 감싸지 않는다 — 제목 안의 따옴표와 섞이고, 화면은
     굵게 그리는 법을 이미 안다(ARTEL-927)."""
@@ -308,6 +342,7 @@ def _answer(
     detail: str = "",
     questions: list[ScenarioQuestion] | None = None,
     reviewed: ReviewedCases | None = None,
+    changes: list[ScenarioChange] | None = None,
 ) -> ScenarioAgentResult:
     """세 칸 답을 만든다. `message` 는 세 칸을 이은 글 — Redis 대화 기록과 구형 화면이
     그것만 읽으므로, 물은 것까지 들어 있어야 다음 턴이 "그거"를 풀 수 있다.
@@ -332,15 +367,17 @@ def _answer(
         ]})
         for question in asked
     ]
+    changes = changes or []
+    listed = "\n".join(f"- {change.title}" for change in changes)
     message = "\n".join(
         _spoken(part, found, prefix=True)
-        for part in (result, detail, *(q.text for q in asked)) if part
+        for part in (result, listed, detail, *(q.text for q in asked)) if part
     )
     return ScenarioAgentResult(
         message=message,
         scenarios=[],
         reviewed=reviewed,
-        reply=AgentReply(result=result, detail=detail),
+        reply=AgentReply(result=result, detail=detail, changes=changes),
         questions=asked,
         refs=list(found.values()),
     )
@@ -615,7 +652,10 @@ async def run_authoring_workflow(
 
     # ── D: 제출 (코드 — 기존 프레임 그대로, 묶음 순서대로 직렬 방출) ──────────────
     saved: list[str] = []
-    saved_steps = 0  # **저쪽이 센 수.** 우리가 낸 수가 아닌 이유는 ScenarioAccepted.steps 에 있다
+    # 바뀐 시나리오(ARTEL-936). **저쪽이 저장한 대로** 센다 — 하나를 냈는데 둘로 나뉘어 저장되거나,
+    # 같은 제목이라 새로 만들지 않고 기존 것을 고쳤을 수 있다. 옛 서버는 그 목록을 안 보내므로
+    # 그때만 우리가 낸 것으로 짐작한다.
+    changes: list[ScenarioChange] = []
     dropped: list[str] = []
     accepted_plans: list[ScenarioPlan] = []
     for group, scenario in zip(groups, written):
@@ -634,7 +674,10 @@ async def run_authoring_workflow(
                 answer = None
         if answer is not None and answer.accepted:
             saved.append(group.title)
-            saved_steps += answer.steps or len(scenario.steps)
+            changes += [
+                _change_of("created" if one.created else "updated", one.title, one.scenario_id)
+                for one in answer.saved
+            ] or [_change_of("updated" if group.scenario_id else "created", group.title, group.scenario_id)]
             accepted_plans.append(scenario)
         else:
             dropped.append(group.title)
@@ -659,33 +702,11 @@ async def run_authoring_workflow(
     reviewed = ReviewedCases(
         included=sorted(covered), excluded=sorted(known_ids - covered)
     )
-    # 답은 세 칸이다(ARTEL-927). **결과는 코드가 센 사실만**(무엇을 몇 스텝으로 저장),
-    # **설명은 판단한 모델이**(`plan.detail`), **질문은 고를 수 있게.** 코드가 아는
-    # 미반영분(저장 못 한 시나리오, 자리를 못 찾은 TC)도 설명에 사과문으로 섞지 않고
-    # 질문으로 낸다 — 사용자가 정할 일이기 때문이다. 어느 칸에도 번호는 없다.
-    #
-    # 조사를 붙이지 않는다 — 은/는·이/가는 제목 끝 글자의 받침으로 갈리는데, 제목은 모델이
-    # 쓰는 말이라 코드가 알 수 없다. 이름은 콜론 뒤에 두어 그 자리를 피한다.
-    if ko:
-        if len(saved) == 1:
-            result = f"시나리오를 저장했어요: {_bold(saved)}" + (f" ({saved_steps}스텝)" if saved_steps else "")
-        elif saved:
-            result = (
-                f"시나리오 {len(saved)}개를 저장했어요: {_bold(saved)}"
-                + (f" (모두 {saved_steps}스텝)" if saved_steps else "")
-            )
-        else:
-            result = "이번에는 저장한 시나리오가 없어요."
-    else:
-        if len(saved) == 1:
-            result = f"Saved the scenario {_bold(saved)}" + (f" ({saved_steps} steps)." if saved_steps else ".")
-        elif saved:
-            result = (
-                f"Saved {len(saved)} scenarios: {_bold(saved)}"
-                + (f" ({saved_steps} steps in total)." if saved_steps else ".")
-            )
-        else:
-            result = "Nothing was saved this time."
+    # 답은 세 칸이다(ARTEL-927). **결과는 코드가 센 사실만**(몇 건을 생성·수정했는지와 그 목록,
+    # ARTEL-936), **설명은 판단한 모델이**(`plan.detail`), **질문은 고를 수 있게.** 코드가 아는
+    # 미반영분(저장 못 한 시나리오, 자리를 못 찾은 TC)도 설명에 사과문으로 섞지 않고 질문으로
+    # 낸다 — 사용자가 정할 일이기 때문이다. 어느 칸에도 번호는 없다.
+    result = _summary(changes, ko)
 
     asks = list(plan.questions)
     if dropped:
@@ -713,7 +734,7 @@ async def run_authoring_workflow(
         ))
     # scenarios 는 비운다 — 하나씩 제출 계약에서 저장은 이미 끝났고, 결과 봉투에 다시
     # 실으면 두 벌이 된다(런 12 의 그 사고). 턴끝 검수는 reviewed 로 커버리지만 본다.
-    return _answer(request, result, plan.detail, _questions(asks), reviewed)
+    return _answer(request, result, plan.detail, _questions(asks), reviewed, changes)
 
 
 async def run_modify_workflow(
@@ -899,22 +920,17 @@ async def run_modify_workflow(
     )
     title = plan.title or original.title
     if saved and answer is not None:
-        # **스텝 수는 저쪽이 센 것만 말한다.** 우리가 낸 수는 검수의 나누기·메우기와 코드가
-        # 끼운 `bridge` 를 지나기 전 수라 화면에 뜬 것과 다르다(실측: 37개라 말했다).
-        count = answer.steps or len(plan.steps)
-        result = (
-            f"고쳐서 저장했어요: {_bold([title])} (지금 {count}스텝)"
-            if ko else f"Updated {_bold([title])} — it now has {count} steps."
-        )
-        if answer.absorbed:
-            result += (
-                f"\n합친 시나리오는 목록에서 뺐어요: {_bold(answer.absorbed)}"
-                if ko else
-                f"\nFolded in and taken off the list: {_bold(answer.absorbed)}"
-            )
+        # 무엇이 바뀌었는지는 저쪽이 센 것만 말한다(ARTEL-936). 고친 것은 저장 목록에서, 합치면서
+        # 걷어낸 것은 `absorbed` 에서 — 지울지 말지는 저쪽이 판정했다.
+        changes = [
+            _change_of("created" if one.created else "updated", one.title, one.scenario_id)
+            for one in answer.saved
+        ] or [_change_of("updated", title, plan.scenario_id)]
+        changes += [_change_of("removed", gone) for gone in answer.absorbed]
+        result = _summary(changes, ko)
         # 남긴 이유는 저쪽 문장을 그대로 옮긴다 — 왜 못 지웠는지는 센 쪽만 안다.
         detail = "\n".join(part for part in (plan.detail.strip(), *answer.kept) if part)
-        return _answer(request, result, detail, _questions(plan.questions))
+        return _answer(request, result, detail, _questions(plan.questions), changes=changes)
     # 저장되지 않은 수정의 설명은 싣지 않는다 — 일어나지 않은 변경을 설명하게 된다.
     return _answer(
         request,
