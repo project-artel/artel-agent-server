@@ -7,8 +7,16 @@
 `edit_macro` 로 고치고, `register_macro` 로 부를 수 있게 한다. `run_macro` 는 등록된
 것만 부른다. 초안은 런의 상태(`QaRunState.macros`)에 살고 `content_map` 에 안 쓰인다.
 
-**이 PR 에서는 등록된 것도 런의 상태에 산다.** `content_map` 에 적을 frame 이
-`artel-orchestration-server` 에 아직 없다. 그 자리는 `MacroBook.register` 하나다.
+**등록된 것은 런을 넘어 산다** (ARTEL-921). `register_macro` 가 `MACRO_REGISTER` 로
+`content_map` 에 적고, `read_macro` 와 `run_macro` 는 이 런이 모르는 이름을 만나면
+`MACRO_READ` 로 저쪽에 묻는다 — 지난 런이 등록한 것을 이번 런이 부르는 길이 그것이다.
+
+**쓰기가 실패해도 런은 계속 간다.** 저쪽 거절도, 답 없음(`None`)도, 새는 예외도 전부
+모델이 읽는 문장으로 바뀌고, 등록은 이 런의 `MacroBook` 에 그대로 남아 `run_macro` 가
+부를 수 있다. `capability_tools.py` 의 `_write_capability` 가 선례이고, 특히 `None` 을
+실패로 옮기지 않는 이유도 같다 — 이 프레임을 모르는 구버전 orchestration 은 라우터에서
+프레임을 떨어뜨리고 거절이 안 돌아오는데, 그때 "안 됐다" 고 하면 모델이 같은 정의를
+계속 다시 보낸다.
 """
 
 from typing import Any
@@ -16,6 +24,7 @@ from typing import Any
 from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.macro.binding import LateSelector, MacroMemories
+from app.agents.qa.macro.book import RegisteredMacro
 from app.agents.qa.macro.descriptions import (
     EDIT_MACRO_DESCRIPTION,
     READ_MACRO_DESCRIPTION,
@@ -35,6 +44,8 @@ from app.agents.qa.macro.runner import (
 from app.agents.qa.tools.action_tools import parse_target
 from app.agents.qa.tools.state import QaRunState
 from app.agents.qa.tools.tool_context import ToolContext
+from app.qa.channel import KnowledgeRequestFailed, QaCancelled, with_operator_messages
+from app.qa.envelope import MacroReadPayload, MacroRegisterPayload
 
 
 def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
@@ -58,16 +69,139 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
     host = _Host()
 
     def _standing_screen() -> str:
-        """등록하는 순간 agent 가 서 있는 `screen`. 없으면 빈 문자열.
+        """등록하는 순간 agent 가 서 있는 `screen.id`. 모르면 빈 문자열.
 
-        `_standing_scene` 과 같은 두 자리를 본다. `GAME_STATE` 없이 `pulse` 만 오는
-        게임에서는 `SceneMemory.scene` 이 끝까지 비어 있다.
+        **`scene` 이름이 아니라 `screen.id` 다.** 저쪽의 `MACRO_REGISTER.screens` 는
+        `screen.id` 를 JSON 문자열로 받고(`CAPABILITY_VERDICT.screen_id` 와 같은 규약),
+        이 build 의 `content_map` 에 없는 값을 통째로 거절한다 —
+        `references screens outside this build's content map`.
 
-        `screen` 을 무엇으로 지목하는지 — 곧 식별자의 모양 — 는 `ARTEL-919` 가 스키마와
-        함께 정한다. 그것이 정해지기 전에 모양을 못 박지 않으려고, 여기서는 지금 서 있는
-        scene 이름을 그대로 쓰고 해석하지 않는다.
+        출처는 지도가 이 런에 대해 마지막으로 한 말 하나다(`ScreenMap.verdict`,
+        ARTEL-668). 그 판정이 지금 서 있는 `scene` 의 것이 아니면 안 쓴다 — 게임은
+        `Battle` 과 `Battle 2` 를 둘 다 가질 수 있고, 옆 `scene` 의 화면 번호를 이
+        macro 에 달면 그 관계는 거짓이다. `ScreenMap.render` 가 이름을 정확히 맞대는
+        것과 같은 판단이다.
+
+        빈 문자열이 정상이다. `scene` 이 아직 안 굳었거나 `SCREEN_SETTLED` 가 한 장도
+        안 온 빌드에서는 끝까지 비어 있고, 그때 macro 는 관계 없이 등록된다.
         """
-        return (channel.scene.scene or channel.scene.pulse.scene or "").strip()
+        verdict = channel.scene.screen_map.verdict
+        standing = (channel.scene.scene or channel.scene.pulse.scene or "").strip()
+        if verdict is None or not standing or verdict.scene != standing:
+            return ""
+        return verdict.screen_id.strip()
+
+    def _named_screens_problem(named: list[str]) -> str | None:
+        """agent 가 지목한 `screens` 가 `screen.id` 가 아니면 무엇을 적어야 하는지.
+
+        저쪽도 거절하지만 그 거절은 **등록 전체를 버린다** — `screens` 하나가 숫자가
+        아니면 macro 행도 안 적힌다. 여기서 먼저 막는 것은 왕복 하나를 아끼려는 것이
+        아니라, `scene` 이름을 적는 흔한 실수 때문에 멀쩡한 정의가 저장되지 않는 것을
+        막으려는 것이다.
+        """
+        wrong = [one for one in named if not one.isdigit()]
+        if not wrong:
+            return None
+        return (
+            f"`screens` takes screen ids, and {', '.join(wrong)} "
+            f"{'is not one' if len(wrong) == 1 else 'are not'}, so nothing was "
+            "registered. A screen id is the number in the `content map: you are on "
+            "screen <id>` line of your scene view — not a scene name. Leave `screens` "
+            "out to relate the macro only to the screen you are standing on."
+        )
+
+    async def _store(definition: MacroDefinition, screens: tuple[str, ...]) -> str:
+        """등록된 정의를 `content_map` 에 적고, 답을 모델이 읽는 문장으로 옮긴다.
+
+        **어느 경우에도 런이 안 죽는다.** 저쪽은 거절을 값으로 돌려주고, 그래도 새는
+        예외는 여기서 문장으로 바뀐다 — `capability_tools._write_capability` 와 같은
+        규율이다.
+
+        `None` 을 실패로 옮기지 않는다. 이 프레임을 모르는 구버전 orchestration 은
+        라우터에서 프레임을 떨어뜨리고 그 거절이 이 소켓으로 안 돌아오는데, 그때
+        "안 됐다" 고 하면 모델이 같은 정의를 계속 다시 보낸다.
+
+        어느 문장이 돌아와도 이 런의 `MacroBook` 에는 이미 등록돼 있다. 부르는 쪽이
+        그것을 먼저 하는 이유는 저쪽이 뭐라고 답하든 `run_macro` 가 이번 런 안에서는
+        이 macro 를 부를 수 있어야 하기 때문이다.
+        """
+        payload = MacroRegisterPayload(
+            name=definition.name,
+            source=definition.source,
+            definition=definition.model_dump(mode="json"),
+            parameters=[one.name for one in definition.entry.parameters],
+            screens=list(screens),
+        )
+        try:
+            answer = await channel.register_macro(payload)
+        except QaCancelled:
+            raise
+        except Exception as error:  # noqa: BLE001 - 지도를 적다 런이 끝나면 안 된다
+            return (
+                f"It could not be sent to the content map — {error}. It is registered "
+                "for this run only, so it will be gone when the run ends."
+            )
+
+        if isinstance(answer, KnowledgeRequestFailed):
+            return (
+                f"The content map refused to store it — {answer.reason}. It is "
+                "registered for this run only, so it will be gone when the run ends. "
+                "This says nothing about the game; carry on with the step."
+            )
+        if answer is None:
+            return (
+                "It was sent to the content map, which did not answer, so whether it "
+                "is stored beyond this run cannot be confirmed. Do not register it "
+                "again for that reason — it is callable either way."
+            )
+        where = (
+            ", ".join(answer.screen_ids)
+            if answer.screen_ids
+            else "no screen yet"
+        )
+        kept = "stored in the content map" if answer.created else "updated in place"
+        return (
+            f"It is {kept}, so later runs can call it too. Screens related to it: "
+            f"{where}."
+        )
+
+    async def _stored(macro_name: str) -> tuple[RegisteredMacro | None, str]:
+        """이 런이 모르는 이름을 `content_map` 에 묻고, 찾으면 이 런의 책에 들인다.
+
+        `read_macro` 와 `run_macro` 가 같은 이 경로를 쓴다. 지난 런이 등록한 macro 를
+        이번 런이 보는 길이 이것 하나다.
+
+        **돌아온 `source` 를 다시 파싱한다.** `definition` tree 를 그대로 모델로 읽지
+        않는 이유는 `macro/model.py` 가 정의를 만드는 길을
+        `macro_definition_from_source` 하나로 못박았기 때문이고, 다시 파싱하면 저장된
+        뒤에 좁아진 허용 목록도 실행 **전에** 걸린다 — 실행 한복판에서 처음 거절되면
+        이미 나간 action 을 되돌릴 수 없다.
+
+        실패 셋이 전부 문장이다. 예외도 여기서 멈춘다 — macro 를 하나 못 찾은 것이 런을
+        끝낼 이유가 아니다.
+        """
+        try:
+            answer = await channel.read_macro(MacroReadPayload(name=macro_name))
+        except QaCancelled:
+            raise
+        except Exception as error:  # noqa: BLE001 - 조회 하나로 런이 끝나면 안 된다
+            return None, f"The content map could not be asked — {error}."
+
+        if isinstance(answer, KnowledgeRequestFailed):
+            return None, f"The content map does not have it — {answer.reason}."
+        if answer is None:
+            return None, (
+                "The content map did not answer, so whether it has one by that name "
+                "is unknown here."
+            )
+
+        definition, problem = _parsed(answer.name or macro_name, answer.source)
+        if definition is None:
+            return None, (
+                f"The content map has a macro called {macro_name}, but it no longer "
+                f"parses, so it cannot be called: {problem}"
+            )
+        return state.macros.adopt(definition, tuple(answer.screen_ids)), ""
 
     def _parsed(name: str, source: str) -> tuple[MacroDefinition | None, str]:
         """파싱해 보고 결과를 말한다. 등록하지도, 실행하지도 않는다."""
@@ -166,12 +300,26 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
     @tool(description=READ_MACRO_DESCRIPTION)
     async def read_macro(step: int, thought: str, name: str) -> str:
         # What the agent reads is READ_MACRO_DESCRIPTION, not this.
+        #
+        # 이 런이 모르는 이름이면 `content_map` 에 묻는다. 그것이 지난 런이 등록한
+        # macro 를 이번 런이 읽는 유일한 길이다(ARTEL-921).
         macro_name = (name or "").strip()
         source = state.macros.source(macro_name)
         if source is None:
-            known = ", ".join(sorted(_known(state))) or "none yet"
-            return (
-                f"There is no macro called {macro_name}. This run knows: {known}."
+            found, problem = await _stored(macro_name)
+            messages = channel.drain_operator_messages()
+            if found is None:
+                known = ", ".join(sorted(_known(state))) or "none yet"
+                return with_operator_messages(
+                    f"There is no macro called {macro_name} in this run. {problem} "
+                    f"This run knows: {known}.",
+                    messages,
+                )
+            state.macros.remember_read(macro_name)
+            return with_operator_messages(
+                f"{macro_name} (registered in the content map by an earlier run):"
+                f"\n\n{found.definition.source}",
+                messages,
             )
 
         state.macros.remember_read(macro_name)
@@ -214,17 +362,20 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
                 "so `edit_macro` can fix it."
             )
 
-        standing = _standing_screen()
         named = [one.strip() for one in (screens or []) if one and one.strip()]
+        problem = _named_screens_problem(named)
+        if problem is not None:
+            # 초안은 그대로다. 거절은 아무 자취도 남기지 않는다.
+            return problem
+
+        standing = _standing_screen()
         relations = tuple([standing] if standing else []) + tuple(named)
+        # **저쪽에 보내기 전에 이 런의 책에 넣는다.** 저쪽이 거절하든 답이 없든
+        # `run_macro` 는 이번 런 안에서 이 macro 를 부를 수 있어야 한다.
         registered = book.register(definition, relations)
 
         lines = [f"{macro_name} is registered. {_signature(definition)}"]
-        if registered.screens:
-            lines.append(
-                "Related to: " + ", ".join(registered.screens) + "."
-            )
-        else:
+        if not registered.screens:
             # 빈 관계는 아직 어디서 쓸지 모른다는 뜻이고, 서 있는 `screen` 을 모르는
             # 경우와 맞는다.
             lines.append(
@@ -232,10 +383,13 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
                 "one it is standing on. Register it again from a settled screen, or "
                 "name screens yourself, to record where it is used."
             )
+        lines.append(await _store(definition, relations))
         lines.append(
             "Nothing has run. `run_macro` is what calls it."
         )
-        return "\n".join(lines)
+        return with_operator_messages(
+            "\n".join(lines), channel.drain_operator_messages()
+        )
 
     @tool(description=RUN_MACRO_DESCRIPTION)
     async def run_macro(
@@ -250,16 +404,24 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         # 부딪히는 것으로 보고 `v__args` 로 바꾸므로, 호출이 통째로 깨진다.
         macro_name = (name or "").strip()
         registered = state.macros.registered(macro_name)
-        if registered is None:
-            if state.macros.draft(macro_name) is not None:
-                return (
-                    f"{macro_name} is only a draft, so it cannot be called. "
-                    "`register_macro` first."
-                )
-            known = ", ".join(sorted(state.macros.registrations)) or "none yet"
+        if registered is None and state.macros.draft(macro_name) is not None:
             return (
-                f"There is no registered macro called {macro_name}. Registered in this "
-                f"run: {known}."
+                f"{macro_name} is only a draft, so it cannot be called. "
+                "`register_macro` first."
+            )
+        problem = ""
+        if registered is None:
+            # 이 런이 등록하지 않은 이름이다. 지난 런이 `content_map` 에 등록해 둔 것일
+            # 수 있고, `read_macro` 와 같은 경로로 가져온다(ARTEL-921).
+            registered, problem = await _stored(macro_name)
+        if registered is None:
+            known = ", ".join(sorted(state.macros.registrations)) or "none yet"
+            # 게임에 아무것도 안 보냈으므로 화면을 안 싣는다. `_stored` 가 왕복 하나를
+            # 기다렸을 수 있어 그동안 온 operator 의 말만 붙인다.
+            return with_operator_messages(
+                f"There is no registered macro called {macro_name}. {problem} "
+                f"Registered in this run: {known}.",
+                channel.drain_operator_messages(),
             )
 
         definition = registered.definition

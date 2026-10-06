@@ -62,6 +62,90 @@ def with_cards(channel: QaRunChannel, scene: str = "Battle") -> None:
     )
 
 
+def settled(channel: QaRunChannel, screen_id: str = "12", scene: str = "Battle") -> None:
+    """지도가 이 런에 어느 `screen` 에 서 있다고 말하게 한다 (ARTEL-668).
+
+    `register_macro` 가 다는 관계가 이 값이다 — `scene` 이름이 아니라 `screen.id`.
+    """
+    channel.on_screen_settled(
+        {
+            "type": MessageType.SCREEN_SETTLED.value,
+            "payload": {
+                "scene": {"scene_id": "3", "name": scene},
+                "current_screen": {"screen_id": screen_id, "name": "Board"},
+            },
+        }
+    )
+
+
+def macro_frames(sent: list[dict], message_type: MessageType) -> list[dict]:
+    return [frame for frame in sent if frame["type"] == message_type.value]
+
+
+def answer_macro(
+    channel: QaRunChannel,
+    sent: list[dict],
+    message_type: MessageType,
+    result_type: MessageType,
+    payload: dict,
+):
+    """저쪽이 답하는 것처럼, 방금 나간 요청의 correlation 을 물고."""
+    already = len(macro_frames(sent, message_type))
+
+    async def reply() -> None:
+        for _ in range(200):
+            if len(macro_frames(sent, message_type)) > already:
+                break
+            await asyncio.sleep(0)
+        frame = {
+            "type": result_type.value,
+            "correlationId": macro_frames(sent, message_type)[-1]["messageId"],
+            "payload": payload,
+        }
+        if result_type is MessageType.MACRO_WRITE_RESULT:
+            channel.on_macro_write_result(frame)
+        else:
+            channel.on_macro_read_result(frame)
+
+    return asyncio.create_task(reply())
+
+
+def refuse_macro(
+    channel: QaRunChannel, sent: list[dict], message_type: MessageType, reason: str
+):
+    """저쪽이 correlation 붙은 `ERROR` 로 거절하는 것처럼."""
+    already = len(macro_frames(sent, message_type))
+
+    async def reply() -> None:
+        for _ in range(200):
+            if len(macro_frames(sent, message_type)) > already:
+                break
+            await asyncio.sleep(0)
+        channel.on_error(
+            {
+                "type": MessageType.ERROR.value,
+                "correlationId": macro_frames(sent, message_type)[-1]["messageId"],
+                "payload": {"message": reason},
+            }
+        )
+
+    return asyncio.create_task(reply())
+
+
+def with_reply(tool, reply_factory, **arguments) -> str:
+    """답하는 쪽을 함께 돌리며 tool 하나를 부른다.
+
+    `call` 은 `asyncio.run` 하나라 답을 보낼 자리가 없다. 저쪽이 답하는 프레임을 끼우려면
+    같은 loop 안에서 둘을 함께 돌려야 한다.
+    """
+
+    async def both() -> str:
+        reply_factory()
+        return await tool.ainvoke({"step": 1, "thought": "testing", **arguments})
+
+    return asyncio.run(both())
+
+
 def call(tool, **arguments) -> str:
     return asyncio.run(tool.ainvoke({"step": 1, "thought": "testing", **arguments}))
 
@@ -299,14 +383,16 @@ def test_editing_a_registered_macro_copies_it_into_a_draft_and_leaves_it_running
 def test_register_macro_makes_the_draft_callable_and_relates_it_to_the_screen() -> None:
     channel, state, tools, _ = make()
     with_cards(channel)
+    settled(channel, screen_id="12")
     call(tools["write_macro"], name="deal_a_card", source=SIMPLE)
 
     answer = call(tools["register_macro"], name="deal_a_card")
 
     assert "registered" in answer
-    assert "Battle" in answer
     registered = state.macros.registered("deal_a_card")
-    assert registered.screens == ("Battle",)
+    # `scene` 이름이 아니라 `screen.id` 다. 저쪽은 이 build 의 `content_map` 에 없는
+    # 값을 통째로 거절한다.
+    assert registered.screens == ("12",)
     # 등록이 끝나면 초안은 할 일을 다했다.
     assert state.macros.draft("deal_a_card") is None
 
@@ -322,14 +408,49 @@ def test_register_macro_leaves_the_relation_empty_when_the_screen_is_unknown() -
     assert state.macros.registered("deal_a_card").screens == ()
 
 
+def test_register_macro_ignores_a_screen_verdict_from_another_scene() -> None:
+    """옆 `scene` 의 화면 번호를 달면 그 관계는 거짓이다.
+
+    게임은 `Battle` 과 `Battle 2` 를 둘 다 가질 수 있다.
+    """
+    channel, state, tools, _ = make()
+    with_cards(channel, scene="Battle")
+    settled(channel, screen_id="12", scene="Shop")
+    call(tools["write_macro"], name="deal_a_card", source=SIMPLE)
+
+    call(tools["register_macro"], name="deal_a_card")
+
+    assert state.macros.registered("deal_a_card").screens == ()
+
+
 def test_register_macro_adds_the_screens_the_agent_names() -> None:
     channel, state, tools, _ = make()
     with_cards(channel)
+    settled(channel, screen_id="12")
     call(tools["write_macro"], name="deal_a_card", source=SIMPLE)
 
-    call(tools["register_macro"], name="deal_a_card", screens=["Shop", "Map"])
+    call(tools["register_macro"], name="deal_a_card", screens=["40", "41"])
 
-    assert state.macros.registered("deal_a_card").screens == ("Battle", "Shop", "Map")
+    assert state.macros.registered("deal_a_card").screens == ("12", "40", "41")
+
+
+def test_register_macro_refuses_a_screen_that_is_not_an_id() -> None:
+    """저쪽의 거절은 등록 전체를 버린다 — `screens` 하나 때문에 macro 행도 안 적힌다.
+
+    `scene` 이름을 적는 것이 흔한 실수라, 그 왕복 전에 무엇을 적어야 하는지 말한다.
+    """
+    channel, state, tools, sent = make()
+    with_cards(channel)
+    settled(channel, screen_id="12")
+    call(tools["write_macro"], name="deal_a_card", source=SIMPLE)
+
+    answer = call(tools["register_macro"], name="deal_a_card", screens=["Shop"])
+
+    assert "screen ids" in answer and "Shop" in answer
+    # 아무것도 안 등록하고 아무 프레임도 안 보낸다. 초안은 그대로다.
+    assert state.macros.registered("deal_a_card") is None
+    assert state.macros.draft("deal_a_card") == SIMPLE
+    assert macro_frames(sent, MessageType.MACRO_REGISTER) == []
 
 
 def test_registering_again_updates_in_place_and_keeps_the_relations() -> None:
@@ -339,8 +460,9 @@ def test_registering_again_updates_in_place_and_keeps_the_relations() -> None:
     """
     channel, state, tools, _ = make()
     with_cards(channel)
+    settled(channel, screen_id="12")
     call(tools["write_macro"], name="deal_a_card", source=SIMPLE)
-    call(tools["register_macro"], name="deal_a_card", screens=["Shop"])
+    call(tools["register_macro"], name="deal_a_card", screens=["40"])
 
     call(tools["read_macro"], name="deal_a_card")
     call(
@@ -349,11 +471,11 @@ def test_registering_again_updates_in_place_and_keeps_the_relations() -> None:
         old_text="drag(card, slot)",
         new_text="double_click(card)",
     )
-    call(tools["register_macro"], name="deal_a_card", screens=["Map"])
+    call(tools["register_macro"], name="deal_a_card", screens=["41"])
 
     registered = state.macros.registered("deal_a_card")
     assert registered.definition.entry.statements[2].callee == "double_click"
-    assert registered.screens == ("Battle", "Shop", "Map")
+    assert registered.screens == ("12", "40", "41")
 
 
 def test_register_macro_refuses_a_draft_that_does_not_parse() -> None:

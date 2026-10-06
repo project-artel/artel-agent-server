@@ -162,28 +162,36 @@ exactly as it was**, so a run calling it while you edit is unaffected, and
 READ_MACRO_DESCRIPTION = """Read a macro's source text.
 
 Returns the draft if there is one, and the registered macro's source otherwise.
-This is also what licenses `edit_macro`: changing text you have not read is
-changing text you cannot check.
+A name this run has never seen is looked up in the content map, so a macro an
+EARLIER run registered comes back here too. This is also what licenses
+`edit_macro`: changing text you have not read is changing text you cannot check.
 
 The text comes back as it was written, comments and blank lines included, which
 is why the macro's own source is what is stored rather than something printed
 back out of a parsed tree."""
 
-REGISTER_MACRO_DESCRIPTION = """Register a macro draft so `run_macro` can call it.
+REGISTER_MACRO_DESCRIPTION = """Register a macro draft so `run_macro` can call it, in this run and in later ones.
 
 The draft is parsed again and refused if anything in it is not allowed — broken
 syntax, an unknown tool name, an untyped parameter, a comparison that could never
 be true. Nothing is registered when it is refused, and the refusal names what to
 write instead.
 
+A registered macro is written to the content map, so a later run can call it
+without writing it again. The answer tells you whether it got there. If it did
+not, the macro is still callable for the rest of THIS run — do not register it
+again on that account, because a second attempt changes nothing.
+
 A name that is already registered is updated in place, so the `screen` relations
 that name already carries are kept rather than dropped and rebuilt.
 
 The macro is related to the `screen` you are standing on right now, and
-`screens` lets you name more. `screens` ADDS to what is already there; there is
-no way to take a relation away. When the run does not yet know which screen it
-is standing on, the macro registers with no relation at all — which is the right
-record of "nobody knows where this is used yet"."""
+`screens` lets you name more. A screen is named by its ID — the number in the
+`content map: you are on screen <id>` line of your scene view — not by a scene
+name, and an id from another game build is refused. `screens` ADDS to what is
+already there; there is no way to take a relation away. When the run does not
+yet know which screen it is standing on, the macro registers with no relation at
+all — which is the right record of "nobody knows where this is used yet"."""
 
 RUN_MACRO_DESCRIPTION = """Call a macro you registered earlier, against the screen you are on now.
 
@@ -196,6 +204,10 @@ no way to write one.
 A draft is not callable; `register_macro` first. When a name has both a draft and
 a registration, this calls the REGISTERED one, so editing a macro never changes
 what a call does until you register the change.
+
+A name this run never registered is looked up in the content map first, so a
+macro an EARLIER run registered can be called straight away. Call `read_macro`
+on it before you do, to see what it will send.
 
 What comes back says how far it got. The actions that actually reached the game
 are listed apart from the ones that did not, and apart again from the ones an
