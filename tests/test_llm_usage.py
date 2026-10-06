@@ -37,7 +37,7 @@ def _buffer(sender: RecordingSender | None = None, **kwargs) -> UsageBuffer:
 def _chat_result(
     *,
     cost: float | None = 0.021374,
-    model: str = "anthropic/claude-sonnet-5",
+    model: str = "anthropic/claude-sonnet-5.5",
 ) -> LLMResult:
     """A finished chat completion shaped the way OpenRouter answers one."""
     token_usage = {
@@ -94,7 +94,7 @@ def test_chat_usage_becomes_one_record_in_the_wire_shape() -> None:
     assert record["service"] == "QA_RUN"
     assert record["referenceId"] == 42
     assert record["provider"] == "anthropic"
-    assert record["model"] == "anthropic/claude-sonnet-5"
+    assert record["model"] == "anthropic/claude-sonnet-5.5"
     assert record["inputTokens"] == 12043
     assert record["outputTokens"] == 318
     assert record["cachedInputTokens"] == 10240

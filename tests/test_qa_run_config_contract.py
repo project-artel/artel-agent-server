@@ -73,7 +73,7 @@ def test_a_model_without_reasoning_says_so_rather_than_going_quiet() -> None:
     """`reasoning: null` alone has two meanings — not asked for, and not
     offered. A comparison that cannot tell them apart reads a model's missing
     capability as a choice nobody made."""
-    config = open_session(model=LLMModel.gpt_chat_latest.value)["run_config"]
+    config = open_session(model=LLMModel.qwen3_7_max.value)["run_config"]
 
     assert config["reasoning"] is None
     assert config["reasoning_supported"] is False
@@ -81,7 +81,7 @@ def test_a_model_without_reasoning_says_so_rather_than_going_quiet() -> None:
 
 def test_a_reasoning_model_reports_what_it_was_given() -> None:
     config = open_session(
-        model=LLMModel.claude_sonnet_5.value, reasoning={"effort": "high"}
+        model=LLMModel.claude_sonnet_5_5.value, reasoning={"effort": "high"}
     )["run_config"]
 
     # Nulls are kept rather than stripped: the record's shape stays the same
