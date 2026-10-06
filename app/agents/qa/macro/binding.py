@@ -557,15 +557,26 @@ def _apply(operator: MacroOperator, left: Any, right: Any) -> bool:
 
 
 def operand_value(
-    memories: MacroMemories, scope: MacroScope, operand: MacroOperand
+    memories: MacroMemories,
+    scope: MacroScope,
+    operand: MacroOperand,
+    observed: dict[str, Any] | None = None,
 ) -> Any:
+    """피연산자 하나의 지금 값.
+
+    `observed` 를 주면 읽은 호출의 값을 거기 적는다. `flag` 와 `ask_verdict` 에 붙는
+    `observed` 가 이 기록이고, 값을 두 번 읽지 않으려고 평가와 같은 걸음에서 모은다.
+    """
     if operand.kind == "literal":
         return _literal_value(operand.literal)
     if operand.kind == "name":
         return scope.value(operand.name)
     if operand.kind == "selector":
         return LateSelector(selector=operand.selector)
-    return read(memories, scope, operand.call)
+    value = read(memories, scope, operand.call)
+    if observed is not None:
+        observed[describe(operand.call)] = value
+    return value
 
 
 def _literal_value(literal: MacroLiteral) -> Any:
@@ -600,20 +611,27 @@ def describe(call: MacroReaderCall) -> str:
 
 
 def evaluate(
-    memories: MacroMemories, scope: MacroScope, condition: MacroCondition
+    memories: MacroMemories,
+    scope: MacroScope,
+    condition: MacroCondition,
+    observed: dict[str, Any] | None = None,
 ) -> bool:
     """`require` 와 `if` 의 조건을 판정한다. 평가기가 하나다.
 
     파서가 `if` 의 조건 문법을 `require` 의 첫 인자와 같게 두었으므로, 평가 시점의
     연산자 거절도 한 곳에서 난다. 거절된 `if` 조건을 거짓으로 읽어 분기를 조용히 넘기면
     안 된다.
+
+    `observed` 를 주면 이 조건이 읽은 호출의 값을 거기 적는다.
     """
     if isinstance(condition, MacroComparisonCondition):
-        left = operand_value(memories, scope, condition.left)
-        right = operand_value(memories, scope, condition.right)
+        left = operand_value(memories, scope, condition.left, observed)
+        right = operand_value(memories, scope, condition.right, observed)
         return compare(memories, left, condition.operator, right)
 
     value = read(memories, scope, condition.call)
+    if observed is not None:
+        observed[describe(condition.call)] = value
     shape = shape_of(value)
     if shape is MacroShape.bool_:
         return bool(value)
