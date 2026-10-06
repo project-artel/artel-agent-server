@@ -44,6 +44,7 @@ from app.agents.qa.macro.runner import (
 from app.agents.qa.tools.action_tools import parse_target
 from app.agents.qa.tools.state import QaRunState
 from app.agents.qa.tools.tool_context import ToolContext
+from app.qa.acting import ActionOutcome
 from app.qa.channel import KnowledgeRequestFailed, QaCancelled, with_operator_messages
 from app.qa.envelope import MacroReadPayload, MacroRegisterPayload
 
@@ -58,10 +59,13 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         runner 가 `ToolContext` 를 직접 받지 않는 이유는 `app/agents/qa/macro/runner.py`
         에 적혀 있다 — 그쪽이 `tools` 를 import 하면 순환이 된다. 그 잇는 자리가 여기
         하나다.
+
+        `ctx.run` 이 아니라 `ctx.act` 다. runner 는 돌아온 값을 **보고** 멈출지 정하는데
+        `run` 은 모델이 읽는 문장만 내므로, 그것으로는 문장을 다시 파싱하는 수밖에 없다.
         """
 
-        async def run(self, actions, summary: str, step: int) -> str:
-            return await ctx.run(actions, summary, step)
+        async def run(self, actions, summary: str, step: int) -> ActionOutcome:
+            return await ctx.act(actions, summary, step)
 
         def memories(self) -> MacroMemories:
             return MacroMemories(scene=channel.scene)

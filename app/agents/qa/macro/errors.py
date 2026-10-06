@@ -35,6 +35,15 @@ STALE_BINDING = "STALE_BINDING"
 # 게임의 결함으로 적는다. step 을 실패로 적지 않는다.
 COMPARISON_REJECTED = "COMPARISON_REJECTED"
 
+# action 이 나갔는데 화면이 연달아 몇 번 그대로였다. 일곱 중에 맞는 것이 없어 새로
+# 둔다. `REQUIRE_FAILED` 는 저자가 적은 조건이 거짓이었다는 뜻인데 여기에는 적힌 조건이
+# 없고, `ACTION_REJECTED` 는 step 을 실패로 적지 않는 코드인데 멈춘 화면은 QA 가 찾는
+# 결함 그 자체일 수 있다. 어느 쪽인지는 agent 가 정한다.
+SCREEN_UNCHANGED = "SCREEN_UNCHANGED"
+# macro 가 도는 동안 operator 가 말을 걸었다. 게임의 잘못도 macro 의 잘못도 아니라
+# 둘 중 어느 코드에도 담을 수 없다. step 을 실패로 적지 않는다.
+OPERATOR_INTERRUPTED = "OPERATOR_INTERRUPTED"
+
 RUNTIME_CODES = (
     REQUIRE_FAILED,
     SCENE_MISMATCH,
@@ -43,6 +52,8 @@ RUNTIME_CODES = (
     SELECTOR_AMBIGUOUS,
     STALE_BINDING,
     COMPARISON_REJECTED,
+    SCREEN_UNCHANGED,
+    OPERATOR_INTERRUPTED,
 )
 
 
@@ -68,10 +79,10 @@ class MacroRejection(Exception):
 
 @dataclass
 class MacroFailure(Exception):
-    """실행 시점 멈춤. `code` 는 위 일곱 중 하나다.
+    """실행 시점 멈춤. `code` 는 `RUNTIME_CODES` 중 하나다.
 
     `payload` 는 그 코드가 기대·관측·되는 연산자 같은 것을 싣는 자리다. 코드마다 싣는
-    것이 달라 사전으로 둔다 — 코드 일곱마다 필드를 다 합친 하나의 모양을 만들면 어느
+    것이 달라 사전으로 둔다 — 코드마다 필드를 다 합친 하나의 모양을 만들면 어느
     코드에서 어느 칸이 뜻을 갖는지 읽는 쪽이 모른다.
     """
 

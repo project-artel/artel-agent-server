@@ -17,6 +17,18 @@ batch 하나에 대응시켜야 "이 statement 는 안 나갔다" 는 말이 참
   매번 추측한다. 실패 지점 뒤에 있어 `if` 가 아직 판정되지 않은 분기의 statement 는
   `skipped` 가 아니라 `pending` 이다.
 
+**저자가 적은 실패만 잡지 않는다.** `require` 는 저자가 미리 상상한 실패만 잡는다.
+그 밖에 runner 가 스스로 멈추는 자리가 넷 더 있고, 넷 다 **이미 손에 있는 값**으로
+판단해 model 턴을 안 쓴다 — macro 의 존재 이유가 그 턴을 안 쓰는 것이다.
+
+- 누름이 닿은 것이 하나도 없다 → `REQUIRE_FAILED`. click 계열 뒤의 암묵적 `require` 다
+- 사람이 마우스를 쥐고 있다 → `ACTION_REJECTED`. 게임도 macro 도 아닌 환경 문제다
+- 화면이 연달아 `STILL_SCREENS_BEFORE_STOP` 번 그대로다 → `SCREEN_UNCHANGED`
+- operator 가 말을 걸었다 → `OPERATOR_INTERRUPTED`
+
+판단에 쓰는 값은 `MacroHost.run` 이 내는 `ActionOutcome` 이다. 문장이 아니라 **문장이
+되기 전의 데이터**를 받는다.
+
 **상한은 세지 않는다.** statement 총수 128 과 호출 깊이 3 은 `register_macro` 가 저장
 시점에 정적으로 판정해, 넘는 macro 를 아예 등록하지 않는다. 그래서 여기에는 상한에
 걸려 멈추는 경로도 그 전용 코드도 없다. 저장 때 잡는 것이 런타임에 잡는 것보다 언제나
@@ -41,8 +53,10 @@ from app.agents.qa.macro.binding import (
 )
 from app.agents.qa.macro.errors import (
     ACTION_REJECTED,
+    OPERATOR_INTERRUPTED,
     REQUIRE_FAILED,
     SCENE_MISMATCH,
+    SCREEN_UNCHANGED,
     MacroFailure,
 )
 from app.agents.qa.macro.grammar import TOOLS_BY_NAME, ToolParameter, ToolSpec
@@ -62,7 +76,26 @@ from app.agents.qa.macro.model import (
     MacroSelectorValue,
     MacroStatement,
 )
+from app.qa.acting import ActionOutcome, PressLanding, ScreenChange
 from app.qa.envelope import JsonRpcAction
+
+# 화면이 연달아 이만큼 그대로면 멈춘다.
+#
+# 한 번은 정상이다. `ToolContext.act` 는 action 마다 다음 `pulse` 를 1.5초까지 기다리고
+# (`READING_WAIT_SECONDS`), SDK 는 움직인 것이 없으면 `pulse` 를 아예 안 낸다. 그래서
+# "그대로" 는 1.5초 동안 아무것도 안 바뀌었다는 말인데, 그렇게 되는 정상적인 action 이
+# 여럿 있다 — `hold_mouse_button`·`hold_key`·`move_pointer`·`set_input_axis` 는 설계상
+# 화면을 안 바꾸고, 클릭의 효과가 1.5초 뒤에 시작하는 animation 이어도 마찬가지다.
+#
+# 둘도 정상이다. `hold_key` 다음 `move_pointer` 처럼 화면을 안 바꾸는 statement 둘이
+# 붙어 있는 macro 를 사람이 평범하게 쓴다.
+#
+# 셋은 아니다. statement 상한이 128 이므로 안 멈추면 아무 반응 없는 게임에 128 개를 다
+# 쏟아붓는다. 셋에서 끊으면 헛돈 시간이 4.5초로 묶이고, 위의 정상 둘은 그대로 통과한다.
+#
+# **연달아** 다. 한 번이라도 움직이면 0 으로 돌아간다 — 움직였다 안 움직였다 하는
+# macro 는 어디론가 가고 있는 macro 다.
+STILL_SCREENS_BEFORE_STOP = 3
 
 
 class MacroHost(Protocol):
@@ -71,11 +104,17 @@ class MacroHost(Protocol):
     `ToolContext` 를 받지 않는다. `app.agents.qa.tools.tool_context` 를 import 하면
     `tools/__init__.py` 가 먼저 돌고 그것이 `macro_tools` 를 import 하므로 순환이 된다.
     그리고 이 모양이면 runner 테스트가 가짜 channel 없이 돈다.
+
+    `run` 이 문장이 아니라 `ActionOutcome` 을 돌려주는 이유는 **runner 가 돌아온 값을
+    봐야 하기 때문**이다. macro 는 batch 사이에 model 턴을 안 쓰는 것이 존재 이유라
+    문장을 읽어 줄 쪽이 없고, runner 가 문장을 정규식으로 긁으면 문구 한 줄 고칠 때마다
+    runner 가 조용히 안 멈춘다(ARTEL-777 이 표현을 프로토콜에 싣지 말라고 적은 것과 같은
+    이유). 그래서 host 가 문장과 그 앞의 데이터를 함께 낸다.
     """
 
     async def run(
         self, actions: list[JsonRpcAction], summary: str, step: int
-    ) -> str: ...
+    ) -> ActionOutcome: ...
 
     def memories(self) -> MacroMemories: ...
 
@@ -232,6 +271,8 @@ class _Runner:
         self.frames: list[_Frame] = []
         # 감싼 `if` 조건이 읽은 값. `flag` 와 `ask_verdict` 의 `observed` 가 이것이다.
         self.observed: list[dict[str, Any]] = []
+        # 화면이 연달아 몇 번 그대로였나. 한 번이라도 움직이면 0 으로 돌아간다.
+        self.still_screens = 0
 
     # -- 바깥 --
 
@@ -430,10 +471,99 @@ class _Runner:
         # `summary` 에 저자가 쓴 원문 줄을 넣어 `ACTION` frame 마다 그것이 남게 한다.
         # `ast.unparse` 로 되찍지 않는다 — 그러면 timeline 에 남는 것이 agent 가 쓴
         # 글자가 아니게 되고, 자기가 쓴 줄을 못 알아보는 것이 제일 비싼 혼선이다.
-        self.result.outcomes.append(
-            await self.host.run(actions, statement.source, self.step)
+        outcome = await self.host.run(actions, statement.source, self.step)
+        self.result.outcomes.append(outcome.text)
+
+        # **돌아온 값을 본다.** 종전에는 여기서 무조건 `True` 였고, 그래서 클릭이 허공에
+        # 떨어져도 사람이 마우스를 쥐어도 macro 가 끝까지 갔다 — 저자가 `require` 로 미리
+        # 상상한 실패만 잡혔다.
+        failure = self._went_wrong(statement, outcome)
+        if failure is None:
+            return True
+        self.stop(failure, place)
+        return False
+
+    def _went_wrong(
+        self, statement: MacroActionStatement, outcome: ActionOutcome
+    ) -> MacroFailure | None:
+        """나간 action 하나의 결과를 보고, 여기서 멈춰야 하는지. 아니면 `None`.
+
+        **순서가 뜻을 갖는다.** operator 가 먼저다 — 사람이 말을 걸었으면 게임이 뭐라고
+        했든 그 말이 먼저 읽혀야 한다. 그 다음이 누름이 닿은 자리이고, 원인을 이름으로
+        댄다. 화면이 안 움직인 것이 마지막이다 — 셋 중 가장 약한 근거이고, 혼자서는
+        못 서서 횟수를 세야 한다.
+        """
+        if outcome.operator_messages:
+            return _operator_spoke(outcome.operator_messages)
+        if PressLanding.held_by_person in outcome.landings:
+            # 하나만 있어도 멈춘다. 사람이 마우스를 쥔 것은 batch 전체에 걸리는 일이지
+            # 이 누름 하나의 사정이 아니다.
+            return MacroFailure(
+                ACTION_REJECTED,
+                f"`{statement.source}` did not reach the game: a person is holding the "
+                "mouse, so the virtual pointer went nowhere. Nothing after this was "
+                "sent. This is the machine, not the game and not the macro — take your "
+                "hand off the mouse and call the macro again.",
+            )
+        if outcome.landings and all(
+            landing is PressLanding.reached_nothing for landing in outcome.landings
+        ):
+            # 설계 때 "click 계열 뒤에 닿았는가를 암묵적 `require` 로 붙인다" 고 한 자리다.
+            #
+            # **batch 의 누름이 하나도 못 닿았을 때만** 멈춘다. `click` 은 `mouse_down`
+            # 과 `mouse_up` 둘을 내는데, 누르자마자 사라지는 카드를 누르면 뒤엣것이 빈
+            # 자리에 떨어진다 — 그것까지 실패로 치면 성공한 클릭에서 멈춘다. 전부 비었을
+            # 때는 그런 사정이 없고, 포인터 밑에 처음부터 아무것도 없었다는 뜻이다.
+            return MacroFailure(
+                REQUIRE_FAILED,
+                f"`{statement.source}` pressed empty space: nothing was under the "
+                "pointer, so the game received no press at all. Nothing after this was "
+                "sent. Observe the scene and check the macro is aiming at something "
+                "this screen actually shows.",
+            )
+        if outcome.screen is not ScreenChange.still:
+            self.still_screens = 0
+            return None
+        self.still_screens += 1
+        if self.still_screens < STILL_SCREENS_BEFORE_STOP:
+            return None
+        return MacroFailure(
+            SCREEN_UNCHANGED,
+            f"{self.still_screens} actions in a row left the screen exactly as it was, "
+            f"the last of them `{statement.source}`. Nothing after this was sent. "
+            "Either the game stopped responding or this macro is somewhere it was not "
+            "written for — observe the scene and decide which, because a screen frozen "
+            "under real input is a defect worth reporting.",
+            {"observed": {"still actions in a row": str(self.still_screens)}},
         )
-        return True
+
+
+def _operator_spoke(messages: tuple[str, ...]) -> MacroFailure:
+    """operator 가 말을 걸었다. **무슨 말이든 멈춘다.**
+
+    말의 내용을 가리지 않는다. "멈춰" 만 골라내려면 멈추라는 말의 목록을 가지고 있어야
+    하는데, operator 에게 명령어 목록을 알려 준 적이 없어서 그 목록은 맞히는 쪽보다
+    틀리는 쪽이 흔하다. 그리고 틀리는 방향이 나쁘다 — 목록에 없는 말로 그만하라고 한
+    사람은 macro 가 남은 statement 를 다 쏟아붓는 동안 자기 말이 무시되는 것을 본다.
+
+    **그대로 흘려보내는 것과 다른 점은 언제 읽히느냐 하나다.** `with_operator_messages`
+    는 여기서도 그대로 돌아 그 말을 결과 끝에 붙이므로 버려지는 말이 없다. 다른 것은
+    agent 가 그 말을 **남은 action 이 전부 게임에 나간 뒤**가 아니라 **지금** 읽는다는
+    것뿐이다. model 턴은 안 쓴다 — macro step 하나가 batch 하나라 그 사이에 끼어들 자리가
+    이미 있고, 여기서 하는 일은 그 자리에서 멈추는 것이 전부다.
+
+    헛멈춤의 값은 model 턴 하나다. 놓친 멈춤의 값은 사람이 그만하라고 한 뒤에 남은
+    macro 가 전부 게임에 떨어지는 것이다.
+    """
+    said = " / ".join(messages)
+    return MacroFailure(
+        OPERATOR_INTERRUPTED,
+        f"the operator spoke while the macro was running: {said}. It stopped here "
+        "rather than sending the rest, so you read that before the game moves any "
+        "further. Neither the game nor the macro did anything wrong — decide what the "
+        "operator wants, and call the macro again if it still applies.",
+        {"operator_said": list(messages)},
+    )
 
 
 def _spanned(statements: tuple[MacroStatement, ...], frame: _Frame) -> list[int]:

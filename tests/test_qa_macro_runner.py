@@ -18,11 +18,20 @@ from app.agents.qa.macro.errors import (
     SCENE_MISMATCH,
     SELECTOR_NOT_FOUND,
 )
+from app.agents.qa.macro.errors import OPERATOR_INTERRUPTED, SCREEN_UNCHANGED
 from app.agents.qa.macro.parser import macro_definition_from_source
-from app.agents.qa.macro.runner import run_macro
+from app.agents.qa.macro.runner import STILL_SCREENS_BEFORE_STOP, run_macro
+from app.qa.acting import ActionOutcome, PressLanding, ScreenChange
 from app.qa.envelope import JsonRpcAction
 from app.qa.pulse import PulseReading
 from app.qa.scene import SceneMemory
+
+
+def reached(text: str = "  ok") -> ActionOutcome:
+    """누름이 닿았고 화면이 움직였다. 멈출 이유가 하나도 없는 결과."""
+    return ActionOutcome(
+        text=text, screen=ScreenChange.moved, landings=(PressLanding.sent,)
+    )
 
 # 이슈의 예시. statement 아홉이 require 셋·대입 둘·action 넷으로 갈리고, 여섯 번째가
 # `require` 다. 그것이 실패하면 `applied` 가 4-5, `pending` 이 7-9 여야 한다.
@@ -50,13 +59,22 @@ class FakeHost:
     channel 과 socket 을 세워야 하고, 그러면 재는 것이 `applied` 가 아니라 wiring 이 된다.
     """
 
-    def __init__(self, memory: SceneMemory) -> None:
+    def __init__(
+        self, memory: SceneMemory, answers: list[ActionOutcome] | None = None
+    ) -> None:
         self.memory = memory
         self.sent: list[tuple[list[JsonRpcAction], str, int]] = []
+        # batch 하나에 답 하나. 다 쓰면 그 뒤는 기본값이다 — 128 개를 손으로 적지
+        # 않으려는 것이고, 앞의 몇 개만 다르게 두는 테스트가 그 뒤를 안 적어도 된다.
+        self.answers = list(answers or [])
 
-    async def run(self, actions, summary: str, step: int) -> str:
+    async def run(self, actions, summary: str, step: int) -> ActionOutcome:
         self.sent.append((actions, summary, step))
-        return f"  {actions[0].method}: ok"
+        answered = len(self.sent) - 1
+        if answered < len(self.answers):
+            return self.answers[answered]
+        # 기본값은 **멈출 이유가 없는 결과**다. 누름이 닿았고 화면이 움직였다.
+        return reached(f"  {actions[0].method}: ok")
 
     def memories(self) -> MacroMemories:
         return MacroMemories(scene=self.memory)
@@ -585,3 +603,190 @@ def test_the_runner_has_no_statement_or_depth_limit_of_its_own() -> None:
     assert result.passed
     assert len(result.applied) == 128
     assert len(host.sent) == 128
+
+
+# --- runner 가 스스로 멈추는 자리 넷 ---------------------------------------------
+#
+# 종전에는 `_action` 이 돌려받은 값을 한 번도 안 보고 무조건 `True` 를 돌려줬다. 그래서
+# 저자가 `require` 로 미리 상상한 실패만 잡혔고, 클릭이 허공에 떨어져도 사람이 마우스를
+# 쥐어도 화면이 안 움직여도 macro 는 끝까지 갔다. 아래가 그 넷을 못박는다.
+#
+# **안 멈춰야 하는 경우도 같이 잰다.** 멈추는 조건만 재면 아무 때나 멈추는 구현이
+# 통과한다.
+
+THREE_CLICKS = '''def m(card: object) -> None:
+    click(card)
+    click(card)
+    click(card)
+    click(card)
+'''
+
+
+def held_by_person() -> ActionOutcome:
+    return ActionOutcome(
+        text="  mouse_down: 전해지지 않음 — 포인터를 사람이 쥐고 있다",
+        screen=ScreenChange.still,
+        landings=(PressLanding.held_by_person, PressLanding.held_by_person),
+    )
+
+
+def pressed_nothing() -> ActionOutcome:
+    return ActionOutcome(
+        text="  mouse_down: 닿은 것 없음 — 그 자리에 누를 것이 없다",
+        screen=ScreenChange.still,
+        landings=(PressLanding.reached_nothing, PressLanding.reached_nothing),
+    )
+
+
+def still_screen() -> ActionOutcome:
+    return ActionOutcome(
+        text="  mouse_down: ok\n\nNothing on the screen moved.",
+        screen=ScreenChange.still,
+        landings=(PressLanding.sent, PressLanding.sent),
+    )
+
+
+def clicks(host: FakeHost, count: int = 4):
+    card_a = two_cards(host)["card_a"]
+    body = "".join("    click(card)\n" for _ in range(count))
+    return drive(host, f"def m(card: object) -> None:\n{body}", "m", {"card": card_a})
+
+
+def test_a_press_that_reached_nothing_stops_the_macro() -> None:
+    """설계 때 "click 계열 뒤에 닿았는가를 암묵적 `require` 로 붙인다" 고 한 자리다.
+
+    `REQUIRE_FAILED` 인 이유는 저자가 적었다면 `require(...)` 로 적었을 조건이기
+    때문이다. 그 자리에 누를 것이 없었다는 것은 게임이 다르게 동작한 것이다.
+    """
+    host = FakeHost(battle(), answers=[reached(), pressed_nothing()])
+    result = clicks(host)
+
+    assert not result.passed
+    assert result.failure.code == REQUIRE_FAILED
+    # 두 번째 statement 에서 멈췄으므로 세 번째·네 번째는 안 나갔다.
+    assert len(host.sent) == 2
+    assert [place.number for place in result.applied] == [1, 2]
+    assert [place.number for place in result.pending] == [3, 4]
+
+
+def test_a_press_the_person_took_the_mouse_from_stops_the_macro() -> None:
+    """`ACTION_REJECTED` 다. 게임도 macro 도 아니라 기계가 문제다."""
+    host = FakeHost(battle(), answers=[held_by_person()])
+    result = clicks(host)
+
+    assert not result.passed
+    assert result.failure.code == ACTION_REJECTED
+    assert "holding the mouse" in result.failure.reason
+    assert len(host.sent) == 1
+
+
+def test_a_batch_where_one_press_still_landed_does_not_stop() -> None:
+    """`click` 은 `mouse_down` 과 `mouse_up` 둘을 낸다.
+
+    누르자마자 사라지는 카드를 누르면 뒤엣것이 빈 자리에 떨어진다. 그것까지 실패로 치면
+    **성공한 클릭에서 멈춘다.** batch 의 누름이 하나도 못 닿았을 때만 멈춘다.
+    """
+    half = ActionOutcome(
+        text="  mouse_down: Card 에 보냄\n  mouse_up: 닿은 것 없음",
+        screen=ScreenChange.moved,
+        landings=(PressLanding.sent, PressLanding.reached_nothing),
+    )
+    host = FakeHost(battle(), answers=[half, half, half, half])
+    result = clicks(host)
+
+    assert result.passed, result.failure
+    assert len(host.sent) == 4
+
+
+def test_the_screen_standing_still_once_does_not_stop_the_macro() -> None:
+    """한 번은 정상이다. 효과가 1.5초 뒤에 시작하는 animation 일 수 있다."""
+    host = FakeHost(battle(), answers=[still_screen()])
+    result = clicks(host)
+
+    assert result.passed, result.failure
+    assert len(host.sent) == 4
+
+
+def test_the_screen_standing_still_twice_in_a_row_does_not_stop_the_macro() -> None:
+    """둘도 정상이다. 화면을 안 바꾸는 statement 둘이 붙은 macro 를 사람이 평범하게 쓴다."""
+    host = FakeHost(battle(), answers=[still_screen(), still_screen()])
+    result = clicks(host)
+
+    assert result.passed, result.failure
+    assert len(host.sent) == 4
+
+
+def test_the_screen_standing_still_three_times_in_a_row_stops_the_macro() -> None:
+    """셋은 아니다. 안 멈추면 반응 없는 게임에 남은 statement 를 다 쏟아붓는다."""
+    assert STILL_SCREENS_BEFORE_STOP == 3
+    host = FakeHost(battle(), answers=[still_screen()] * 3)
+    result = clicks(host)
+
+    assert not result.passed
+    assert result.failure.code == SCREEN_UNCHANGED
+    assert len(host.sent) == 3
+    assert [place.number for place in result.applied] == [1, 2, 3]
+    assert [place.number for place in result.pending] == [4]
+    # 멈춘 이유를 payload 가 사람이 읽는 문장으로 말한다.
+    assert "3 actions in a row" in result.failure.reason
+
+
+def test_a_screen_that_moves_in_between_resets_the_count() -> None:
+    """**연달아** 다. 움직였다 안 움직였다 하는 macro 는 어디론가 가고 있는 macro 다."""
+    host = FakeHost(
+        battle(),
+        answers=[still_screen(), still_screen(), reached(), still_screen()],
+    )
+    result = clicks(host)
+
+    assert result.passed, result.failure
+    assert len(host.sent) == 4
+
+
+def test_a_build_that_reports_no_screen_at_all_does_not_stop_the_macro() -> None:
+    """`unknown` 은 `still` 이 아니다. 섞으면 화면을 안 보내는 빌드에서 전부 멈춘다."""
+    silent = ActionOutcome(
+        text="  mouse_down: ok\n\nThe game is not reporting the screen at all.",
+        screen=ScreenChange.unknown,
+        landings=(PressLanding.sent, PressLanding.sent),
+    )
+    host = FakeHost(battle(), answers=[silent] * 4)
+    result = clicks(host)
+
+    assert result.passed, result.failure
+    assert len(host.sent) == 4
+
+
+def test_the_operator_speaking_stops_the_macro() -> None:
+    """무슨 말이든 멈춘다.
+
+    "멈춰" 만 골라내려면 멈추라는 말의 목록이 있어야 하는데 operator 에게 명령어를 알려
+    준 적이 없고, 목록에 없는 말로 그만하라고 한 사람은 macro 가 남은 statement 를 다
+    쏟아붓는 것을 보게 된다.
+    """
+    interrupted = ActionOutcome(
+        text="  mouse_down: ok",
+        screen=ScreenChange.moved,
+        landings=(PressLanding.sent,),
+        operator_messages=("그만하고 설정 화면 봐줘",),
+    )
+    host = FakeHost(battle(), answers=[reached(), interrupted])
+    result = clicks(host)
+
+    assert not result.passed
+    assert result.failure.code == OPERATOR_INTERRUPTED
+    assert len(host.sent) == 2
+    assert [place.number for place in result.pending] == [3, 4]
+    # 그 말이 버려지지 않는다. 멈춘 이유에 그대로 실린다.
+    assert "그만하고 설정 화면 봐줘" in result.failure.reason
+    assert result.failure.payload["operator_said"] == ["그만하고 설정 화면 봐줘"]
+
+
+def test_an_ordinary_macro_with_nobody_speaking_runs_to_the_end() -> None:
+    """평범한 성공은 끝까지 간다. 멈추는 조건만 재면 아무 때나 멈추는 구현이 통과한다."""
+    host = FakeHost(battle())
+    result = drive(host, EXAMPLE, "attack_with_combined_card", two_cards(host))
+
+    assert result.passed, result.failure
+    assert len(host.sent) == 4
+    assert result.pending == []
