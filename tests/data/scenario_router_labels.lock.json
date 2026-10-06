@@ -23,7 +23,7 @@
     "technical": 4,
     "weather": 3
   },
-  "labels_sha256": "a62f4bab3f4465ea6e48e3779bdca09e0d64c374d80e3a9be248295bcb8221bd",
+  "labels_sha256": "17f4856bfa35217c9310989207a89d0bf096f3facb3bd7ea205e93c0c104548f",
   "minimum_per_route": {
     "authoring": 100,
     "greeting": 2,
@@ -35,7 +35,7 @@
   "rows": 201,
   "scored_denominator": 163,
   "spec": {
-    "scenario_router/v6/system": "5c9c84acf76a3bfe3e62f5e66563ee9fccff8acca39ec4a7ae3d5801a5646221"
+    "scenario_router/v7/system": "5c9c84acf76a3bfe3e62f5e66563ee9fccff8acca39ec4a7ae3d5801a5646221"
   },
   "spec_rules": {
     "authoring": "asks to create scenarios OR to add more coverage",

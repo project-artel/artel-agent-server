@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """정답표가 **스스로를 지키는지** 본다. 모델도 네트워크도 안 쓴다 — CI 에서 도는 부분이다.
 
-왜 있나: `modify`↔`authoring` 경계가 v1→v6 동안 다섯 번 움직였고(run 64 시나리오 소실 ·
+왜 있나: `modify`↔`authoring` 경계가 v1→v7 동안 다섯 번 움직였고(run 64 시나리오 소실 ·
 합치기 누출 · run 68 거절 · run 75 자리 지목 · 나누기 누출), 매번 **한 사건에 대한 패치**였다.
 앞의 수정이 여전히 서는지 보는 장치가 없어서 같은 자리가 반복해 깨졌다.
 
@@ -72,7 +72,7 @@ def test_every_label_cites_a_rule_that_still_exists(rows: list[dict], lock: dict
     줄 번호가 편집 한 번에 밀리기 때문이다 — v6→v7 에서 나누기 절이 들어오자 뒤의 모든 번호가
     세 줄 밀렸다. 문구는 그 편집을 견딘다.
     """
-    pinned = next(iter(lock["spec"]))                   # 예: scenario_router/v6/system
+    pinned = next(iter(lock["spec"]))                   # 예: scenario_router/v7/system
     body = (PROMPTS / f"{pinned}.md").read_text(encoding="utf-8")
     flat = _squeeze(body)
     for r in rows:

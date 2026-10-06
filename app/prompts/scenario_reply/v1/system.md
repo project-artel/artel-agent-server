@@ -1,6 +1,6 @@
 ---
 version: v1
-note: 인사·가드레일 문구 전용. 라우터가 갈래만 내고 문구를 못 낼 때(Jev) 이 노드가 답한다. 규칙은 scenario_router/v6:71-75 에서 옮겨 왔다.
+note: 인사·가드레일 문구 전용. 라우터가 갈래만 내고 문구를 못 낼 때(Jev) 이 노드가 답한다. 규칙은 scenario_router/v7:71-75 에서 옮겨 왔다.
 placeholders: [route, user_input]
 ---
 You write the one reply a game-QA scenario authoring assistant sends when the user's

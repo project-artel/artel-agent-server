@@ -1,6 +1,6 @@
 ---
-version: v6
-note: ARTEL-930 의 짧은 인사·잡담 답에 더해, 나누기(split)를 modify 에 이름으로 넣는다. v6 는 `REWRITES, COMBINES, or TRIMS` 만 적어 "하나에 다 넣었는데 좀 나눠줄레" 가 authoring 으로 샜다(실측 2026-10-06, 163줄 중 유일하게 남은 오분류).
+version: v7
+note: ARTEL-930 의 v6(짧은 인사·잡담 답) 위에 나누기(split)를 modify 에 이름으로 넣는다. v6 는 `REWRITES, COMBINES, or TRIMS` 만 적어 "하나에 다 넣었는데 좀 나눠줄레" 가 authoring 으로 샜다(실측 2026-10-06, 163줄 중 유일하게 남은 오분류).
 placeholders: [context_hint, user_input]
 ---
 You route one user message for a game-QA scenario authoring assistant.
