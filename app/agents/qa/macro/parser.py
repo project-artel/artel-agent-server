@@ -850,6 +850,20 @@ class _FunctionReader:
             )
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             if node.func.id in READERS_BY_NAME:
+                spec = READERS_BY_NAME[node.func.id]
+                # 비교 없는 조건은 참거짓으로 도착해야 한다. 그 밖의 모양을 진리값으로
+                # 접으면 빈 문자열이 거짓, 아무 사전이 참이 되어 조용히 틀린다 —
+                # `require` 가 게임 결함처럼 실패하는 바로 그 경우다. 모양을 저장
+                # 시점에 아는 다섯은 여기서 거절하고, 모르는 셋(`static`·`observable`·
+                # `member`)은 값이 도착한 뒤 `binding.evaluate` 가 같은 거절을 한다.
+                if spec.shape is not None and spec.shape is not MacroShape.bool_:
+                    raise MacroRejection(
+                        f"`{spec.name}(...)` reads a {spec.shape.value}, and a condition "
+                        "written without a comparison has to be a bool. Compare it: "
+                        f"`{spec.name}(...) == <value>`. The readers that are already a "
+                        "bool are: actionable(), exists(), absent().",
+                        node.lineno,
+                    )
                 return MacroReaderCondition(call=self._reader(node))
             raise MacroRejection(
                 f"`{node.func.id}` cannot be a condition. The calls a condition reads "
