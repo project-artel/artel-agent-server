@@ -286,10 +286,11 @@ def test_a_known_tc_marker_is_kept_and_named(monkeypatch) -> None:
     assert "[[tc:1]]" in out.reply.detail
     assert len(out.refs) == 1
     ref = out.refs[0]
-    assert (ref.kind, ref.id, ref.label) == ("tc", 1, "Shop — 상점을 연다")
+    # 칩 이름은 스텝만(ARTEL-939) — 씬은 TC 상세 화면에 나온다.
+    assert (ref.kind, ref.id, ref.label) == ("tc", 1, "상점을 연다")
     assert "상점이 열린다" in (ref.detail or "")  # 기대값이 카드에 실린다
     # 대화 기록은 사람이 읽는 글 — 표식 대신 이름이다.
-    assert "@TC Shop — 상점을 연다" in out.message and "[[" not in out.message
+    assert "@TC 상점을 연다" in out.message and "[[" not in out.message
 
 
 def test_an_unknown_marker_is_dropped(monkeypatch) -> None:
@@ -341,7 +342,7 @@ def test_options_never_carry_a_marker(monkeypatch) -> None:
     out, _, _ = _author(monkeypatch, plan, [wf._Writer(steps=[_case_step()])])
 
     labels = [o.label for o in out.questions[0].options]
-    assert labels[0] == "Shop — 상점을 연다 따로 만들어 줘"
+    assert labels[0] == "상점을 연다 따로 만들어 줘"
     assert all("[[" not in label for label in labels)
 
 

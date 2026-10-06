@@ -115,8 +115,9 @@ class Ask(BaseModel):
 _DETAIL_DESCRIPTION = (
     "Why you did it this way, for the user to read — how you read the request, why this"
     " order or split, what you left out and why. Plain words in the user's language."
-    " Shape it for the reader: a sentence or two when that is enough, a short `- ` list"
-    " for three or more points, a `| a | b |` table when comparing or mapping things."
+    " Lay it out like a chat message: one point per paragraph, a blank line between"
+    " paragraphs, at most two sentences each; a `- ` list when listing things; a"
+    " `| a | b |` table when comparing or mapping things."
     " Do not repeat what was saved — the result line already says that."
     " Point at a TC as [[tc:<case_id>]] and a scenario as [[ts:<scenario_id>]] — the"
     " screen turns the marker into a chip with its name. Never a bare id outside one."
@@ -298,7 +299,8 @@ def _ref_of(request: ScenarioAgentRequest, kind: str, ref_id: int) -> Ref | None
         )
         return Ref(
             kind="tc", id=ref_id,
-            label=f"{case.scene} — {case.step}" if case.scene else case.step,
+            # 스텝만(ARTEL-939). 씬까지 붙이면 칩 하나가 두 줄이 되고, 씬은 TC 상세 화면에 나온다.
+            label=case.step,
             detail=detail or None,
         )
     scenario = next(

@@ -301,7 +301,7 @@ def test_workflow_reports_a_case_it_could_not_place(monkeypatch) -> None:
     assert out.reviewed.excluded == [1]
     assert "넣을 자리가 없던" in out.message
     # **번호가 아니라 이름으로 말한다** — 내부 id 는 사용자에게 나가지 않는다.
-    assert "Shop" in out.message and "케이스 1" not in out.message
+    assert "상점을 연다" in out.message and "케이스 1" not in out.message
 
 
 def test_workflow_merges_into_an_existing_scenario_when_b_points_at_it(monkeypatch) -> None:
