@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """결정 전용 라우터에게 주는 **선택지 명세**.
 
-`scenario_router/v7/system.md` 의 산문을 선택지별 칸으로 옮긴 것이다. 산문이 원본이고 이
+`scenario_router/v6/system.md` 의 산문을 선택지별 칸으로 옮긴 것이다. 산문이 원본이고 이
 파일은 옮겨 적은 것이라, 산문이 바뀌면 여기도 바꿔야 한다. 그 어긋남을 사람 기억에 맡기지
 않으려고 `DIGEST` 를 못 박고 `tests/test_scenario_router_jev.py` 가 검사한다.
 

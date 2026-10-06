@@ -9,7 +9,7 @@
 1. 되묻기 규칙이 **한쪽으로만** 걸린다. 반대 방향에도 걸면 163줄에서 15건을 되묻고 13건이
    헛경보였다(실측 2026-10-06). 그 비대칭이 코드에 남아 있는지 본다
 2. 호출이 실패해도 턴이 죽지 않고 `authoring` 으로 떨어진다 — 그 갈래는 아무것도 덮어쓰지 않는다
-3. 선택지 명세가 **조용히 바뀌지 않는다.** 산문(`scenario_router/v7`)을 옮겨 적은 것이라
+3. 선택지 명세가 **조용히 바뀌지 않는다.** 산문(`scenario_router/v6`)을 옮겨 적은 것이라
    어긋나면 측정이 거짓이 된다
 4. 설정 한 줄로 되돌아간다
 """
@@ -23,7 +23,7 @@ import pytest
 from app.agents.scenario import jev_criteria as spec
 from app.agents.scenario.router import JevScenarioRouter, Route, ScenarioRouter
 
-# 이 값을 바꾸려면 `scenario_router/v7/system.md` 와 맞는지 확인하고 함께 바꾼다.
+# 이 값을 바꾸려면 `scenario_router/v6/system.md` 와 맞는지 확인하고 함께 바꾼다.
 PINNED_DIGEST = "dcd210c3bdca2f144734952f75b65f455933f41db588682bc9508355aca3adf6"
 
 
@@ -114,7 +114,7 @@ def test_the_reply_field_is_left_empty() -> None:
 
 def test_the_criteria_have_not_changed_without_anyone_noticing() -> None:
     assert spec.digest() == PINNED_DIGEST, (
-        "선택지 명세가 바뀌었다. 이것은 `scenario_router/v7/system.md` 의 산문을 옮겨 적은 "
+        "선택지 명세가 바뀌었다. 이것은 `scenario_router/v6/system.md` 의 산문을 옮겨 적은 "
         "것이므로, 산문과 맞는지 확인하고 측정을 다시 한 뒤 PINNED_DIGEST 를 갱신한다."
     )
 

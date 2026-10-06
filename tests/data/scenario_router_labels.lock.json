@@ -13,7 +13,7 @@
       "underspecified": 4
     }
   },
-  "labels_sha256": "b23471f0e8914e590700f484871459a999a44afb45db91211d653cc1ff5b2543",
+  "labels_sha256": "da3dca5dbcaacdf1321a5cf91a59ecfd7b1a8388dac2daed7e866fc7c349b613",
   "minimum_per_route": {
     "authoring": 100,
     "greeting": 2,
@@ -25,7 +25,7 @@
   "rows": 182,
   "scored_denominator": 163,
   "spec": {
-    "scenario_router/v7/system": "5c9c84acf76a3bfe3e62f5e66563ee9fccff8acca39ec4a7ae3d5801a5646221"
+    "scenario_router/v6/system": "5c9c84acf76a3bfe3e62f5e66563ee9fccff8acca39ec4a7ae3d5801a5646221"
   },
   "spec_rules": {
     "authoring": "asks to create scenarios OR to add more coverage",
