@@ -359,7 +359,7 @@ def test_run_start_log_names_reasoning(monkeypatch, caplog) -> None:
         if "[QA] run starting" in record.getMessage()
     ]
     assert len(starting) == 1
-    assert "'model': 'anthropic/claude-sonnet-5'" in starting[0]
+    assert "'model': 'anthropic/claude-sonnet-5.5'" in starting[0]
     assert "'reasoning': {'effort': 'high'}" in starting[0]
 
 
