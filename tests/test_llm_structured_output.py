@@ -25,7 +25,7 @@ def _capture(monkeypatch) -> MagicMock:
 
 
 BEDROCK = LLMModel.claude_haiku_4_5_bedrock
-OPENROUTER = LLMModel.gpt_5_6_luna
+OPENROUTER = LLMModel.gpt_6_luna
 
 
 def test_bedrock_gets_json_schema_without_strict(monkeypatch) -> None:

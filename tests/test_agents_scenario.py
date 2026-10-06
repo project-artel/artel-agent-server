@@ -280,7 +280,7 @@ def test_language_directives_cover_every_language() -> None:
 
 
 def test_select_structured_method_by_model() -> None:
-    assert select_structured_method(LLMModel.gpt_5_6_luna) == "json_schema"
+    assert select_structured_method(LLMModel.gpt_6_luna) == "json_schema"
     assert select_structured_method(LLMModel.gemma_4_free) == "json_mode"
 
 

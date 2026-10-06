@@ -276,16 +276,33 @@ def test_a_run_that_cannot_see_is_not_offered_the_tool() -> None:
     assert "observe_scene" in tools
 
 
-def test_every_catalogued_model_is_marked_as_seeing() -> None:
+# Which catalogued models do NOT take images, as `architecture.input_modalities`
+# in the OpenRouter catalog says. Everything absent from this set must see.
+#
+# Kept as an explicit set rather than asserting that every model sees, which is
+# what this test did until Qwen3.7 Max replaced the withdrawn 3.8 Max and
+# brought the catalog its first text-only entry. "They all see" would now have
+# to be deleted to go green, and deleting it would take the Gemma 4 guard with
+# it; naming the exceptions keeps the guard and lets a text-only model exist.
+MODELS_WITHOUT_VISION = {LLMModel.qwen3_7_max}
+
+
+def test_catalogued_vision_flags_match_the_openrouter_catalog() -> None:
     """Matches `architecture.input_modalities` in the OpenRouter catalog.
 
     Gemma 4 was carried as text-only on the strength of a ticket description; the
     catalog says `image,text,video`, and the wrong flag silently took the capture
     tool away from it. The flags are claims about a live catalog, so they are
     written down here rather than left to whoever adds the next model.
+
+    A wrong flag costs something in both directions. Marked text-only when it
+    sees, a model loses the capture tool for no reason — that was Gemma 4.
+    Marked seeing when it does not, every picture the run sends is a provider
+    error several turns in.
     """
     for model in LLMModel:
-        assert get_model_spec(model).supports_vision is True, model
+        expected = model not in MODELS_WITHOUT_VISION
+        assert get_model_spec(model).supports_vision is expected, model
 
 
 # --- fetching ---
