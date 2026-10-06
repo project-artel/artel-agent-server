@@ -10,10 +10,11 @@ import asyncio
 import pytest
 
 from app.agents.qa.arch import default_resolved_arch
-from app.agents.qa.macro.errors import MACRO_NODE_REJECTED
+from app.agents.qa.tools import macro_tools
+from app.agents.qa.macro.errors import COMPARISON_REJECTED, MACRO_NODE_REJECTED
 from app.agents.qa.macro.grammar import READER_NAMES, TOOL_NAMES
 from app.agents.qa.tools import QaRunState, build_tools
-from app.qa.channel import QaRunChannel
+from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import MessageType
 from app.qa.pulse import PulseReading
 
@@ -806,3 +807,113 @@ def test_the_macro_tools_sit_beside_the_action_tools_in_the_offered_list() -> No
         "register_macro",
         "run_macro",
     ]
+
+
+# --- tool 다섯은 런을 죽이지 않는다 ----------------------------------------------
+#
+# 실제 런 하나가 여기서 죽었다. agent 가 `run_macro` 를 불렀고 macro 가
+# `COMPARISON_REJECTED` 로 멈췄는데, 그 결과를 그리다 `'str' object has no attribute
+# 'items'` 가 tool 밖으로 나가 런이 `run_incomplete` 로 끝났다.
+#
+# **macro 가 멈추는 것은 정상 동작이다.** tool 다섯이 있는 이유가 agent 가 그 실패를
+# 읽고 `edit_macro` 로 고쳐 다시 등록하는 것인데, 실패가 런을 죽이면 고칠 기회가 안 온다.
+
+# `member()` 가 돌려주는 모양은 저장 시점에 알 수 없다. 그래서 parser 가 통과시키고,
+# 실제로 수가 도착하는 런타임에 `COMPARISON_REJECTED` 가 난다 — 비교 없는 조건은 bool
+# 로 도착해야 한다.
+COMPARED = '''def judge_the_card(card: object) -> None:
+    require(member(card, "Enemy.Hp"), "Draw a card with a bigger number.")
+'''
+
+
+def with_a_watched_number(channel: QaRunChannel) -> None:
+    """게임이 이 카드의 `Enemy.Hp` 를 지켜보고 있다고 해 둔다. 기본 빌드에서 수를 읽는 자리다."""
+    channel.scene.pulse.apply(
+        PulseReading.model_validate(
+            {
+                "scene": "Battle",
+                "whole": True,
+                "active": [
+                    {
+                        "selector": "Root[0]/Hand[2]/Card(Clone)[3]",
+                        "id": 41,
+                        "members": [{"on": "Game.Enemy", "member": "Hp", "value": 42}],
+                    }
+                ],
+            }
+        )
+    )
+
+
+def test_a_macro_stopped_by_comparison_rejected_is_drawn_without_killing_the_run() -> None:
+    """실제로 터진 경로 그대로. `>` 는 string 에 못 쓰므로 `COMPARISON_REJECTED` 가 난다.
+
+    `binding` 은 비교에 도착한 값 하나를 `arrived` 에, `runner` 는 조건이 읽은 값들을
+    `observed` 에 싣는다. 종전에는 둘 다 `observed` 였고 그리는 쪽이 문자열에 대고
+    `.items()` 를 불렀다.
+    """
+    channel, _, tools, _ = make()
+    with_a_watched_number(channel)
+    call(tools["write_macro"], name="judge_the_card", source=COMPARED)
+    call(tools["register_macro"], name="judge_the_card")
+
+    answer = call(
+        tools["run_macro"],
+        name="judge_the_card",
+        arguments={"card": "Root[0]/Hand[2]/Card(Clone)[3]"},
+    )
+
+    assert COMPARISON_REJECTED in answer
+    # 도착한 값이 그려진다. 문자열 칸이 dict 인 척하지 않는다.
+    assert "The value that arrived there: 42" in answer
+    # 게임에는 아무것도 안 갔다. `require` 가 첫 statement 다.
+    assert "Reached the game" not in answer
+
+
+def test_a_macro_tool_that_hits_a_server_defect_answers_instead_of_raising(
+    monkeypatch,
+) -> None:
+    """tool 본문에서 새는 예외는 모델이 읽는 문장이 된다.
+
+    `capability_tools._write_capability` 와 같은 규율이다 — macro tool 하나가 터졌다고
+    시나리오가 멈추면 이 다섯은 런이 지는 위험이지 보태는 것이 아니다.
+    """
+    channel, _, tools, _ = make()
+    with_a_watched_number(channel)
+    call(tools["write_macro"], name="judge_the_card", source=COMPARED)
+    call(tools["register_macro"], name="judge_the_card")
+
+    def explode(_result):
+        raise AttributeError("'str' object has no attribute 'items'")
+
+    monkeypatch.setattr(macro_tools, "_render", explode)
+
+    answer = call(
+        tools["run_macro"],
+        name="judge_the_card",
+        arguments={"card": "Root[0]/Hand[2]/Card(Clone)[3]"},
+    )
+
+    # 예외가 밖으로 안 나갔고, 무엇이 잘못됐는지를 말한다.
+    assert "run_macro" in answer and "error inside the server" in answer
+    assert "defect in the server" in answer
+
+
+def test_an_operator_ending_the_run_is_not_turned_into_a_sentence(monkeypatch) -> None:
+    """`QaCancelled` 는 통과시킨다. operator 가 런을 끝낸 것이라 고칠 것이 없다."""
+    channel, _, tools, _ = make()
+    with_a_watched_number(channel)
+    call(tools["write_macro"], name="judge_the_card", source=COMPARED)
+    call(tools["register_macro"], name="judge_the_card")
+
+    def give_up(_result):
+        raise QaCancelled()
+
+    monkeypatch.setattr(macro_tools, "_render", give_up)
+
+    with pytest.raises(QaCancelled):
+        call(
+            tools["run_macro"],
+            name="judge_the_card",
+            arguments={"card": "Root[0]/Hand[2]/Card(Clone)[3]"},
+        )

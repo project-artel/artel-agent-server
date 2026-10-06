@@ -11,6 +11,11 @@
 `content_map` 에 적고, `read_macro` 와 `run_macro` 는 이 런이 모르는 이름을 만나면
 `MACRO_READ` 로 저쪽에 묻는다 — 지난 런이 등록한 것을 이번 런이 부르는 길이 그것이다.
 
+**다섯 중 무엇이 터져도 런은 안 죽는다.** tool 본문이 전부
+`_answers_instead_of_raising` 아래에 있어, 새는 예외가 모델이 읽는 문장이 된다. macro
+가 멈추는 것은 정상 동작이고 — 수명주기 네 걸음이 있는 이유가 agent 가 실패를 읽고
+고치는 것이다 — 그 실패가 런을 죽이면 고칠 기회 자체가 안 온다.
+
 **쓰기가 실패해도 런은 계속 간다.** 저쪽 거절도, 답 없음(`None`)도, 새는 예외도 전부
 모델이 읽는 문장으로 바뀌고, 등록은 이 런의 `MacroBook` 에 그대로 남아 `run_macro` 가
 부를 수 있다. `capability_tools.py` 의 `_write_capability` 가 선례이고, 특히 `None` 을
@@ -19,6 +24,8 @@
 계속 다시 보낸다.
 """
 
+from collections.abc import Awaitable, Callable
+from functools import wraps
 from typing import Any
 
 from langchain_core.tools import BaseTool, tool
@@ -47,6 +54,46 @@ from app.agents.qa.tools.tool_context import ToolContext
 from app.qa.acting import ActionOutcome
 from app.qa.channel import KnowledgeRequestFailed, QaCancelled, with_operator_messages
 from app.qa.envelope import MacroReadPayload, MacroRegisterPayload
+
+
+def _answers_instead_of_raising(
+    body: Callable[..., Awaitable[str]],
+) -> Callable[..., Awaitable[str]]:
+    """tool 본문에서 새는 예외를 모델이 읽는 문장으로 바꾼다.
+
+    **어느 경우에도 런이 안 죽는다.** `capability_tools._write_capability` 가 같은
+    규율을 같은 이유로 적어 두었다 — macro tool 하나가 터졌다고 시나리오가 멈추면 이
+    다섯은 런이 지는 위험이지 보태는 것이 아니다.
+
+    종전에는 guard 가 orchestration 왕복 둘(`_store`·`_stored`)에만 있었고 tool 본문은
+    맨몸이었다. 그래서 런 하나가 실제로 여기서 죽었다 — `COMPARISON_REJECTED` 로 멈춘
+    macro 의 결과를 그리다 `'str' object has no attribute 'items'` 가 tool 밖으로 나갔고,
+    agent 는 아무것도 못 하고 런이 끝났다.
+
+    **macro 가 멈추는 것은 정상 동작이다.** tool 다섯이 있는 이유가 agent 가 그 실패를
+    읽고 `edit_macro` 로 고쳐 다시 등록하는 것인데, 실패가 런을 죽이면 고칠 기회 자체가
+    안 온다.
+
+    `QaCancelled` 는 통과시킨다. operator 가 런을 끝낸 것이라 문장으로 바꿀 일이 아니다.
+    """
+
+    @wraps(body)
+    async def answering(*arguments: Any, **keywords: Any) -> str:
+        try:
+            return await body(*arguments, **keywords)
+        except QaCancelled:
+            raise
+        except Exception as error:  # noqa: BLE001 - macro tool 이 런을 끝내면 안 된다
+            return (
+                f"`{body.__name__}` hit an error inside the server and could not "
+                f"finish: {error!r}. This is a defect in the server, not in the game "
+                "and not in your macro, so nothing about the game follows from it. "
+                "Anything the macro already sent has been sent and cannot be taken "
+                "back. Observe the scene to see where you are, and carry on without "
+                "this call."
+            )
+
+    return answering
 
 
 def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
@@ -215,6 +262,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
             return None, rejection.render()
 
     @tool(description=WRITE_MACRO_DESCRIPTION)
+    @_answers_instead_of_raising
     async def write_macro(step: int, thought: str, name: str, source: str) -> str:
         # What the agent reads is WRITE_MACRO_DESCRIPTION, not this.
         #
@@ -240,6 +288,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         return _draft_report(macro_name, definition)
 
     @tool(description=EDIT_MACRO_DESCRIPTION)
+    @_answers_instead_of_raising
     async def edit_macro(
         step: int, thought: str, name: str, old_text: str, new_text: str
     ) -> str:
@@ -302,6 +351,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         return _draft_report(macro_name, definition)
 
     @tool(description=READ_MACRO_DESCRIPTION)
+    @_answers_instead_of_raising
     async def read_macro(step: int, thought: str, name: str) -> str:
         # What the agent reads is READ_MACRO_DESCRIPTION, not this.
         #
@@ -336,6 +386,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         return f"{macro_name} ({where}):\n\n{source}"
 
     @tool(description=REGISTER_MACRO_DESCRIPTION)
+    @_answers_instead_of_raising
     async def register_macro(
         step: int, thought: str, name: str, screens: list[str] = []
     ) -> str:
@@ -403,6 +454,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         )
 
     @tool(description=RUN_MACRO_DESCRIPTION)
+    @_answers_instead_of_raising
     async def run_macro(
         step: int, thought: str, name: str, arguments: dict[str, Any] = {}
     ) -> str:
@@ -614,12 +666,22 @@ def _render(result: MacroRunResult) -> str:
             lines.append(f"It stopped at {result.stopped_at}.")
         if len(result.chain) > 1:
             lines.append("Call chain: " + " → ".join(str(one) for one in result.chain))
+        # 두 칸을 따로 그린다. 종전에는 둘 다 `observed` 였는데 `runner` 쪽은 dict 를,
+        # `binding` 쪽은 문자열 하나를 실어서, `COMPARISON_REJECTED` 가 나는 순간 여기
+        # `.items()` 가 터지고 **런이 통째로 죽었다.** 뜻이 다르니 이름이 다르다 —
+        # `observed` 는 조건이 읽은 호출들이고, `arrived` 는 비교에 도착한 값 하나다.
+        #
+        # 그래도 `isinstance` 를 둔다. `payload` 는 코드마다 싣는 것이 달라 사전이고,
+        # 여기서 한 번 더 막는 값이 다음에 같은 자리에서 런을 죽이는 것을 막는다.
         observed = failure.payload.get("observed")
-        if observed:
+        if isinstance(observed, dict) and observed:
             lines.append(
                 "What it read there: "
                 + ", ".join(f"{name} = {shown}" for name, shown in observed.items())
             )
+        arrived = failure.payload.get("arrived")
+        if arrived:
+            lines.append(f"The value that arrived there: {arrived}")
 
     lines.append(_places("Reached the game", result.applied))
     lines.append(_places("Did NOT reach the game", result.pending))

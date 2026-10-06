@@ -552,7 +552,7 @@ def compare(
                 "shape": left_shape.value,
                 "operator": operator.value,
                 "allowed": [one.value for one in allowed],
-                "observed": repr(left),
+                "arrived": repr(left),
             },
         )
 
@@ -670,7 +670,7 @@ def evaluate(
         f"`{describe(condition.call)} == <value>`.",
         {
             "shape": shape.value,
-            "observed": repr(value),
+            "arrived": repr(value),
             "reader": condition.call.reader,
         },
     )
