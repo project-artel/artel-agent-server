@@ -17,6 +17,35 @@ Copy-Item .env.example .env
 Then set `OPENROUTER_API_KEY` in `.env`.
 The application loads `.env` automatically through `app.config.Settings`.
 
+### LLM key source
+
+The key for chat and embedding calls is resolved in this order:
+
+1. The key an administrator saved in the orchestration server, fetched from
+   `GET {ORCHESTRATION_BASE_URL}/internal/settings/llm` and cached for
+   `LLM_KEY_CACHE_TTL_SECONDS` (default 30). A 401 from the provider drops the
+   cached value, so a replaced key takes effect on the next call.
+2. The `OPENROUTER_API_KEY` environment variable (alias `LLM_API_KEY`).
+
+If the orchestration server is unreachable or answers anything other than a key,
+the environment variable is used. Embeddings use the same key unless
+`EMBEDDING_API_KEY` is set. The key is never logged.
+
+### Models a key must reach
+
+`GET /internal/models/required` returns `{ "slugs": [...] }`: every catalog model
+served through OpenRouter plus the embedding model (`EMBEDDING_MODEL`). It is
+derived from the catalog in `app/llm/models.py`, so documentation and the
+administrator page can read it instead of keeping a copy.
+
+### Bedrock is optional
+
+A default install never calls AWS Bedrock and boots with no `BEDROCK_*` value.
+The scenario router uses `ROUTER_MODEL`, default `openai/gpt-5.6-luna`. If you
+have Bedrock credentials, you can set `ROUTER_MODEL` to the `bedrock/...` catalog
+value and configure `BEDROCK_REGION` and `BEDROCK_API_KEY` (or the standard AWS
+credential chain).
+
 Install dependencies:
 
 ```powershell

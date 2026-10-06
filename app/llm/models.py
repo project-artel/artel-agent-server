@@ -473,3 +473,17 @@ def list_models() -> list[dict[str, Any]]:
         }
         for model, spec in MODEL_SPECS.items()
     ]
+
+
+def required_openrouter_slugs(embedding_model: str) -> list[str]:
+    """OpenRouter slugs one API key must be able to reach.
+
+    Every catalog entry served through OpenRouter, plus the embedding model.
+    Bedrock entries are left out: they authenticate with AWS, not with the key.
+    Documentation and the administrator page read this so they cannot drift from
+    the catalog.
+    """
+    slugs = [model.value for model in MODEL_SPECS if not model.value.startswith("bedrock/")]
+    if embedding_model not in slugs:
+        slugs.append(embedding_model)
+    return slugs

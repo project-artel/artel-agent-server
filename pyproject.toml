@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "artel-agent-server"
 version = "0.1.0"
 description = "AI agent operation server backend"
+license = {text = "AGPL-3.0-only"}
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
