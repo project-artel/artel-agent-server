@@ -381,6 +381,32 @@ REPORTING_NAMES: dict[str, str] = {
     ),
 }
 
+@dataclass(frozen=True)
+class PairedTools:
+    """눌렀으면 풀어야 하는 tool 두 짝.
+
+    `action_tools.py` 의 그 셋이 전부 같은 문장을 docstring 에 들고 있다 — "Nothing
+    releases this for you." tool 을 직접 부르는 agent 는 다음 턴에 그 문장을 다시
+    읽지만, macro 는 저작 시점에 글이 고정되므로 읽어 줄 다음 턴이 없다. 그래서 저장
+    시점에 센다.
+    """
+
+    # 사람이 읽는 이름. 거절 문장에 그대로 끼운다.
+    counter: str
+    opens: str
+    closes: str
+
+
+# 짝을 맞춰야 하는 셋. `set_input_axis` 와 `set_input_button` 은 여기 없다 — 둘은 같은
+# tool 을 다른 인자로 다시 부르는 모양이고, 그 인자가 이름일 수 있어 저장 시점에 값을
+# 모른다. 두 tool 의 docstring 이 여전히 그것을 말하지만 집행은 못 한다.
+PAIRED_TOOLS: tuple[PairedTools, ...] = (
+    PairedTools("a held key", "hold_key", "release_key"),
+    PairedTools("a held mouse button", "hold_mouse_button", "release_mouse_button"),
+    PairedTools("frozen game time", "pause_game_time", "resume_game_time"),
+)
+
+
 # 호출 깊이. 진입점을 포함해 센다. payload 가 호출 사슬을 찍는데 네 겹은 한 payload
 # 에서 안 읽힌다.
 MAX_CALL_DEPTH = 3

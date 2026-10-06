@@ -230,10 +230,19 @@ MacroArgument = Annotated[
 
 
 class _Statement(_Frozen):
-    # `ast.unparse` 한 statement 텍스트. runner 가 `ctx.run` 의 `summary` 에 넣어
-    # `ACTION` frame 마다 그 statement 가 남게 한다. 여기 싣는 이유는 실행이 저장된
-    # JSON 만 보기 때문이다 — 실행 시점에 다시 unparse 하려면 tree 가 있어야 한다.
-    text: str
+    # 저자가 쓴 **원문 그대로**의 그 줄. runner 가 `ctx.run` 의 `summary` 에 넣어
+    # `ACTION` frame 마다 그 statement 가 남게 한다.
+    #
+    # `ast.unparse` 를 쓰지 않는다. 그것은 따옴표를 바꾸고(`"CardSlot/0"` 이
+    # `'CardSlot/0'` 이 된다) 주석을 버리므로, timeline 에 남는 것이 agent 가 쓴 글자가
+    # 아니게 된다. 이 설계 전체가 텍스트가 원본이고 JSON 이 파생이라는 것 위에 서
+    # 있는데, timeline 이 파생에서 역생성한 글을 보여주면 그 원칙이 바로 그 자리에서
+    # 깨진다 — macro 를 쓴 agent 가 자기가 쓴 줄을 timeline 에서 못 알아보는 것은
+    # 디버깅할 때 제일 비싼 종류의 혼선이다.
+    #
+    # 여기 싣는 이유는 실행이 저장된 JSON 만 보기 때문이다. 실행 시점에 원문에서 다시
+    # 떠내려면 텍스트를 매번 다시 파싱해야 한다.
+    source: str
 
 
 class MacroActionStatement(_Statement):

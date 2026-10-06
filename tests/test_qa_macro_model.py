@@ -148,19 +148,49 @@ def test_an_if_keeps_its_condition_and_both_bodies() -> None:
     assert [statement.kind for statement in branch.orelse] == ["ask_verdict"]
 
 
-def test_every_statement_carries_the_text_the_runner_puts_on_the_timeline() -> None:
-    """`ctx.run` 의 `summary` 에 들어가는 값이다.
+def test_every_statement_carries_the_line_as_the_author_wrote_it() -> None:
+    """`ctx.run` 의 `summary` 에 들어가는 값이고, **원문 그대로**여야 한다.
 
-    여기 실리는 이유는 실행이 저장된 JSON 만 보기 때문이다. 실행 시점에 다시 unparse
-    하려면 tree 가 있어야 하고, tree 가 있으면 매번 다시 파싱하는 것과 같아진다.
+    `ast.unparse` 로 되찍지 않는다. 그것은 따옴표를 바꾸고 주석을 버리므로 timeline 에
+    남는 것이 agent 가 쓴 글자가 아니게 된다 — 텍스트가 원본이고 JSON 이 파생이라는
+    원칙이 바로 그 자리에서 깨진다.
     """
     definition = round_trip(macro_definition_from_source("attack", WITH_HELPERS))
 
-    assert definition.entry.statements[0].text == "aim(card)"
-    # `if` 는 조건 줄만 남긴다. 몸통까지 unparse 하면 한 statement 의 텍스트가 블록
-    # 전체가 되는데, 이 값이 쓰이는 자리는 `ACTION` frame 의 한 줄이다.
-    assert definition.entry.statements[1].text == "if actionable(card):"
-    assert definition.entry.statements[1].body[0].text == "strike(speed)"
+    assert definition.entry.statements[0].source == "aim(card)"
+    # `if` 는 조건 줄만 든다. 몸통까지 들면 한 statement 의 텍스트가 블록 전체가 되는데,
+    # 이 값이 쓰이는 자리는 `ACTION` frame 의 한 줄이다.
+    assert definition.entry.statements[1].source == "if actionable(card):"
+    assert definition.entry.statements[1].body[0].source == "strike(speed)"
+
+
+def test_the_stored_line_keeps_the_quotes_and_the_comment_the_author_wrote() -> None:
+    """`ast.unparse` 가 바꿔 버리는 것이 정확히 이 둘이다.
+
+    따옴표(`"CardSlot/0"` 이 `'CardSlot/0'` 이 된다)와 주석. 둘 중 하나라도 바뀌면
+    macro 를 쓴 agent 가 timeline 에서 자기가 쓴 줄을 못 알아보고, 그것이 디버깅할 때
+    제일 비싼 종류의 혼선이다.
+    """
+    written = (
+        "def m(card: object) -> None:\n"
+        "    # 슬롯으로 끌어 놓는다\n"
+        '    slot: object = selector("CardSlot/0")   # 첫 슬롯\n'
+        "    drag(\n"
+        "        card,\n"
+        "        slot,\n"
+        "    )\n"
+    )
+    definition = round_trip(macro_definition_from_source("m", written))
+
+    assert definition.entry.statements[0].source == (
+        'slot: object = selector("CardSlot/0")   # 첫 슬롯'
+    )
+    # 여러 줄에 걸친 호출은 걸친 줄 전부를 그대로 든다. 안쪽 정렬이 남는다.
+    assert definition.entry.statements[1].source == "drag(\n    card,\n    slot,\n)"
+    # 그리고 어느 statement 에도 `ast.unparse` 가 쓰는 작은따옴표가 없다.
+    assert all(
+        "'" not in statement.source for statement in definition.entry.statements
+    )
 
 
 # --- 텍스트가 원본이라는 관계 ---------------------------------------------------

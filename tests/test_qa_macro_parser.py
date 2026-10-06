@@ -12,6 +12,7 @@ import pytest
 
 from app.agents.qa.macro.errors import MACRO_NODE_REJECTED, MacroRejection
 from app.agents.qa.macro.grammar import (
+    PAIRED_TOOLS,
     DECLARABLE_TYPES,
     MAX_CALL_DEPTH,
     MAX_STATEMENTS,
@@ -654,6 +655,133 @@ def test_every_reader_is_named_in_the_refusal_of_a_bad_condition() -> None:
 
 def test_an_empty_source_is_refused() -> None:
     assert "empty" in rejection("   \n")
+
+
+# --- 눌렀으면 풀어야 하는 tool ------------------------------------------------
+#
+# tool 을 직접 부르는 agent 는 그 tool 의 docstring("Nothing releases this for you.")을
+# 다음 턴에 다시 읽는다. macro 는 글이 저작 시점에 고정이라 읽어 줄 다음 턴이 없고,
+# 눌린 채로 남은 키는 그 뒤의 모든 step 을 조용히 바꾼다. 반복이 없어 경로가 유한하므로
+# 저장 시점에 센다.
+
+
+@pytest.mark.parametrize("pair", list(PAIRED_TOOLS), ids=lambda one: one.opens)
+def test_holding_without_releasing_is_refused(pair) -> None:
+    opener = f"{pair.opens}({_arguments(pair.opens)})"
+    closer = f"{pair.closes}({_arguments(pair.closes)})"
+
+    reason = rejection(f"def m() -> None:\n    {opener}\n")
+    assert pair.counter in reason and pair.closes in reason
+
+    parse(f"def m() -> None:\n    {opener}\n    {closer}\n")
+
+
+@pytest.mark.parametrize("pair", list(PAIRED_TOOLS), ids=lambda one: one.opens)
+def test_releasing_without_holding_is_refused(pair) -> None:
+    opener = f"{pair.opens}({_arguments(pair.opens)})"
+    closer = f"{pair.closes}({_arguments(pair.closes)})"
+
+    assert "never took" in rejection(f"def m() -> None:\n    {closer}\n")
+    # 합이 0 이어도 순서가 뒤바뀐 것은 거절한다. 그 macro 는 끝에 키를 눌린 채로 둔다.
+    assert "never took" in rejection(
+        f"def m() -> None:\n    {closer}\n    {opener}\n"
+    )
+
+
+def test_the_two_branches_of_an_if_have_to_leave_the_counter_the_same() -> None:
+    """한 분기에서만 누르고 다른 분기에서 푸는 macro 는 거절된다. 그것이 맞는 거절이다.
+
+    경로마다 따로 세고 어느 경로에서든 끝에 0 이 아니면 거절한다는 것이 규칙이고, 두
+    가지가 다른 값을 남기면 그런 경로가 반드시 하나 생긴다.
+    """
+    reason = rejection(
+        "def m(card: object) -> None:\n"
+        "    if exists(card):\n"
+        '        hold_key("W")\n'
+        "    else:\n"
+        "        click(card)\n"
+        '    release_key("W")\n'
+    )
+    assert "different state" in reason
+    # 같은 분기 안에서 누르고 풀면 통과한다.
+    parse(
+        "def m(card: object) -> None:\n"
+        "    if exists(card):\n"
+        '        hold_key("W")\n'
+        '        release_key("W")\n'
+        "    else:\n"
+        "        click(card)\n"
+    )
+    # 두 가지가 같은 값을 남기면 분기 밖에서 풀어도 된다.
+    parse(
+        "def m(card: object) -> None:\n"
+        "    if exists(card):\n"
+        '        hold_key("W")\n'
+        "    else:\n"
+        '        hold_key("S")\n'
+        '    release_key("W")\n'
+    )
+
+
+def test_a_helper_that_holds_without_releasing_is_counted_in_its_caller() -> None:
+    """카운터는 호출 트리 전체를 지나는 경로를 센다. helper 로 숨길 수 없다."""
+    assert "a held key" in rejection(
+        "def m() -> None:\n    grab()\n"
+        "\n"
+        'def grab() -> None:\n    hold_key("W")\n'
+    )
+    parse(
+        "def m() -> None:\n    grab()\n"
+        "\n"
+        'def grab() -> None:\n    hold_key("W")\n    release_key("W")\n'
+    )
+
+
+def _arguments(tool: str) -> str:
+    """짝 tool 을 부르는 데 필요한 최소 인자."""
+    return '"W"' if tool in ("hold_key", "release_key") else ""
+
+
+# --- statement 가 드는 원문 ----------------------------------------------------
+
+
+def test_a_statement_keeps_the_line_as_it_was_written() -> None:
+    """`ast.unparse` 로 되찍지 않는다. 따옴표도 주석도 원문 그대로다."""
+    written = (
+        "def m(card: object) -> None:\n"
+        '    slot: object = selector("CardSlot/0")   # 첫 슬롯\n'
+        "    drag(card, slot)  # 끌어 놓는다\n"
+    )
+    definition = parse(written)
+
+    assert definition.entry.statements[0].source == (
+        'slot: object = selector("CardSlot/0")   # 첫 슬롯'
+    )
+    assert definition.entry.statements[1].source == "drag(card, slot)  # 끌어 놓는다"
+    for statement in definition.entry.statements:
+        assert statement.source in written
+
+
+def test_an_if_keeps_only_its_own_line() -> None:
+    definition = parse(
+        "def m(card: object) -> None:\n"
+        "    if exists(card):\n"
+        "        click(card)\n"
+    )
+
+    assert definition.entry.statements[0].source == "if exists(card):"
+
+
+def test_a_statement_spread_over_several_lines_keeps_all_of_them() -> None:
+    definition = parse(
+        "def m(card: object, slot: object) -> None:\n"
+        "    drag(\n"
+        "        card,\n"
+        "        slot,\n"
+        "    )\n"
+    )
+
+    assert definition.entry.statements[0].source == "drag(\n    card,\n    slot,\n)"
 
 
 def test_a_statement_outside_a_def_is_refused() -> None:

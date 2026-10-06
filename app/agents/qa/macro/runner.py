@@ -370,8 +370,8 @@ class _Runner:
         self.stop(
             MacroFailure(
                 code,
-                f"{statement.text} is false. {statement.remedy}",
-                {"expected": statement.text, "observed": _printable(observed)},
+                f"{statement.source} is false. {statement.remedy}",
+                {"expected": statement.source, "observed": _printable(observed)},
             ),
             place,
         )
@@ -425,9 +425,11 @@ class _Runner:
         # 여기까지 오면 게임에 나간다. 번호를 먼저 적는 이유는 `applied` 의 뜻이
         # "나갔다" 이기 때문이다 — 돌려받은 문장이 실패라고 해도 그 action 은 나갔다.
         self.result.applied.append(place)
-        # `summary` 에 statement 텍스트를 넣어 `ACTION` frame 마다 그것이 남게 한다.
+        # `summary` 에 저자가 쓴 원문 줄을 넣어 `ACTION` frame 마다 그것이 남게 한다.
+        # `ast.unparse` 로 되찍지 않는다 — 그러면 timeline 에 남는 것이 agent 가 쓴
+        # 글자가 아니게 되고, 자기가 쓴 줄을 못 알아보는 것이 제일 비싼 혼선이다.
         self.result.outcomes.append(
-            await self.host.run(actions, statement.text, self.step)
+            await self.host.run(actions, statement.source, self.step)
         )
         return True
 

@@ -167,11 +167,12 @@ def test_only_action_statements_reach_applied() -> None:
     assert len(result.applied) == len(host.sent) == 4
 
 
-def test_the_statement_text_rides_along_as_the_action_summary() -> None:
-    """`ACTION` frame 마다 그 statement 가 남는다.
+def test_the_summary_is_the_line_the_author_wrote_character_for_character() -> None:
+    """`ACTION` frame 마다 그 statement 가 **원문 그대로** 남는다.
 
-    `ast.unparse` 를 거친 글이라 원문과 글자가 다를 수 있다 — 따옴표가 작은따옴표로
-    바뀐다. 기대값이 그것을 반영한다.
+    `ast.unparse` 로 되찍으면 따옴표가 작은따옴표로 바뀌고 주석이 떨어진다. 그러면
+    timeline 에 남는 것이 agent 가 쓴 글자가 아니고, macro 를 쓴 agent 가 자기가 쓴 줄을
+    못 알아본다.
     """
     host = FakeHost(battle())
     drive(host, EXAMPLE, "attack_with_combined_card", two_cards(host))
@@ -179,9 +180,23 @@ def test_the_statement_text_rides_along_as_the_action_summary() -> None:
     assert host.summaries() == [
         "drag(card_a, zone)",
         "drag(card_b, zone)",
-        "click(selector('Root[0]/Canvas[1]/Combine[2]'))",
-        "click(selector('Root[0]/Canvas[1]/Attack[3]'))",
+        'click(selector("Root[0]/Canvas[1]/Combine[2]"))',
+        'click(selector("Root[0]/Canvas[1]/Attack[3]"))',
     ]
+    # 그 줄이 실제로 원문에 그대로 있다. 기대값을 손으로 적어 맞춘 것이 아니다.
+    for summary in host.summaries():
+        assert summary in EXAMPLE
+
+
+def test_a_trailing_comment_survives_into_the_summary() -> None:
+    host = FakeHost(battle())
+    source = (
+        "def m(card: object) -> None:\n"
+        '    click(card)  # 카드를 낸다\n'
+    )
+    drive(host, source, "m", {"card": two_cards(host)["card_a"]})
+
+    assert host.summaries() == ["click(card)  # 카드를 낸다"]
 
 
 def test_the_step_the_macro_was_called_on_rides_on_every_batch() -> None:

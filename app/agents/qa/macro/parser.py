@@ -35,6 +35,7 @@ from app.agents.qa.macro.grammar import (
     FORBIDDEN_TOOLS,
     MAX_CALL_DEPTH,
     MAX_STATEMENTS,
+    PAIRED_TOOLS,
     READER_NAME_LIST,
     READERS_BY_NAME,
     REPORTING_NAMES,
@@ -160,6 +161,29 @@ class _Signature:
     parameters: tuple[MacroParameter, ...]
 
 
+def _written(node: ast.AST, lines: list[str], header_only: bool = False) -> str:
+    """그 statement 가 원문에서 차지한 줄, 글자 하나까지 그대로.
+
+    `ast.unparse` 를 쓰지 않는다. 그것은 따옴표를 바꾸고 주석을 버리므로, timeline 에
+    남는 것이 저자가 쓴 글자가 아니게 된다. `ast.get_source_segment` 도 모자라다 — node
+    의 끝 열에서 멈추므로 줄 끝 주석이 떨어진다. 그래서 줄 자체를 떠낸다.
+
+    들여쓰기는 statement 의 `col_offset` 만큼만 벗긴다. 그만큼이 그 몸통의 들여쓰기이고,
+    더 벗기면 여러 줄짜리 호출의 안쪽 정렬이 무너진다.
+
+    `header_only` 는 `if` 다. 몸통까지 떠내면 한 statement 의 텍스트가 블록 전체가
+    되는데, 이 값이 쓰이는 자리는 `ACTION` frame 의 한 줄이다.
+    """
+    first = node.lineno - 1
+    last = first if header_only else (node.end_lineno or node.lineno) - 1
+    indent = node.col_offset
+    taken = []
+    for line in lines[first : last + 1]:
+        head = line[:indent]
+        taken.append(line[indent:] if not head.strip() else line.lstrip())
+    return "\n".join(taken).rstrip()
+
+
 def macro_definition_from_source(name: str, source: str) -> MacroDefinition:
     """macro 텍스트 하나를 통과시켜 정의로 만든다. 못 통과하면 `MacroRejection`.
 
@@ -167,13 +191,14 @@ def macro_definition_from_source(name: str, source: str) -> MacroDefinition:
     `model.py` 의 계약이고, 그래서 `MacroDefinition` 은 여기서만 생긴다.
     """
     module = _module(source)
+    lines = source.splitlines()
     functions = _top_level_functions(module)
     signatures = _signatures(name, functions)
 
     entry: MacroFunction | None = None
     helpers: list[MacroFunction] = []
     for node in functions:
-        reader = _FunctionReader(signatures, node.name)
+        reader = _FunctionReader(signatures, node.name, lines)
         built = MacroFunction(
             name=node.name,
             parameters=signatures[node.name].parameters,
@@ -196,6 +221,7 @@ def macro_definition_from_source(name: str, source: str) -> MacroDefinition:
     _reject_recursion(definition)
     _reject_over_depth(definition)
     _reject_over_statements(definition)
+    _reject_unpaired(definition)
     return definition
 
 
@@ -491,9 +517,13 @@ class _FunctionReader:
     않고 어느 쪽도 밖으로 안 나간다.
     """
 
-    def __init__(self, signatures: dict[str, _Signature], name: str) -> None:
+    def __init__(
+        self, signatures: dict[str, _Signature], name: str, lines: list[str]
+    ) -> None:
         self.signatures = signatures
         self.name = name
+        # 원문의 줄. statement 마다 저자가 쓴 그 줄을 그대로 떠내는 데 쓴다.
+        self.lines = lines
         self.parameters: dict[str, _Binding] = {
             parameter.name: _Binding(parameter.declared_type, "parameter")
             for parameter in signatures[name].parameters
@@ -664,7 +694,7 @@ class _FunctionReader:
         # 않게 하려는 것이다.
         self._bind(node.target.id, declared, origin, node)
         return MacroAssignStatement(
-            text=ast.unparse(node),
+            source=_written(node, self.lines),
             name=node.target.id,
             declared_type=declared,
             value=value,
@@ -805,9 +835,7 @@ class _FunctionReader:
         # Python AST 가 `elif` 를 그렇게 표현하므로 `If` 를 허용하면 따라온다.
         orelse = self.body(node.orelse, node) if node.orelse else ()
         return MacroIfStatement(
-            # 몸통까지 unparse 하면 한 statement 의 텍스트가 블록 전체가 된다. 이 값이
-            # 쓰이는 자리는 `ACTION` frame 의 한 줄이므로 조건 줄만 남긴다.
-            text=f"if {ast.unparse(node.test)}:",
+            source=_written(node, self.lines, header_only=True),
             condition=condition,
             body=body,
             orelse=orelse,
@@ -1109,19 +1137,19 @@ class _FunctionReader:
                 node.lineno,
             )
         name = node.func.id
-        text = ast.unparse(node)
+        written = _written(node, self.lines)
 
         if name == REQUIRE:
-            return self._require(node, text)
+            return self._require(node, written)
         if name == FLAG:
-            return self._flag(node, text)
+            return self._flag(node, written)
         if name == ASK_VERDICT:
-            return self._ask_verdict(node, text)
+            return self._ask_verdict(node, written)
 
         if name in TOOLS_BY_NAME:
             spec = TOOLS_BY_NAME[name]
             return MacroActionStatement(
-                text=text,
+                source=written,
                 callee=name,
                 arguments=self._arguments(spec.name, spec.parameters, node),
             )
@@ -1129,7 +1157,7 @@ class _FunctionReader:
         if name in self.signatures:
             helper = self.signatures[name]
             return MacroHelperCallStatement(
-                text=text,
+                source=written,
                 callee=name,
                 arguments=self._arguments(
                     helper.name, _helper_parameters(helper), node
@@ -1163,7 +1191,7 @@ class _FunctionReader:
             node.lineno,
         )
 
-    def _require(self, node: ast.Call, text: str) -> MacroRequireStatement:
+    def _require(self, node: ast.Call, written: str) -> MacroRequireStatement:
         if node.keywords:
             # `require(hp = 100)` 은 문법 오류가 아니다. Python 이 `hp = 100` 을
             # `ast.keyword` 로 읽어 조용히 통과시키므로, 거절 문장이 `==` 를 대 줘야 한다.
@@ -1190,9 +1218,9 @@ class _FunctionReader:
                 "condition is false, in one sentence.",
                 node.lineno,
             )
-        return MacroRequireStatement(text=text, condition=condition, remedy=remedy)
+        return MacroRequireStatement(source=written, condition=condition, remedy=remedy)
 
-    def _flag(self, node: ast.Call, text: str) -> MacroFlagStatement:
+    def _flag(self, node: ast.Call, written: str) -> MacroFlagStatement:
         if node.keywords or len(node.args) != 1:
             raise MacroRejection(
                 "`flag` takes exactly one argument: a message written out as a string. "
@@ -1206,9 +1234,9 @@ class _FunctionReader:
                 "the message of `flag` cannot be empty. Say what the macro saw.",
                 node.lineno,
             )
-        return MacroFlagStatement(text=text, message=message)
+        return MacroFlagStatement(source=written, message=message)
 
-    def _ask_verdict(self, node: ast.Call, text: str) -> MacroAskVerdictStatement:
+    def _ask_verdict(self, node: ast.Call, written: str) -> MacroAskVerdictStatement:
         if node.keywords or len(node.args) != 2:
             raise MacroRejection(
                 "`ask_verdict` takes exactly two arguments: the scenario step number, "
@@ -1237,7 +1265,7 @@ class _FunctionReader:
                 "not what you happened to see on one run.",
                 node.lineno,
             )
-        return MacroAskVerdictStatement(text=text, step=step.value, expected=expected)
+        return MacroAskVerdictStatement(source=written, step=step.value, expected=expected)
 
     # -- 인자 --
 
@@ -1478,6 +1506,101 @@ def _statement_cost(statements: tuple[MacroStatement, ...], cost) -> int:
         else:
             total += 1
     return total
+
+
+@dataclass(frozen=True)
+class _Tally:
+    """한 몸통이 카운터 하나에 하는 일. 경로마다 따로 센 결과다.
+
+    `delta` 는 그 몸통을 지나면 카운터가 얼마나 달라지나, `lowest` 는 그 몸통을 지나는
+    동안 카운터가 내려간 최저값이다. 둘을 함께 들면 분기가 있어도 경로를 하나하나
+    펼치지 않고 셀 수 있다 — `if` 하나당 경로가 둘로 갈려 128 statement 면 경로가
+    천문학적인 수가 되므로, 펼치는 셈은 집행이 안 된다.
+    """
+
+    delta: int
+    lowest: int
+
+
+def _tally(statements: tuple[MacroStatement, ...], pair, cost) -> _Tally:
+    """그 몸통의 카운터 합과 최저값.
+
+    `if` 의 두 가지가 서로 다른 `delta` 를 내면 거기서 거절한다. 그래야 "어느 경로에서든
+    끝에 0 이 남는다" 를 합 하나로 판정할 수 있고, 무엇보다 **한 분기에서만 누르고 다른
+    분기에서 푸는 macro** 가 바로 그 경우다 — 그것이 맞는 거절이다.
+    """
+    delta = 0
+    lowest = 0
+    for statement in statements:
+        if isinstance(statement, MacroActionStatement):
+            step = (
+                1
+                if statement.callee == pair.opens
+                else -1
+                if statement.callee == pair.closes
+                else 0
+            )
+            delta += step
+            lowest = min(lowest, delta)
+            continue
+        if isinstance(statement, MacroHelperCallStatement):
+            inner = cost(statement.callee)
+        elif isinstance(statement, MacroIfStatement):
+            taken = _tally(statement.body, pair, cost)
+            other = _tally(statement.orelse, pair, cost)
+            if taken.delta != other.delta:
+                raise MacroRejection(
+                    f"{pair.counter} is left in a different state by the two branches of "
+                    f"`{statement.source}`: one leaves {taken.delta:+d} and the other "
+                    f"{other.delta:+d}. Hold and release it inside the same branch, or "
+                    "in neither — a macro that presses in one branch and lets go in the "
+                    "other leaves the game holding it whenever the condition goes the "
+                    "other way."
+                )
+            inner = _Tally(
+                delta=taken.delta, lowest=min(taken.lowest, other.lowest)
+            )
+        else:
+            continue
+        lowest = min(lowest, delta + inner.lowest)
+        delta += inner.delta
+    return _Tally(delta=delta, lowest=lowest)
+
+
+def _reject_unpaired(definition: MacroDefinition) -> None:
+    """누른 것을 안 푼 macro 를 저장 시점에 거절한다.
+
+    tool 을 직접 부르는 agent 는 그 tool 의 docstring 을 다음 턴에 다시 읽는다. macro
+    는 글이 저작 시점에 고정이라 읽어 줄 다음 턴이 없고, 눌린 채로 남은 키는 그 뒤의
+    모든 step 을 조용히 바꾼다. 반복이 없어 경로가 유한하므로 여기서 셀 수 있다.
+    """
+    for pair in PAIRED_TOOLS:
+        memo: dict[str, _Tally] = {}
+
+        def cost(name: str, pair=pair, memo=memo) -> _Tally:
+            if name not in memo:
+                function = definition.function(name)
+                memo[name] = (
+                    _Tally(0, 0)
+                    if function is None
+                    else _tally(function.statements, pair, cost)
+                )
+            return memo[name]
+
+        total = _tally(definition.entry.statements, pair, cost)
+        if total.delta > 0:
+            raise MacroRejection(
+                f"this macro leaves {pair.counter} behind: it calls `{pair.opens}` "
+                f"{total.delta} more time(s) than `{pair.closes}`. Nothing releases it "
+                f"for you, so every step after this macro would run with it still held. "
+                f"Add the matching `{pair.closes}`."
+            )
+        if total.delta < 0 or total.lowest < 0:
+            raise MacroRejection(
+                f"this macro releases {pair.counter} it never took: `{pair.closes}` is "
+                f"reached without a `{pair.opens}` before it. Either the `{pair.opens}` "
+                "is missing or the two are the wrong way round."
+            )
 
 
 def _reject_over_statements(definition: MacroDefinition) -> None:
