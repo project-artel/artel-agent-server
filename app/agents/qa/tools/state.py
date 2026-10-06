@@ -8,6 +8,7 @@
 from dataclasses import dataclass
 from typing import Any
 
+from app.agents.qa.macro.book import MacroBook
 from app.qa.envelope import ActionResultItem, JsonRpcAction
 from app.qa.schemas import QaStepResult
 
@@ -156,6 +157,12 @@ class QaRunState:
         # 받아 적으면 안 된다 — JSON-RPC 인자는 모델이 지어내기 쉬운 모양이고 저쪽은 그것을
         # 읽지 않고 그대로 저장한다. 모델은 "무엇으로 눌렀나" 만 말하고 인자는 이 표가 낸다.
         self.dispatched_action_params: dict[str, list[Any]] = {}
+        # 이 런의 macro 초안과 등록된 정의, 그리고 무엇을 읽었나 (ARTEL-925).
+        #
+        # 사전 셋을 여기 흩뿌리지 않는 이유는 초안의 수명주기 — 쓰고·읽고·고치고·
+        # 등록한다 — 가 규칙을 들고 있기 때문이다. 그 규칙이 `MacroBook` 에 있으면 tool
+        # 없이 단위 테스트가 되고, 여기 흩어 놓으면 tool 을 통해서만 재어진다.
+        self.macros = MacroBook()
         # Handed to the vision middleware on the next model call. The tool cannot
         # return the image itself — an image block on a tool result is rejected by
         # the chat/completions API every model here is reached through.

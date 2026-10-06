@@ -1,0 +1,174 @@
+"""모델이 읽는 tool 다섯의 설명.
+
+`app/agents/qa/screen.py` 와 `app/agents/qa/capability.py` 의 선례다. tool 파일에 두면
+그 파일이 정책 문서가 되고, 설명이 길어질수록 tool 본문이 묻힌다.
+
+**받을 수 있는 것의 목록은 `grammar.py` 에서 조립한다.** `parse_target` 의 선례대로
+설명이 이름을 전부 대야 하는데, 손으로 다시 적으면 모델이 읽는 글과 parser 가 실제로
+받는 것이 어긋난다 — 그 어긋남은 모델이 거절을 받을 때까지 아무 데도 안 보인다.
+"""
+
+from app.agents.qa.macro.grammar import (
+    DECLARABLE_TYPE_NAMES,
+    MAX_CALL_DEPTH,
+    MAX_STATEMENTS,
+    READER_NAMES,
+    TOOL_NAMES,
+)
+
+_TOOLS = ", ".join(f"`{name}`" for name in TOOL_NAMES)
+_READERS = ", ".join(f"`{name}()`" for name in READER_NAMES)
+
+# 문법 전체를 한 번 적는 자리. `write_macro` 와 `edit_macro` 가 같은 것을 받으므로 두
+# 설명이 이것을 공유한다.
+GRAMMAR = f"""A macro is written as Python-looking text, but it is NOT executed as Python:
+it is read with `ast.parse` and anything outside the list below is refused when
+you store it, with a refusal that names what is accepted instead.
+
+**The shape.** One `def` named exactly like the macro is its entry point. Any
+other `def` in the same source is a helper it may call. Every parameter and
+every assignment carries a type, and the types are: {DECLARABLE_TYPE_NAMES}.
+Every `def` returns `-> None`, because a macro hands back no value.
+
+**The six statements.**
+- an action: {_TOOLS}, or a helper `def` from this same source
+- `require(<condition>, "<remedy>")` — both arguments are required. The remedy
+  is what the agent reading the failure is told to do about it
+- a typed assignment: `card: object = find(label="shoot")`
+- `if` / `elif` / `else`
+- `flag("<message>")` — tells you what the macro saw, and nothing more
+- `ask_verdict(<step>, "<expected>")` — says that scenario step needs judging
+
+**Aiming.** A target is `selector("<unity/hierarchy/path>")`, a parameter on the
+`def` line, or a name bound by `find(...)` or `selector(...)`. There is no syntax
+for a coordinate or a `#id`: both go stale between the run that writes the macro
+and the run that calls it. `enter_text` takes a target here even though the tool
+itself takes an id — the macro resolves the id for you.
+
+**Finding things.** `find(label=..., name=..., under=...)` takes keywords only
+and needs at least one of `label=` or `name=`. `label=` matches the text an
+object is showing on screen; `name=` matches the last segment of its selector;
+`under=` narrows by path prefix. A lookup that matches nothing, or more than one
+thing, is reported where it happened and nothing is sent to the game.
+
+**Conditions.** One condition is ONE comparison (`==`, `!=`, `>`, `<`, `>=`,
+`<=`) or ONE reader call. `and`, `or` and `not` are refused — write two
+`require` calls, so each says on its own what to do when it fails. The readers
+are: {_READERS}. A condition written without a comparison has to be a bool, so
+only `actionable()`, `exists()` and `absent()` stand alone.
+
+**What each type can be compared with.** Ordering (`>`, `<`, `>=`, `<=`) works
+on numbers only. A string, a bool and an object take `==` and `!=`. A vector
+takes nothing. Comparing two different shapes is refused rather than being
+false forever.
+
+**Refused outright:** `for`, `while`, `and`, `or`, `not`, a dot (`card.id`), a
+nested `def`, `import`, `lambda`, an f-string, `return`, a docstring,
+re-assignment, arithmetic, `click_button` (deprecated), `reset_game` (a stored
+script must not be able to throw the run's progress away), and `report_step` /
+`report_issue` (a verdict needs the scenario and the operator's words, which a
+macro does not hold).
+
+**What you hold, you release.** `hold_key` / `release_key`,
+`hold_mouse_button` / `release_mouse_button` and `pause_game_time` /
+`resume_game_time` are counted along every path through the macro, and a macro
+that ends any path still holding one is refused when you register it. That
+includes holding inside one branch of an `if` and releasing outside it: hold and
+release in the same branch, or in neither. Nothing releases these for you, and a
+key left down changes every step after the macro.
+
+**The limits, checked when you register rather than while it runs:** at most
+{MAX_STATEMENTS} statements along the longest path, and a call chain at most
+{MAX_CALL_DEPTH} deep counting the entry point. Caught at registration because
+an action already sent to the game cannot be taken back."""
+
+# 연속값 권고. 거절이 아니라 관용구를 주는 것이라 `write_macro` 에만 싣는다.
+_NUMBER_EQUALITY = """**A caution about `==` on a number.** It is allowed, and on a continuous value
+— a position, a timer — it is treacherous. The SDK rounds a number to four
+decimals before sending it, so a value sitting still still wobbles in its last
+place. The idiom is two `require` calls with `<` and `>` around the value you
+expect, rather than one with `==`. This is advice, not a refusal."""
+
+WRITE_MACRO_DESCRIPTION = f"""Write a macro draft: a named sequence of actions you can call again later.
+
+Use this once you have worked out a sequence by hand and expect to need it
+again — dealing a card into a slot, walking a dialogue to its end, setting up the
+board a step needs. The draft is parsed and you are told what it would do, or
+exactly what is wrong with it. **Nothing is registered and nothing runs.**
+`register_macro` is what makes it callable.
+
+`name` is what you will call it by, and the source must contain a `def` with
+exactly that name — that `def` is the entry point and its parameters are what
+`run_macro` will ask you for.
+
+Calling this with a name that already has a draft replaces that draft outright.
+To change part of one, read it with `read_macro` and change that part with
+`edit_macro`.
+
+{GRAMMAR}
+
+{_NUMBER_EQUALITY}"""
+
+EDIT_MACRO_DESCRIPTION = f"""Change part of a macro draft by replacing text in it.
+
+`old_text` is matched as plain text against the draft and has to appear EXACTLY
+ONCE. Nothing happens if it appears zero times or more than once, and you are
+told which — a line number would be worse, because getting one wrong changes the
+wrong line silently.
+
+Read the macro with `read_macro` first. This refuses a macro this run has not
+read, because changing text you have not seen is changing text you cannot check.
+
+If the name has no draft but is already registered, the registered macro is
+copied into a draft and the draft is changed. **The registered macro is left
+exactly as it was**, so a run calling it while you edit is unaffected, and
+`register_macro` is what replaces it.
+
+{GRAMMAR}"""
+
+READ_MACRO_DESCRIPTION = """Read a macro's source text.
+
+Returns the draft if there is one, and the registered macro's source otherwise.
+This is also what licenses `edit_macro`: changing text you have not read is
+changing text you cannot check.
+
+The text comes back as it was written, comments and blank lines included, which
+is why the macro's own source is what is stored rather than something printed
+back out of a parsed tree."""
+
+REGISTER_MACRO_DESCRIPTION = """Register a macro draft so `run_macro` can call it.
+
+The draft is parsed again and refused if anything in it is not allowed — broken
+syntax, an unknown tool name, an untyped parameter, a comparison that could never
+be true. Nothing is registered when it is refused, and the refusal names what to
+write instead.
+
+A name that is already registered is updated in place, so the `screen` relations
+that name already carries are kept rather than dropped and rebuilt.
+
+The macro is related to the `screen` you are standing on right now, and
+`screens` lets you name more. `screens` ADDS to what is already there; there is
+no way to take a relation away. When the run does not yet know which screen it
+is standing on, the macro registers with no relation at all — which is the right
+record of "nobody knows where this is used yet"."""
+
+RUN_MACRO_DESCRIPTION = """Call a macro you registered earlier, against the screen you are on now.
+
+`arguments` is a mapping from the entry `def`'s parameter names to values. Every
+parameter without a default has to be there. An `object` parameter takes a
+selector — a Unity hierarchy path — and a coordinate or a `#id` string is refused
+before anything reaches the game, for the same reason the macro's own syntax has
+no way to write one.
+
+A draft is not callable; `register_macro` first. When a name has both a draft and
+a registration, this calls the REGISTERED one, so editing a macro never changes
+what a call does until you register the change.
+
+What comes back says how far it got. The actions that actually reached the game
+are listed apart from the ones that did not, and apart again from the ones an
+`if` decided to skip — an action already sent cannot be taken back, so calling
+the macro again starts from a board that is not where it started last time.
+
+Anything the macro flagged comes back too, and so does any step it says needs
+judging. A flagged line is for you to read; a step it names still needs your
+`report_step`, and the macro does not report anything itself."""

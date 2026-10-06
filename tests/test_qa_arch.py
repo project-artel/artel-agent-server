@@ -446,6 +446,11 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
     "pause_game_time",
     "resume_game_time",
     "reset_game",
+    "write_macro",
+    "edit_macro",
+    "read_macro",
+    "register_macro",
+    "run_macro",
     "wait_for_operator",
     "report_step",
     "report_issue",
@@ -454,12 +459,20 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
     "capture_screen",
     "compact_context",
 )
-# Moved twice since it was last pinned: `screen_capture` joined `QaArchSpec`
-# (ARTEL-868), which every structure's digest follows because the dump gained a
-# key, and then three pointer tool names and four tool schemas changed
-# (ARTEL-880). Only the second is a change of shape, and it is why the label
-# above moved with the digest this time.
-_EXPECTED_DEFAULT_FINGERPRINT = "83bc272fee58"
+# Moved again, and this time the label deliberately did NOT move with it. The
+# five macro tools above joined the set (ARTEL-925): `write_macro`,
+# `edit_macro`, `read_macro`, `register_macro` and `run_macro`. By the rule in
+# the docstring below that is the first case and should carry a `QA_ARCH_LABEL`
+# bump — the tool set changed.
+#
+# The bump is deliberately deferred to ARTEL-926, which owns it and drives the
+# QA run that gives the new label numbers to be read against. The cost of
+# deferring is stated rather than hidden: until that issue lands, runs made
+# before and after these tools exist are both filed under `v5-pointer-target`
+# while carrying two different fingerprints, which is exactly the failure the
+# module docstring in `app/agents/qa/arch.py` names. The fingerprint still
+# separates them, so no record is lost — only the readable name is.
+_EXPECTED_DEFAULT_FINGERPRINT = "72640f62436a"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:

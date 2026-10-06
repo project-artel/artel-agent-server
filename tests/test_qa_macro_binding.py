@@ -257,7 +257,7 @@ def test_text_reads_the_letters_the_object_is_showing() -> None:
 def test_actionable_answers_from_offers_alone() -> None:
     """`id` 는 거의 모든 객체에 실리므로 그것으로 가르면 아무것도 안 걸러진다."""
     held = memories(
-        card("Root[0]/Go[1]", offers={"clicks": ["onClick"]}),
+        card("Root[0]/Go[1]", offers={"clicks": [{"on": "Button", "method": "Deal"}]}),
         card("Root[0]/Label[2]", text="hello", offers=None),
     )
     scope = MacroScope()

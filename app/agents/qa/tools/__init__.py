@@ -19,6 +19,7 @@ from app.agents.qa.arch import ResolvedArch, default_resolved_arch
 from app.agents.qa.tools.action_tools import build_action_tools
 from app.agents.qa.tools.capability_tools import build_capability_tools
 from app.agents.qa.tools.knowledge_tools import build_knowledge_tools
+from app.agents.qa.tools.macro_tools import build_macro_tools
 from app.agents.qa.tools.observation_tools import build_capture_tool, build_observation_tools
 from app.agents.qa.tools.reporting_tools import build_reporting_tools
 from app.agents.qa.tools.screen_tools import build_screen_selector_tools
@@ -40,6 +41,9 @@ def build_tools(
         *build_screen_selector_tools(ctx),
         *build_capability_tools(ctx),
         *build_action_tools(ctx),
+        # action tool 바로 뒤다. macro 가 하는 일이 그 열넷을 묶어 다시 보내는 것이므로,
+        # 모델이 받는 목록에서도 그 옆에 선다.
+        *build_macro_tools(ctx),
         *build_reporting_tools(ctx),
     ]
 

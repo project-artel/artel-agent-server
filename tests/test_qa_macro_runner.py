@@ -107,9 +107,9 @@ def battle(combine_actionable: bool = True, enemy_text: str = "60") -> SceneMemo
         card(
             "Root[0]/Canvas[1]/Combine[2]",
             instance_id=51,
-            offers={"clicks": ["onClick"]} if combine_actionable else None,
+            offers={"clicks": [{"on": "Button", "method": "Deal"}]} if combine_actionable else None,
         ),
-        card("Root[0]/Canvas[1]/Attack[3]", instance_id=52, offers={"clicks": ["onClick"]}),
+        card("Root[0]/Canvas[1]/Attack[3]", instance_id=52, offers={"clicks": [{"on": "Button", "method": "Deal"}]}),
         card("Root[0]/Enemy[7]", text=enemy_text, instance_id=60),
     )
 
@@ -292,7 +292,7 @@ def test_the_branch_not_taken_lands_in_skipped_and_not_in_pending() -> None:
     host = FakeHost(battle())
     pressable = two_cards(host)["card_a"]
     # 그 카드를 누를 수 있게 둔다.
-    host.memory.pulse.held[pressable.key].offers = {"clicks": ["onClick"]}
+    host.memory.pulse.held[pressable.key].offers = {"clicks": [{"on": "Button", "method": "Deal"}]}
     result = drive(host, BRANCHY, "m", {"card": pressable})
 
     assert result.passed, result.failure
@@ -317,7 +317,7 @@ def test_a_flag_and_a_verdict_request_are_collected_apart() -> None:
     """하나는 알림이고 하나는 의무라 agent 가 다르게 다뤄야 한다."""
     host = FakeHost(battle())
     pressable = two_cards(host)["card_a"]
-    host.memory.pulse.held[pressable.key].offers = {"clicks": ["onClick"]}
+    host.memory.pulse.held[pressable.key].offers = {"clicks": [{"on": "Button", "method": "Deal"}]}
     result = drive(host, BRANCHY, "m", {"card": pressable})
 
     assert [one.message for one in result.flags] == ["the card was pressable"]
@@ -335,7 +335,7 @@ def test_a_flag_and_a_verdict_request_are_collected_apart() -> None:
 def test_a_flag_or_verdict_request_in_the_branch_not_taken_is_not_collected() -> None:
     host = FakeHost(battle())
     pressable = two_cards(host)["card_a"]
-    host.memory.pulse.held[pressable.key].offers = {"clicks": ["onClick"]}
+    host.memory.pulse.held[pressable.key].offers = {"clicks": [{"on": "Button", "method": "Deal"}]}
     result = drive(host, BRANCHY, "m", {"card": pressable})
 
     assert len(result.flags) == 1 and result.verdict_requests == []
@@ -411,7 +411,7 @@ def test_a_helper_runs_as_a_call_and_its_numbers_are_its_own() -> None:
     """세는 것만 편다, 실행은 안 편다. `step N of M` 은 `def` 마다 1부터 센다."""
     host = FakeHost(battle())
     pressable = two_cards(host)["card_a"]
-    host.memory.pulse.held[pressable.key].offers = {"clicks": ["onClick"]}
+    host.memory.pulse.held[pressable.key].offers = {"clicks": [{"on": "Button", "method": "Deal"}]}
     result = drive(host, WITH_HELPER, "attack", {"card": pressable})
 
     assert result.passed, result.failure
@@ -455,7 +455,7 @@ def test_a_flag_inside_a_helper_says_which_def_it_stood_in() -> None:
         '        flag("pressable")\n'
     )
     pressable = two_cards(host)["card_a"]
-    host.memory.pulse.held[pressable.key].offers = {"clicks": ["onClick"]}
+    host.memory.pulse.held[pressable.key].offers = {"clicks": [{"on": "Button", "method": "Deal"}]}
     result = drive(host, source, "attack", {"card": pressable})
 
     assert result.flags[0].place.function == "look"
