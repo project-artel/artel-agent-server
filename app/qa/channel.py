@@ -17,6 +17,8 @@ from app.qa.envelope import (
     ActionResultPayload,
     CapabilityWriteResultPayload,
     ChatPayload,
+    ContextUsage,
+    ContextUsagePayload,
     GameState,
     JsonRpcAction,
     KnowledgeExpandPayload,
@@ -239,6 +241,21 @@ class QaRunChannel:
         """Put a line on the timeline. Nothing waits for it."""
         await self._send(
             self._frame(MessageType.LOG, LogPayload(category=category, message=message, step=step))
+        )
+
+    async def context_usage(self, used_tokens: int, max_tokens: int) -> None:
+        """Report how much of the model's input window the last call filled."""
+        percent = 100 * used_tokens // max_tokens
+        message = f"context {used_tokens // 1000}k / {max_tokens // 1000}k ({percent}%)"
+        await self._send(
+            self._frame(
+                MessageType.LOG,
+                ContextUsagePayload(
+                    category=LogCategory.SYSTEM,
+                    message=message,
+                    context=ContextUsage(used_tokens=used_tokens, max_tokens=max_tokens),
+                ),
+            )
         )
 
     async def say(self, message: str, step: int | None = None) -> None:

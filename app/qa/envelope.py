@@ -560,6 +560,22 @@ class LogPayload(BaseModel):
     step: int | None = None
 
 
+class ContextUsage(BaseModel):
+    used_tokens: int
+    max_tokens: int
+
+
+class ContextUsagePayload(LogPayload):
+    """A `LOG` line that also carries how full the model's context was on one call.
+
+    Rides on `LOG` rather than a new type: Orchestration rejects a type it does not
+    know, and it stores and relays a `LOG` payload whole. Screens find these lines by
+    the `context` key; every other `LOG` frame lacks it.
+    """
+
+    context: ContextUsage
+
+
 class ToolCallPayload(BaseModel):
     """모델이 부른 tool 하나.
 

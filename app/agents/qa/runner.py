@@ -546,6 +546,7 @@ class QaRunner:
                 if kind != "ai":
                     continue
 
+                await self._report_context(channel, message)
                 text = self._text_of(message)
                 calls = getattr(message, "tool_calls", None) or []
                 logger.info(
@@ -560,6 +561,20 @@ class QaRunner:
                     await channel.note(text, LogCategory.THOUGHT)
                 for call in calls:
                     await self._log_tool_call(channel, call)
+
+    async def _report_context(self, channel: QaRunChannel, message) -> None:
+        """Tell the timeline how full the context was on this model call.
+
+        `input_tokens` is what the provider counted for the call, cached prefix
+        included, so it is the number compaction's trigger should be read against.
+        A call that came back without usage reports nothing rather than a zero.
+        """
+        usage = getattr(message, "usage_metadata", None) or {}
+        used = usage.get("input_tokens")
+        maximum = get_model_spec(self._config.model).max_input_tokens
+        if not isinstance(used, int) or used <= 0 or maximum <= 0:
+            return
+        await channel.context_usage(used, maximum)
 
     @staticmethod
     def _step_of(args: dict) -> int | None:
