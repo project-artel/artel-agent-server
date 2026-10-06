@@ -1,5 +1,7 @@
 from functools import lru_cache
 
+from typing import Literal
+
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -43,6 +45,20 @@ class Settings(BaseSettings):
     # 180 s is above the slowest authoring turn measured (a 66-case project ran
     # ~70 s) with room for a reasoning model, and far below a wait a person
     # accepts without being told something is wrong.
+    # 입구 라우터를 어느 모델로 돌릴까. **롤백이 이 한 줄이다.**
+    #
+    # `haiku` 는 종전 그대로(범용 대화 모델에 분류를 맡긴다). `jev` 는 갈래를 고르는 일만
+    # 하는 결정 전용 모델이다 — 실측(실제 사용자 말 163줄, ARTEL-944)에서 지연 중앙값
+    # 1,702ms → 240ms, 판정당 $0.0020140 → $0.0001152, 정확도 95.7% → 98.2%.
+    #
+    # 기본값을 `haiku` 로 두는 이유는 측정에 못 들어간 자리가 남아서다. 실제 사용자 말에
+    # `offtopic` 이 0건이어서 그 갈래는 손으로 쓴 트립와이어 14줄로만 봤고, 문맥을 주지
+    # 않은 조건에서 쟀다.
+    scenario_router_engine: Literal["haiku", "jev"] = "haiku"
+    # 결정 모델 호출의 한도. 실측 p90 이 340ms 라 느슨하게 잡아도 10초면 넉넉하고, 이보다
+    # 길게 두면 입구가 막힌 채로 모든 갈래가 기다린다.
+    scenario_router_timeout_seconds: float = 10.0
+
     openrouter_timeout_seconds: float = 180.0
     openrouter_max_retries: int = 1
 
