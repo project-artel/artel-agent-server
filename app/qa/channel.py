@@ -703,15 +703,7 @@ class QaRunChannel:
         The tool times out into "cannot confirm", which is what the situation is.
         """
         payload = KnowledgeWriteResultPayload.model_validate(raw.get("payload") or {})
-        correlation = raw.get("correlationId")
-        pending = self._pending.get(correlation) if isinstance(correlation, str) else None
-        if pending is not None and payload.type and payload.type != pending.request_type:
-            logger.warning(
-                "[QA] a %s answer arrived for a %s request (correlation %s); dropped",
-                payload.type,
-                pending.request_type,
-                correlation,
-            )
+        if self._answers_another_request(raw, payload.type):
             return
         self._resolve(raw, payload)
 
@@ -759,15 +751,7 @@ class QaRunChannel:
         거절 사유를 모델에게 읽어 준다.
         """
         payload = ScreenSelectorResultPayload.model_validate(raw.get("payload") or {})
-        correlation = raw.get("correlationId")
-        pending = self._pending.get(correlation) if isinstance(correlation, str) else None
-        if pending is not None and payload.type and payload.type != pending.request_type:
-            logger.warning(
-                "[QA] a %s answer arrived for a %s request (correlation %s); dropped",
-                payload.type,
-                pending.request_type,
-                correlation,
-            )
+        if self._answers_another_request(raw, payload.type):
             return
         if self._resolve(raw, payload):
             return
@@ -800,15 +784,7 @@ class QaRunChannel:
         타임아웃으로 "확인할 수 없다" 에 도달하는데, 그것이 실제 상황이다.
         """
         payload = CapabilityWriteResultPayload.model_validate(raw.get("payload") or {})
-        correlation = raw.get("correlationId")
-        pending = self._pending.get(correlation) if isinstance(correlation, str) else None
-        if pending is not None and payload.type and payload.type != pending.request_type:
-            logger.warning(
-                "[QA] a %s answer arrived for a %s request (correlation %s); dropped",
-                payload.type,
-                pending.request_type,
-                correlation,
-            )
+        if self._answers_another_request(raw, payload.type):
             return
         self._resolve(raw, payload)
 
@@ -829,15 +805,21 @@ class QaRunChannel:
     def _answers_another_request(self, raw: dict, answered_type: str) -> bool:
         """이 답이 실은 **다른** 요청의 답인가. 맞으면 부르는 쪽이 버린다.
 
-        저쪽은 쓰기 응답마다 무엇의 답인지를 payload 의 `type` 에 echo 한다. correlation
-        만으로는 못 잡는 것을 이 비교가 잡는다 — 둘이 어긋나면 믿는 대신 버린다.
-        macro 는 쓰기와 읽기의 응답 타입이 갈려 있어 지금은 어긋날 길이 없지만, 저쪽이
-        타입을 하나 더하면 그때 조용히 틀리는 자리가 여기다.
+        저쪽은 응답마다 무엇의 답인지를 payload 의 `type` 에 echo 한다. correlation
+        하나로는 못 잡는 것을 이 비교가 잡는다 — 둘이 어긋나면 믿는 대신 버린다.
+        한 응답 타입이 요청 여러 개에 답하는 자리마다 필요하고
+        (`KNOWLEDGE_WRITE_RESULT` 가 쓰기 다섯에, `SCREEN_SELECTOR_RESULT` 가
+        `SCREEN_SELECTOR_RULE` 과 `SCREEN_SELECTOR_VERDICT` 둘에,
+        `CAPABILITY_WRITE_RESULT` 가 쓰기 둘에), macro 는 쓰기와 읽기의 응답 타입이
+        갈려 있어 지금은 어긋날 길이 없지만 저쪽이 macro 쓰기 타입을 하나 더하면 그때
+        조용히 틀리는 자리가 여기다.
 
-        어긋난 답을 실패로 옮기지 않고 버리는 것은 `on_capability_write_result` 와 같은
-        판단이다. 저쪽의 프로토콜 오류이지 런이 할 수 있는 일이 아니고, 실패로 옮기면
-        모델이 이미 적혔을지도 모르는 정의를 다시 쓴다. tool 은 타임아웃으로 "확인할 수
-        없다" 에 도달하는데, 그것이 실제 상황이다.
+        **어긋난 답은 실패로 옮기지 않고 버린다.** 저쪽의 프로토콜 오류이지 런이 할 수
+        있는 일이 아니고, 실패로 옮기면 모델이 이미 적혔을지도 모르는 것을 다시 쓴다.
+        tool 은 타임아웃으로 "확인할 수 없다" 에 도달하는데, 그것이 실제 상황이다.
+
+        `type` 이 비어 있으면 안 가른다. 그 칸을 안 싣는 구버전 orchestration 의 답을
+        전부 버리게 된다.
         """
         correlation = raw.get("correlationId")
         pending = self._pending.get(correlation) if isinstance(correlation, str) else None

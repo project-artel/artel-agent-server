@@ -178,9 +178,11 @@ be true. Nothing is registered when it is refused, and the refusal names what to
 write instead.
 
 A registered macro is written to the content map, so a later run can call it
-without writing it again. The answer tells you whether it got there. If it did
-not, the macro is still callable for the rest of THIS run — do not register it
-again on that account, because a second attempt changes nothing.
+without writing it again. The answer tells you whether it got there, and the
+macro is callable for the rest of THIS run either way. When the answer says the
+write could not be CONFIRMED, registering again changes nothing — it may well
+have been stored. When the answer names a reason it was refused, that reason is
+the thing to fix before registering again.
 
 A name that is already registered is updated in place, so the `screen` relations
 that name already carries are kept rather than dropped and rebuilt.

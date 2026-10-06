@@ -304,6 +304,9 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         # 이 런이 모르는 이름이면 `content_map` 에 묻는다. 그것이 지난 런이 등록한
         # macro 를 이번 런이 읽는 유일한 길이다(ARTEL-921).
         macro_name = (name or "").strip()
+        if not macro_name:
+            return "`name` must say which macro to read, so nothing was looked up."
+
         source = state.macros.source(macro_name)
         if source is None:
             found, problem = await _stored(macro_name)
@@ -383,7 +386,11 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
                 "one it is standing on. Register it again from a settled screen, or "
                 "name screens yourself, to record where it is used."
             )
-        lines.append(await _store(definition, relations))
+        # 이번에 지목한 것만이 아니라 **이 런이 아는 관계 전부**를 보낸다. 앞선 쓰기가
+        # 저쪽에 안 닿았으면(구버전 orchestration·타임아웃·거절) 그때 지목한 `screen` 이
+        # 저쪽에 없고, 이번에 이번 것만 보내면 그것이 영영 빠진다 — 관계를 빼는 길이 v1
+        # 에 없다고 적어 둔 것과 어긋난다.
+        lines.append(await _store(definition, registered.screens))
         lines.append(
             "Nothing has run. `run_macro` is what calls it."
         )
@@ -403,6 +410,9 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         # 서명에서 argument schema 를 떠낼 때 pydantic 이 `args` 를 내부 이름과
         # 부딪히는 것으로 보고 `v__args` 로 바꾸므로, 호출이 통째로 깨진다.
         macro_name = (name or "").strip()
+        if not macro_name:
+            return "`name` must say which macro to call, so nothing was sent to the game."
+
         registered = state.macros.registered(macro_name)
         if registered is None and state.macros.draft(macro_name) is not None:
             return (

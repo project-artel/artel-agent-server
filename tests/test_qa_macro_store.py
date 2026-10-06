@@ -171,6 +171,40 @@ def test_an_update_in_place_is_not_reported_as_a_new_macro() -> None:
     assert "updated in place" in answer
 
 
+def test_registering_again_resends_every_relation_this_run_knows() -> None:
+    """앞선 쓰기가 저쪽에 안 닿았으면 그때 지목한 `screen` 이 저쪽에 없다.
+
+    이번에 지목한 것만 보내면 그것이 영영 빠지고, 관계를 빼는 길이 v1 에 없다고 적어 둔
+    것과 어긋난다. 구버전 orchestration 에서 한 번 등록한 뒤 고쳐서 다시 등록하는 것이
+    바로 이 경로다 — 첫 번째 프레임에는 아무 답도 안 온다.
+    """
+    channel, _, tools, sent = drafted()
+    call(tools["register_macro"], name="deal_a_card", screens=["40"])
+
+    call(tools["read_macro"], name="deal_a_card")
+    call(
+        tools["edit_macro"],
+        name="deal_a_card",
+        old_text="drag(card, slot)",
+        new_text="double_click(card)",
+    )
+    call(tools["register_macro"], name="deal_a_card", screens=["41"])
+
+    frames = macro_frames(sent, MessageType.MACRO_REGISTER)
+    assert len(frames) == 2
+    assert frames[0]["payload"]["screens"] == ["12", "40"]
+    assert frames[1]["payload"]["screens"] == ["12", "40", "41"]
+
+
+def test_an_empty_name_never_reaches_the_content_map() -> None:
+    """빈 이름으로 묻는 것은 구버전 orchestration 에서 5초를 그냥 버리는 일이다."""
+    _, _, tools, sent = make()
+
+    assert "`name` must say" in call(tools["read_macro"], name="")
+    assert "`name` must say" in call(tools["run_macro"], name="  ", arguments={})
+    assert macro_frames(sent, MessageType.MACRO_READ) == []
+
+
 # --- 쓰기 실패가 런을 안 죽인다 --------------------------------------------------
 
 
