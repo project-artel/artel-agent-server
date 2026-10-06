@@ -4,7 +4,24 @@
 세 가지가 구분되지 않아, 에이전트가 헛손질을 하고도 성공으로 읽고 다음 단계로 갔다.
 """
 
-from app.agents.qa.tools.tool_context import _is_press, _press_outcome
+from app.agents.qa.tools.tool_context import (
+    _is_press,
+    _press_landing,
+    _press_sentence,
+)
+from app.qa.acting import PressLanding
+
+
+def _press_outcome(value: object) -> str:
+    """`ToolContext.act` 가 누름 한 줄을 만드는 두 걸음. 가르고, 그 다음 말한다.
+
+    production 에 이 한 걸음짜리 함수를 두지 않는 이유는 `act` 가 가른 값(`landing`)을
+    문장과 **따로** 쥐어야 하기 때문이다. macro runner 가 그 값을 보고 멈출지 정한다.
+    """
+    if not _is_press(value):
+        return "ok"
+    assert isinstance(value, dict)
+    return _press_sentence(_press_landing(value), value)
 
 
 def test_a_press_that_reached_something_does_not_claim_it_worked() -> None:
@@ -49,3 +66,24 @@ def test_an_older_sdk_still_reads_as_ok() -> None:
     assert _press_outcome(None) == "ok"
     assert not _is_press(None)
     assert not _is_press({"capturedAt": 12})
+
+
+def test_the_landing_is_decided_before_any_sentence_exists() -> None:
+    """가르는 자리와 말하는 자리가 떨어져 있다.
+
+    macro runner 가 문장이 아니라 이 값을 읽는다. 한 자리에 붙여 두면 읽는 쪽이 문장을
+    다시 파싱하게 되고, 그러면 표현이 곧 프로토콜이 된다(ARTEL-777).
+    """
+    assert (
+        _press_landing({"reached": "CardSystem/Card(Clone)", "pointerHeldByPerson": False})
+        is PressLanding.sent
+    )
+    assert (
+        _press_landing({"reached": None, "pointerHeldByPerson": False})
+        is PressLanding.reached_nothing
+    )
+    # 포인터를 사람이 쥐었으면 `reached` 가 무엇이든 그쪽이 이긴다.
+    assert (
+        _press_landing({"reached": "Card", "pointerHeldByPerson": True})
+        is PressLanding.held_by_person
+    )

@@ -614,14 +614,6 @@ def test_the_runner_has_no_statement_or_depth_limit_of_its_own() -> None:
 # **안 멈춰야 하는 경우도 같이 잰다.** 멈추는 조건만 재면 아무 때나 멈추는 구현이
 # 통과한다.
 
-THREE_CLICKS = '''def m(card: object) -> None:
-    click(card)
-    click(card)
-    click(card)
-    click(card)
-'''
-
-
 def held_by_person() -> ActionOutcome:
     return ActionOutcome(
         text="  mouse_down: 전해지지 않음 — 포인터를 사람이 쥐고 있다",
@@ -777,9 +769,8 @@ def test_the_operator_speaking_stops_the_macro() -> None:
     assert result.failure.code == OPERATOR_INTERRUPTED
     assert len(host.sent) == 2
     assert [place.number for place in result.pending] == [3, 4]
-    # 그 말이 버려지지 않는다. 멈춘 이유에 그대로 실린다.
+    # 그 말이 버려지지 않는다. 멈춘 이유에 그대로 실려 agent 가 읽는다.
     assert "그만하고 설정 화면 봐줘" in result.failure.reason
-    assert result.failure.payload["operator_said"] == ["그만하고 설정 화면 봐줘"]
 
 
 def test_an_ordinary_macro_with_nobody_speaking_runs_to_the_end() -> None:
@@ -790,3 +781,26 @@ def test_an_ordinary_macro_with_nobody_speaking_runs_to_the_end() -> None:
     assert result.passed, result.failure
     assert len(host.sent) == 4
     assert result.pending == []
+
+
+def test_a_wedged_game_that_times_out_every_other_batch_still_stops() -> None:
+    """**이것이 진짜 멈춘 게임의 궤적이다.**
+
+    `unknown` 은 게임이 결과를 아예 안 줬다는 뜻이고 그것이 `dispatch_actions` 의
+    타임아웃이다. 반응 없는 게임은 그 타임아웃을 간헐적으로 내므로 실제로 오는 것은
+    `still` 과 `unknown` 이 섞인 줄이다. `unknown` 에서 수를 0 으로 지우면 수가 영영
+    3 에 못 닿고, macro 가 죽은 게임에 statement 를 끝까지 다 쏟아붓는다.
+    """
+    timed_out = ActionOutcome(
+        text="The game reported no result.", screen=ScreenChange.unknown
+    )
+    host = FakeHost(
+        battle(),
+        answers=[still_screen(), timed_out, still_screen(), timed_out, still_screen()],
+    )
+    result = clicks(host, count=8)
+
+    assert not result.passed
+    assert result.failure.code == SCREEN_UNCHANGED
+    # 세 번째 `still` 에서 멈춘다. 그 사이의 `unknown` 둘은 세지도 지우지도 않았다.
+    assert len(host.sent) == 5

@@ -917,3 +917,19 @@ def test_an_operator_ending_the_run_is_not_turned_into_a_sentence(monkeypatch) -
             name="judge_the_card",
             arguments={"card": "Root[0]/Hand[2]/Card(Clone)[3]"},
         )
+
+
+def test_every_macro_tool_body_is_guarded_against_a_leaking_exception() -> None:
+    """다섯 **전부**다. 아래 `_render` 테스트가 재는 것은 `run_macro` 하나뿐이라,
+    나중에 여섯 번째 tool 이 guard 없이 들어와도 그쪽은 조용히 통과한다.
+
+    감싼 함수의 `__code__.co_name` 이 그 표시다. `functools.wraps` 가 이름과
+    `__wrapped__` 는 베껴도 `__code__` 는 안 베끼므로, 이 칸만은 속지 않는다. tool 의
+    이름과 argument schema 가 그대로인 것은 `tests/test_qa_arch.py` 의 fingerprint pin
+    이 따로 지킨다 — langchain 이 `__wrapped__` 를 따라가 서명을 떠내기 때문이다.
+    """
+    _, _, tools, _ = make()
+
+    for name in ("write_macro", "edit_macro", "read_macro", "register_macro", "run_macro"):
+        assert tools[name].coroutine.__code__.co_name == "answering", name
+        assert tools[name].name == name

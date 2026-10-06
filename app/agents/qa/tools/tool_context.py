@@ -128,6 +128,10 @@ class ToolContext:
             elif item.success:
                 outcome = "ok"
             else:
+                # **실패한 결과는 `landings` 에 안 든다.** 지금은 그래서 macro runner 가
+                # 이것을 못 본다 — 알면서 비워 둔 자리다. 어떤 method 는 실패해도 해롭지
+                # 않고(안 눌린 키의 `release_key`), 어떤 것은 그 자리에서 멈춰야 한다.
+                # 그 판단을 여기서 하나로 정할 수 없어 따로 다룬다.
                 outcome = f"FAILED — {item.error or 'no reason given'}"
             # Named, because a drag comes back as four lines and an unlabelled
             # failure would not say which part of it went wrong.
@@ -218,9 +222,3 @@ def _press_sentence(landing: PressLanding, value: dict) -> str:
     # 자리에 데려다 놓는 셈이다.
     return f"{value.get('reached')} 에 보냄 — 반응했는지는 화면으로 확인할 것"
 
-
-def _press_outcome(value: object) -> str:
-    """누름이 무엇에 닿았는지를 한 줄로. 가르고 나서 말한다."""
-    if not isinstance(value, dict):
-        return "ok"
-    return _press_sentence(_press_landing(value), value)

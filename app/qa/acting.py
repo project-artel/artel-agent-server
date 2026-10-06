@@ -10,6 +10,12 @@ macro runner 는 다르다. **모델 턴을 안 쓰는 것이 macro 의 존재 �
 
 그래서 `ToolContext.act` 가 문장과 데이터를 함께 돌려준다. 문장은 모델이 읽고, 아래
 세 필드는 runner 가 읽는다. 둘이 같은 관측에서 나오므로 어긋날 수 없다.
+
+**`app/qa` 에 둔 이유.** `ToolContext` 와 `macro/runner.py` 가 둘 다 import 할 수
+있어야 하는데, runner 가 `app.agents.qa.tools` 를 import 하면 `tools/__init__.py` 가
+`macro_tools` 를 거쳐 runner 로 돌아온다. 그리고 이것은 `JsonRpcAction` 한 batch 를
+보낸 답이므로, 그 batch 를 정의하는 `app/qa/envelope.py` 와 그것을 내보내는
+`app/qa/channel.py` 옆이 맞는 자리다.
 """
 
 from dataclasses import dataclass
@@ -17,7 +23,7 @@ from enum import StrEnum
 
 
 class PressLanding(StrEnum):
-    """누름 하나가 무엇에 닿았나. `_press_outcome` 이 문장으로 옮기기 전의 값이다.
+    """누름 하나가 무엇에 닿았나. `_press_sentence` 가 문장으로 옮기기 전의 값이다.
 
     SDK 가 보내는 것은 `reached` 와 `pointerHeldByPerson` 두 값뿐이고, 이 셋은 그
     둘의 조합에 이름을 붙인 것이다.

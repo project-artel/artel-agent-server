@@ -93,8 +93,8 @@ from app.qa.envelope import JsonRpcAction
 # 셋은 아니다. statement 상한이 128 이므로 안 멈추면 아무 반응 없는 게임에 128 개를 다
 # 쏟아붓는다. 셋에서 끊으면 헛돈 시간이 4.5초로 묶이고, 위의 정상 둘은 그대로 통과한다.
 #
-# **연달아** 다. 한 번이라도 움직이면 0 으로 돌아간다 — 움직였다 안 움직였다 하는
-# macro 는 어디론가 가고 있는 macro 다.
+# **연달아** 다. 화면이 움직이면 0 으로 돌아간다 — 움직였다 안 움직였다 하는 macro 는
+# 어디론가 가고 있는 macro 다. 움직였는지 모르는 batch 는 세지도 지우지도 않는다.
 STILL_SCREENS_BEFORE_STOP = 3
 
 
@@ -271,7 +271,8 @@ class _Runner:
         self.frames: list[_Frame] = []
         # 감싼 `if` 조건이 읽은 값. `flag` 와 `ask_verdict` 의 `observed` 가 이것이다.
         self.observed: list[dict[str, Any]] = []
-        # 화면이 연달아 몇 번 그대로였나. 한 번이라도 움직이면 0 으로 돌아간다.
+        # 화면이 연달아 몇 번 그대로였나. 화면이 움직이면 0 으로 돌아가고, 움직였는지
+        # 모르는 batch 는 세지도 지우지도 않는다 — 까닭은 `_went_wrong` 에 있다.
         self.still_screens = 0
 
     # -- 바깥 --
@@ -521,8 +522,17 @@ class _Runner:
                 "sent. Observe the scene and check the macro is aiming at something "
                 "this screen actually shows.",
             )
-        if outcome.screen is not ScreenChange.still:
+        if outcome.screen is ScreenChange.moved:
             self.still_screens = 0
+            return None
+        if outcome.screen is ScreenChange.unknown:
+            # **세지도 않고 지우지도 않는다.** `unknown` 은 게임이 결과를 아예 안 줬거나
+            # (`dispatch_actions` 의 타임아웃이다) 화면을 한 번도 안 보낸 빌드라는 뜻이다.
+            #
+            # 세면 화면을 안 보내는 빌드에서 멀쩡한 macro 가 전부 멈춘다. 0 으로
+            # 지우면 더 나쁘다 — 멈춘 게임은 간헐적으로 타임아웃을 내므로 실제 궤적이
+            # `still`·`unknown`·`still`·`unknown` 이 되고, 지우는 구현은 그 사이에서
+            # 수를 계속 잃어 반응 없는 게임에 statement 를 끝까지 다 쏟아붓는다.
             return None
         self.still_screens += 1
         if self.still_screens < STILL_SCREENS_BEFORE_STOP:
@@ -534,7 +544,6 @@ class _Runner:
             "Either the game stopped responding or this macro is somewhere it was not "
             "written for — observe the scene and decide which, because a screen frozen "
             "under real input is a defect worth reporting.",
-            {"observed": {"still actions in a row": str(self.still_screens)}},
         )
 
 
@@ -562,7 +571,6 @@ def _operator_spoke(messages: tuple[str, ...]) -> MacroFailure:
         "rather than sending the rest, so you read that before the game moves any "
         "further. Neither the game nor the macro did anything wrong — decide what the "
         "operator wants, and call the macro again if it still applies.",
-        {"operator_said": list(messages)},
     )
 
 
