@@ -24,7 +24,7 @@ from app.agents.scenario import jev_criteria as spec
 from app.agents.scenario.router import JevScenarioRouter, Route, ScenarioRouter
 
 # 이 값을 바꾸려면 `scenario_router/v7/system.md` 와 맞는지 확인하고 함께 바꾼다.
-PINNED_DIGEST = "8b0920dd2eb4554c6ebee346c22f054ac5ab1bbc69f5de944282edd4e99da28e"
+PINNED_DIGEST = "dcd210c3bdca2f144734952f75b65f455933f41db588682bc9508355aca3adf6"
 
 
 def _answers(route: str, target: str) -> dict:
