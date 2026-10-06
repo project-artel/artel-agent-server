@@ -310,6 +310,9 @@ def test_every_live_agent_has_a_v1(monkeypatch) -> None:
             "scenario",
             # 저작 워크플로의 단계별 프롬프트 — 루프의 scenario(v9)에서 갈라져 나옴.
             "scenario_router",
+            # 인사·가드레일 문구 전용. 라우터가 갈래만 내고 문구를 못 낼 때 쓴다 —
+            # 결정 전용 모델(Jev)은 선택지를 고를 뿐 문장을 못 쓴다.
+            "scenario_reply",
             "scenario_grouping",
             "scenario_writer",
             "scenario_modify",
