@@ -99,7 +99,7 @@ def test_the_fingerprint_ignores_the_model_and_the_prompt() -> None:
     """The axes are independent, and a digest that moved with all of them could
     not group "the same structure under two models" — the comparison this exists
     to make possible."""
-    sonnet = resolve_run_config(model=LLMModel.claude_sonnet_5)
+    sonnet = resolve_run_config(model=LLMModel.claude_sonnet_5_5)
     gpt = resolve_run_config(model=LLMModel.gpt_6_luna)
     pinned = resolve_run_config(model=LLMModel.gpt_6_luna, prompt_version="v1")
 

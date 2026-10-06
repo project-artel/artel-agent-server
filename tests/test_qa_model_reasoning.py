@@ -35,7 +35,7 @@ def test_models_api_exposes_reasoning_selection_capabilities() -> None:
     }
 
     assert set(catalog) == {model.value for model in LLMModel}
-    assert catalog[LLMModel.claude_sonnet_5]["reasoning"] == {
+    assert catalog[LLMModel.claude_sonnet_5_5]["reasoning"] == {
         "kind": "effort",
         "efforts": ["max", "xhigh", "high", "medium", "low"],
         "min_tokens": None,
@@ -65,7 +65,7 @@ def test_models_api_exposes_reasoning_selection_capabilities() -> None:
         "max_tokens": None,
         "step": None,
     }
-    assert catalog[LLMModel.gemini_3_7_flash]["reasoning"] == {
+    assert catalog[LLMModel.gemini_3_8_flash]["reasoning"] == {
         "kind": "effort",
         # Three, not five. The picker has to offer what the model takes: an
         # effort it never advertised is a 400 the user only sees mid-run.
@@ -89,7 +89,7 @@ def test_models_api_exposes_reasoning_selection_capabilities() -> None:
 def test_request_accepts_each_supported_reasoning_shape() -> None:
     effort = OpenQaSessionRequest.model_validate(
         open_request(
-            model=LLMModel.claude_sonnet_5,
+            model=LLMModel.claude_sonnet_5_5,
             reasoning={"effort": "high"},
         )
     )
@@ -108,10 +108,10 @@ def test_request_accepts_each_supported_reasoning_shape() -> None:
     ("model", "reasoning"),
     [
         (LLMModel.qwen3_7_max, {"effort": "low"}),
-        (LLMModel.claude_sonnet_5, {"max_tokens": 2048}),
+        (LLMModel.claude_sonnet_5_5, {"max_tokens": 2048}),
         (LLMModel.claude_haiku_4_5_bedrock, {"effort": "high"}),
         # The right kind, an effort the model does not offer.
-        (LLMModel.gemini_3_7_flash, {"effort": "max"}),
+        (LLMModel.gemini_3_8_flash, {"effort": "max"}),
         (LLMModel.gemini_3_8_flash, {"effort": "xhigh"}),
         (LLMModel.kimi_k3, {"effort": "medium"}),
     ],
@@ -136,7 +136,7 @@ def test_request_rejects_unknown_or_out_of_range_reasoning_fields() -> None:
     with pytest.raises(ValidationError):
         OpenQaSessionRequest.model_validate(
             open_request(
-                model=LLMModel.claude_sonnet_5,
+                model=LLMModel.claude_sonnet_5_5,
                 reasoning={"effort": "high", "max_token": 2048},
             )
         )
@@ -170,7 +170,7 @@ def test_service_persists_reasoning_and_passes_it_to_runner() -> None:
             scenarios=[
                 QaRunScenario(qa_try_id=7, test_scenario_id=1, scenario=make_scenario())
             ],
-            model=LLMModel.claude_sonnet_5,
+            model=LLMModel.claude_sonnet_5_5,
             reasoning=reasoning,
         )
 
@@ -248,7 +248,7 @@ def test_langchain_sends_reasoning_in_openrouter_request(monkeypatch) -> None:
     chat_model.build_chat_model.cache_clear()
     try:
         chat_model.build_chat_model(
-            LLMModel.claude_sonnet_5,
+            LLMModel.claude_sonnet_5_5,
             ReasoningConfig(effort=ReasoningEffort.high),
         ).invoke("test")
     finally:
@@ -269,9 +269,9 @@ def test_omitted_reasoning_is_not_sent_and_uses_a_distinct_cache_entry(
     monkeypatch.setattr(chat_model, "ChatOpenAI", FakeChat)
     chat_model.build_chat_model.cache_clear()
     try:
-        plain = chat_model.build_chat_model(LLMModel.claude_sonnet_5)
+        plain = chat_model.build_chat_model(LLMModel.claude_sonnet_5_5)
         reasoned = chat_model.build_chat_model(
-            LLMModel.claude_sonnet_5,
+            LLMModel.claude_sonnet_5_5,
             ReasoningConfig(effort=ReasoningEffort.low),
         )
         assert plain is not reasoned
@@ -304,8 +304,8 @@ def test_caching_is_opt_in_and_only_for_anthropic(monkeypatch) -> None:
     monkeypatch.setattr(chat_model, "ChatOpenAI", FakeChat)
     chat_model.build_chat_model.cache_clear()
     try:
-        chat_model.build_chat_model(LLMModel.claude_opus_5, cache_prompt=True)
-        chat_model.build_chat_model(LLMModel.claude_opus_5)
+        chat_model.build_chat_model(LLMModel.claude_opus_5_5, cache_prompt=True)
+        chat_model.build_chat_model(LLMModel.claude_opus_5_5)
         chat_model.build_chat_model(LLMModel.gpt_6_luna, cache_prompt=True)
     finally:
         chat_model.build_chat_model.cache_clear()
@@ -340,7 +340,7 @@ def test_run_start_log_names_reasoning(monkeypatch, caplog) -> None:
 
         runner = QaRunner(
             resolve_run_config(
-                model=LLMModel.claude_sonnet_5,
+                model=LLMModel.claude_sonnet_5_5,
                 reasoning=ReasoningConfig(effort=ReasoningEffort.high),
             )
         )
@@ -381,7 +381,7 @@ def test_a_model_call_carries_a_request_timeout_and_bounded_retries(
     monkeypatch.setattr(chat_model, "ChatOpenAI", FakeChat)
     chat_model.build_chat_model.cache_clear()
     try:
-        chat_model.build_chat_model(LLMModel.claude_sonnet_5)
+        chat_model.build_chat_model(LLMModel.claude_sonnet_5_5)
     finally:
         chat_model.build_chat_model.cache_clear()
 

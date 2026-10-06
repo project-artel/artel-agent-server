@@ -40,13 +40,9 @@ class LLMModel(StrEnum):
     gpt_5_6_terra = "openai/gpt-5.6-terra"
     claude_opus_5_5 = "anthropic/claude-opus-5.5"
     claude_sonnet_5_5 = "anthropic/claude-sonnet-5.5"
-    claude_sonnet_5 = "anthropic/claude-sonnet-5"
-    claude_opus_5 = "anthropic/claude-opus-5"
     gemini_3_8_flash = "google/gemini-3.8-flash"
-    gemini_3_7_flash = "google/gemini-3.7-flash"
     gemma_4_free = "google/gemma-4-31b-it:free"
     grok_4_7 = "x-ai/grok-4.7"
-    grok_4_6 = "x-ai/grok-4.6"
     kimi_k3 = "moonshotai/kimi-k3"
     glm_5_3_flash = "z-ai/glm-5.3-flash"
     qwen3_7_max = "qwen/qwen3.7-max"
@@ -310,54 +306,15 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         reasoning=ReasoningKind.effort,
         reasoning_efforts=tuple(ReasoningEffort),
     ),
-    LLMModel.claude_sonnet_5: ModelSpec(
-        provider=LLMProvider.anthropic,
-        supports_strict_json=True,
-        label="Claude Sonnet 5",
-        max_input_tokens=872_000,
-        input_modalities=("text", "image", "file"),
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=tuple(ReasoningEffort),
-    ),
-    LLMModel.claude_opus_5: ModelSpec(
-        provider=LLMProvider.anthropic,
-        supports_strict_json=True,
-        label="Claude Opus 5",
-        max_input_tokens=872_000,
-        input_modalities=("text", "image", "file"),
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=tuple(ReasoningEffort),
-    ),
-    # 3.7 Flash 와 창, 출력 상한, modality, effort 세 개, 단가($0.75 / $3.75 per
-    # Mtok)가 전부 같다. 다른 것은 카탈로그가 싣고 온 점수뿐이다 — artificial
-    # analysis 의 agentic index 50 대 45.1, intelligence index 58.7 대 56.
-    #
-    # 그래서 둘 다 둔다. 슬러그를 갈아 끼우면 3.7 로 돌린 런과 비교할 수 없고, 같은
-    # 값에서 점수만 다른 두 항목이 나란히 있어야 그 차이를 QA 런으로 잴 수 있다.
     LLMModel.gemini_3_8_flash: ModelSpec(
         provider=LLMProvider.google,
         supports_strict_json=True,
         label="Gemini 3.8 Flash",
         max_input_tokens=983_040,
         input_modalities=("text", "image", "file", "audio", "video"),
-        # 3.7 Flash 와 같다: `reasoning_effort` 를 받고 세 개만 advertise 하며,
-        # 추론이 mandatory 라 요청이 빼면 provider 의 `medium` 으로 돈다.
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=(
-            ReasoningEffort.high,
-            ReasoningEffort.medium,
-            ReasoningEffort.low,
-        ),
-    ),
-    LLMModel.gemini_3_7_flash: ModelSpec(
-        provider=LLMProvider.google,
-        supports_strict_json=True,
-        label="Gemini 3.7 Flash",
-        max_input_tokens=983_040,
-        input_modalities=("text", "image", "file", "audio", "video"),
-        # 3.x Flash advertises `reasoning_effort` and three named efforts, and
-        # reasoning is mandatory, so the run reasons at the provider's `medium`
-        # whenever the request leaves it out.
+        # `reasoning_effort` 를 받고 세 개만 advertise 하며, 추론이 mandatory 라
+        # 요청이 빼면 provider 의 `medium` 으로 돈다. 남은 둘(`max`·`xhigh`)을
+        # 요청하면 런 중간에 provider 400 이고, 가까운 effort 로 내려가지 않는다.
         reasoning=ReasoningKind.effort,
         reasoning_efforts=(
             ReasoningEffort.high,
@@ -377,27 +334,10 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         provider=LLMProvider.xai,
         supports_strict_json=True,
         label="Grok 4.7",
-        # The same 50k out of 500k that 4.6 gets, and the same four efforts
-        # without `max`. 4.6's own catalog entry now says it is succeeded by
-        # this one; both stay so a run on either can still be reproduced.
-        max_input_tokens=50_000,
-        input_modalities=("text", "image", "file"),
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=(
-            ReasoningEffort.xhigh,
-            ReasoningEffort.high,
-            ReasoningEffort.medium,
-            ReasoningEffort.low,
-        ),
-    ),
-    LLMModel.grok_4_6: ModelSpec(
-        provider=LLMProvider.xai,
-        supports_strict_json=True,
-        label="Grok 4.6",
         # 50k out of a 500k window, because the top provider reserves 450k of
         # it for the completion. That is by far the smallest budget in the
-        # catalog — an eighteenth of Luna's — so a QA run on this model
-        # compacts many times where the others never trigger.
+        # catalog — an eighteenth of Sol's — so a QA run on this model compacts
+        # many times where the others never trigger. Four efforts, no `max`.
         max_input_tokens=50_000,
         input_modalities=("text", "image", "file"),
         reasoning=ReasoningKind.effort,
