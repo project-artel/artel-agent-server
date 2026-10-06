@@ -34,18 +34,18 @@ class LLMModel(StrEnum):
     Re-verify all three against that endpoint before adding or renaming entries.
     """
 
-    gpt_5_6_luna = "openai/gpt-5.6-luna"
-    gpt_5_6_sol = "openai/gpt-5.6-sol"
-    gpt_chat_latest = "openai/gpt-chat-latest"
-    claude_sonnet_5 = "anthropic/claude-sonnet-5"
-    claude_opus_5 = "anthropic/claude-opus-5"
+    gpt_6_1_sol = "openai/gpt-6.1-sol"
+    gpt_6_astra = "openai/gpt-6-astra"
+    gpt_6_luna = "openai/gpt-6-luna"
+    gpt_5_6_terra = "openai/gpt-5.6-terra"
+    claude_opus_5_5 = "anthropic/claude-opus-5.5"
+    claude_sonnet_5_5 = "anthropic/claude-sonnet-5.5"
     gemini_3_8_flash = "google/gemini-3.8-flash"
-    gemini_3_7_flash = "google/gemini-3.7-flash"
     gemma_4_free = "google/gemma-4-31b-it:free"
-    grok_4_6 = "x-ai/grok-4.6"
+    grok_4_7 = "x-ai/grok-4.7"
     kimi_k3 = "moonshotai/kimi-k3"
     glm_5_3_flash = "z-ai/glm-5.3-flash"
-    qwen3_8_max = "qwen/qwen3.8-max"
+    qwen3_7_max = "qwen/qwen3.7-max"
 
     # 여기부터는 OpenRouter slug 가 아니다. `bedrock/` 접두를 뗀 나머지가 그대로
     # Bedrock 의 inference profile ID 이고, `build_chat_model` 이 그 접두를 보고
@@ -139,8 +139,10 @@ class ModelSpec:
     #
     # A model without vision is not a failure: the QA run drops to text-only rather
     # than refusing to start, and the capture tool is left out of its toolset so it
-    # cannot ask for a picture nothing can read. Every model in the catalog below
-    # currently sees, so that path is covered by tests rather than by a live model.
+    # cannot ask for a picture nothing can read. `qwen3_7_max` is the one entry
+    # that takes this path — it advertises `text` alone — so a vision arm cannot
+    # be run on it and a measurement that compares it against a seeing model is
+    # comparing two things at once.
     input_modalities: tuple[str, ...] = ("text", "image")
     # Verified against the live catalog's `reasoning` object. None means the
     # model must not receive OpenRouter's reasoning parameter.
@@ -228,86 +230,91 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
             source="AWS 콘솔, Claude Haiku 4.5 / us-west-2 / on-demand",
         ),
     ),
-    LLMModel.gpt_5_6_luna: ModelSpec(
-        provider=LLMProvider.openai,
-        supports_strict_json=True,
-        label="GPT-5.6 Luna",
-        max_input_tokens=922_000,
-        input_modalities=("text", "image", "file"),
-        # The catalog also advertises a sixth effort, `none`, which
-        # `ReasoningEffort` does not model; the five below are the whole enum.
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=tuple(ReasoningEffort),
-    ),
-    LLMModel.gpt_5_6_sol: ModelSpec(
-        provider=LLMProvider.openai,
-        supports_strict_json=True,
-        label="GPT-5.6 Sol",
-        max_input_tokens=922_000,
-        input_modalities=("text", "image", "file"),
-        # Six efforts like Luna, the unmodelled `none` included.
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=tuple(ReasoningEffort),
-    ),
-    # The one entry that does not reason, which is why it is here: `reasoning`
-    # left None is a state the request validator and the catalog API both have
-    # to keep answering for. The slug tracks whatever ChatGPT currently serves,
-    # so its window is the one most worth re-checking against the catalog.
-    LLMModel.gpt_chat_latest: ModelSpec(
-        provider=LLMProvider.openai,
-        supports_strict_json=True,
-        label="GPT Chat Latest",
-        max_input_tokens=272_000,
-        input_modalities=("text", "image", "file"),
-    ),
-    LLMModel.claude_sonnet_5: ModelSpec(
-        provider=LLMProvider.anthropic,
-        supports_strict_json=True,
-        label="Claude Sonnet 5",
-        max_input_tokens=872_000,
-        input_modalities=("text", "image", "file"),
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=tuple(ReasoningEffort),
-    ),
-    LLMModel.claude_opus_5: ModelSpec(
-        provider=LLMProvider.anthropic,
-        supports_strict_json=True,
-        label="Claude Opus 5",
-        max_input_tokens=872_000,
-        input_modalities=("text", "image", "file"),
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=tuple(ReasoningEffort),
-    ),
-    # 3.7 Flash 와 창, 출력 상한, modality, effort 세 개, 단가($0.75 / $3.75 per
-    # Mtok)가 전부 같다. 다른 것은 카탈로그가 싣고 온 점수뿐이다 — artificial
-    # analysis 의 agentic index 50 대 45.1, intelligence index 58.7 대 56.
+    # The four below share one window, one modality set and one effort set —
+    # 1,050,000 less the 128,000 the top provider reserves for the completion,
+    # `text,image,file`, and all five modelled efforts with `medium` as the
+    # provider's default. They differ only in which checkpoint OpenRouter is
+    # serving, which is the axis a QA run measures.
     #
-    # 그래서 둘 다 둔다. 슬러그를 갈아 끼우면 3.7 로 돌린 런과 비교할 수 없고, 같은
-    # 값에서 점수만 다른 두 항목이 나란히 있어야 그 차이를 QA 런으로 잴 수 있다.
+    # `6.1` exists for Sol and not for the other three; `6` exists for Astra and
+    # Luna and not for Terra. These are the newest of each family the catalog
+    # carries, re-read on 2026-10-06. Terra at `5.6` is not an oversight — there
+    # is no `gpt-6-terra`.
+    LLMModel.gpt_6_1_sol: ModelSpec(
+        provider=LLMProvider.openai,
+        supports_strict_json=True,
+        label="GPT-6.1 Sol",
+        max_input_tokens=922_000,
+        input_modalities=("text", "image", "file"),
+        # `reasoning.mandatory` is true here and false for Luna and Terra, so
+        # this one reasons whatever the request says. `ReasoningEffort` models
+        # all five it advertises; there is no sixth `none` to leave out.
+        reasoning=ReasoningKind.effort,
+        reasoning_efforts=tuple(ReasoningEffort),
+    ),
+    LLMModel.gpt_6_astra: ModelSpec(
+        provider=LLMProvider.openai,
+        supports_strict_json=True,
+        label="GPT-6 Astra",
+        max_input_tokens=922_000,
+        input_modalities=("text", "image", "file"),
+        # Mandatory reasoning, five efforts, like 6.1 Sol.
+        reasoning=ReasoningKind.effort,
+        reasoning_efforts=tuple(ReasoningEffort),
+    ),
+    LLMModel.gpt_6_luna: ModelSpec(
+        provider=LLMProvider.openai,
+        supports_strict_json=True,
+        label="GPT-6 Luna",
+        max_input_tokens=922_000,
+        input_modalities=("text", "image", "file"),
+        # Six advertised efforts, the unmodelled `none` included, and reasoning
+        # is optional rather than mandatory — same as 5.6 Luna below.
+        reasoning=ReasoningKind.effort,
+        reasoning_efforts=tuple(ReasoningEffort),
+    ),
+    LLMModel.gpt_5_6_terra: ModelSpec(
+        provider=LLMProvider.openai,
+        supports_strict_json=True,
+        label="GPT-5.6 Terra",
+        max_input_tokens=922_000,
+        input_modalities=("text", "image", "file"),
+        # Optional reasoning and six advertised efforts, like 6 Luna.
+        reasoning=ReasoningKind.effort,
+        reasoning_efforts=tuple(ReasoningEffort),
+    ),
+    # Both carry the same 1,000,000 window less the 128,000 completion reserve,
+    # `text,image,file`, and five efforts. The difference from Opus 5 and
+    # Sonnet 5 below is that reasoning is `mandatory` here and the provider's
+    # default effort is `high` rather than `medium` — so an arm that omits
+    # effort is not comparing the same thing across the two generations.
+    LLMModel.claude_opus_5_5: ModelSpec(
+        provider=LLMProvider.anthropic,
+        supports_strict_json=True,
+        label="Claude Opus 5.5",
+        max_input_tokens=872_000,
+        input_modalities=("text", "image", "file"),
+        reasoning=ReasoningKind.effort,
+        reasoning_efforts=tuple(ReasoningEffort),
+    ),
+    LLMModel.claude_sonnet_5_5: ModelSpec(
+        provider=LLMProvider.anthropic,
+        supports_strict_json=True,
+        label="Claude Sonnet 5.5",
+        max_input_tokens=872_000,
+        input_modalities=("text", "image", "file"),
+        reasoning=ReasoningKind.effort,
+        reasoning_efforts=tuple(ReasoningEffort),
+    ),
     LLMModel.gemini_3_8_flash: ModelSpec(
         provider=LLMProvider.google,
         supports_strict_json=True,
         label="Gemini 3.8 Flash",
         max_input_tokens=983_040,
         input_modalities=("text", "image", "file", "audio", "video"),
-        # 3.7 Flash 와 같다: `reasoning_effort` 를 받고 세 개만 advertise 하며,
-        # 추론이 mandatory 라 요청이 빼면 provider 의 `medium` 으로 돈다.
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=(
-            ReasoningEffort.high,
-            ReasoningEffort.medium,
-            ReasoningEffort.low,
-        ),
-    ),
-    LLMModel.gemini_3_7_flash: ModelSpec(
-        provider=LLMProvider.google,
-        supports_strict_json=True,
-        label="Gemini 3.7 Flash",
-        max_input_tokens=983_040,
-        input_modalities=("text", "image", "file", "audio", "video"),
-        # 3.x Flash advertises `reasoning_effort` and three named efforts, and
-        # reasoning is mandatory, so the run reasons at the provider's `medium`
-        # whenever the request leaves it out.
+        # `reasoning_effort` 를 받고 세 개만 advertise 하며, 추론이 mandatory 라
+        # 요청이 빼면 provider 의 `medium` 으로 돈다. 남은 둘(`max`·`xhigh`)을
+        # 요청하면 런 중간에 provider 400 이고, 가까운 effort 로 내려가지 않는다.
         reasoning=ReasoningKind.effort,
         reasoning_efforts=(
             ReasoningEffort.high,
@@ -323,14 +330,14 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         max_input_tokens=229_376,
         input_modalities=("text", "image", "video"),
     ),
-    LLMModel.grok_4_6: ModelSpec(
+    LLMModel.grok_4_7: ModelSpec(
         provider=LLMProvider.xai,
         supports_strict_json=True,
-        label="Grok 4.6",
+        label="Grok 4.7",
         # 50k out of a 500k window, because the top provider reserves 450k of
         # it for the completion. That is by far the smallest budget in the
-        # catalog — an eighteenth of Luna's — so a QA run on this model
-        # compacts many times where the others never trigger.
+        # catalog — an eighteenth of Sol's — so a QA run on this model compacts
+        # many times where the others never trigger. Four efforts, no `max`.
         max_input_tokens=50_000,
         input_modalities=("text", "image", "file"),
         reasoning=ReasoningKind.effort,
@@ -360,7 +367,13 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         provider=LLMProvider.zai,
         supports_strict_json=True,
         label="GLM-5.3 Flash",
-        max_input_tokens=1_179_648,
+        # The same reservation story as Kimi K3 above, and nearly the same
+        # numbers: a 1,048,576 window with 943,717 held for the completion.
+        # This read 1_179_648 until 2026-10-06 — larger than the whole window,
+        # so `QaCompactionMiddleware` could never reach its trigger fraction and
+        # a long run on this model was refused by the provider instead of
+        # compacting. That is the failure `max_input_tokens` exists to prevent.
+        max_input_tokens=104_859,
         input_modalities=("text", "image", "video"),
         reasoning=ReasoningKind.effort,
         reasoning_efforts=(
@@ -369,26 +382,39 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
             ReasoningEffort.low,
         ),
     ),
-    LLMModel.qwen3_8_max: ModelSpec(
+    # 3.8 Max is **gone from the catalog** as of 2026-10-06 — picking it got a
+    # provider refusal, not a degradation — so it is replaced rather than kept
+    # beside the newer slug the way Grok and Gemini are. 3.7 Max is what Qwen
+    # serves now, and it is a different model in two ways that matter:
+    #
+    # * **Text only.** 3.8 was carried here as `text,image,video`; 3.7
+    #   advertises `text` alone, so a QA run on it has no capture tool. That is
+    #   a supported shape (see `input_modalities`), not a defect, but it makes
+    #   this the one catalog entry a vision arm cannot use.
+    # * **No effort axis.** Its `reasoning` object carries no
+    #   `supported_efforts` and `reasoning_effort` is absent from
+    #   `supported_parameters`, so `reasoning` is left None here: a request must
+    #   not send OpenRouter's reasoning parameter at all. Turning reasoning off
+    #   still works — `ReasoningConfig.disabled` is valid for every model.
+    LLMModel.qwen3_7_max: ModelSpec(
         provider=LLMProvider.qwen,
         supports_strict_json=True,
-        label="Qwen3.8 Max",
+        label="Qwen3.7 Max",
         max_input_tokens=868_928,
-        input_modalities=("text", "image", "video"),
-        # The catalog lists a fifth effort, `minimal`, which `ReasoningEffort`
-        # does not model; the four below are what a request may ask for.
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=(
-            ReasoningEffort.xhigh,
-            ReasoningEffort.high,
-            ReasoningEffort.medium,
-            ReasoningEffort.low,
-        ),
+        input_modalities=("text",),
     ),
 }
 
 
-DEFAULT_MODEL: LLMModel = LLMModel.gpt_5_6_luna
+# Moved off `gpt-5.6-luna` on 2026-10-06 when that slug left the catalog along
+# with `gpt-5.6-sol` and `gpt-chat-latest`. `gpt-6-luna` is the same family's
+# newest entry, so a deployment that never set `DEFAULT_MODEL` keeps reasoning
+# at the provider's `medium` with the same window and modalities as before.
+#
+# This is still a behaviour change for anyone relying on the constant: runs that
+# do not name a model now go to a different checkpoint, and a comparison that
+# straddles the change is not about one model.
+DEFAULT_MODEL: LLMModel = LLMModel.gpt_6_luna
 
 
 def get_model_spec(model: LLMModel) -> ModelSpec:
