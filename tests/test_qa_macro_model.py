@@ -196,6 +196,36 @@ def test_the_stored_line_keeps_the_quotes_and_the_comment_the_author_wrote() -> 
 # --- 텍스트가 원본이라는 관계 ---------------------------------------------------
 
 
+def test_a_require_node_keeps_the_two_key_names_a_db_check_matches_on() -> None:
+    """`artel-orchestration-server` 의 CHECK 제약 하나가 이 두 이름에 기댄다.
+
+    `ck_macro_require_carries_remedy`(`V98__store_registered_macros_on_the_content_map.sql`)
+    가 `jsonb_path_exists` 로 `$.**` 를 훑어, `kind` 가 `"require"` 인데 `remedy` 가
+    없거나 비거나 문자열이 아닌 node 가 있으면 행을 거절한다. `require` 가 `if` 몸통
+    안에 중첩될 수 있어 고정 경로로는 닿지 않으므로 tree 전체를 훑는다.
+
+    **둘 중 하나라도 이름이 바뀌면 그 제약이 조용히 아무것도 막지 않게 된다.**
+    `NOT jsonb_path_exists(...)` 가 어떤 tree 에도 참이 되고, 에러는 안 나고 검증만
+    사라진다. 그래서 여기서 이름을 못박는다 — 저쪽 repository 의 테스트는 이 PR 의
+    diff 에서 안 보인다.
+
+    목록을 담는 key 이름(`statements`·`body`·`orelse`)에는 기대지 않으므로 그쪽은
+    자유롭다.
+    """
+    nested = json.loads(
+        macro_definition_from_source(
+            "m",
+            "def m(card: object) -> None:\n"
+            "    if exists(card):\n"
+            '        require(actionable(card), "wait for the card to settle")\n',
+        ).model_dump_json()
+    )["entry"]["statements"][0]["body"][0]
+
+    assert nested["kind"] == "require"
+    assert isinstance(nested["remedy"], str)
+    assert nested["remedy"] == "wait for the card to settle"
+
+
 def test_a_stored_definition_cannot_be_edited_in_place() -> None:
     """고치는 유일한 길은 원본 텍스트를 다시 파싱하는 것이다."""
     definition = macro_definition_from_source("attack_with_combined_card", EXAMPLE)
