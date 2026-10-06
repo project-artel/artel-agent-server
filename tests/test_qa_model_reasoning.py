@@ -58,7 +58,7 @@ def test_models_api_exposes_reasoning_selection_capabilities() -> None:
         "video",
     ]
     assert catalog[LLMModel.gemini_3_8_flash]["multimodal"] is True
-    assert catalog[LLMModel.gpt_5_6_luna]["reasoning"] == {
+    assert catalog[LLMModel.gpt_6_luna]["reasoning"] == {
         "kind": "effort",
         "efforts": ["max", "xhigh", "high", "medium", "low"],
         "min_tokens": None,
@@ -83,7 +83,7 @@ def test_models_api_exposes_reasoning_selection_capabilities() -> None:
         "max_tokens": None,
         "step": None,
     }
-    assert catalog[LLMModel.gpt_chat_latest]["reasoning"] is None
+    assert catalog[LLMModel.qwen3_7_max]["reasoning"] is None
 
 
 def test_request_accepts_each_supported_reasoning_shape() -> None:
@@ -107,7 +107,7 @@ def test_request_accepts_each_supported_reasoning_shape() -> None:
 @pytest.mark.parametrize(
     ("model", "reasoning"),
     [
-        (LLMModel.gpt_chat_latest, {"effort": "low"}),
+        (LLMModel.qwen3_7_max, {"effort": "low"}),
         (LLMModel.claude_sonnet_5, {"max_tokens": 2048}),
         (LLMModel.claude_haiku_4_5_bedrock, {"effort": "high"}),
         # The right kind, an effort the model does not offer.
@@ -203,7 +203,7 @@ def test_service_rejects_invalid_reasoning_before_saving() -> None:
                 ],
                 # Named rather than left to DEFAULT_MODEL: the default now
                 # reasons, and this case needs a model that does not.
-                model=LLMModel.gpt_chat_latest,
+                model=LLMModel.qwen3_7_max,
                 reasoning=ReasoningConfig(effort=ReasoningEffort.low),
             )
 
@@ -306,7 +306,7 @@ def test_caching_is_opt_in_and_only_for_anthropic(monkeypatch) -> None:
     try:
         chat_model.build_chat_model(LLMModel.claude_opus_5, cache_prompt=True)
         chat_model.build_chat_model(LLMModel.claude_opus_5)
-        chat_model.build_chat_model(LLMModel.gpt_chat_latest, cache_prompt=True)
+        chat_model.build_chat_model(LLMModel.gpt_6_luna, cache_prompt=True)
     finally:
         chat_model.build_chat_model.cache_clear()
 

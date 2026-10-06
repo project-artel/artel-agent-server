@@ -38,9 +38,6 @@ class LLMModel(StrEnum):
     gpt_6_astra = "openai/gpt-6-astra"
     gpt_6_luna = "openai/gpt-6-luna"
     gpt_5_6_terra = "openai/gpt-5.6-terra"
-    gpt_5_6_luna = "openai/gpt-5.6-luna"
-    gpt_5_6_sol = "openai/gpt-5.6-sol"
-    gpt_chat_latest = "openai/gpt-chat-latest"
     claude_opus_5_5 = "anthropic/claude-opus-5.5"
     claude_sonnet_5_5 = "anthropic/claude-sonnet-5.5"
     claude_sonnet_5 = "anthropic/claude-sonnet-5"
@@ -290,38 +287,6 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
         reasoning=ReasoningKind.effort,
         reasoning_efforts=tuple(ReasoningEffort),
     ),
-    LLMModel.gpt_5_6_luna: ModelSpec(
-        provider=LLMProvider.openai,
-        supports_strict_json=True,
-        label="GPT-5.6 Luna",
-        max_input_tokens=922_000,
-        input_modalities=("text", "image", "file"),
-        # The catalog also advertises a sixth effort, `none`, which
-        # `ReasoningEffort` does not model; the five below are the whole enum.
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=tuple(ReasoningEffort),
-    ),
-    LLMModel.gpt_5_6_sol: ModelSpec(
-        provider=LLMProvider.openai,
-        supports_strict_json=True,
-        label="GPT-5.6 Sol",
-        max_input_tokens=922_000,
-        input_modalities=("text", "image", "file"),
-        # Six efforts like Luna, the unmodelled `none` included.
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=tuple(ReasoningEffort),
-    ),
-    # The one entry that does not reason, which is why it is here: `reasoning`
-    # left None is a state the request validator and the catalog API both have
-    # to keep answering for. The slug tracks whatever ChatGPT currently serves,
-    # so its window is the one most worth re-checking against the catalog.
-    LLMModel.gpt_chat_latest: ModelSpec(
-        provider=LLMProvider.openai,
-        supports_strict_json=True,
-        label="GPT Chat Latest",
-        max_input_tokens=272_000,
-        input_modalities=("text", "image", "file"),
-    ),
     # Both carry the same 1,000,000 window less the 128,000 completion reserve,
     # `text,image,file`, and five efforts. The difference from Opus 5 and
     # Sonnet 5 below is that reasoning is `mandatory` here and the provider's
@@ -501,7 +466,15 @@ MODEL_SPECS: dict[LLMModel, ModelSpec] = {
 }
 
 
-DEFAULT_MODEL: LLMModel = LLMModel.gpt_5_6_luna
+# Moved off `gpt-5.6-luna` on 2026-10-06 when that slug left the catalog along
+# with `gpt-5.6-sol` and `gpt-chat-latest`. `gpt-6-luna` is the same family's
+# newest entry, so a deployment that never set `DEFAULT_MODEL` keeps reasoning
+# at the provider's `medium` with the same window and modalities as before.
+#
+# This is still a behaviour change for anyone relying on the constant: runs that
+# do not name a model now go to a different checkpoint, and a comparison that
+# straddles the change is not about one model.
+DEFAULT_MODEL: LLMModel = LLMModel.gpt_6_luna
 
 
 def get_model_spec(model: LLMModel) -> ModelSpec:
