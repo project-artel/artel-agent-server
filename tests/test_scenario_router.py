@@ -145,10 +145,13 @@ class _FakeChannel:
         # 제출마다 "합치면서 걷어내라"고 지목한 번호들. 지우는 일이라 지목 자체가 검사 대상이다.
         self.absorbed = []
         self.stages = []
+        # 수를 실은 보고까지 받아 둔다 — 문장 쓰기의 n/N 이 올라가는지가 검사 대상이다.
+        self.reports: list[tuple[str, int | None, int | None]] = []
         self._answers = answers or []
 
-    async def report(self, stage: str) -> None:
+    async def report(self, stage: str, done: int | None = None, total: int | None = None) -> None:
         self.stages.append(stage)
+        self.reports.append((stage, done, total))
 
     async def submit_scenario(self, scenario: dict, absorbed_scenario_ids=None):
         from app.sessions.channel import ScenarioAccepted
@@ -214,8 +217,27 @@ def test_workflow_groups_writes_and_submits_in_order(monkeypatch) -> None:
 
     assert calls["b"] == 1
     assert [s["title"] for s in channel.submitted] == ["첫 여정", "둘째 여정"]  # 순서 보존
-    # 노드 경계 보고: B 앞에 thinking 한 번, worker 마다 writing — 침묵이 안 생긴다.
-    assert channel.stages == ["thinking", "writing", "writing"]
+    # 노드 경계 보고(ARTEL-952). 루프 시절에는 `thinking` 한 줄과 worker 마다 `writing`
+    # 뿐이었고, 그 사이가 25~54초였다(run 87 실측) — 멈춘 것과 구분이 안 됐다.
+    #
+    # 이제 노드마다 나간다: 묶기 시작 → 묶음 수 → (묶음마다 시작·끝) → 저장.
+    assert channel.stages == [
+        "grouping", "grouped",
+        "writing", "writing",          # 두 묶음의 호출 시작
+        "writing", "writing",          # 두 묶음의 완료 (n 이 오른다)
+        "saving",
+    ]
+    # **분모와 분자가 실려 나간다.** 이 수가 없으면 "쓰고 있다" 가 몇 번째인지 말할 수 없다.
+    assert ("grouped", None, 2) in channel.reports
+    assert ("saving", None, 2) in channel.reports
+    #
+    # **끼어드는 순서는 못 박지 않는다.** 묶음은 병렬로 돌아서 시작과 끝이 섞이는 순서가
+    # 호출 지연에 달려 있고, 이 검사의 가짜 호출은 즉시 끝나 직렬처럼 보인다. 못 박으면
+    # 운영에서 맞는 코드를 검사가 틀렸다고 한다. 대신 불변식을 본다.
+    counted = [(d, t) for stage, d, t in channel.reports if stage == "writing"]
+    assert all(t == 2 for _, t in counted), counted          # 분모는 늘 묶음 수
+    assert counted[0][0] == 0 and counted[-1][0] == 2         # 0 에서 시작해 전부 끝난다
+    assert [d for d, _ in counted] == sorted(d for d, _ in counted)  # 분자는 줄지 않는다
     # 판정은 B 의 선택에서 결정적으로 — 모델을 다시 안 부른다.
     assert out.reviewed is not None and out.reviewed.included == [1]
     assert out.scenarios == []  # 저장은 제출로 끝났다 — 봉투에 다시 실으면 두 벌이 된다

@@ -36,7 +36,15 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from app.agents.base import AgentContext
 from app.config import get_settings
 from app.agents.scenario import trace
-from app.agents.scenario.progress import THINKING, WRITING
+from app.agents.scenario.progress import (
+    BRIDGING,
+    GROUPED,
+    GROUPING,
+    MODIFYING,
+    SAVING,
+    THINKING,
+    WRITING,
+)
 from app.llm.chat_model import CACHE_POINT
 from app.prompts import load_prompt
 from app.agents.scenario.cases import render_game_shape, render_test_case_list
@@ -512,9 +520,11 @@ async def run_authoring_workflow(
     known_ids = {case.id for case in request.test_case_list}
 
     # ── B: 묶기·순서 (전량은 여기 1회) ─────────────────────────────────────────
-    # 노드 경계 보고 — 모델 사이의 침묵이 "멎었다"와 구분되게. 오케는 모르는 stage 를
-    # 버리므로 기존 wire 값(thinking/writing)을 그대로 쓴다(배포 결합 없음).
-    await channel.report(THINKING)
+    # 노드 경계 보고. 오케는 모르는 stage 를 버리므로 새 값을 더해도 배포가 묶이지 않는다 —
+    # 오케가 아직 `grouping` 을 모르면 그 줄만 안 보이고 턴은 그대로 돈다.
+    #
+    # 실측(run 87): 이 호출이 25.7초·50.3초였고 그 사이 프레임이 하나도 없었다.
+    await channel.report(GROUPING)
     plan: GroupingPlan = await _call(
         request.model, request.reasoning, GroupingPlan, _grouping_prompt(request)
     )
@@ -531,6 +541,8 @@ async def run_authoring_workflow(
         for g in plan.groups
     ]
     groups = [g for g in groups if g.case_ids]
+    # B 가 끝났다. **묶음 수를 함께 보낸다** — 이 수가 뒤따르는 문장 쓰기의 분모다.
+    await channel.report(GROUPED, total=len(groups))
     trace.record(
         run_id, "워크플로 B — 묶기·순서",
         f"묶음 {len(groups)}개"
@@ -569,6 +581,7 @@ async def run_authoring_workflow(
             request.model, request.reasoning, GroupingPlan,
             _grouping_prompt(request, findings=findings),
         )
+        await channel.report(BRIDGING)
         retried_groups = [
             Group(
                 title=g.title,
@@ -596,8 +609,14 @@ async def run_authoring_workflow(
         trace.record(run_id, "워크플로 B — 걷기 검증", "어긋남 0건")
 
     # ── C: 문장 쓰기 (묶음별 병렬 — 각 호출은 규칙+모양(캐시)+자기 묶음만) ────────
+    # 묶음이 끝날 때마다 n/N 을 올린다. 병렬이라 **끝난 순서**로 센다 — 어느 묶음이 먼저
+    # 끝났는지는 알 바가 아니고, 움직이고 있다는 것만 보이면 된다.
+    done = 0
+
     async def write(group: Group, feedback: str = "") -> ScenarioPlan | None:
-        await channel.report(WRITING)
+        # 호출이 시작됐다는 박동. 보수 호출도 여기로 오므로 그때도 한 줄이 나가고, 그것이
+        # "아직 움직인다" 는 유일한 신호다 — 한 호출이 29~54초다(run 87 실측).
+        await channel.report(WRITING, done=done, total=len(groups))
         try:
             out: _Writer = await _call(
                 request.model, request.reasoning, _Writer, _writer_prompt(request, group, feedback)
@@ -639,6 +658,9 @@ async def run_authoring_workflow(
             )
             if repaired is not None:
                 scenario = repaired
+        nonlocal done
+        done += 1
+        await channel.report(WRITING, done=done, total=len(groups))
         return scenario
 
     written = await asyncio.gather(*(write_covering(g) for g in groups))
@@ -653,6 +675,7 @@ async def run_authoring_workflow(
     )
 
     # ── D: 제출 (코드 — 기존 프레임 그대로, 묶음 순서대로 직렬 방출) ──────────────
+    await channel.report(SAVING, total=len([w for w in written if w is not None]))
     saved: list[str] = []
     # 바뀐 시나리오(ARTEL-936). **저쪽이 저장한 대로** 센다 — 하나를 냈는데 둘로 나뉘어 저장되거나,
     # 같은 제목이라 새로 만들지 않고 기존 것을 고쳤을 수 있다. 옛 서버는 그 목록을 안 보내므로
@@ -761,7 +784,7 @@ async def run_modify_workflow(
     }
 
     async def edit(feedback: str = "") -> ModifyPlan | None:
-        await channel.report(WRITING)
+        await channel.report(MODIFYING)
         try:
             return await _call(
                 request.model, request.reasoning, ModifyPlan, _modify_prompt(request, feedback)
