@@ -83,6 +83,20 @@ class UncoveredCases(BaseModel):
     scenes: list[UncoveredScene] = Field(default_factory=list)
 
 
+class SavedScenario(BaseModel):
+    """저쪽이 이번 제출로 저장한 시나리오 하나 (ARTEL-937).
+
+    하나를 냈는데 검수가 둘로 나눌 수 있고, 같은 제목이면 새로 만들지 않고 기존 것을 고친다.
+    그래서 무엇을 새로 만들고 무엇을 고쳤는지는 우리가 낸 `scenario_id` 가 아니라 이것을 믿는다.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    scenario_id: int = Field(alias="scenarioId")
+    title: str
+    created: bool
+
+
 class ScenarioAccepted(BaseModel):
     """시나리오 하나를 넘긴 것에 대한 저쪽의 답.
 
@@ -104,6 +118,8 @@ class ScenarioAccepted(BaseModel):
     absorbed: list[str] = Field(default_factory=list)
     kept: list[str] = Field(default_factory=list)
     detail: str | None = None
+    # 이번 제출로 저장한 것(ARTEL-937). 옛 서버는 안 보내므로 비어 있을 수 있다.
+    saved: list[SavedScenario] = Field(default_factory=list)
 
 
 class ScenarioPath(BaseModel):
