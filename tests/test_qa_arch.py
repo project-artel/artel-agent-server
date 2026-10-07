@@ -16,6 +16,7 @@ from app.agents.qa import arch as arch_module
 from app.agents.qa.arch import (
     BASE_TOOL_CALLS,
     DEFAULT_ARCH,
+    PhaseCycleMode,
     MAX_EXPANDS_PER_RUN,
     MAX_FORGETS_PER_RUN,
     MAX_LINKS_PER_RUN,
@@ -39,7 +40,7 @@ from app.qa.run_config import resolve_run_config
 
 
 def resolved(**overrides) -> ResolvedArch:
-    return resolve_arch(QaArchSpec(**overrides), LLMModel.gpt_chat_latest)
+    return resolve_arch(QaArchSpec(**overrides), LLMModel.gpt_6_luna)
 
 
 # --- the fingerprint ----------------------------------------------------------
@@ -99,9 +100,16 @@ def test_the_fingerprint_ignores_the_model_and_the_prompt() -> None:
     """The axes are independent, and a digest that moved with all of them could
     not group "the same structure under two models" — the comparison this exists
     to make possible."""
-    sonnet = resolve_run_config(model=LLMModel.claude_sonnet_5)
-    gpt = resolve_run_config(model=LLMModel.gpt_chat_latest)
-    pinned = resolve_run_config(model=LLMModel.gpt_chat_latest, prompt_version="v1")
+    # `v1` predates the phase cycle and carries no `phase_directive`, so the
+    # pinned side is asked for with the rung that needs none — and then so are
+    # the other two, because a structure that differed between them is the one
+    # thing that would make this comparison say nothing.
+    old_shape = QaArchSpec(phase_cycle=PhaseCycleMode.off)
+    sonnet = resolve_run_config(model=LLMModel.claude_sonnet_5_5, arch=old_shape)
+    gpt = resolve_run_config(model=LLMModel.gpt_6_luna, arch=old_shape)
+    pinned = resolve_run_config(
+        model=LLMModel.gpt_6_luna, prompt_version="v1", arch=old_shape
+    )
 
     assert sonnet.agent_fingerprint == gpt.agent_fingerprint == pinned.agent_fingerprint
     assert pinned.prompt_version != gpt.prompt_version
@@ -126,7 +134,7 @@ def test_a_relabelled_structure_keeps_its_fingerprint() -> None:
 
 def test_auto_follows_the_model() -> None:
     assert resolved(vision=VisionMode.auto).vision is get_model_spec(
-        LLMModel.gpt_chat_latest
+        LLMModel.gpt_6_luna
     ).supports_vision
 
 
@@ -137,14 +145,14 @@ def test_vision_on_is_refused_when_the_model_cannot_see(monkeypatch) -> None:
     is a wrong data point — and wrong is worse than absent, because nobody
     re-checks the rows that are there.
     """
-    blind = replace(get_model_spec(LLMModel.gpt_chat_latest), input_modalities=("text",))
+    blind = replace(get_model_spec(LLMModel.gpt_6_luna), input_modalities=("text",))
     monkeypatch.setattr(arch_module, "get_model_spec", lambda _model: blind)
 
     with pytest.raises(QaArchError, match="cannot read images"):
-        resolve_arch(QaArchSpec(vision=VisionMode.on), LLMModel.gpt_chat_latest)
+        resolve_arch(QaArchSpec(vision=VisionMode.on), LLMModel.gpt_6_luna)
 
     # `auto` still resolves, to the truth about the model.
-    assert resolve_arch(QaArchSpec(vision=VisionMode.auto), LLMModel.gpt_chat_latest).vision is False
+    assert resolve_arch(QaArchSpec(vision=VisionMode.auto), LLMModel.gpt_6_luna).vision is False
 
 
 def test_every_call_is_refused_when_the_run_resolves_to_no_vision(monkeypatch) -> None:
@@ -157,19 +165,19 @@ def test_every_call_is_refused_when_the_run_resolves_to_no_vision(monkeypatch) -
     over — and it cannot be caught from the spec alone, because `vision='auto'` is
     still `auto` until a model is named.
     """
-    blind = replace(get_model_spec(LLMModel.gpt_chat_latest), input_modalities=("text",))
+    blind = replace(get_model_spec(LLMModel.gpt_6_luna), input_modalities=("text",))
     monkeypatch.setattr(arch_module, "get_model_spec", lambda _model: blind)
 
     every_call = QaArchSpec(screen_capture=ScreenCaptureMode.every_call)
     with pytest.raises(QaArchError, match="needs vision"):
-        resolve_arch(every_call, LLMModel.gpt_chat_latest)
+        resolve_arch(every_call, LLMModel.gpt_6_luna)
 
     stated_off = QaArchSpec(vision=VisionMode.off, screen_capture=ScreenCaptureMode.every_call)
     with pytest.raises(QaArchError, match="needs vision"):
-        resolve_arch(stated_off, LLMModel.gpt_chat_latest)
+        resolve_arch(stated_off, LLMModel.gpt_6_luna)
 
     # The default mode is unaffected by any of this.
-    assert resolve_arch(QaArchSpec(), LLMModel.gpt_chat_latest).vision is False
+    assert resolve_arch(QaArchSpec(), LLMModel.gpt_6_luna).vision is False
 
 
 def test_the_two_capture_arms_are_two_structures_with_one_tool_set() -> None:
@@ -184,7 +192,7 @@ def test_the_two_capture_arms_are_two_structures_with_one_tool_set() -> None:
     on_demand = resolved(vision=VisionMode.on)
     every_call = resolve_arch(
         QaArchSpec(vision=VisionMode.on, screen_capture=ScreenCaptureMode.every_call),
-        LLMModel.gpt_chat_latest,
+        LLMModel.gpt_6_luna,
     )
 
     on_demand_tools, on_demand_middleware, on_demand_print = structure_of(on_demand)
@@ -206,7 +214,7 @@ def test_the_three_capture_modes_are_three_structures_with_one_tool_set() -> Non
     """
     resolved_modes = {
         mode: resolve_arch(
-            QaArchSpec(vision=VisionMode.on, screen_capture=mode), LLMModel.gpt_chat_latest
+            QaArchSpec(vision=VisionMode.on, screen_capture=mode), LLMModel.gpt_6_luna
         )
         for mode in ScreenCaptureMode
     }
@@ -225,15 +233,15 @@ def test_every_automatic_mode_is_refused_without_vision(monkeypatch) -> None:
     `middleware_names_for` 가 vision 이 켜진 런에만 `capture_vision` 을 붙이므로, 통과시키면
     그림을 실으라고 적힌 런이 한 장도 없이 돈다.
     """
-    blind = replace(get_model_spec(LLMModel.gpt_chat_latest), input_modalities=("text",))
+    blind = replace(get_model_spec(LLMModel.gpt_6_luna), input_modalities=("text",))
     monkeypatch.setattr(arch_module, "get_model_spec", lambda _model: blind)
 
     for mode in (ScreenCaptureMode.every_call, ScreenCaptureMode.by_role):
         with pytest.raises(QaArchError, match="needs vision"):
-            resolve_arch(QaArchSpec(screen_capture=mode), LLMModel.gpt_chat_latest)
+            resolve_arch(QaArchSpec(screen_capture=mode), LLMModel.gpt_6_luna)
 
     # 기본 mode 는 그대로 통과한다.
-    assert resolve_arch(QaArchSpec(), LLMModel.gpt_chat_latest).vision is False
+    assert resolve_arch(QaArchSpec(), LLMModel.gpt_6_luna).vision is False
 
 
 def test_deleting_without_being_able_to_replace_is_refused() -> None:
@@ -374,11 +382,72 @@ def test_a_pinned_summarizer_stays_apart_from_the_run_model() -> None:
         get_settings(), "qa_compaction_model", LLMModel.gemma_4_free.value
     ):
         resolved = resolve_run_config(
-            arch=QaArchSpec(compaction=True), model=LLMModel.gpt_5_6_luna
+            arch=QaArchSpec(compaction=True), model=LLMModel.gpt_6_luna
         )
 
     assert resolved.compaction_model == LLMModel.gemma_4_free.value
-    assert resolved.model is LLMModel.gpt_5_6_luna
+    assert resolved.model is LLMModel.gpt_6_luna
+
+
+# --- the phase cycle as an axis -----------------------------------------------
+
+
+def test_the_off_rung_is_the_run_that_existed_before_the_axis() -> None:
+    """`off` has to stay the run that existed before the field did.
+
+    It is not the default any more, which is exactly why this is still checked.
+    `off` is what a caller reaches for to get the old shape back — a pinned
+    prompt version, a rollback, the arm the pilot measured against — and it is
+    worth nothing if it has drifted in the meantime. The three things that decide
+    what a run does are the tool set, each tool's argument schema and the
+    middleware; they are compared against the `in_verdict` rung, the nearest
+    value that does change `report_step`, so this asserts identity in two of them
+    and a difference in the third.
+    """
+    off = resolved(phase_cycle=PhaseCycleMode.off, vision=VisionMode.on)
+    in_verdict = resolved(phase_cycle=PhaseCycleMode.remember_in_verdict, vision=VisionMode.on)
+
+    # Same tools and same middleware as the rung above; only `report_step`'s
+    # schema and the knob itself separate them.
+    assert structure_of(off)[0] == structure_of(in_verdict)[0]
+    assert structure_of(off)[1] == structure_of(in_verdict)[1]
+    assert structure_of(off)[2] != structure_of(in_verdict)[2]
+
+
+def test_each_rung_of_the_ladder_is_its_own_structure() -> None:
+    """Four values, four digests, or `agent_fingerprint` averages the arms.
+
+    The pilot compares arms that run from one image against one game. If two of
+    them hashed the same, `/api/qa-stats` would put them in one cell and the
+    comparison would read as noise inside a single structure.
+    """
+    digests = {
+        mode: structure_of(resolved(phase_cycle=mode, vision=VisionMode.on))[2]
+        for mode in PhaseCycleMode
+    }
+    assert len(set(digests.values())) == len(PhaseCycleMode)
+
+
+def test_the_default_structure_holds_the_run_to_the_phase_cycle() -> None:
+    """기본값이 `lite` 라는 것을, 기본값을 안 적은 자리에서 지킨다.
+
+    `tests/test_qa_tools.py` 는 `make()` 에서 `phase_cycle=off` 를 명시한다 — 그 파일은 tool
+    하나하나를 보는 자리이고, gate 를 켜 두면 거의 모든 테스트가 한 왕복씩 더 쓴다. 그래서
+    기본값이 바뀌어도 저쪽은 안 깨진다. **이 테스트가 그 자리를 대신한다.**
+
+    아래 `_EXPECTED_DEFAULT_TOOL_NAMES` 와 fingerprint 핀도 같은 것을 지키지만, 그 둘은 값이
+    맞는지만 말한다. 기본 런이 실제로 phase 를 강제하는지는 이 줄이 말한다.
+    """
+    # 요청이 아무 말도 안 했을 때 무엇이 되는지를 두 자리에서 본다 — spec 의 기본값과,
+    # 그 spec 이 실제 런 설정으로 풀린 결과.
+    assert DEFAULT_ARCH.phase_cycle is PhaseCycleMode.lite
+    mode = resolve_run_config().arch.phase_cycle
+    assert mode is PhaseCycleMode.lite
+
+    assert mode.gates_phases
+    assert mode.remembers_in_verdict
+    # `decide_next_action` 은 `full` 만의 것이고 기본값은 그 왕복을 안 쓴다.
+    assert not mode.decides_in_its_own_turn
 
 
 # --- the skills axis ----------------------------------------------------------
@@ -429,7 +498,7 @@ def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v6-skills-on-demand"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v8-skills-on-demand"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -486,24 +555,31 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
     "finish_run",
     "reply_to_operator",
     "capture_screen",
+    "skip_memory_update",
     "compact_context",
 )
-# Moved twice since it was last pinned: `screen_capture` joined `QaArchSpec`
-# (ARTEL-868), which every structure's digest follows because the dump gained a
-# key, and then three pointer tool names and four tool schemas changed
-# (ARTEL-880). Only the second is a change of shape, and it is why the label
-# above moved with the digest this time.
+# Moved twice since `83bc272fee58`, which was the last digest taken before this
+# axis existed. First to `7235b9a26d43`, by the smallest thing that can move a
+# digest: `phase_cycle` joined `QaArchSpec`, so `arch.model_dump()` gained a key
+# and every structure followed, the default's shape included, while nothing the
+# default run did had moved at all.
 #
-# Moved a third time for `QaArchSpec.skills`: the dump the digest hashes gained a
-# key, so every structure's digest follows. The default tool names are unchanged
-# (`skills` defaults to `off`, so `load_skill` is not in the list). The label moved
-# with it because the structure now has a second shape, `on_demand`.
+# Then here, by the largest thing on this axis: the default itself moved from
+# `off` to `lite`. This is the first bullet of the docstring below, not the
+# third — `skip_memory_update` is in the list above now, `report_step` carries
+# `capability_key` and `learned`, and the phase state machine sits in front of
+# every call. A run that names nothing is a different agent than it was, so the
+# label was bumped with it.
 #
-# Moved a fourth time for `QaArchSpec.fold_stale_skills`: the dump gained a key
-# again. The default middleware list is unchanged, because the skill fold is wired
-# only when `skills` is `on_demand`. The label stays: the fold is part of the
-# `on_demand` shape, and it landed before `v6-skills-on-demand` was merged.
-_EXPECTED_DEFAULT_FINGERPRINT = "4f5bccfede52"
+# Moved once more, from `2a87923211b7`, when the skills branch merged develop:
+# `QaArchSpec` gained `skills` and `fold_stale_skills`, so the dump the digest
+# hashes gained two keys and every structure followed. Nothing the default run
+# does moved with it — `skills` defaults to `off`, so `load_skill` is not in the
+# list above, and the skill fold is wired only when `skills` is `on_demand`, so
+# the default middleware list is the same. The label moved to
+# `v8-skills-on-demand` anyway, because the structure now has a second shape
+# along that axis and a run has to say which side of it it was filed on.
+_EXPECTED_DEFAULT_FINGERPRINT = "e458f275968a"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
@@ -556,7 +632,7 @@ def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
     """
     resolved_arch = resolve_arch(
         QaArchSpec(vision=VisionMode.on, **_PINNED_COMPACTION_KNOBS),
-        LLMModel.gpt_chat_latest,
+        LLMModel.gpt_6_luna,
     )
     names, _middleware, fingerprint = structure_of(resolved_arch)
 

@@ -145,10 +145,13 @@ class _FakeChannel:
         # 제출마다 "합치면서 걷어내라"고 지목한 번호들. 지우는 일이라 지목 자체가 검사 대상이다.
         self.absorbed = []
         self.stages = []
+        # 수를 실은 보고까지 받아 둔다 — 문장 쓰기의 n/N 이 올라가는지가 검사 대상이다.
+        self.reports: list[tuple[str, int | None, int | None]] = []
         self._answers = answers or []
 
-    async def report(self, stage: str) -> None:
+    async def report(self, stage: str, done: int | None = None, total: int | None = None) -> None:
         self.stages.append(stage)
+        self.reports.append((stage, done, total))
 
     async def submit_scenario(self, scenario: dict, absorbed_scenario_ids=None):
         from app.sessions.channel import ScenarioAccepted
@@ -203,7 +206,7 @@ def test_workflow_groups_writes_and_submits_in_order(monkeypatch) -> None:
     plan = wf_mod.GroupingPlan(groups=[
         wf_mod.Group(title="첫 여정", case_ids=[1]),
         wf_mod.Group(title="둘째 여정", case_ids=[1]),
-    ], note="좁게 읽음")
+    ], detail="좁게 읽음")
     writers = [wf_mod._Writer(steps=[_case_step()]), wf_mod._Writer(steps=[_case_step()])]
     wf, calls = _workflow_agent(monkeypatch, plan, writers)
     channel = _FakeChannel()
@@ -214,19 +217,38 @@ def test_workflow_groups_writes_and_submits_in_order(monkeypatch) -> None:
 
     assert calls["b"] == 1
     assert [s["title"] for s in channel.submitted] == ["첫 여정", "둘째 여정"]  # 순서 보존
-    # 노드 경계 보고: B 앞에 thinking 한 번, worker 마다 writing — 침묵이 안 생긴다.
-    assert channel.stages == ["thinking", "writing", "writing"]
+    # 노드 경계 보고(ARTEL-952). 루프 시절에는 `thinking` 한 줄과 worker 마다 `writing`
+    # 뿐이었고, 그 사이가 25~54초였다(run 87 실측) — 멈춘 것과 구분이 안 됐다.
+    #
+    # 이제 노드마다 나간다: 묶기 시작 → 묶음 수 → (묶음마다 시작·끝) → 저장.
+    assert channel.stages == [
+        "grouping", "grouped",
+        "writing", "writing",          # 두 묶음의 호출 시작
+        "writing", "writing",          # 두 묶음의 완료 (n 이 오른다)
+        "saving",
+    ]
+    # **분모와 분자가 실려 나간다.** 이 수가 없으면 "쓰고 있다" 가 몇 번째인지 말할 수 없다.
+    assert ("grouped", None, 2) in channel.reports
+    assert ("saving", None, 2) in channel.reports
+    #
+    # **끼어드는 순서는 못 박지 않는다.** 묶음은 병렬로 돌아서 시작과 끝이 섞이는 순서가
+    # 호출 지연에 달려 있고, 이 검사의 가짜 호출은 즉시 끝나 직렬처럼 보인다. 못 박으면
+    # 운영에서 맞는 코드를 검사가 틀렸다고 한다. 대신 불변식을 본다.
+    counted = [(d, t) for stage, d, t in channel.reports if stage == "writing"]
+    assert all(t == 2 for _, t in counted), counted          # 분모는 늘 묶음 수
+    assert counted[0][0] == 0 and counted[-1][0] == 2         # 0 에서 시작해 전부 끝난다
+    assert [d for d, _ in counted] == sorted(d for d, _ in counted)  # 분자는 줄지 않는다
     # 판정은 B 의 선택에서 결정적으로 — 모델을 다시 안 부른다.
     assert out.reviewed is not None and out.reviewed.included == [1]
     assert out.scenarios == []  # 저장은 제출로 끝났다 — 봉투에 다시 실으면 두 벌이 된다
-    assert "2개 갈래로 나눠 저장했어요" in out.message and "좁게 읽음" in out.message
+    assert out.reply.result == "총 2건의 시나리오를 생성했습니다." and out.reply.detail == "좁게 읽음"
 
 
 def test_workflow_question_returns_early(monkeypatch) -> None:
     import asyncio as aio
     import app.agents.scenario.workflow as wf_mod
 
-    plan = wf_mod.GroupingPlan(groups=[], question="엔딩 전이 보스 포함인가요?")
+    plan = wf_mod.GroupingPlan(groups=[], questions=[wf_mod.Ask(text="엔딩 전이 보스 포함인가요?")])
     wf, calls = _workflow_agent(monkeypatch, plan, [])
     channel = _FakeChannel()
 
@@ -234,7 +256,7 @@ def test_workflow_question_returns_early(monkeypatch) -> None:
         _request(user_input="애매한 요청", test_case_list=_case_list()), _CTX, channel,
     ))
 
-    assert out.message == "엔딩 전이 보스 포함인가요?"
+    assert [q.text for q in out.questions] == ["엔딩 전이 보스 포함인가요?"]
     assert channel.submitted == [] and not calls["c"]
 
 
@@ -299,9 +321,9 @@ def test_workflow_reports_a_case_it_could_not_place(monkeypatch) -> None:
     # in 으로 거짓말하지 않는다 — out 으로 보내고 문구에 밝힌다.
     assert out.reviewed is not None and out.reviewed.included == []
     assert out.reviewed.excluded == [1]
-    assert "넣을 자리를 찾지 못한" in out.message
+    assert "넣을 자리가 없던" in out.message
     # **번호가 아니라 이름으로 말한다** — 내부 id 는 사용자에게 나가지 않는다.
-    assert "Shop" in out.message and "케이스 1" not in out.message
+    assert "상점을 연다" in out.message and "케이스 1" not in out.message
 
 
 def test_workflow_merges_into_an_existing_scenario_when_b_points_at_it(monkeypatch) -> None:
@@ -374,7 +396,7 @@ def test_workflow_b_regroups_once_on_order_findings(monkeypatch) -> None:
     assert calls["b"] == 2                                # 재작성 딱 한 번
     assert "StagePosition" in calls["b_prompts"][1]       # 지적이 B 에게 전달됐다
     assert channel.submitted[0]["title"] == "고친 여정"    # 고친 묶음으로 진행
-    assert "한 갈래로 정리해서 저장했어요" in out.message
+    assert out.reply.result == "총 1건의 시나리오를 생성했습니다."
 
 
 def test_workflow_b_skips_verification_without_scope(monkeypatch) -> None:
@@ -391,7 +413,7 @@ def test_workflow_b_skips_verification_without_scope(monkeypatch) -> None:
         _request(user_input="짜줘", test_case_list=_case_list()), _CTX, channel,
     ))
 
-    assert calls["b"] == 1 and "한 갈래로 정리해서 저장했어요" in out.message
+    assert calls["b"] == 1 and out.reply.result == "총 1건의 시나리오를 생성했습니다."
 
 
 def _current_scenario(scenario_id: int = 7, title: str = "상점 여정"):
@@ -426,7 +448,7 @@ def test_modify_workflow_replaces_the_target_by_id(monkeypatch) -> None:
         # 본문이 원본과 달라야 **고친 것**이다. 같으면 저장하지 않는다(ARTEL-913) — 그 규칙은
         # `test_modify_workflow_refuses_to_claim_an_edit_it_did_not_make` 가 따로 본다.
         scenario_id=7, title="", description="",
-        steps=[_case_step(), _case_step()], note="스텝을 다듬음",
+        steps=[_case_step(), _case_step()], detail="스텝을 다듬음",
     )]
     wf, calls = _modify_agent(monkeypatch, plans)
     channel = _FakeChannel()
@@ -444,7 +466,7 @@ def test_modify_workflow_replaces_the_target_by_id(monkeypatch) -> None:
     submitted = channel.submitted[0]
     assert submitted["scenario_id"] == 7
     assert submitted["title"] == "상점 여정"  # 제목을 안 냈으면 원본 제목이 산다
-    assert "고쳐서 저장했어요" in out.message and out.scenarios == []
+    assert "시나리오를 수정했습니다" in out.message and out.scenarios == []
     assert channel.absorbed == [[]]  # 합치기 요청이 아니면 아무것도 걷어내지 않는다
     assert out.reviewed is None  # 수정은 전 건 판정 턴이 아니다
 
@@ -463,7 +485,7 @@ def test_modify_workflow_carries_absorbed_ids_and_tells_what_was_removed(monkeyp
     plans = [wf_mod.ModifyPlan(
         scenario_id=7, title="합친 여정", steps=[_case_step(), _case_step()],
         absorbed_scenario_ids=[8, 7, 99],  # 자기 자신과 유령 번호가 섞여 있다
-        note="두 흐름이 이어지는 순서라 하나로 묶었어요.",
+        detail="두 흐름이 이어지는 순서라 하나로 묶었어요.",
     )]
     wf, _ = _modify_agent(monkeypatch, plans)
     channel = _FakeChannel(answers=[ScenarioAccepted(
@@ -480,9 +502,8 @@ def test_modify_workflow_carries_absorbed_ids_and_tells_what_was_removed(monkeyp
 
     # 자기 자신(7)과 모르는 번호(99)는 지목에서 빠진다 — 지우는 일에 유령이 닿으면 안 된다.
     assert channel.absorbed == [[8]]
-    assert "상점 둘러보기" in out.message and "걷어냈어요" in out.message
-    # **스텝 수는 저쪽이 센 5** 지 우리가 낸 2 가 아니다(검수·bridge 를 지난 뒤가 최종본).
-    assert "5개" in out.message and "2개" not in out.message
+    assert ("removed", "상점 둘러보기") in [(c.action, c.title) for c in out.reply.changes]
+    assert "1건을 삭제했습니다" in out.reply.result
 
 
 def test_modify_workflow_relays_why_something_was_kept(monkeypatch) -> None:
@@ -544,8 +565,8 @@ def test_modify_workflow_refuses_to_claim_an_edit_it_did_not_make(monkeypatch) -
     # 한 번 더 시켰고, 그래도 그대로라 **저장하지 않았다.**
     assert len(calls) == 2 and "unchanged" in calls[1]
     assert channel.submitted == []
-    assert "반영하지 못했습니다" in out.message
-    assert "고쳐서 저장했어요" not in out.message
+    assert "반영하지 못해서 저장하지 않았어요" in out.reply.result
+    assert "시나리오를 수정했습니다" not in out.message
 
 
 def test_modify_workflow_saves_when_the_retry_actually_changes_it(monkeypatch) -> None:
@@ -567,14 +588,14 @@ def test_modify_workflow_saves_when_the_retry_actually_changes_it(monkeypatch) -
     ))
 
     assert len(calls) == 2 and len(channel.submitted) == 1
-    assert "고쳐서 저장했어요" in out.message
+    assert "시나리오를 수정했습니다" in out.message
 
 
 def test_modify_workflow_asks_when_the_target_is_unclear(monkeypatch) -> None:
     import asyncio as aio
     import app.agents.scenario.workflow as wf_mod
 
-    plans = [wf_mod.ModifyPlan(question="어느 시나리오를 고칠까요?")]
+    plans = [wf_mod.ModifyPlan(questions=[wf_mod.Ask(text="어느 시나리오를 고칠까요?")])]
     wf, _ = _modify_agent(monkeypatch, plans)
     channel = _FakeChannel()
 
@@ -586,7 +607,8 @@ def test_modify_workflow_asks_when_the_target_is_unclear(monkeypatch) -> None:
         _CTX, channel,
     ))
 
-    assert out.message == "어느 시나리오를 고칠까요?" and channel.submitted == []
+    assert [q.text for q in out.questions] == ["어느 시나리오를 고칠까요?"]
+    assert channel.submitted == []
 
 
 def test_modify_workflow_refuses_a_ghost_scenario_id(monkeypatch) -> None:
@@ -608,8 +630,10 @@ def test_modify_workflow_refuses_a_ghost_scenario_id(monkeypatch) -> None:
 
     assert channel.submitted == []
     # 제목으로 가리키고 되묻는다. **번호는 붙이지 않는다** — 내부 id 는 사용자에게 안 나간다.
-    assert "상점 여정" in out.message and "건드리지 않았어요" in out.message
-    assert "id" not in out.message and "7" not in out.message
+    assert "그대로 두었어요" in out.reply.result
+    assert any("상점 여정" in o.label for o in out.questions[0].options)
+    shown = out.message + "".join(o.label for q in out.questions for o in q.options)
+    assert "id" not in shown and "7" not in shown
 
 
 def test_modify_workflow_retries_once_then_leaves_the_original(monkeypatch) -> None:
@@ -636,7 +660,7 @@ def test_modify_workflow_retries_once_then_leaves_the_original(monkeypatch) -> N
     ))
 
     assert len(channel.submitted) == 2 and "근거가 어긋납니다" in calls[1]
-    assert "기존 본문이 그대로" in out.message
+    assert "본문은 그대로예요" in out.reply.result
 
 
 def test_authoring_route_enters_the_workflow(monkeypatch) -> None:

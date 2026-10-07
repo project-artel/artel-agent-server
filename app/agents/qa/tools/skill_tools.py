@@ -1,6 +1,6 @@
 """The `load_skill` tool: a skill body the system prompt no longer carries.
 
-From `qa_run/v18` on, the long sections of the system prompt live in
+From `qa_run/v19` on, the long sections of the system prompt live in
 `qa_run/<version>/skill_<name>.md`, and the agent reads one when it needs it.
 The tool only reads a prompt file. It sends nothing to the game and changes no
 run state, so the result carries no scene view and no operator messages, the same

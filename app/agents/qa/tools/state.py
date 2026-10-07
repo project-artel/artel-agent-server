@@ -145,6 +145,24 @@ class QaRunState:
         # observation 이 아니면 거절한다. 그래서 이 표가 없으면 모델이 지어낸 id 를 싣고 왕복
         # 하나를 거절로 쓴다 — `knowledge_seen` 이 있는 이유와 같다.
         self.capability_observations: dict[str, str] = {}
+        # 이 런에게 실제로 줄로 찍힌 content map 행의 `capability_key` → 그 요약.
+        #
+        # `report_step` 의 `capability_key` 가 이 표와 씬 맥락 블록을 함께 본다. 없는 키는
+        # 떨군다 — `knowledge_seen` 이 있는 이유와 같고, 여기서 안 하면 아무 데서도 안 된다.
+        # 이 런이 무엇을 받았는지 아는 곳이 여기뿐이기 때문이다.
+        #
+        # `list_scene_capabilities` 가 낸 페이지의 줄만 들어온다. 씬 맥락 블록 쪽은 여기 안
+        # 쌓는다 — 그 블록은 `SceneMemory.render` 가 그리고 그 자리에 런 상태가 없어서, 대신
+        # `report_step` 이 지금 서 있는 씬의 조회 결과를 직접 본다.
+        self.capability_keys_listed: dict[str, str] = {}
+        # `report_step` 이 `learned` 를 안 받아 연속으로 되돌려 보낸 횟수.
+        #
+        # 상한이 필요한 이유가 phase 거절과 같다(`app/agents/qa/tools/phase.py` 의
+        # `MAX_CONSECUTIVE_REFUSALS`). 되돌려 보낸 뒤 모델이 또 빠뜨리면 왕복만 탄다.
+        self.verdict_memory_refusals = 0
+        # 이 런의 phase 상태 기계, 또는 `None`. `build_tools` 가 `arch.phase_cycle` 을 보고
+        # 채운다 — `off` 와 `in_verdict` 에서는 끝까지 `None` 이다.
+        self.phase_cycle = None
         # 이 런이 `record_new_capability` 로 만든 행의 id → 그 요약.
         #
         # 그 행들은 `capability_key` 가 NULL 이라(키의 산식에 넣을 `entry_id` 가 없다) 나중에
@@ -195,6 +213,24 @@ class QaRunState:
     def knows_of(self, knowledge_id: str) -> bool:
         """Whether this run has been shown this entry at all, in full or as a line."""
         return knowledge_id in self.knowledge_seen or knowledge_id in self.knowledge_glimpsed
+
+    def remember_listed_capabilities(self, capabilities) -> None:
+        """`list_scene_capabilities` 가 방금 찍어 준 줄의 키를 기억한다.
+
+        키 없는 행은 건너뛴다. 그 행은 agent 가 만든 것이고 `capability_key` 가 NULL 이라
+        지목할 값이 애초에 없다 — id 없는 이웃을 빈 문자열 아래 안 쌓는 것과 같다.
+        """
+        for capability in capabilities:
+            if capability.capability_key:
+                self.capability_keys_listed[capability.capability_key] = capability.summary
+
+    def was_shown_capability_key(self, capability_key: str) -> bool:
+        """이 런이 이 키를 줄로 받은 적이 있나.
+
+        `list_scene_capabilities` 결과만 본다. 씬 맥락 블록은 `report_step` 이 지금 서 있는
+        씬의 조회 결과로 따로 본다 — 블록을 그리는 자리에 런 상태가 없기 때문이다.
+        """
+        return capability_key in self.capability_keys_listed
 
     @property
     def knowledge_writes_attempted(self) -> int:

@@ -43,6 +43,7 @@ class StubSettings:
         self.screen_verdict_prompt_version = versions.get(
             "screen_verdict_prompt_version"
         )
+        self.screen_name_prompt_version = versions.get("screen_name_prompt_version")
 
 
 @pytest.fixture
@@ -355,10 +356,10 @@ def _write_all_agents(root) -> None:
         write_prompt(root, agent, "v1", "system", "body")
 
 
-def test_validate_prompts_rejects_a_long_tool_description_from_v18(prompt_root) -> None:
+def test_validate_prompts_rejects_a_long_tool_description_from_v19(prompt_root) -> None:
     _write_all_agents(prompt_root)
-    write_prompt(prompt_root, "qa_run", "v18", "system", "body")
-    write_prompt(prompt_root, "qa_run", "v18", "tool_click", "x" * 501)
+    write_prompt(prompt_root, "qa_run", "v19", "system", "body")
+    write_prompt(prompt_root, "qa_run", "v19", "tool_click", "x" * 501)
 
     with pytest.raises(PromptError, match=r"tool_click\.md.*501 characters"):
         validate_prompts()
@@ -366,23 +367,26 @@ def test_validate_prompts_rejects_a_long_tool_description_from_v18(prompt_root) 
 
 def test_validate_prompts_accepts_a_tool_description_at_the_limit(prompt_root) -> None:
     _write_all_agents(prompt_root)
-    write_prompt(prompt_root, "qa_run", "v18", "system", "body")
-    write_prompt(prompt_root, "qa_run", "v18", "tool_click", "x" * 500)
+    write_prompt(prompt_root, "qa_run", "v19", "system", "body")
+    write_prompt(prompt_root, "qa_run", "v19", "tool_click", "x" * 500)
 
     validate_prompts()
 
 
-def test_validate_prompts_exempts_versions_before_v18(prompt_root) -> None:
+def test_validate_prompts_exempts_versions_before_v19(prompt_root) -> None:
+    # v18 is develop's phase-cycle prompt, released at 24,739 characters before
+    # the caps existed; a released version is never edited.
     _write_all_agents(prompt_root)
     write_prompt(prompt_root, "qa_run", "v17", "system", "x" * 24_000)
     write_prompt(prompt_root, "qa_run", "v17", "tool_click", "x" * 5_000)
+    write_prompt(prompt_root, "qa_run", "v18", "system", "x" * 24_739)
 
     validate_prompts()
 
 
-def test_validate_prompts_rejects_a_long_system_prompt_from_v18(prompt_root) -> None:
+def test_validate_prompts_rejects_a_long_system_prompt_from_v19(prompt_root) -> None:
     _write_all_agents(prompt_root)
-    write_prompt(prompt_root, "qa_run", "v18", "system", "x" * 8_001)
+    write_prompt(prompt_root, "qa_run", "v19", "system", "x" * 8_001)
 
     with pytest.raises(PromptError, match=r"system\.md.*8001 characters"):
         validate_prompts()
@@ -390,16 +394,16 @@ def test_validate_prompts_rejects_a_long_system_prompt_from_v18(prompt_root) -> 
 
 def test_the_size_limits_apply_to_qa_run_only(prompt_root) -> None:
     _write_all_agents(prompt_root)
-    write_prompt(prompt_root, "scenario", "v18", "system", "x" * 9_000)
-    write_prompt(prompt_root, "scenario", "v18", "tool_click", "x" * 9_000)
+    write_prompt(prompt_root, "scenario", "v19", "system", "x" * 9_000)
+    write_prompt(prompt_root, "scenario", "v19", "tool_click", "x" * 9_000)
 
     validate_prompts()
 
 
 def test_skills_are_not_held_to_the_tool_description_limit(prompt_root) -> None:
     _write_all_agents(prompt_root)
-    write_prompt(prompt_root, "qa_run", "v18", "system", "body")
-    write_prompt(prompt_root, "qa_run", "v18", "skill_knowledge_base", "x" * 6_200)
+    write_prompt(prompt_root, "qa_run", "v19", "system", "body")
+    write_prompt(prompt_root, "qa_run", "v19", "skill_knowledge_base", "x" * 6_200)
 
     validate_prompts()
 
@@ -427,6 +431,7 @@ def test_every_live_agent_has_a_v1(monkeypatch) -> None:
             "game_context",
             "knowledge_query",
             "screen_verdict",
+            "screen_name",
             "step_phrasing",
         }
         for agent in known_agents():

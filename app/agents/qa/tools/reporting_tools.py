@@ -6,6 +6,7 @@
 
 from langchain_core.tools import BaseTool, tool
 
+from app.agents.qa.tools.phase import MAX_CONSECUTIVE_REFUSALS
 from app.agents.qa.tools.state import QaRunState
 from app.agents.qa.tools.tool_context import ToolContext
 from app.prompts import load_tool_description
@@ -108,14 +109,88 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             )
         return _answer("The operator answered.", messages)
 
-    @tool(description=load_tool_description("report_step").body)
-    async def report_step(
+    def _capability_key_problem(capability_key: str) -> str | None:
+        """이 런이 이 키를 받은 적이 있나. 없으면 무엇이 잘못됐는지 한 줄.
+
+        보는 곳이 둘이다 — `list_scene_capabilities` 가 찍어 준 줄(`state`), 그리고 지금 서
+        있는 씬의 맥락 block 이 찍은 줄. `used_knowledge_ids` 가 `state.knows_of` 로 하는 것과
+        같은 검사이고, 이유도 같다: 지어낸 키도 저쪽에서는 진짜 행을 가리키고, 저쪽은 그것이
+        이 런이 본 행인지 알 방법이 없다.
+
+        서 있지 않은 씬의 키는 여기서 통과하지 못한다. `record_capability_verdict` 가 이미
+        같은 선을 긋고 있고(저쪽이 서 있지 않은 씬의 verdict 를 거절한다), 서 있지 않은 씬은
+        이 런이 지금 보고 있지 않은 씬이다.
+        """
+        if state.was_shown_capability_key(capability_key):
+            return None
+        context = channel.scene.scene_context
+        scene = (channel.scene.scene or channel.scene.pulse.scene or "").strip()
+        entry = context.entry_for(scene) if context is not None else None
+        printed = entry.printed_capabilities() if entry is not None else []
+        if any(item.capability_key == capability_key for item in printed):
+            return None
+        return (
+            f"`capability_key` {capability_key!r} is not a row this run has been shown, "
+            "so it was not recorded against this step. The verdict stands. Keys come "
+            "from the square brackets on a capability line in your scene context block "
+            "or in a `list_scene_capabilities` result — call that tool to find the row "
+            "you mean."
+        )
+
+    async def _record_verdict(
         step: int,
         passed: bool,
         message: str,
-        thought: str,
-        used_knowledge_ids: list[str] = [],
+        used_knowledge_ids: list[str],
+        capability_key: str | None = None,
+        learned: str | None = None,
+        asks_memory: bool = False,
     ) -> str:
+        """두 `report_step` 모양이 함께 쓰는 몸통.
+
+        `asks_memory` 는 `phase_cycle` 이 `in_verdict` 이상인가다. `off` 에서는 아래 두 인자가
+        schema 에 아예 없으므로 이 갈래는 한 줄도 안 돈다 — 기존 런 테스트가 왕복을 한 번도
+        더 치르지 않아야 한다는 것이 이 축의 조건이다(ARTEL-667).
+        """
+        notes: list[str] = []
+
+        # `learned` 를 안 받았으면 되돌려 보낸다. 판정을 적기 **전**이다 — 뒤에 두면 다시
+        # 부른 호출이 같은 스텝의 판정을 두 번 쌓는다.
+        #
+        # 되돌려 보내는 것은 인자를 진짜 질문으로 만드는 유일한 방법이다. 빠뜨린 것을 말만
+        # 하고 지나가면 v16 이 문장으로 부탁하고 0 을 받은 그 실패를 그대로 재현한다. 대신
+        # 연속 상한을 둔다 — phase 거절과 같은 산수이고(`phase.py` 의
+        # `MAX_CONSECUTIVE_REFUSALS`), 상한에 닿으면 통과시키고 답이 없었다고 적는다.
+        if asks_memory and learned is None:
+            if state.verdict_memory_refusals < MAX_CONSECUTIVE_REFUSALS:
+                state.verdict_memory_refusals += 1
+                # `lite`·`full` 에서는 이 호출로 `VERIFY` 가 끝나면 안 된다. 판정이 하나도
+                # 안 적혔는데 다음 phase 로 가면 `UPDATE_MEMORY` 가 없는 판정을 두고 묻는다.
+                if state.phase_cycle is not None:
+                    state.phase_cycle.hold()
+                return (
+                    "Nothing was recorded — this report has no `learned`. Call "
+                    "`report_step` again with the same verdict and add it: one line a "
+                    'later run would otherwise work out again, or `learned: ""` to say '
+                    "this step left nothing worth keeping. The empty string is a real "
+                    "answer; leaving the argument out is not."
+                )
+            state.verdict_memory_refusals = 0
+            notes.append(
+                f"You have now left `learned` out {MAX_CONSECUTIVE_REFUSALS} times in a "
+                "row, so this verdict was recorded without it and the run is going on. "
+                "It stands on the record as unanswered, which is not the same as "
+                "nothing to write."
+            )
+        else:
+            state.verdict_memory_refusals = 0
+
+        key = (capability_key or "").strip()
+        if asks_memory and key:
+            problem = _capability_key_problem(key)
+            if problem is not None:
+                notes.append(problem)
+
         # The empty list default is never mutated — the ids are read once, below.
         # It is spelled as a literal rather than as `None` because this is a tool
         # schema the model fills in: an optional array is something it can simply
@@ -154,6 +229,9 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         # along here rather than in a frame of their own precisely so they cannot
         # change that — a second frame type would be a second thing to get wrong
         # about ending the run.
+        #
+        # `capability_key` 와 `learned` 도 같은 이유로 프레임에 안 실린다. 둘은 모델이 쓴
+        # 인자 그대로 `qa_log` 의 tool 호출 행에 남고, 파일럿이 세는 자리가 거기다.
         await channel.emit(
             MessageType.STATUS,
             StatusPayload(
@@ -171,15 +249,13 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         # this is not a refusal — but an agent told nothing would carry on
         # believing the entry was credited, and the ids it invents are exactly
         # what nobody would otherwise notice.
-        note = (
-            ""
-            if not rejected
-            else (
-                f"\n\n{len(rejected)} of the ids you cited are not entries this run "
+        if rejected:
+            notes.append(
+                f"{len(rejected)} of the ids you cited are not entries this run "
                 f"has been shown, so they were not recorded: {rejected}. The verdict "
                 "stands. Cite only ids printed to you by a search or a neighbour line."
             )
-        )
+        note = "".join(f"\n\n{line}" for line in notes)
         if remaining <= 0:
             # 무엇을 남길지 묻는 자리이자 이유는 `render_closing_asks` 가 들고 있다. 여기서
             # 말하는 것은 그 자리가 여기라는 것뿐이다 — 매 스텝마다 붙이면 표가 뜻을 잃고,
@@ -197,6 +273,46 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         if not passed:
             body = f"{body} A failed step is not a reason to stop."
         return _answer(f"{body}{note}", channel.drain_operator_messages())
+
+    # 두 모양을 `if` 로 가른다. 인자 하나를 `None` 기본값으로 늘 달아 두는 길도 있지만, 그러면
+    # `off` 런의 tool schema 가 움직이고 `arch_fingerprint` 가 그것을 tool 의 `args` 로 잡는다
+    # — 아무것도 안 켠 런이 다른 구조로 기록되는 것이 이 축이 피해야 할 첫 번째 일이다.
+    if arch.phase_cycle.remembers_in_verdict:
+
+        @tool(description=load_tool_description("report_step_memory").body)
+        async def report_step(
+            step: int,
+            passed: bool,
+            message: str,
+            thought: str,
+            used_knowledge_ids: list[str] = [],
+            capability_key: str | None = None,
+            learned: str | None = None,
+        ) -> str:
+            # What the agent reads is `qa_run/<version>/tool_report_step_memory.md`.
+            return await _record_verdict(
+                step,
+                passed,
+                message,
+                used_knowledge_ids,
+                capability_key=capability_key,
+                learned=learned,
+                asks_memory=True,
+            )
+
+    else:
+
+        @tool(description=load_tool_description("report_step").body)
+        async def report_step(
+            step: int,
+            passed: bool,
+            message: str,
+            thought: str,
+            used_knowledge_ids: list[str] = [],
+        ) -> str:
+            # What the agent reads is `qa_run/<version>/tool_report_step.md`.
+            return await _record_verdict(step, passed, message, used_knowledge_ids)
+
 
     @tool(
         description=load_tool_description("report_issue").body.format(
