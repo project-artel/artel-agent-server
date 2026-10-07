@@ -202,9 +202,51 @@ def test_a_brace_in_a_skill_body_is_not_formatted(monkeypatch) -> None:
 
 def test_on_demand_fills_the_directive_from_its_file() -> None:
     directive = _skills_directive("v19", "on_demand")
-    assert directive == load_prompt("qa_run", "skills_directive", "v19").body
+    template = load_prompt("qa_run", "skills_directive", "v19").body
+    assert directive.startswith(template.split("{skill_list}")[0])
     assert directive.lstrip().startswith("## Skills")
     assert "load_skill(" in directive
+    assert "{skill_list}" not in directive
+
+
+def test_on_demand_lists_every_skill_with_its_description_in_name_order() -> None:
+    directive = _skills_directive("v19", "on_demand")
+    lines = [line for line in directive.splitlines() if line.startswith("- `")]
+    assert lines == [
+        f"- `{name}` — {load_skill(name, 'v19').description}" for name in skill_names("v19")
+    ]
+    # content_map · held_state · knowledge_base · macro. macro 는 macro PR(#204)이 더한다.
+    assert len(lines) == len(skill_names("v19")) == 4
+
+
+def test_a_new_skill_file_is_listed_without_editing_the_directive(
+    tmp_path, monkeypatch
+) -> None:
+    """The list is generated from the skill files, so one added with a description
+    reaches the Skills section on its own."""
+    import shutil
+
+    from app.prompts import clear_prompt_cache, loader
+
+    shutil.copytree(loader.PROMPTS_ROOT / "qa_run" / "v19", tmp_path / "qa_run" / "v19")
+    (tmp_path / "qa_run" / "v19" / "skill_audio.md").write_text(
+        "---\nversion: v19\nnote: test\nplaceholders: []\n"
+        "description: sound cues and how to check them. Load before judging a sound.\n"
+        "---\n# Audio\n\nListen.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(loader, "PROMPTS_ROOT", tmp_path)
+    clear_prompt_cache()
+    try:
+        directive = _skills_directive("v19", "on_demand")
+    finally:
+        monkeypatch.undo()
+        clear_prompt_cache()
+
+    assert "- `audio` — sound cues and how to check them. Load before judging a sound.\n" in (
+        directive + "\n"
+    )
+    assert directive.index("`audio`") < directive.index("`content_map`")
 
 
 def test_off_fills_the_directive_with_nothing() -> None:

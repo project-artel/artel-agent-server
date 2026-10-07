@@ -2,6 +2,7 @@
 version: v19
 note: macro 문법과 수명주기와 예시 둘. tool_write_macro·tool_read_macro·tool_edit_macro·tool_register_macro·tool_run_macro 다섯이 500자 상한 안에 들어가려면 이 글이 설명 밖에 있어야 한다. tests/test_qa_macro_reference.py 가 문법 절을 app/agents/qa/macro/reference.py 가 grammar.py 로 조립한 글과 맞추고, 예시 둘을 parser 에 넣는다.
 placeholders: []
+description: the macro grammar, two worked examples, and the write, read, edit, register and run lifecycle. Load before your first `write_macro`, and before `run_macro` on a macro you have not read.
 ---
 # Macros — a named sequence of actions you can call again
 

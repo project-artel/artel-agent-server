@@ -29,7 +29,7 @@ from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.vision import QaCaptureVisionMiddleware
 from app.llm.chat_model import build_chat_model
 from app.llm.models import LLMModel, get_model_spec
-from app.prompts import load_prompt, load_skill, skill_names
+from app.prompts import load_prompt, load_skill, skill_descriptions, skill_names
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory
 from app.qa.schemas import QaScenario, QaStep
@@ -104,11 +104,22 @@ def _skills_directive(prompt_version: str, skills: str) -> str:
     With `skills="off"` every skill body is already inlined, and the tool
     descriptions say "the X skill" without naming a tool, so a section telling the
     agent to call `load_skill` would send it looking for a tool it was not given.
+
+    The list of skills is not written in `skills_directive.md`. Each skill file
+    carries its own `description` in frontmatter, and `{skill_list}` is filled
+    with one line per skill, in name order, so the line that advertises a skill
+    cannot drift away from the skill it advertises.
     """
     match = _VERSION_NUMBER.match(prompt_version)
     if skills != "on_demand" or match is None or int(match.group(1)) < _FIRST_SKILL_VERSION:
         return ""
-    return load_prompt(PROMPT_AGENT, "skills_directive", prompt_version).body
+    skill_list = "\n".join(
+        f"- `{name}` — {description}"
+        for name, description in skill_descriptions(prompt_version).items()
+    )
+    return load_prompt(PROMPT_AGENT, "skills_directive", prompt_version).body.format(
+        skill_list=skill_list
+    )
 
 
 def _as_section(name: str, body: str) -> str:
