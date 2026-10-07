@@ -37,6 +37,7 @@ from app.qa.run_config import (
     COMPACTION_PROMPT_AGENT,
     COMPACTION_ROLE,
     DECIDE_ROLE,
+    MACRO_MEMORY_ROLE,
     MEMORY_ROLE,
     PHASE_ROLE,
     PROMPT_AGENT,
@@ -44,6 +45,7 @@ from app.qa.run_config import (
     VISION_ROLE,
     RunConfig,
     resolve_run_config,
+    macro_memory_directive_applies,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,6 +105,26 @@ def system_prompt_with_skills(
 
 
 _HEADING = re.compile(r"^(#+)(?= )", re.MULTILINE)
+
+
+def phase_directive_for(arch: ResolvedArch, prompt_version: str) -> str:
+    """system prompt 의 `{phase_directive}` 자리에 들어가는 글.
+
+    phase 를 강제하는 런에만 실린다. macro 가 켜진 런이면 그 뒤에 지식화 단계에서 macro 를
+    만들게 하는 문단(`macro_memory_directive`)이 붙어 그 순서의 일부로 읽힌다. 조립을 여기
+    하나에 두는 이유는 `tests/test_qa_phase_cycle.py` 가 이 글과 phase 표를 맞대기 때문이다
+    — 테스트가 따로 조립하면 런이 읽는 글이 아닌 것을 잰다.
+    """
+    if not arch.phase_cycle.gates_phases:
+        return ""
+    directive = load_prompt(PROMPT_AGENT, PHASE_ROLE, prompt_version).body
+    if macro_memory_directive_applies(arch, prompt_version):
+        directive = (
+            directive.rstrip()
+            + "\n\n"
+            + load_prompt(PROMPT_AGENT, MACRO_MEMORY_ROLE, prompt_version).body
+        )
+    return directive
 
 
 def _skills_directive(
@@ -473,11 +495,7 @@ class QaRunner:
         )
         # phase 를 강제하는 런에만, 그리고 `DECIDE` 가 자기 turn 을 갖는 런에만. 안 실리면
         # 빈 문자열이라 렌더 결과가 그만큼 그대로다.
-        phase_directive = (
-            load_prompt(PROMPT_AGENT, PHASE_ROLE, config.prompt_version).body
-            if arch.phase_cycle.gates_phases
-            else ""
-        )
+        phase_directive = phase_directive_for(arch, config.prompt_version)
         decide_directive = (
             load_prompt(PROMPT_AGENT, DECIDE_ROLE, config.prompt_version).body
             if arch.phase_cycle.decides_in_its_own_turn

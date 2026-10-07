@@ -83,7 +83,7 @@ def build_tools(
     # `off` 와 `in_verdict` 에서는 `cycle` 이 `None` 이라 tool 이 감싸이지 않는다. 감싸는 것이
     # tool 의 이름도 `args` 도 안 바꾸므로 fingerprint 에는 안 잡히지만, 안 감싸면 실행 경로도
     # 종전 그대로라는 것이 읽는 사람에게 보인다.
-    cycle = build_phase_cycle(ctx.arch.phase_cycle)
+    cycle = build_phase_cycle(ctx.arch.phase_cycle, frozenset(one.name for one in tools))
     state.phase_cycle = cycle
     if cycle is None:
         return tools

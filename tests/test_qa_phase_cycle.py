@@ -98,16 +98,34 @@ def test_the_directive_names_the_same_tools_the_table_does() -> None:
     set may be named at all: a name the model cannot call is worse than no
     advice.
     """
-    body = load_prompt("qa_run", "phase_directive", "v18").body
-    tools, _middleware, _print = structure_of(arch_for(PhaseCycleMode.full))
-    tools = set(tools)
+    for version, macros in (("v18", "off"), ("v19", "off"), ("v19", "on")):
+        _the_directive_names_what_this_structure_offers(version, macros)
 
-    for name in ALWAYS_ALLOWED:
-        assert f"`{name}`" in body, f"{name} is exempt from the order and unsaid"
+
+def _the_directive_names_what_this_structure_offers(version: str, macros: str) -> None:
+    """한 구조가 읽는 지시문과 그 구조가 가진 tool 을 맞댄다.
+
+    표는 모든 구조에 하나지만 tool 목록은 구조마다 다르다. `macros=on` 이면 macro tool 넷이
+    표에 들어 있고 지시문에 macro 문단이 붙는다. `macros=off` 에서는 둘 다 없다 — 그래서 이
+    구조가 실제로 가진 이름만 요구한다. 지시문은 runner 가 조립하는 그대로 받는다.
+    """
+    from app.agents.qa.runner import phase_directive_for
+
+    arch = resolve_arch(
+        QaArchSpec(vision=VisionMode.on, phase_cycle=PhaseCycleMode.full, macros=macros),
+        LLMModel.gpt_6_luna,
+    )
+    body = phase_directive_for(arch, version)
+    tools, _middleware, _print = structure_of(arch)
+    tools = set(tools)
+    where = f"{version}, macros={macros}"
+
+    for name in ALWAYS_ALLOWED & tools:
+        assert f"`{name}`" in body, f"{name} is exempt from the order and unsaid ({where})"
 
     for name, at in _TOOL_PHASE.items():
-        if at is RunPhase.update_memory:
-            assert f"`{name}`" in body, f"{name} answers UPDATE_MEMORY and is unsaid"
+        if at is RunPhase.update_memory and name in tools:
+            assert f"`{name}`" in body, f"{name} answers UPDATE_MEMORY and is unsaid ({where})"
 
     # Backticks in this file mark tool names and argument names alike, and the
     # only argument it has reason to mention is the one it refuses when empty.
@@ -556,3 +574,100 @@ def test_the_new_tools_appear_only_at_the_rung_that_pays_for_them() -> None:
     assert off == in_verdict
     assert set(lite) - set(off) == {"skip_memory_update"}
     assert set(full) - set(off) == {"skip_memory_update", "decide_next_action"}
+
+
+# --- macro 와 지식화 단계 -----------------------------------------------------------
+
+
+def _lite(offered=None):
+    from app.agents.qa.tools.phase import build_phase_cycle
+
+    return build_phase_cycle(PhaseCycleMode.lite, offered)
+
+
+def _into_update_memory(cycle) -> None:
+    """한 step 을 손으로 하고 판정해서 `UPDATE_MEMORY` 에 앉힌다."""
+    for name in ("observe_scene", "click", "report_step"):
+        assert cycle.refusal_for(name) is None, name
+        cycle.advance(name)
+    assert cycle.phase is RunPhase.update_memory
+
+
+def test_registering_a_macro_answers_update_memory() -> None:
+    """등록한 macro 는 다음 런이 쓴다. knowledge 항목과 같은 "런을 넘어 남는 기록" 이다."""
+    cycle = _lite()
+    _into_update_memory(cycle)
+
+    for name in ("read_macro", "write_macro", "edit_macro"):
+        assert cycle.refusal_for(name) is None, name
+        cycle.advance(name)
+    # 초안은 지식이 아니다. 아직 이 step 의 지식화를 마치지 않았다.
+    assert cycle.refusal_for("observe_scene") is None
+    assert cycle.refusal_for("click") is not None
+
+    assert cycle.refusal_for("register_macro") is None
+    cycle.advance("register_macro")
+    # 등록으로 이 step 의 지식화가 끝났다. 다음 step 의 ACT 로 갈 수 있다.
+    assert cycle.refusal_for("run_macro") is None
+
+
+def test_a_macro_registered_now_runs_from_the_next_step() -> None:
+    cycle = _lite()
+    _into_update_memory(cycle)
+    cycle.advance("write_macro")
+    cycle.advance("register_macro")
+
+    assert cycle.refusal_for("run_macro") is None
+    cycle.advance("run_macro")
+    assert cycle.phase is RunPhase.act
+
+
+def test_macro_drafts_can_be_written_and_read_in_any_phase() -> None:
+    """초안은 런 밖에 아무것도 안 바꾼다. ACT 에서 실패한 macro 를 읽고 고칠 수 있어야 한다."""
+    cycle = _lite()
+    for name in ("observe_scene", "run_macro"):
+        cycle.advance(name)
+    assert cycle.phase is RunPhase.act
+
+    for name in ("read_macro", "edit_macro", "write_macro"):
+        assert cycle.refusal_for(name) is None, name
+        cycle.advance(name)
+    assert cycle.phase is RunPhase.act
+
+
+def test_the_refusal_names_only_the_tools_this_run_has() -> None:
+    """`macros=off` 런에 "`register_macro` 로 끝내라" 고 하면 없는 tool 을 찾는다."""
+    offered = frozenset({"observe_scene", "click", "report_step", "record_knowledge", "skip_memory_update"})
+    cycle = _lite(offered)
+    _into_update_memory(cycle)
+
+    refusal = cycle.refusal_for("click")
+
+    assert refusal is not None
+    assert "`record_knowledge`" in refusal
+    assert "register_macro" not in refusal
+
+
+@pytest.mark.parametrize(
+    "version, macros, phase_cycle, applies",
+    [
+        ("v19", "on", PhaseCycleMode.lite, True),
+        ("v19", "off", PhaseCycleMode.lite, False),
+        ("v19", "on", PhaseCycleMode.off, False),
+        ("v18", "on", PhaseCycleMode.lite, False),
+    ],
+)
+def test_the_macro_paragraph_reaches_only_a_phased_run_with_macros_on_a_version_that_has_it(
+    version: str, macros: str, phase_cycle: PhaseCycleMode, applies: bool
+) -> None:
+    """runner 가 싣는 것과 `run_config` 가 hash 하는 것이 같은 조건 하나에서 나온다."""
+    from app.agents.qa.runner import phase_directive_for
+    from app.qa.run_config import macro_memory_directive_applies
+
+    arch = resolve_arch(
+        QaArchSpec(vision=VisionMode.on, phase_cycle=phase_cycle, macros=macros),
+        LLMModel.gpt_6_luna,
+    )
+
+    assert macro_memory_directive_applies(arch, version) is applies
+    assert ("`register_macro` answers UPDATE_MEMORY" in phase_directive_for(arch, version)) is applies

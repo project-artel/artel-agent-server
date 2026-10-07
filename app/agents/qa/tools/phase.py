@@ -52,8 +52,14 @@ class RunPhase(StrEnum):
 # - `pause_game_time`, `resume_game_time` — 판정하려고 화면을 세우는 것은 관측이지 조작이
 #   아니다. 그래서 `ACT` 를 끝내지도 않는다(아래 표에 없다).
 # - `include_screen_selector`, `exclude_screen_selector` — 관측 설정이다.
+# - `write_macro`, `edit_macro`, `read_macro` — macro 초안은 이 런 밖에 아무것도 안 바꾼다.
+#   그리고 어느 단계에서든 불려야 한다 — `UPDATE_MEMORY` 에서 방금 한 순서를 적고, `ACT` 에서
+#   실패한 macro 를 읽고 고친다. 초안은 지식이 아니므로 `UPDATE_MEMORY` 를 끝내지 않는다.
 ALWAYS_ALLOWED = frozenset(
     {
+        "write_macro",
+        "edit_macro",
+        "read_macro",
         "observe_scene",
         "reply_to_operator",
         "wait_for_operator",
@@ -106,26 +112,10 @@ _TOOL_PHASE: dict[str, RunPhase] = {
     "set_input_button": RunPhase.act,
     "drag": RunPhase.act,
     "reset_game": RunPhase.act,
-    # macro 다섯도 ACT 다. macro 는 action 의 순서이고, 그것을 쓰고·고치고·부르는 일은
-    # 손으로 조작하던 바로 그 자리에서 일어난다.
-    #
-    # 다섯을 한 phase 에 두는 이유는 고치는 고리다. `run_macro` 가 실패하면 `read_macro` →
-    # `edit_macro` → `register_macro` → `run_macro` 로 돌아오는데, `read_macro` 를 OBSERVE
-    # 에 두면 실패한 run 다음의 읽기가 뒤로 가는 호출이라 거절당한다. 이 phase 는 뒤로 가지
-    # 않는다.
-    #
-    # `UPDATE_MEMORY` 에 두지 않는 이유: 거기 있는 tool 은 매 step 의 필수 기록을 채운다.
-    # macro 를 쓰는 것으로 그것을 채우게 두면 게임에 대해 적을 것을 건너뛰는 길이 생긴다.
-    # 또 그 phase 의 tool 은 release 된 `qa_run/v18/phase_directive.md` 가 이름을 다 대야
-    # 하는데(`tests/test_qa_phase_cycle.py`), ACT 의 tool 은 그 요구가 없다.
-    "write_macro": RunPhase.act,
-    "edit_macro": RunPhase.act,
-    "read_macro": RunPhase.act,
-    "register_macro": RunPhase.act,
+    # macro 를 돌리는 둘은 ACT 다 — 게임을 움직인다. `checkpoint` 에서 멈춘 macro 도 ACT
+    # 안에서 멈췄으므로 잇는 `resume_macro` 도 ACT 다. 초안을 다루는 셋은 위 `ALWAYS_ALLOWED`
+    # 에 있고, 등록은 아래 `UPDATE_MEMORY` 다.
     "run_macro": RunPhase.act,
-    # `checkpoint` 에서 멈춘 macro 를 잇는 tool. 멈춘 macro 는 ACT 안에서 멈췄으므로
-    # 잇는 것도 ACT 다 — 다른 phase 에 두면 멈춘 자리로 돌아가는 호출이 뒤로 가는
-    # 호출이 되어 거절당한다.
     "resume_macro": RunPhase.act,
     # VERIFY — 판정 하나.
     "report_step": RunPhase.verify,
@@ -138,6 +128,11 @@ _TOOL_PHASE: dict[str, RunPhase] = {
     "forget_knowledge": RunPhase.update_memory,
     "unlink_knowledge": RunPhase.update_memory,
     "skip_memory_update": RunPhase.update_memory,
+    # 등록한 macro 는 다음 런이 쓴다. knowledge 항목과 같은 "런을 넘어 남는 기록" 이라 이
+    # 단계를 끝낼 수 있다. 그래서 이 단계가 macro 를 만드는 자리가 된다 — agent 가 매 step
+    # "무엇을 남길까" 를 묻는 바로 그때 "반복한 순서가 있었나" 도 묻게 한다. 이 순간에 등록한
+    # macro 는 다음 step 의 ACT 부터 돌린다.
+    "register_macro": RunPhase.update_memory,
 }
 
 
@@ -213,9 +208,17 @@ _SKIPPABLE = frozenset({RunPhase.observe, RunPhase.act})
 assert not (_SKIPPABLE & {RunPhase.update_memory})
 
 
-def _tools_that_end(phase: RunPhase) -> str:
-    """그 phase 를 끝내는 tool 이름을, 거절 문구에 넣을 한 줄로."""
-    names = sorted(name for name, at in _TOOL_PHASE.items() if at is phase)
+def _tools_that_end(phase: RunPhase, offered: frozenset[str] | None = None) -> str:
+    """그 phase 를 끝내는 tool 이름을, 거절 문구에 넣을 한 줄로.
+
+    `offered` 를 주면 이 런이 가진 tool 만 댄다. 표는 모든 구조에 하나지만 tool 목록은 구조마다
+    다르다 — `macros=off` 런에 "`register_macro` 로 끝내라" 고 하면 없는 tool 을 찾게 된다.
+    """
+    names = sorted(
+        name
+        for name, at in _TOOL_PHASE.items()
+        if at is phase and (offered is None or name in offered)
+    )
     return ", ".join(f"`{name}`" for name in names)
 
 
@@ -230,8 +233,11 @@ class PhaseCycle:
         self,
         order: tuple[RunPhase, ...],
         max_consecutive_refusals: int = MAX_CONSECUTIVE_REFUSALS,
+        offered: frozenset[str] | None = None,
     ) -> None:
         self._order = order
+        # 이 런이 가진 tool. 거절 문구가 이 안의 이름만 댄다.
+        self._offered = offered
         self._max_consecutive_refusals = max_consecutive_refusals
         self.phase = order[0]
         # 이 런이 자리에 안 맞는 호출을 몇 번 돌려보냈나. 파일럿의 진단 항목이다.
@@ -335,7 +341,7 @@ class PhaseCycle:
             f"Not now — this run is in the {self.phase.value} phase and `{tool_name}` "
             f"belongs to {at.value}. Nothing ran and nothing was recorded. "
             f"{blocking.value} ends when you call one of: "
-            f"{_tools_that_end(blocking)}. Do that first; `{tool_name}` will be "
+            f"{_tools_that_end(blocking, self._offered)}. Do that first; `{tool_name}` will be "
             "waiting on the other side of it."
         )
 
@@ -371,8 +377,12 @@ class PhaseCycle:
                 self._satisfied = True
 
 
-def build_phase_cycle(mode: PhaseCycleMode) -> PhaseCycle | None:
+def build_phase_cycle(
+    mode: PhaseCycleMode, offered: frozenset[str] | None = None
+) -> PhaseCycle | None:
     """이 mode 가 phase 를 강제하면 그 상태 기계, 아니면 `None`."""
     if not mode.gates_phases:
         return None
-    return PhaseCycle(_FULL_ORDER if mode.decides_in_its_own_turn else _LITE_ORDER)
+    return PhaseCycle(
+        _FULL_ORDER if mode.decides_in_its_own_turn else _LITE_ORDER, offered=offered
+    )

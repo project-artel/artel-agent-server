@@ -208,7 +208,18 @@ from app.llm.models import LLMModel, get_model_spec
 #
 # This was `v8-macros` until the branch underneath renumbered itself to
 # `v8-skills-on-demand` (above). No run was filed under `v8-macros`.
-QA_ARCH_LABEL = "v9-macros"
+#
+# v10 because a phased run with macros on now makes macros part of UPDATE_MEMORY
+# (ARTEL-914). `register_macro` moved from ACT to UPDATE_MEMORY in the phase table, so
+# registering a macro answers that step the way a knowledge entry does; the three draft
+# tools became always-allowed; and the phase directive of such a run gains a paragraph
+# (`qa_run/v19/macro_memory_directive.md`) asking, at that step, whether the step had a
+# sequence worth saving. None of this moves `arch_fingerprint` — the phase table is not
+# hashed and neither is the directive's text — while runs were already filed under
+# `v9-macros` (the `macro-ab-l1b` and `macro-ab-l1-nudge` measurements, 2026-10-07). The
+# label is the only thing that can tell them apart from runs after this, which is the
+# case the module docstring says the hand-bumped label exists for.
+QA_ARCH_LABEL = "v10-macro-memory"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

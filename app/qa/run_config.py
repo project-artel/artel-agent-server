@@ -66,7 +66,26 @@ DECIDE_ROLE = "decide_directive"
 # The Skills section of the system prompt, read only by a run with
 # `skills=on_demand`; with `off` the skill bodies are inlined instead.
 SKILLS_ROLE = "skills_directive"
+# macro 를 지식화 단계에서 만들라는 문단. phase 를 강제하고 macro 가 켜진 런에만, 그리고 그
+# 파일을 가진 prompt version 에만 닿는다 — `qa_run/v18` 은 macro 보다 먼저 나와서 없다. 없는
+# version 에서 거절하지 않는 이유는 skills 와 다르다: 이것이 빠져도 tool 이 깨지지 않고, 지식화
+# 단계에서 macro 를 권하는 말만 없다.
+MACRO_MEMORY_ROLE = "macro_memory_directive"
 COMPACTION_ROLE = "summary"
+
+def macro_memory_directive_applies(arch, prompt_version: str) -> bool:
+    """`macro_memory_directive` 가 이 런의 system prompt 에 실리나.
+
+    runner 와 이 파일이 같은 답을 내야 hash 가 실제로 실린 글을 가리킨다. 그래서 한 곳이다.
+    """
+    from app.prompts.loader import roles_in
+
+    return (
+        arch.phase_cycle.gates_phases
+        and arch.macros == "on"
+        and MACRO_MEMORY_ROLE in roles_in(PROMPT_AGENT, prompt_version)
+    )
+
 
 # This build reports citations. Declared as a constant rather than written inline
 # so that a build which one day cannot — a stripped tool set, a structure without
@@ -189,6 +208,10 @@ def resolve_run_config(
         # `phase_cycle=off` reads none of this text, and recording its hash would
         # say the run was given something it never saw.
         hashes[MEMORY_ROLE] = _conditional_hash(MEMORY_ROLE, prompt.version, asked_by)
+    if macro_memory_directive_applies(resolved_arch, prompt.version):
+        hashes[MACRO_MEMORY_ROLE] = load_prompt(
+            PROMPT_AGENT, MACRO_MEMORY_ROLE, prompt.version
+        ).body_sha256
     if resolved_arch.skills == "on_demand":
         # The same refusal one axis over. `qa_run/v18` carries the phase directives
         # but no skill files, so `skills=on_demand` on it would offer `load_skill`

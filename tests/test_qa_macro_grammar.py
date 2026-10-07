@@ -22,6 +22,8 @@ from app.agents.qa.macro.grammar import (
     MacroType,
     ToolSpec,
 )
+from app.agents.qa.arch import PhaseCycleMode, QaArchSpec, VisionMode, resolve_arch
+from app.llm.models import LLMModel
 from app.agents.qa.tools import QaRunState, build_tools
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import MessageType
@@ -65,7 +67,12 @@ def make(timeout: float = 0.05):
             }
         )
     )
-    tools = {one.name: one for one in build_tools(channel, state)}
+    # phase cycle 을 끄고 만든다. 재는 것은 macro 가 보내는 것과 tool 이 보내는 것이 같은지이고,
+    # 켜 두면 `register_macro`(UPDATE_MEMORY)가 첫 phase 에서 거절당해 macro 가 안 돈다.
+    without_phases = resolve_arch(
+        QaArchSpec(vision=VisionMode.on, phase_cycle=PhaseCycleMode.off), LLMModel.gpt_6_luna
+    )
+    tools = {one.name: one for one in build_tools(channel, state, without_phases)}
     return channel, state, tools, sent
 
 
