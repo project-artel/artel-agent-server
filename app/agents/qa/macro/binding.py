@@ -10,7 +10,7 @@
 하나가 `GAME_STATE` 0장, `PULSE` 14489장을 기록했다. 여기서 `SceneMemory` 를 읽는
 것은 `observable()` 하나이고, 그것은 애초에 `GAME_STATE` 전용 reader 다.
 
-**묶인 이름이 드는 값은 id 하나가 아니라 기록 자체다.** 그 기록이 `id` 와 `selector` 를
+**bind 된 이름이 드는 값은 id 하나가 아니라 기록 자체다.** 그 기록이 `id` 와 `selector` 를
 둘 다 들고 있어, 뒤이은 action 은 어느 쪽으로도 겨눌 수 있다.
 
 코드 넷이 여기서 갈린다.
@@ -24,7 +24,7 @@
   그 기록에 없다.
 
 그리고 비교의 거절이 `COMPARISON_REJECTED` 다. 게임이 틀린 것이 아니라 macro 가 못
-묻는 것을 물은 것이라 `REQUIRE_FAILED` 와 같은 코드에 담을 수 없다.
+묻는 것을 물은 것이라 `REQUIRE_FAILED` 와 같은 코드로 낼 수 없다.
 """
 
 from dataclasses import dataclass
@@ -85,11 +85,11 @@ class FoundObject:
 
 @dataclass(frozen=True)
 class LateSelector:
-    """`selector(...)` 를 묶은 이름이 드는 것. 그 자리에서 풀지 않는다.
+    """`selector(...)` 에 bind 한 이름이 드는 것. 그 자리에서 풀지 않는다.
 
     즉시 풀면 적어 둔 주소인데도 `STALE_BINDING` 이 나서, 적어 둔 주소면
     `REQUIRE_FAILED`, 이 런에서 찾은 값이면 `STALE_BINDING` 이라는 기준이 깨진다.
-    `find(...)` 를 묶은 이름과 다른 점이 이것이다.
+    `find(...)` 에 bind 한 이름과 다른 점이 이것이다.
     """
 
     selector: str
@@ -118,7 +118,7 @@ class MacroMemories:
 class MacroScope:
     """한 `def` 가 도는 동안 맨이름이 드는 값.
 
-    `def` 하나가 scope 하나다. parser 가 한 `def` 안에서 이름을 한 번만 묶게 했으므로,
+    `def` 하나가 scope 하나다. parser 가 한 `def` 안에서 이름을 한 번만 bind 하게 했으므로,
     여기서 덮어쓰기를 걱정할 자리가 없다.
     """
 
@@ -130,7 +130,7 @@ class MacroScope:
 
     def value(self, name: str) -> Any:
         if name not in self.values:
-            # parser 가 묶이지 않은 이름을 이미 거절하므로, 여기 닿으면 runner 와 parser
+            # parser 가 bind 되지 않은 이름을 이미 거절하므로, 여기 닿으면 runner 와 parser
             # 가 같은 몸통을 다르게 걸은 것이다.
             raise MacroFailure(
                 ACTION_REJECTED,
@@ -166,7 +166,7 @@ def _live(memory: PulseMemory) -> list[tuple[str, _HeldObject]]:
 
     꺼진 것을 빼는 이유는 `PulseMemory.render` 가 그것을 안 그리는 이유와 같다 — 화면에
     없고 누를 수도 없어 조준 후보가 아니다. 넣으면 `find` 가 agent 가 본 적 없는 것을
-    돌려주게 된다. 그래서 묶은 뒤 그 객체가 꺼지면 `STALE_BINDING` 이 나고, 그것이 이
+    돌려주게 된다. 그래서 bind 한 뒤 그 객체가 꺼지면 `STALE_BINDING` 이 나고, 그것이 이
     경우에 agent 가 할 일(다시 부른다)과 맞는다.
     """
     return [(key, record) for key, record in memory.held.items() if record.live]
@@ -281,7 +281,7 @@ def resolve_target(
 ) -> FoundObject:
     """조준 하나를 지금의 pulse 기록으로 푼다.
 
-    `selector(...)` 는 쓰이는 자리에서 푼다(late binding). 묶인 이름은 그때 푼 기록이
+    `selector(...)` 는 쓰이는 자리에서 푼다(late binding). bind 된 이름은 그때 푼 기록이
     지금도 memory 에 있는지를 다시 본다 — 없으면 `STALE_BINDING` 이고, 그것은 적어 둔
     주소가 낡은 것과 다른 얘기다.
     """

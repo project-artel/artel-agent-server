@@ -5,7 +5,7 @@
 `runner.py` 다.
 
 **거절 문장은 받을 수 있는 것을 이름으로 전부 댄다.** 그것이 이 파일의 문장 대부분이
-긴 이유다. 소문자 `true` 는 `ast.Name` 으로 읽혀 묶인 적 없는 이름으로 거절되므로,
+긴 이유다. 소문자 `true` 는 `ast.Name` 으로 읽혀 bind 된 적 없는 이름으로 거절되므로,
 거절 문장이 `True` 를 이름으로 대야 모델이 한 번에 고친다. 같은 자리가 열 곳이 넘는다.
 
 **언제 검사하나.** 파서는 값을 영영 못 본다. macro 는 저장할 때 파싱되고 값은 돌 때
@@ -117,7 +117,7 @@ _COMPARE_OPERATORS: dict[type[ast.cmpop], MacroOperator] = {
     ast.LtE: MacroOperator.less_or_equal,
 }
 
-# 묶인 적 없는 이름 중, 무엇을 적으려 했는지가 뻔한 것들. 거절 문장이 고칠 글자를
+# bind 된 적 없는 이름 중, 무엇을 적으려 했는지가 뻔한 것들. 거절 문장이 고칠 글자를
 # 그대로 대 준다.
 _MISTYPED_CONSTANTS = {
     "true": "True",
@@ -146,10 +146,10 @@ _STATEMENT_KINDS = (
 
 @dataclass(frozen=True)
 class _Binding:
-    """한 이름이 무엇으로 묶였나.
+    """한 이름이 무엇에 bind 됐나.
 
-    `origin` 을 드는 이유는 target 자리의 거절 문장 하나 때문이다. 문자열 리터럴로
-    묶은 이름을 `click` 에 넣는 것은 좌표 금지를 우회하려는 흔한 시도라, `object` 가
+    `origin` 을 드는 이유는 target 자리의 거절 문장 하나 때문이다. 문자열 리터럴에
+    bind 한 이름을 `click` 에 넣는 것은 좌표 금지를 우회하려는 흔한 시도라, `object` 가
     아니라고만 말하면 무엇이 문제였는지 안 읽힌다.
     """
 
@@ -514,11 +514,11 @@ def _string_literal(node: ast.expr, what: str) -> str:
 
 
 class _FunctionReader:
-    """`def` 하나를 읽는다. 이름 묶기를 세는 자가 여기다.
+    """`def` 하나를 읽는다. 이름의 bind 를 세는 자리가 여기다.
 
-    이름을 묶는 규칙은 `def` 하나 안에서 센다. 한 `def` 안에서 맨이름 하나는 한 가지만
-    뜻해야 하므로, 같은 몸통 안의 재대입도 안쪽 몸통이 바깥 이름을 다시 묶는 것도
-    거절이다. 형제 분기(`if` 와 `else`)가 같은 이름을 묶는 것은 된다 — 두 몸통은 겹치지
+    이름을 bind 하는 규칙은 `def` 하나 안에서 센다. 한 `def` 안에서 맨이름 하나는 한 가지만
+    뜻해야 하므로, 같은 몸통 안의 재대입도 안쪽 몸통이 바깥 이름을 다시 bind 하는 것도
+    거절이다. 형제 분기(`if` 와 `else`)가 같은 이름을 bind 하는 것은 된다 — 두 몸통은 겹치지
     않고 어느 쪽도 밖으로 안 나간다.
     """
 
@@ -605,7 +605,7 @@ class _FunctionReader:
         try:
             return tuple(self._statement(node) for node in nodes)
         finally:
-            # 몸통이 끝나면 그 안에서 묶은 이름도 끝난다. 밖에서 쓰면 묶이지 않은
+            # 몸통이 끝나면 그 안에서 bind 한 이름도 끝난다. 밖에서 쓰면 bind 되지 않은
             # 이름이 되므로, 버리는 것 자체가 그 거절이다.
             self.scopes.pop()
 
@@ -695,7 +695,7 @@ class _FunctionReader:
             )
         declared = _declared_type(node.annotation, f"`{node.target.id}`", node)
         value, origin = self._assigned_value(node.value, declared, node.target.id)
-        # 묶는 것은 오른쪽을 읽은 뒤다. `a: object = find(name=a)` 가 자기 자신을 보지
+        # bind 는 오른쪽을 읽은 뒤에 한다. `a: object = find(name=a)` 가 자기 자신을 보지
         # 않게 하려는 것이다.
         self._bind(node.target.id, declared, origin, node)
         return MacroAssignStatement(
@@ -714,9 +714,9 @@ class _FunctionReader:
             return MacroLiteralValue(literal=literal), "literal"
 
         if isinstance(node, ast.Name):
-            # 먼저 묶였는지 묻는다. 소문자 `true` 가 여기로 오므로, 그 자리에서 `True` 를
-            # 이름으로 대 줘야 모델이 한 번에 고친다. 묶인 이름이면 아래에서 거절한다 —
-            # 이름을 다시 묶는 것은 재대입과 같은 것이고 macro 에 재대입은 없다.
+            # 먼저 bind 됐는지 묻는다. 소문자 `true` 가 여기로 오므로, 그 자리에서 `True` 를
+            # 이름으로 대 줘야 모델이 한 번에 고친다. bind 된 이름이면 아래에서 거절한다 —
+            # 이름을 다시 bind 하는 것은 재대입과 같은 것이고 macro 에 재대입은 없다.
             self._require_bound(node)
             raise MacroRejection(
                 f"`{name}` is bound to `{node.id}`, which is already a name in this "
@@ -871,7 +871,7 @@ class _FunctionReader:
         if isinstance(node, ast.Compare):
             return self._comparison(node)
         if isinstance(node, ast.Name):
-            # 맨이름 하나는 조건이 아니다. 그래도 먼저 묶였는지 묻는다 — 소문자 `true`
+            # 맨이름 하나는 조건이 아니다. 그래도 먼저 bind 됐는지 묻는다 — 소문자 `true`
             # 가 `ast.Name` 으로 읽히므로, 그 자리에서 `True` 를 이름으로 대 줘야
             # 모델이 한 번에 고친다.
             bound = self._require_bound(node)
@@ -1073,8 +1073,8 @@ class _FunctionReader:
     def _target(self, node: ast.expr, what: str) -> MacroTarget:
         """target 자리에 올 수 있는 셋만 통과시킨다.
 
-        `selector(<문자열 리터럴>)`, `def` 줄의 parameter, `find()` 나 `selector()` 로
-        묶인 이름. 맨문자열 좌표(`640,360`)나 id(`#12345`)를 적을 문법 자체가 없다.
+        `selector(<문자열 리터럴>)`, `def` 줄의 parameter, `find()` 나 `selector()` 에
+        bind 된 이름. 맨문자열 좌표(`640,360`)나 id(`#12345`)를 적을 문법 자체가 없다.
         """
         if isinstance(node, ast.Attribute):
             # `click(t.id)` 가 이 자리다. id 를 꺼내 쓰는 것이 조준의 자연스러운 모양처럼
@@ -1099,7 +1099,7 @@ class _FunctionReader:
         if isinstance(node, ast.Name):
             bound = self._require_bound(node)
             if bound.origin == "literal" and bound.declared_type is MacroType.string:
-                # `t: string = "640,360"` 을 묶어 `click(t)` 하면 좌표가 target 자리로
+                # `t: string = "640,360"` 을 bind 해 `click(t)` 하면 좌표가 target 자리로
                 # 들어가 macro 의 좌표 금지를 우회한다.
                 raise MacroRejection(
                     f"{what} is `{node.id}`, which holds a string this macro wrote out. "
@@ -1280,7 +1280,7 @@ class _FunctionReader:
         parameters: tuple[ToolParameter, ...],
         node: ast.Call,
     ) -> tuple[MacroArgument, ...]:
-        """적힌 인자를 parameter 에 맞춰 묶는다. 기본값은 여기서 채우지 않는다.
+        """적힌 인자를 parameter 에 맞춰 bind 한다. 기본값은 여기서 채우지 않는다.
 
         채우지 않는 이유는 저장되는 JSON 이 저자가 적은 것만 들어야 하기 때문이다.
         tool 의 기본값은 `grammar.py` 의 표가 들고 있고, runner 가 부를 때 거기서 읽는다.

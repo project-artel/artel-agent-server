@@ -702,7 +702,7 @@ def test_a_step_a_macro_asked_about_still_has_to_be_reported() -> None:
     """새 강제 장치를 만들지 않는다. `finish_run` 이 이미 강제한다.
 
     `ask_verdict` 가 세운 step 은 시나리오 step 이고, `QaRunState.unreported_steps` 가
-    판정 없는 시나리오 step 을 세므로 그 기계에 그대로 꽂힌다.
+    판정 없는 시나리오 step 을 세므로 그 수에 그대로 더해진다.
     """
     channel, state, tools, sent = make(total_steps=3)
     with_cards(channel)
@@ -733,7 +733,7 @@ def test_a_step_a_macro_asked_about_still_has_to_be_reported() -> None:
 
 
 def test_a_flag_only_macro_does_not_add_a_step_to_report() -> None:
-    """`flag` 는 어느 step 도 지목하지 않으므로 이 기계에 아무것도 더하지 않는다."""
+    """`flag` 는 어느 step 도 지목하지 않으므로 `unreported_steps` 에 아무것도 더하지 않는다."""
     channel, state, tools, _ = make(total_steps=1)
     with_cards(channel)
     source = (

@@ -1,4 +1,4 @@
-"""성공한 조작 묶음을 macro 로 적어 두고 다시 부르는 도구 다섯.
+"""성공한 action 순서를 macro 로 적어 두고 다시 부르는 tool 다섯.
 
 문구는 `app/prompts/qa_run/v18/tool_<name>.md` 다섯 파일에 있고, 문법과 예시와 수명주기
 전체는 `skill_macro.md` 에 있다. 다섯 설명이 각각 500자 상한 아래라 매 호출마다 나가는
@@ -93,7 +93,7 @@ def _answers_instead_of_raising(
 
 
 def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
-    # 아래 tool 이 closure 로 잡는 것. 되묶는 이유는 `tool_context.py` 에 있다.
+    # 아래 tool 이 closure 로 잡는 것. 다시 bind 하는 이유는 `tool_context.py` 에 있다.
     channel, state = ctx.channel, ctx.state
 
     class _Host:

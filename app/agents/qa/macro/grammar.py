@@ -146,11 +146,11 @@ class ToolParameter:
     """macro 문법에서 tool 하나가 받는 인자 한 자리.
 
     `is_target` 인 자리는 `selector(<문자열 리터럴>)`·`def` 줄의 parameter·`find()` 나
-    `selector()` 로 묶인 이름 셋만 받는다. 맨문자열 좌표(`640,360`)나 id(`#12345`)를
+    `selector()` 에 bind 된 이름 셋만 받는다. 맨문자열 좌표(`640,360`)나 id(`#12345`)를
     적을 문법 자체가 없다.
 
     `as_instance_id` 는 `enter_text` 하나다. 그 tool 은 `target_id: int` 를 받지만
-    macro 문법에서는 `target` 을 받으므로, runner 가 묶인 기록에서 `id` 를 꺼내 넣는다.
+    macro 문법에서는 `target` 을 받으므로, runner 가 bind 된 기록에서 `id` 를 꺼내 넣는다.
     """
 
     name: str

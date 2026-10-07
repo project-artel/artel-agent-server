@@ -31,7 +31,7 @@ SELECTOR_AMBIGUOUS = "SELECTOR_AMBIGUOUS"
 # `SELECTOR_NOT_FOUND` 와 섞으면 agent 가 할 일이 뒤바뀐다.
 STALE_BINDING = "STALE_BINDING"
 # macro 가 물을 수 없는 것을 물었다. 게임이 틀린 것이 아니라 macro 정의가 틀린 것이라
-# `REQUIRE_FAILED` 와 같은 코드에 담을 수 없다 — 담으면 agent 가 macro 의 잘못을
+# `REQUIRE_FAILED` 와 같은 코드로 낼 수 없다 — 그렇게 내면 agent 가 macro 의 잘못을
 # 게임의 결함으로 적는다. step 을 실패로 적지 않는다.
 COMPARISON_REJECTED = "COMPARISON_REJECTED"
 
@@ -41,7 +41,7 @@ COMPARISON_REJECTED = "COMPARISON_REJECTED"
 # 결함 그 자체일 수 있다. 어느 쪽인지는 agent 가 정한다.
 SCREEN_UNCHANGED = "SCREEN_UNCHANGED"
 # macro 가 도는 동안 operator 가 말을 걸었다. 게임의 잘못도 macro 의 잘못도 아니라
-# 둘 중 어느 코드에도 담을 수 없다. step 을 실패로 적지 않는다.
+# 둘 중 어느 코드로도 낼 수 없다. step 을 실패로 적지 않는다.
 OPERATOR_INTERRUPTED = "OPERATOR_INTERRUPTED"
 
 RUNTIME_CODES = (
@@ -85,7 +85,7 @@ class MacroFailure(Exception):
     것이 달라 사전으로 둔다 — 코드마다 필드를 다 합친 하나의 모양을 만들면 어느
     코드에서 어느 칸이 뜻을 갖는지 읽는 쪽이 모른다.
 
-    **한 이름에 두 타입을 담지 않는다.** `observed` 는 사전이고 조건이 읽은 호출들이다.
+    **key 하나가 두 타입을 갖지 않게 한다.** `observed` 는 사전이고 조건이 읽은 호출들이다.
     `arrived` 는 문자열 하나이고 비교에 도착한 값이다. 종전에는 둘 다 `observed` 라
     그리는 쪽이 문자열에 `.items()` 를 불렀고, `COMPARISON_REJECTED` 가 나는 순간
     예외가 tool 밖으로 나가 **런이 통째로 죽었다.**

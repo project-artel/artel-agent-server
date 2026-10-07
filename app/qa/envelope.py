@@ -1163,7 +1163,7 @@ class MacroRegisterPayload(BaseModel):
 
     `parameters` 는 진입점 `def` 줄의 parameter 이름이고 **순서가 뜻을 가진다.**
 
-    `screens` 는 `screen.id` 를 담은 문자열 배열이고 **기존 관계에 더한다.** 저쪽은 이
+    `screens` 는 `screen.id` 문자열의 배열이고 **기존 관계에 더한다.** 저쪽은 이
     build 의 `content_map` 에 없는 id 를 거절하므로 `scene` 이름을 실으면 안 된다.
     비어 있는 것은 정상이고 "아직 어디서 쓸지 모른다" 는 뜻이다.
     """

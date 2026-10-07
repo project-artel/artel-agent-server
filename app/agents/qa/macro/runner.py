@@ -91,7 +91,7 @@ from app.qa.envelope import JsonRpcAction
 # 붙어 있는 macro 를 사람이 평범하게 쓴다.
 #
 # 셋은 아니다. statement 상한이 128 이므로 안 멈추면 아무 반응 없는 게임에 128 개를 다
-# 쏟아붓는다. 셋에서 끊으면 헛돈 시간이 4.5초로 묶이고, 위의 정상 둘은 그대로 통과한다.
+# 쏟아붓는다. 셋에서 끊으면 헛도는 시간이 4.5초를 넘지 않고, 위의 정상 둘은 그대로 통과한다.
 #
 # **연달아** 다. 화면이 움직이면 0 으로 돌아간다 — 움직였다 안 움직였다 하는 macro 는
 # 어디론가 가고 있는 macro 다. 움직였는지 모르는 batch 는 세지도 지우지도 않는다.
@@ -149,8 +149,8 @@ class MacroVerdictRequest:
     """`ask_verdict` 가 세운 의무. 그 step 에 판정이 필요하다는 말이다.
 
     `expected` 는 macro 가 적은 기대이고 `observed` 는 runner 가 읽은 값이다. 둘이 짝이
-    되어야 agent 가 판정할 수 있다 — 에러 payload 가 `expected` 와 `observed` 로 하는
-    일과 같은 기계다.
+    되어야 agent 가 판정할 수 있다 — 에러 payload 가 `expected` 와 `observed` 두 칸으로
+    하는 일과 같다.
     """
 
     place: MacroPlace
@@ -660,7 +660,7 @@ def _actions(spec: ToolSpec, values: dict[str, Any]) -> list[JsonRpcAction]:
 
 
 def _aim(parameter: ToolParameter, found: FoundObject) -> list[Any]:
-    """묶인 기록을 그 tool 이 받는 조준값으로.
+    """bind 된 기록을 그 tool 이 받는 `target` 값으로.
 
     `enter_text` 는 `target_id: int` 를 받으므로 기록에서 `id` 를 꺼낸다. `id` 는
     `int | None` 이라 `None` 이면 넣을 값이 없고, 게임에 아무것도 보내기 전에 거절한다.

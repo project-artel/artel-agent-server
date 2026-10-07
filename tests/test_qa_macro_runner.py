@@ -662,7 +662,7 @@ def test_a_press_that_reached_nothing_stops_the_macro() -> None:
 
 
 def test_a_press_the_person_took_the_mouse_from_stops_the_macro() -> None:
-    """`ACTION_REJECTED` 다. 게임도 macro 도 아니라 기계가 문제다."""
+    """`ACTION_REJECTED` 다. 게임도 macro 도 아니라 사람이 마우스를 쥐고 있었다."""
     host = FakeHost(battle(), answers=[held_by_person()])
     result = clicks(host)
 

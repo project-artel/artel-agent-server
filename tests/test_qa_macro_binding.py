@@ -94,7 +94,7 @@ def find(**keywords) -> MacroFindValue:
 
 
 def test_a_unique_label_resolves_to_the_record_rather_than_to_an_id() -> None:
-    """묶인 이름이 드는 값은 id 하나가 아니라 기록 자체다.
+    """bind 된 이름이 드는 값은 id 하나가 아니라 기록 자체다.
 
     그 기록이 `id` 와 `selector` 를 둘 다 들고 있어, 뒤이은 action 은 어느 쪽으로도
     겨눌 수 있다.
@@ -239,7 +239,7 @@ def test_name_matches_the_last_segment_with_or_without_its_index() -> None:
 
 
 def test_a_selector_is_resolved_where_it_is_used_rather_than_where_it_was_bound() -> None:
-    """`selector(...)` 를 묶은 이름은 그 자리에서 풀지 않는다.
+    """`selector(...)` 에 bind 한 이름은 그 자리에서 풀지 않는다.
 
     즉시 풀면 적어 둔 주소인데도 `STALE_BINDING` 이 나서, 적어 둔 주소면
     `REQUIRE_FAILED`, 이 런에서 찾은 값이면 `STALE_BINDING` 이라는 기준이 깨진다.

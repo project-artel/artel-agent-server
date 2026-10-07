@@ -209,7 +209,7 @@ def test_a_require_node_keeps_the_two_key_names_a_db_check_matches_on() -> None:
     사라진다. 그래서 여기서 이름을 못박는다 — 저쪽 repository 의 테스트는 이 PR 의
     diff 에서 안 보인다.
 
-    목록을 담는 key 이름(`statements`·`body`·`orelse`)에는 기대지 않으므로 그쪽은
+    목록이 든 key 이름(`statements`·`body`·`orelse`)에는 기대지 않으므로 그쪽은
     자유롭다.
     """
     nested = json.loads(

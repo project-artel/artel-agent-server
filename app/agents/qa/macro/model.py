@@ -64,7 +64,7 @@ class MacroSelectorTarget(_Frozen):
 
 
 class MacroNameTarget(_Frozen):
-    """`def` 줄의 parameter 이거나 `find()`·`selector()` 로 묶인 이름.
+    """`def` 줄의 parameter 이거나 `find()`·`selector()` 에 bind 된 이름.
 
     맨이름은 언제나 이 둘 중 하나라는 것이 macro 문법의 불변식이고, 그래서 좌표나 id 를
     적을 문법 자체가 없다.

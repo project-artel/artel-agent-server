@@ -160,9 +160,9 @@ def test_not_is_refused_and_the_refusal_names_what_to_write_instead() -> None:
 
 
 def test_a_name_bound_inside_a_body_cannot_be_used_outside_it() -> None:
-    """맨이름은 언제나 parameter 이거나 묶인 이름이라는 불변식을 지키는 거절이다.
+    """맨이름은 언제나 parameter 이거나 bind 된 이름이라는 불변식을 지키는 거절이다.
 
-    분기가 안 간 채로 몸통 밖에서 그 이름을 쓰면 묶이지 않은 이름이 된다.
+    분기가 안 간 채로 몸통 밖에서 그 이름을 쓰면 bind 되지 않은 이름이 된다.
     """
     reason = rejection(
         "def m(card: object) -> None:\n"
@@ -270,7 +270,7 @@ def test_a_refused_node_names_what_is_accepted_instead(source: str, named: str) 
 
 
 def test_a_lowercase_true_is_named_back_as_True() -> None:
-    """소문자 `true` 는 `ast.Name` 으로 읽혀 묶인 적 없는 이름으로 거절된다.
+    """소문자 `true` 는 `ast.Name` 으로 읽혀 bind 된 적 없는 이름으로 거절된다.
 
     거절 문장이 `True` 를 이름으로 대야 모델이 한 번에 고친다.
     """
@@ -338,7 +338,7 @@ def test_a_name_in_a_target_slot_has_to_be_declared_object() -> None:
 
 
 def test_a_string_literal_bound_to_a_name_cannot_aim() -> None:
-    """`t: string = "640,360"` 을 묶어 `click(t)` 하면 좌표 금지를 우회한다."""
+    """`t: string = "640,360"` 을 bind 해 `click(t)` 하면 좌표 금지를 우회한다."""
     reason = rejection(
         'def m() -> None:\n    spot: string = "640,360"\n    click(spot)\n'
     )
