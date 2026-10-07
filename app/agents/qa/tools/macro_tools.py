@@ -1,7 +1,9 @@
 """성공한 조작 묶음을 macro 로 적어 두고 다시 부르는 도구 다섯.
 
-문구는 `app/agents/qa/macro/descriptions.py` 가 들고 있다 — `screen.py` 와
-`capability.py` 의 선례다.
+문구는 `app/prompts/qa_run/v18/tool_<name>.md` 다섯 파일에 있고, 문법과 예시와 수명주기
+전체는 `skill_macro.md` 에 있다. 다섯 설명이 각각 500자 상한 아래라 매 호출마다 나가는
+글은 2.5KB 가 안 되고, 13KB 짜리 본문은 모델이 `load_skill("macro")` 를 부를 때만 간다.
+`app/agents/qa/macro/reference.py` 는 그 파일이 `grammar.py` 와 맞는지 재는 기준이다.
 
 수명주기가 네 걸음이다. `write_macro` 로 초안을 쓰고, `read_macro` 로 읽고,
 `edit_macro` 로 고치고, `register_macro` 로 부를 수 있게 한다. `run_macro` 는 등록된
@@ -32,13 +34,6 @@ from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.macro.binding import LateSelector, MacroMemories
 from app.agents.qa.macro.book import RegisteredMacro
-from app.agents.qa.macro.descriptions import (
-    EDIT_MACRO_DESCRIPTION,
-    READ_MACRO_DESCRIPTION,
-    REGISTER_MACRO_DESCRIPTION,
-    RUN_MACRO_DESCRIPTION,
-    WRITE_MACRO_DESCRIPTION,
-)
 from app.agents.qa.macro.errors import MacroFailure, MacroRejection
 from app.agents.qa.macro.grammar import DECLARABLE_TYPE_NAMES, MacroType
 from app.agents.qa.macro.model import MacroDefinition, MacroParameter
@@ -51,6 +46,7 @@ from app.agents.qa.macro.runner import (
 from app.agents.qa.tools.action_tools import parse_target
 from app.agents.qa.tools.state import QaRunState
 from app.agents.qa.tools.tool_context import ToolContext
+from app.prompts import load_tool_description
 from app.qa.acting import ActionOutcome
 from app.qa.channel import KnowledgeRequestFailed, QaCancelled, with_operator_messages
 from app.qa.envelope import MacroReadPayload, MacroRegisterPayload
@@ -261,10 +257,10 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         except MacroRejection as rejection:
             return None, rejection.render()
 
-    @tool(description=WRITE_MACRO_DESCRIPTION)
+    @tool(description=load_tool_description("write_macro").body)
     @_answers_instead_of_raising
     async def write_macro(step: int, thought: str, name: str, source: str) -> str:
-        # What the agent reads is WRITE_MACRO_DESCRIPTION, not this.
+        # What the agent reads is `qa_run/<version>/tool_write_macro.md`, not this.
         #
         # 화면을 안 돌려준다. 이 호출은 게임을 안 건드리므로 화면을 실으면 에이전트가
         # 이미 들고 있는 것을 문맥에 한 번 더 사는 것이다 — 지식 tool 들과 같은 판단
@@ -287,12 +283,12 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         state.macros.remember_read(macro_name)
         return _draft_report(macro_name, definition)
 
-    @tool(description=EDIT_MACRO_DESCRIPTION)
+    @tool(description=load_tool_description("edit_macro").body)
     @_answers_instead_of_raising
     async def edit_macro(
         step: int, thought: str, name: str, old_text: str, new_text: str
     ) -> str:
-        # What the agent reads is EDIT_MACRO_DESCRIPTION, not this.
+        # What the agent reads is `qa_run/<version>/tool_edit_macro.md`, not this.
         macro_name = (name or "").strip()
         book = state.macros
 
@@ -350,10 +346,10 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         book.write(macro_name, changed)
         return _draft_report(macro_name, definition)
 
-    @tool(description=READ_MACRO_DESCRIPTION)
+    @tool(description=load_tool_description("read_macro").body)
     @_answers_instead_of_raising
     async def read_macro(step: int, thought: str, name: str) -> str:
-        # What the agent reads is READ_MACRO_DESCRIPTION, not this.
+        # What the agent reads is `qa_run/<version>/tool_read_macro.md`, not this.
         #
         # 이 런이 모르는 이름이면 `content_map` 에 묻는다. 그것이 지난 런이 등록한
         # macro 를 이번 런이 읽는 유일한 길이다(ARTEL-921).
@@ -385,12 +381,12 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         )
         return f"{macro_name} ({where}):\n\n{source}"
 
-    @tool(description=REGISTER_MACRO_DESCRIPTION)
+    @tool(description=load_tool_description("register_macro").body)
     @_answers_instead_of_raising
     async def register_macro(
         step: int, thought: str, name: str, screens: list[str] = []
     ) -> str:
-        # What the agent reads is REGISTER_MACRO_DESCRIPTION, not this.
+        # What the agent reads is `qa_run/<version>/tool_register_macro.md`, not this.
         #
         # 빈 목록 기본값은 `report_step` 의 `used_knowledge_ids` 와 같은 이유로 리터럴로
         # 적는다 — 모델이 채우는 schema 에서 optional array 는 그냥 빼면 되지만,
@@ -453,12 +449,12 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
             "\n".join(lines), channel.drain_operator_messages()
         )
 
-    @tool(description=RUN_MACRO_DESCRIPTION)
+    @tool(description=load_tool_description("run_macro").body)
     @_answers_instead_of_raising
     async def run_macro(
         step: int, thought: str, name: str, arguments: dict[str, Any] = {}
     ) -> str:
-        # What the agent reads is RUN_MACRO_DESCRIPTION, not this.
+        # What the agent reads is `qa_run/<version>/tool_run_macro.md`, not this.
         #
         # 위 `screens` 와 같은 이유로 빈 사전 리터럴이고, 읽기만 한다.
         #
