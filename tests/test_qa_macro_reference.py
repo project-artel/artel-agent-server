@@ -13,6 +13,13 @@ import re
 import pytest
 
 from app.agents.qa.macro.errors import MacroRejection
+from app.agents.qa.macro.grammar import (
+    READER_NAMES,
+    TOOL_NAMES,
+    MacroShape,
+    allowed_operators,
+    operator_names,
+)
 from app.agents.qa.macro.parser import macro_definition_from_source
 from app.agents.qa.macro.reference import GRAMMAR, NUMBER_EQUALITY
 from app.prompts import (
@@ -109,3 +116,38 @@ def test_each_macro_tool_description_points_at_the_skill(name: str) -> None:
     것도 모른 채 macro 를 쓴다.
     """
     assert f"{SKILL} skill" in load_tool_description(name).body
+
+
+# 아래 둘은 `tests/test_qa_macro_tools.py` 에 있었고 `write_macro` 설명을 봤다. 글이
+# skill 로 옮겨 가면서 보는 자리만 바뀌었다. `reference.py` 와 맞추는 위쪽 테스트와 겹치는
+# 것처럼 보이지만 겹치지 않는다 — 위쪽은 조립한 글과 파일이 같은지를 보고, 이 둘은
+# `grammar.py` 의 데이터 자체가 파일 안에 있는지를 본다. `reference.py` 에서 표 한 줄이
+# 빠지면 위쪽은 그대로 통과하고 이 둘이 깨진다.
+
+
+def test_every_tool_and_reader_is_named_in_the_skill() -> None:
+    """`parse_target` 의 선례다. 손으로 다시 적으면 parser 와 어긋난다.
+
+    어긋남은 모델이 거절을 받을 때까지 아무 데도 안 보인다.
+    """
+    body = skill_body()
+
+    for name in TOOL_NAMES:
+        assert name in body, name
+    for name in READER_NAMES:
+        assert name in body, name
+    # 일부러 뺀 둘도 이름을 대고 왜인지 말한다.
+    assert "click_button" in body and "reset_game" in body
+    # 연속값 권고. 거절이 아니라 관용구를 주는 자리다.
+    assert "==" in body and "rounds a number to four" in body
+
+
+def test_the_operator_table_the_model_reads_is_the_table_the_parser_enforces() -> None:
+    """표를 손으로 다시 적으면, 한 칸이 바뀔 때 조용히 늙는다.
+
+    그 늙음은 모델이 거절을 받을 때까지 아무 데도 안 보인다.
+    """
+    body = skill_body()
+
+    for shape in MacroShape:
+        assert operator_names(allowed_operators(shape)) in body, shape.value

@@ -12,7 +12,7 @@ import pytest
 from app.agents.qa.arch import default_resolved_arch
 from app.agents.qa.tools import macro_tools
 from app.agents.qa.macro.errors import COMPARISON_REJECTED, MACRO_NODE_REJECTED
-from app.agents.qa.macro.grammar import READER_NAMES, TOOL_NAMES
+from app.agents.qa.macro.grammar import TOOL_NAMES
 from app.agents.qa.tools import QaRunState, build_tools
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import MessageType
@@ -756,43 +756,6 @@ def test_a_flag_only_macro_does_not_add_a_step_to_report() -> None:
 
 
 # --- 설명이 받을 수 있는 것을 전부 대는가 ---------------------------------------
-
-
-def test_every_tool_and_reader_is_named_in_the_write_macro_description() -> None:
-    """`parse_target` 의 선례다. 손으로 다시 적으면 parser 와 어긋난다.
-
-    어긋남은 모델이 거절을 받을 때까지 아무 데도 안 보인다.
-    """
-    _, _, tools, _ = make()
-    description = tools["write_macro"].description
-
-    for name in TOOL_NAMES:
-        assert name in description, name
-    for name in READER_NAMES:
-        assert name in description, name
-    # 일부러 뺀 둘도 이름을 대고 왜인지 말한다.
-    assert "click_button" in description and "reset_game" in description
-    # 연속값 권고. 거절이 아니라 관용구를 주는 자리다.
-    assert "==" in description and "rounds a number to four" in description
-
-
-def test_the_operator_table_the_model_reads_is_the_table_the_parser_enforces() -> None:
-    """설명이 표를 손으로 다시 적으면, 한 칸이 바뀔 때 조용히 늙는다.
-
-    그 늙음은 모델이 거절을 받을 때까지 아무 데도 안 보인다. 그래서 설명은
-    `grammar.py` 에서 조립하고, 이 테스트가 조립된 결과를 표와 맞춘다.
-    """
-    from app.agents.qa.macro.grammar import (
-        MacroShape,
-        allowed_operators,
-        operator_names,
-    )
-
-    _, _, tools, _ = make()
-    description = tools["write_macro"].description
-
-    for shape in MacroShape:
-        assert operator_names(allowed_operators(shape)) in description, shape.value
 
 
 def test_the_macro_tools_sit_beside_the_action_tools_in_the_offered_list() -> None:
