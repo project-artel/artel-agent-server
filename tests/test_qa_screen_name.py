@@ -302,7 +302,7 @@ def test_a_model_that_cannot_see_is_not_sent_a_capture(monkeypatch) -> None:
     request = ScreenNameRequest(
         screen=_agent_request(payload).screen,
         scene=_agent_request(payload).scene,
-        model=LLMModel.gpt_chat_latest,
+        model=LLMModel.gpt_6_luna,
     )
 
     assert asyncio.run(agent.run(request, _CTX)).name is None
