@@ -36,6 +36,18 @@ object is showing on screen; `name=` matches the last segment of its selector;
 `under=` narrows by path prefix. A lookup that matches nothing, or more than one
 thing, is reported where it happened and nothing is sent to the game.
 
+**Binding a reading.** The right-hand side of an assignment is one of four
+things: `find(...)`, `selector(...)`, one literal, or one reader call. A reader
+call is read when that line runs and never again, so the name keeps the value
+from before whatever the macro does next. That is how a macro compares before
+and after an action: `before: float = member(enemy, "Enemy.Hp")`, then
+`click(enemy)`, then `require(member(enemy, "Enemy.Hp") < before, ...)`. Declare
+the name `int`, `float`, `string` or `bool`, never `object` — a reading is a
+value, not something to aim at. `text()` and `scene()` always arrive as a string
+and `actionable()`, `exists()` and `absent()` as a bool, so those are checked
+when you store the macro. What `member()`, `observable()` and `static()` return
+is up to the game, so a mismatch there stops the macro on the line that bound it.
+
 **Conditions.** One condition is ONE comparison (`==`, `!=`, `>`, `<`, `>=`,
 `<=`) or ONE reader call. `and`, `or` and `not` are refused — write two
 `require` calls, so each says on its own what to do when it fails. The readers
@@ -146,6 +158,8 @@ What these do that a first draft usually does not:
   the check holds whether the branch ran or not
 - objects are found by the text they show, with `under=` narrowing where it could be
   ambiguous, so the macro is not tied to one hand or one layout
+- a value read before an action is bound to a name and compared after it, so the
+  check holds whatever the starting value was
 - a number is bounded with `<` and `>`, never pinned with `==`
 - what is held is released in the same body that held it
 
@@ -184,16 +198,16 @@ def attack_first_enemy_with(card_label: string, element_label: string) -> None:
     drag(element, slot)
     confirm_combination()
 
-    # A reading cannot be bound to a name — an assignment takes `find(...)`,
-    # `selector(...)` or one literal, nothing else. So write the bound down and
-    # compare against that instead of against a value read before the click.
-    starting_health: float = 100
+    # Read the health BEFORE the attack and bind it. A reading is taken when its
+    # line runs and never again, so `before` still holds the old value after the
+    # click — that is what makes the comparison below mean "the attack did damage".
     enemy: object = find(name="Enemy")
+    before: float = member(enemy, "Health.current")
     click(enemy)
 
     # Two bounds rather than one `==`. A number arrives rounded to four decimals, so
     # a value sitting still still wobbles in its last place.
-    require(member(enemy, "Health.current") < starting_health, "The attack landed but took no health.")
+    require(member(enemy, "Health.current") < before, "The attack landed but took no health.")
     require(member(enemy, "Health.current") > 0, "The enemy died outright; this step wanted chip damage.")
 
     # `flag` tells you what the macro saw, and nothing more.

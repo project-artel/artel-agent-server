@@ -48,6 +48,7 @@ from app.agents.qa.macro.binding import (
     MacroMemories,
     MacroScope,
     evaluate,
+    read_to_bind,
     resolve_find,
     resolve_target,
 )
@@ -71,6 +72,7 @@ from app.agents.qa.macro.model import (
     MacroHelperCallStatement,
     MacroIfStatement,
     MacroLiteralValue,
+    MacroReadValue,
     MacroParameter,
     MacroRequireStatement,
     MacroSelectorValue,
@@ -394,6 +396,19 @@ class _Runner:
         if isinstance(value, MacroSelectorValue):
             # 그 자리에서 풀지 않는다. 문자열에 이름만 붙이고 late binding 을 둔다.
             frame.scope.bind(statement.name, LateSelector(selector=value.selector))
+            return
+        if isinstance(value, MacroReadValue):
+            # 지금 읽고 다시 읽지 않는다. 이유는 `read_to_bind` 에 있다.
+            frame.scope.bind(
+                statement.name,
+                read_to_bind(
+                    self.memories(),
+                    frame.scope,
+                    value.call,
+                    statement.declared_type,
+                    statement.name,
+                ),
+            )
             return
         assert isinstance(value, MacroLiteralValue)
         frame.scope.bind(statement.name, value.literal.value)

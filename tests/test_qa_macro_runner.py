@@ -391,6 +391,71 @@ def test_nested_ifs_put_every_layer_of_reader_values_on_observed() -> None:
     }
 
 
+# --- 읽은 값의 bind ---------------------------------------------------------------
+
+
+def enemy_with_hp(hp) -> dict:
+    return card(
+        "Root[0]/Enemy[7]",
+        instance_id=60,
+        offers={"clicks": [{"on": "Button", "method": "Hit"}]},
+        members=[{"on": "Game.Enemy", "member": "Hp", "value": hp}],
+    )
+
+
+class HitsChangeTheGame(FakeHost):
+    """action 이 하나 나가면 그 뒤로 화면이 `after` 가 된다. 눌렀더니 숫자가 바뀐 것이다."""
+
+    def __init__(self, memory: SceneMemory, after: SceneMemory) -> None:
+        super().__init__(memory)
+        self.after = after
+
+    async def run(self, actions, summary: str, step: int) -> ActionOutcome:
+        outcome = await super().run(actions, summary, step)
+        self.memory = self.after
+        return outcome
+
+
+ATTACK_AND_COMPARE = '''
+def hit(enemy: object) -> None:
+    before: float = member(enemy, "Enemy.Hp")
+    click(enemy)
+    require(member(enemy, "Enemy.Hp") < before, "The attack took no health.")
+'''
+
+
+def test_a_bound_reading_keeps_the_value_from_before_the_action() -> None:
+    """다시 읽으면 `70 < 70` 이라 이 macro 는 실패한다. 통과하는 것이 그 값이 얼어 있다는 증거다."""
+    host = HitsChangeTheGame(scene_with(enemy_with_hp(100)), scene_with(enemy_with_hp(70)))
+
+    result = drive(host, ATTACK_AND_COMPARE, "hit", {"enemy": LateSelector(selector="Root[0]/Enemy[7]")})
+
+    assert result.passed, result.failure
+
+
+def test_a_bound_reading_lets_the_macro_catch_an_attack_that_did_nothing() -> None:
+    """체력이 그대로면 `REQUIRE_FAILED` 다. 이것을 잡으려고 읽은 값을 bind 한다."""
+    host = HitsChangeTheGame(scene_with(enemy_with_hp(100)), scene_with(enemy_with_hp(100)))
+
+    result = drive(host, ATTACK_AND_COMPARE, "hit", {"enemy": LateSelector(selector="Root[0]/Enemy[7]")})
+
+    assert not result.passed
+    assert result.failure.code == REQUIRE_FAILED
+
+
+def test_a_reading_that_arrives_as_another_shape_stops_at_the_bind() -> None:
+    """뒤의 비교까지 가서 거절하면 실패가 엉뚱한 줄에 붙는다. bind 한 그 줄에서 멈춘다."""
+    host = FakeHost(scene_with(enemy_with_hp("full")))
+
+    result = drive(host, ATTACK_AND_COMPARE, "hit", {"enemy": LateSelector(selector="Root[0]/Enemy[7]")})
+
+    assert result.failure.code == COMPARISON_REJECTED
+    assert result.failure.payload["declared"] == "float"
+    assert result.failure.payload["shape"] == "string"
+    # 대입은 첫 statement 다. 게임에는 아무것도 안 나갔다.
+    assert host.sent == []
+
+
 def test_ask_verdict_asks_about_the_step_run_macro_was_called_with() -> None:
     """macro 원문에는 step 이 없다. 판정을 청하는 step 은 그 macro 를 부른 step 이다.
 

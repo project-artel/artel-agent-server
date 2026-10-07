@@ -72,6 +72,7 @@ from app.agents.qa.macro.model import (
     MacroLiteralArgument,
     MacroLiteralOperand,
     MacroLiteralValue,
+    MacroReadValue,
     MacroNameArgument,
     MacroNameOperand,
     MacroNameTarget,
@@ -142,6 +143,19 @@ _STATEMENT_KINDS = (
     "`require(<condition>, <remedy>)`, a typed assignment (`name: object = find(...)`), "
     "`if`, `flag(<message>)`, or `ask_verdict(<expected>)`"
 )
+
+
+# reader 를 bind 한 이름의 `origin`. target 자리 거절이 읽는다.
+_READ = "read"
+
+# 도착 모양이 정해진 reader 를 bind 할 때 선언할 수 있는 타입. `number` 는 `int` 와
+# `float` 둘 다 받는다 — SDK 가 반올림해 보내므로 도착한 값만 보고는 둘을 못 가른다
+# (`grammar.MacroShape`).
+_DECLARED_FOR_SHAPE: dict[MacroShape, tuple[MacroType, ...]] = {
+    MacroShape.number: (MacroType.int_, MacroType.float_),
+    MacroShape.string: (MacroType.string,),
+    MacroShape.bool_: (MacroType.bool_,),
+}
 
 
 @dataclass(frozen=True)
@@ -720,8 +734,9 @@ class _FunctionReader:
             self._require_bound(node)
             raise MacroRejection(
                 f"`{name}` is bound to `{node.id}`, which is already a name in this "
-                "`def`. A macro binds a name to `find(...)`, `selector(...)`, or one "
-                f"literal — never to another name. Use `{node.id}` where you meant it.",
+                "`def`. A macro binds a name to `find(...)`, `selector(...)`, a reader "
+                f"call, or one literal — never to another name. Use `{node.id}` where you "
+                "meant it.",
                 node.lineno,
             )
 
@@ -738,13 +753,48 @@ class _FunctionReader:
                     MacroSelectorValue(selector=self._selector_string(node)),
                     SELECTOR,
                 )
+            if node.func.id in READERS_BY_NAME:
+                return self._read_value(node, declared, name), _READ
 
         raise MacroRejection(
             f"`{name}` is bound to something a macro cannot bind. The right-hand side is "
-            "one of three things: `find(...)`, `selector(...)`, or one literal (an int, "
-            "a float, a string or a bool). Arithmetic and any other call are refused.",
+            f"one of four things: `find(...)`, `selector(...)`, one reader call "
+            f"({READER_NAME_LIST}), or one literal (an int, a float, a string or a bool). "
+            "Arithmetic and any other call are refused.",
             getattr(node, "lineno", None),
         )
+
+    def _read_value(
+        self, node: ast.Call, declared: MacroType, name: str
+    ) -> MacroReadValue:
+        """reader 호출을 대입 오른쪽으로 받는다. 값은 runner 가 그 statement 에서 읽는다.
+
+        `object` 로 선언하면 거절한다. reader 는 값을 읽지 객체를 찾지 않으므로, 그 이름으로
+        겨눌 수 있다고 받아 주면 저장 때 막을 것이 실행 때까지 간다.
+
+        도착 모양이 정해진 reader(`scene`·`text` 는 문자열, `actionable`·`exists`·`absent`
+        는 bool)는 선언한 타입과 여기서 맞춘다. `member`·`observable`·`static` 은 게임이
+        모양을 정하므로 맞추는 것이 실행 때로 간다 — 비교가 이미 그렇게 한다.
+        """
+        spec = READERS_BY_NAME[node.func.id]  # type: ignore[union-attr]
+        if declared is MacroType.object_:
+            raise MacroRejection(
+                f"`{name}` is declared `object` but bound to `{spec.name}(...)`, which "
+                "reads a value rather than finding an object. Declare it `int`, `float`, "
+                "`string` or `bool`. To aim at something, bind `find(...)` or "
+                "`selector(...)` instead.",
+                node.lineno,
+            )
+        call = self._reader(node)
+        wanted = _DECLARED_FOR_SHAPE.get(spec.shape) if spec.shape is not None else None
+        if wanted is not None and declared not in wanted:
+            names = " or ".join(f"`{one.value}`" for one in wanted)
+            raise MacroRejection(
+                f"`{name}` is declared `{declared.value}`, but `{spec.name}(...)` always "
+                f"arrives as a {spec.shape.value}. Declare `{name}` as {names}.",
+                node.lineno,
+            )
+        return MacroReadValue(call=call)
 
     def _require_object(
         self, declared: MacroType, name: str, called: str, node: ast.AST

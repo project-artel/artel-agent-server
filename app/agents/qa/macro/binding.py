@@ -41,6 +41,7 @@ from app.agents.qa.macro.errors import (
 from app.agents.qa.macro.grammar import (
     MacroOperator,
     MacroShape,
+    MacroType,
     allowed_operators,
     comparison_allowed,
     operator_names,
@@ -446,6 +447,55 @@ def _member(found: FoundObject, scope: MacroScope, call: MacroReaderCall) -> Any
 
 
 # --- 도착한 값의 모양 -----------------------------------------------------------
+
+
+# 선언한 타입마다 받는 도착 모양. `int` 와 `float` 가 같은 모양인 이유는
+# `grammar.MacroShape` 의 docstring 에 있다.
+_SHAPE_FOR_DECLARED: dict[MacroType, MacroShape] = {
+    MacroType.int_: MacroShape.number,
+    MacroType.float_: MacroShape.number,
+    MacroType.string: MacroShape.string,
+    MacroType.bool_: MacroShape.bool_,
+}
+
+
+def read_to_bind(
+    memories: MacroMemories,
+    scope: MacroScope,
+    call: MacroReaderCall,
+    declared: MacroType,
+    name: str,
+) -> Any:
+    """reader 하나를 지금 읽어 이름에 bind 할 값으로 돌려준다.
+
+    **이 언어에서 late binding 이 아닌 것은 이것 하나다.** selector 는 action 이 도는
+    프레임에 풀리고, `find` 는 bind 한 순간의 기록을 들지만 쓸 때마다 그 기록이 아직
+    살아 있는지 다시 본다(`STALE_BINDING`). 읽은 값은 다시 보지 않는다. 조작 전의 값을
+    조작 뒤의 값과 비교하려는 것이므로, 다시 읽으면 그 비교가 성립하지 않는다.
+
+    선언한 타입과 도착한 모양이 다르면 이 statement 에서 `COMPARISON_REJECTED` 로
+    멈춘다. `find` 가 대입 자리에서 `SELECTOR_NOT_FOUND` 를 내는 것과 같은 자리다 —
+    뒤의 비교까지 가서 거절하면 실패가 엉뚱한 줄에 붙는다.
+    """
+    value = read(memories, scope, call)
+    arrived = shape_of(value)
+    if arrived is _SHAPE_FOR_DECLARED[declared]:
+        return value
+    if arrived in _SHAPE_FOR_DECLARED.values():
+        fix = f"Declare `{name}` with the type the game actually sends."
+    else:
+        fix = "A name can hold a number, a string or a bool, and nothing else."
+    raise MacroFailure(
+        COMPARISON_REJECTED,
+        f"`{name}` is declared `{declared.value}`, but {describe(call)} arrived as a "
+        f"{arrived.value} ({value!r}). Nothing was sent to the game. {fix}",
+        {
+            "name": name,
+            "declared": declared.value,
+            "shape": arrived.value,
+            "arrived": repr(value),
+        },
+    )
 
 
 def shape_of(value: Any) -> MacroShape:

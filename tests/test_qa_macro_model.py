@@ -52,6 +52,16 @@ def strike(speed: float) -> None:
 '''
 
 
+# 읽은 값을 bind 하는 대입. `MacroReadValue` 가 JSON 을 지나고도 같은 것으로 돌아오는지
+# 보려고 round-trip 목록에 넣는다.
+WITH_A_READING = '''
+def hit(enemy: object) -> None:
+    before: float = member(enemy, "Enemy.Hp")
+    click(enemy)
+    require(member(enemy, "Enemy.Hp") < before, "The attack took no health.")
+'''
+
+
 def round_trip(definition: MacroDefinition) -> MacroDefinition:
     """직렬화하고 다시 읽는다. JSON 이 실제로 실린 것만 들고 돌아오는지 보는 자리다."""
     return MacroDefinition.model_validate_json(definition.model_dump_json())
@@ -59,7 +69,11 @@ def round_trip(definition: MacroDefinition) -> MacroDefinition:
 
 @pytest.mark.parametrize(
     "name, source",
-    [("attack_with_combined_card", EXAMPLE), ("attack", WITH_HELPERS)],
+    [
+        ("attack_with_combined_card", EXAMPLE),
+        ("attack", WITH_HELPERS),
+        ("hit", WITH_A_READING),
+    ],
 )
 def test_a_definition_survives_a_round_trip_unchanged(name: str, source: str) -> None:
     definition = macro_definition_from_source(name, source)

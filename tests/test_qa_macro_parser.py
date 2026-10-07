@@ -329,6 +329,78 @@ def test_an_object_name_cannot_hold_a_literal() -> None:
     assert "find" in rejection('def m() -> None:\n    card: object = "Root[0]/Card[1]"\n')
 
 
+# --- 읽은 값의 bind ---------------------------------------------------------------
+
+
+def test_a_reader_call_can_be_bound_to_a_name_and_compared_later() -> None:
+    """조작 전에 읽은 값을 조작 뒤의 값과 비교한다. QA 가 가장 많이 하는 확인이다."""
+    from app.agents.qa.macro.model import MacroAssignStatement, MacroReadValue
+
+    definition = parse(
+        "def m(enemy: object) -> None:\n"
+        '    before: float = member(enemy, "Enemy.Hp")\n'
+        "    click(enemy)\n"
+        '    require(member(enemy, "Enemy.Hp") < before, "the attack took no health")\n'
+    )
+    bound = definition.entry.statements[0]
+
+    assert isinstance(bound, MacroAssignStatement)
+    assert isinstance(bound.value, MacroReadValue)
+    assert bound.value.call.reader == "member"
+
+
+def test_a_reading_cannot_be_declared_object() -> None:
+    """reader 는 값을 읽지 객체를 찾지 않는다. 그 이름으로 겨눌 수 있게 두면 안 된다."""
+    reason = rejection(
+        'def m(enemy: object) -> None:\n    hp: object = member(enemy, "Enemy.Hp")\n'
+    )
+
+    assert "object" in reason and "find(...)" in reason
+
+
+@pytest.mark.parametrize(
+    "written, declared",
+    [
+        ("label: int = text(card)", "int"),
+        ("there: string = exists(card)", "string"),
+        ("where: bool = scene()", "bool"),
+    ],
+)
+def test_a_reader_whose_shape_is_fixed_has_to_be_declared_with_that_shape(
+    written: str, declared: str
+) -> None:
+    """`text` 는 늘 문자열이고 `exists` 는 늘 bool 이다. 실행까지 기다릴 이유가 없다."""
+    reason = rejection(f"def m(card: object) -> None:\n    {written}\n")
+
+    assert f"declared `{declared}`" in reason
+
+
+def test_a_reader_whose_shape_the_game_decides_passes_with_any_value_type() -> None:
+    """`member` 의 모양은 게임이 정한다. 맞추는 것은 실행 때로 간다 — 비교와 같다."""
+    for declared in ("int", "float", "string", "bool"):
+        parse(f'def m(e: object) -> None:\n    v: {declared} = member(e, "Enemy.Hp")\n')
+
+
+def test_a_name_bound_to_a_reading_cannot_aim() -> None:
+    """읽은 문자열로 겨누면 좌표 금지를 우회하는 길이 하나 더 생긴다."""
+    reason = rejection(
+        "def m(card: object) -> None:\n"
+        "    label: string = text(card)\n"
+        "    click(label)\n"
+    )
+
+    assert "object" in reason
+
+
+def test_a_name_bound_to_a_reading_fills_an_argument_of_its_type() -> None:
+    """읽은 글자를 다른 칸에 그대로 적는 것 — `enter_text` 의 값 자리다."""
+    parse(
+        "def m(source: object, field: object) -> None:\n"
+        "    name: string = text(source)\n"
+        "    enter_text(field, name)\n"
+    )
+
+
 # --- 조준 ---------------------------------------------------------------------
 
 

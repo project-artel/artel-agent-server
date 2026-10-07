@@ -189,8 +189,19 @@ class MacroLiteralValue(_Frozen):
     literal: MacroLiteral
 
 
+class MacroReadValue(_Frozen):
+    """reader 호출 하나. 그 statement 가 도는 순간에 읽고, 그 뒤로 다시 읽지 않는다.
+
+    조작 전에 읽은 값을 조작 뒤의 값과 비교하려고 둔다 — "눌렀더니 숫자가 움직였나"
+    가 QA 가 가장 많이 하는 확인이다. 다시 읽으면 그 비교가 성립하지 않는다.
+    """
+
+    kind: Literal["read"] = "read"
+    call: MacroReaderCall
+
+
 MacroAssignValue = Annotated[
-    Union[MacroFindValue, MacroSelectorValue, MacroLiteralValue],
+    Union[MacroFindValue, MacroSelectorValue, MacroLiteralValue, MacroReadValue],
     Field(discriminator="kind"),
 ]
 

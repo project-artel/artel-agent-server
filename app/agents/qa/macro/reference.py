@@ -87,6 +87,18 @@ object is showing on screen; `name=` matches the last segment of its selector;
 `under=` narrows by path prefix. A lookup that matches nothing, or more than one
 thing, is reported where it happened and nothing is sent to the game.
 
+**Binding a reading.** The right-hand side of an assignment is one of four
+things: `find(...)`, `selector(...)`, one literal, or one reader call. A reader
+call is read when that line runs and never again, so the name keeps the value
+from before whatever the macro does next. That is how a macro compares before
+and after an action: `before: float = member(enemy, "Enemy.Hp")`, then
+`click(enemy)`, then `require(member(enemy, "Enemy.Hp") < before, ...)`. Declare
+the name `int`, `float`, `string` or `bool`, never `object` — a reading is a
+value, not something to aim at. `text()` and `scene()` always arrive as a string
+and `actionable()`, `exists()` and `absent()` as a bool, so those are checked
+when you store the macro. What `member()`, `observable()` and `static()` return
+is up to the game, so a mismatch there stops the macro on the line that bound it.
+
 **Conditions.** One condition is ONE comparison (`==`, `!=`, `>`, `<`, `>=`,
 `<=`) or ONE reader call. `and`, `or` and `not` are refused — write two
 `require` calls, so each says on its own what to do when it fails. The readers
