@@ -381,6 +381,40 @@ def test_a_pinned_summarizer_stays_apart_from_the_run_model() -> None:
     assert resolved.model is LLMModel.gpt_6_luna
 
 
+# --- the skills axis ----------------------------------------------------------
+
+
+def test_skills_default_to_off() -> None:
+    assert QaArchSpec().skills == "off"
+    assert resolved().skills == "off"
+
+
+def test_an_unknown_skills_value_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        QaArchSpec(skills="always")
+
+
+def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
+    structure_of.cache_clear()
+    try:
+        off_names, _, off_fingerprint = structure_of(
+            resolved(**_PINNED_COMPACTION_KNOBS, skills="off")
+        )
+        on_names, _, on_fingerprint = structure_of(
+            resolved(**_PINNED_COMPACTION_KNOBS, skills="on_demand")
+        )
+    finally:
+        structure_of.cache_clear()
+
+    # `build_tools` registers the real `load_skill` itself, so the fingerprint
+    # reads its real schema (`name`, `thought`) rather than a stand-in.
+    assert "load_skill" not in off_names
+    # `build_tools` appends it before the compaction tool, so compare as sets.
+    assert set(on_names) == set(off_names) | {"load_skill"}
+    assert len(on_names) == len(off_names) + 1
+    assert on_fingerprint != off_fingerprint
+
+
 # --- the label stays paired with the structure it names ------------------------
 
 # Pinned next to the label they were computed under, so a diff to either one
@@ -395,7 +429,7 @@ def test_a_pinned_summarizer_stays_apart_from_the_run_model() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v6-macros"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v7-macros"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -459,20 +493,24 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
     "capture_screen",
     "compact_context",
 )
-# Moved again, and this time the label deliberately did NOT move with it. The
-# five macro tools above joined the set (ARTEL-925): `write_macro`,
-# `edit_macro`, `read_macro`, `register_macro` and `run_macro`. By the rule in
-# the docstring below that is the first case and should carry a `QA_ARCH_LABEL`
-# bump — the tool set changed.
+# Moved twice since it was last pinned: `screen_capture` joined `QaArchSpec`
+# (ARTEL-868), which every structure's digest follows because the dump gained a
+# key, and then three pointer tool names and four tool schemas changed
+# (ARTEL-880). Only the second is a change of shape, and it is why the label
+# above moved with the digest that time.
 #
-# The bump is deliberately deferred to ARTEL-926, which owns it and drives the
-# QA run that gives the new label numbers to be read against. The cost of
-# deferring is stated rather than hidden: until that issue lands, runs made
-# before and after these tools exist are both filed under `v5-pointer-target`
-# while carrying two different fingerprints, which is exactly the failure the
-# module docstring in `app/agents/qa/arch.py` names. The fingerprint still
-# separates them, so no record is lost — only the readable name is.
-_EXPECTED_DEFAULT_FINGERPRINT = "72640f62436a"
+# Moved a third time for `QaArchSpec.skills`: the dump the digest hashes gained a
+# key, so every structure's digest follows. The default tool names are unchanged
+# (`skills` defaults to `off`, so `load_skill` is not in the list). The label moved
+# with it because the structure now has a second shape, `on_demand`.
+#
+# Moved a fourth time for the five macro tools (ARTEL-925): `write_macro`,
+# `edit_macro`, `read_macro`, `register_macro` and `run_macro` joined the set
+# above. That is the first case in the docstring below — the tool set changed —
+# and `v7-macros` is the label bump it asks for. ARTEL-926 still owes the QA run
+# that gives the new label numbers to be read against; until then the label
+# separates the structures and no run supplies the comparison.
+_EXPECTED_DEFAULT_FINGERPRINT = "3838cacda917"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:

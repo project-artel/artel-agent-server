@@ -45,6 +45,7 @@ from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.context import fold_stale_scenes
 from app.agents.qa.tools import QaRunState
+from app.prompts import load_tool_description
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import LogCategory
 from app.qa.scene_context import SCENE_CONTEXT_START
@@ -77,23 +78,6 @@ _SUMMARY_SOURCE = "summarization"
 _SUMMARY_PREAMBLE = "Here is a summary of the conversation to date:"
 
 
-COMPACT_CONTEXT_DESCRIPTION = """Compress your own conversation history.
-
-Reach for this when the history behind you has become unwieldy — many steps done,
-long stretches of exploration, repeated looks at the same screen — and it is
-getting in the way of deciding what to do next. It happens automatically when the
-conversation approaches the model's limit; this is for when you would rather not
-wait for that.
-
-Everything that matters survives: the verdicts you have recorded, which steps
-still need one, the step to do next, and anything the operator told you are all
-restated to you immediately afterwards, and the current screen is attached to
-every turn regardless. What you lose is the detail of how you got here.
-
-Say what to do next in `reason` and then simply carry on — there is no need to
-call this again or to re-check what you have already recorded."""
-
-
 def build_compact_tool(state: QaRunState) -> BaseTool:
     """The agent's own handle on compaction.
 
@@ -106,7 +90,7 @@ def build_compact_tool(state: QaRunState) -> BaseTool:
     already knows how to cut without splitting a call from its result.
     """
 
-    @tool(description=COMPACT_CONTEXT_DESCRIPTION)
+    @tool(description=load_tool_description("compact_context").body)
     async def compact_context(reason: str) -> str:
         state.compaction_requested = True
         return (

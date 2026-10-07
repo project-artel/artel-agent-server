@@ -8,6 +8,7 @@ from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.tools.state import QaRunState
 from app.agents.qa.tools.tool_context import ToolContext
+from app.prompts import load_tool_description
 from app.qa.channel import bounded_operator_wait
 from app.qa.envelope import (
     IssuePayload,
@@ -18,32 +19,6 @@ from app.qa.envelope import (
     StepStatus,
 )
 from app.qa.schemas import QaStepResult
-
-
-# Interpolated for the same reason as CAPTURE_SCREEN_DESCRIPTION in
-# app/agents/qa/tools/observation_tools.py: the cap is the part the agent has to
-# ration, and a docstring cannot name it.
-REPORT_ISSUE_DESCRIPTION = """File a defect you found in the GAME, with the evidence for it.
-
-This is not the step verdict — `report_step` is. Use this when what you saw is
-wrong regardless of the scenario: a crash, a button that does nothing, a value
-that goes the wrong way, text that overflows its box. A step can fail without
-being a defect (the scenario may describe the game wrongly), and a step can pass
-while you notice one in passing.
-
-`severity` is one of {severities}, worst first:
-- BLOCKER: the game cannot be played past this point.
-- CRITICAL: a core feature is broken and nothing works around it.
-- MAJOR: an important feature is broken but there is a way around it.
-- MINOR: small or local damage.
-- TRIVIAL: cosmetic — wording, alignment, a wrong colour.
-
-`expected` and `actual` are what should have happened and what did. `reproduction`
-is the shortest list of steps that shows it again, oldest first; write it for
-someone who was not here.
-
-You may file {limit} of these in one run. One defect, one call — do not file the
-same broken screen again on the next step."""
 
 
 def render_closing_asks(state: QaRunState) -> str:
@@ -119,23 +94,10 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
     channel, state, arch = ctx.channel, ctx.state, ctx.arch
     _answer = ctx.answer
 
-    @tool
+    @tool(description=load_tool_description("wait_for_operator").body)
     async def wait_for_operator(
         thought: str, timeout_seconds: float = 60.0, step: int | None = None
     ) -> str:
-        """Stop and wait until the operator says something.
-
-        For when you cannot go on without a person: the step is ambiguous, the
-        game is in a state the scenario does not cover, or you asked them
-        something with `reply_to_operator` and the answer decides what you do
-        next. The run makes no progress while you are here, so ask the question
-        first and only then wait for it.
-
-        Returns what they said, or tells you nobody answered in time — silence is
-        not a failure, and you decide what to do with it. But do not settle in on
-        it: waiting is capped per call, and a couple of full waits is the whole
-        run's clock, spent on nothing.
-        """
         waited = bounded_operator_wait(timeout_seconds)
         messages = await channel.wait_for_operator(timeout_seconds)
         if not messages:
@@ -146,7 +108,7 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             )
         return _answer("The operator answered.", messages)
 
-    @tool
+    @tool(description=load_tool_description("report_step").body)
     async def report_step(
         step: int,
         passed: bool,
@@ -154,20 +116,6 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         thought: str,
         used_knowledge_ids: list[str] = [],
     ) -> str:
-        """Record the verdict for one scenario step, with the evidence for it.
-
-        Call this once per step, right after you have observed the result of that
-        step's action. For a step that verifies an expected result, `passed` is
-        whether that result occurred (this is also its test case's verdict); for
-        any other step, `passed` is whether you carried the action out. `message`
-        should cite what you saw, and `thought` is how you reached the verdict.
-
-        `used_knowledge_ids` is for knowledge base entries that actually bore on
-        THIS verdict — ones you read and then judged differently because of. Give
-        the ids as they were printed to you, whether by a search or as a neighbour
-        line. Leave it empty when the step was decided by what you could see;
-        that is the ordinary case and nothing is lost by saying so.
-        """
         # The empty list default is never mutated — the ids are read once, below.
         # It is spelled as a literal rather than as `None` because this is a tool
         # schema the model fills in: an optional array is something it can simply
@@ -251,7 +199,7 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         return _answer(f"{body}{note}", channel.drain_operator_messages())
 
     @tool(
-        description=REPORT_ISSUE_DESCRIPTION.format(
+        description=load_tool_description("report_issue").body.format(
             severities="/".join(s.value for s in IssueSeverity),
             limit=arch.max_issues_per_run,
         )
@@ -306,16 +254,8 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             channel.drain_operator_messages(),
         )
 
-    @tool
+    @tool(description=load_tool_description("finish_run").body)
     async def finish_run(passed: bool, summary: str, thought: str) -> str:
-        """End the run. Call this once, after the last step has been reported.
-
-        A step with no verdict yet is worth attempting before you close: the run
-        was opened to find out about all of them. Calling this with steps still
-        unreported sends you back to them once.
-
-        `thought` is how you reached the overall verdict; it goes on the timeline.
-        """
         state.finish_attempts += 1
 
         # A step the agent never attempted is the failure this whole change is
@@ -344,13 +284,8 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         )
         return "The run is closed."
 
-    @tool
+    @tool(description=load_tool_description("reply_to_operator").body)
     async def reply_to_operator(message: str, thought: str, step: int | None = None) -> str:
-        """Answer the operator. Use when they asked something, not for progress.
-
-        `thought` is why you are answering this way; it goes on the timeline so a
-        reviewer can see the reasoning behind what the operator was told.
-        """
         await channel.say(message, step)
         return _answer("Sent.", channel.drain_operator_messages())
 
