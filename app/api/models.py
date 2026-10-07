@@ -1,7 +1,14 @@
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.llm.models import LLMProvider, ReasoningEffort, ReasoningKind, list_models
+from app.config import get_settings
+from app.llm.models import (
+    LLMProvider,
+    ReasoningEffort,
+    ReasoningKind,
+    list_models,
+    required_openrouter_slugs,
+)
 
 
 router = APIRouter(tags=["models"])
@@ -29,3 +36,13 @@ class ModelCatalogEntry(BaseModel):
 @router.get("/models", response_model=list[ModelCatalogEntry])
 async def models() -> list[dict]:
     return list_models()
+
+
+class RequiredModels(BaseModel):
+    slugs: list[str]
+
+
+@router.get("/models/required", response_model=RequiredModels)
+async def required_models() -> RequiredModels:
+    """OpenRouter slugs the configured API key must reach: chat catalog and embeddings."""
+    return RequiredModels(slugs=required_openrouter_slugs(get_settings().embedding_model))

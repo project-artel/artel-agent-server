@@ -18,8 +18,9 @@ from typing import Awaitable, Callable
 
 from pydantic import BaseModel, Field
 
+from app.config import get_settings
 from app.llm.chat_model import build_chat_model
-from app.llm.models import LLMModel, ReasoningConfig
+from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig
 from app.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
@@ -41,9 +42,16 @@ class RouteVerdict(BaseModel):
     reply: str = Field(default="")
 
 
-# 라우터는 판단이 얕아 제일 싼 모델이면 된다. 세션 모델과 무관하게 고정한다 —
-# 노드별 모델 혼합의 첫 사례다.
-ROUTER_MODEL = LLMModel.claude_haiku_4_5_bedrock
+def router_model() -> LLMModel:
+    """The router's model, from `Settings.router_model` (env `ROUTER_MODEL`).
+
+    Fixed regardless of the session's model, since the classification is shallow
+    and wants the cheapest option: the first case of mixing models per node. The
+    default is the catalog's `DEFAULT_MODEL`, an OpenRouter slug; a Bedrock model
+    is used only when an operator sets it.
+    """
+    configured = get_settings().router_model
+    return LLMModel(configured) if configured else DEFAULT_MODEL
 
 RouterCall = Callable[[str], Awaitable[RouteVerdict]]
 
@@ -51,7 +59,7 @@ RouterCall = Callable[[str], Awaitable[RouteVerdict]]
 async def _call_model(prompt: str) -> RouteVerdict:
     # 추론 끔(max_tokens=0) — 669토큰짜리 분류에 추론이 지연 13초·출력 수백 토큰을
     # 쓰던 실측(2026-09-09). 라우터가 느리면 모든 갈래가 그만큼 늦게 시작한다.
-    chat = build_chat_model(ROUTER_MODEL, ReasoningConfig(max_tokens=0))
+    chat = build_chat_model(router_model(), ReasoningConfig(max_tokens=0))
     chain = chat.with_structured_output(RouteVerdict, method="json_schema")
     return await chain.ainvoke(prompt)
 

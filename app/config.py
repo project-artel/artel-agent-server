@@ -25,6 +25,12 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("LLM_API_KEY", "OPENROUTER_API_KEY"),
     )
+    # How long a key fetched from the orchestration server is trusted before the
+    # next model call asks again (see app/llm/api_key.py). A provider answering 401
+    # drops it sooner. The fetch timeout bounds how long one call can wait when
+    # orchestration is down; the environment key above answers after that.
+    llm_key_cache_ttl_seconds: float = 30.0
+    llm_key_fetch_timeout_seconds: float = 3.0
     llm_base_url: str = Field(
         default="https://openrouter.ai/api/v1",
         validation_alias=AliasChoices("LLM_BASE_URL", "OPENROUTER_BASE_URL"),
@@ -139,6 +145,29 @@ class Settings(BaseSettings):
             ) from error
         return value
     scenario_prompt_version: str | None = None
+    # Model for the scenario router's one-shot classification. Empty means the
+    # catalog's `DEFAULT_MODEL`, an OpenRouter slug, so a default install needs no
+    # AWS credential and a catalog update cannot leave a stale slug here. An
+    # operator who has Bedrock credentials can set the `bedrock/...` catalog value
+    # to keep the cheaper Haiku route.
+    router_model: str = ""
+
+    @field_validator("router_model")
+    @classmethod
+    def known_router_model(cls, value: str) -> str:
+        from app.llm.models import LLMModel
+
+        if not value:
+            return value
+        try:
+            LLMModel(value)
+        except ValueError as error:
+            known = ", ".join(model.value for model in LLMModel)
+            raise ValueError(
+                f"router_model '{value}' is not in the catalog. Known: {known}."
+            ) from error
+        return value
+
     # 입구 라우터(워크플로 재편 Step 1). 끄면 예전 그대로 모든 입력이 루프로 간다 —
     # 실험의 롤백 스위치다.
     scenario_router_enabled: bool = True

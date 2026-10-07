@@ -5,13 +5,13 @@
   screen selector 판정, 스텝 문구 다듬기
 - QA 런은 tool 37 개와 middleware 5 개를 두른 tool loop. 게임을 직접 만지지 않고
   artel-orchestration-server 를 거쳐 artel-sdk 가 붙은 Unity 빌드를 조작함
-- 사람이 부르는 API 가 아님. 라우트 14 개 중 13 개가 `/internal` 아래 있고 인증이 없음
+- 사람이 부르는 API 가 아님. 라우트 15 개 중 14 개가 `/internal` 아래 있고 인증이 없음
 - 결정론적 명세 발견기 `app/specs_v2` 도 여기 삶. 그쪽은 모델을 한 번도 부르지 않음
 
 | 무엇 | 수 | 어디 |
 | --- | --- | --- |
 | agent | 6 | `app/agents/` |
-| HTTP 라우트 | 12 | `app/api/` |
+| HTTP 라우트 | 13 | `app/api/` |
 | WebSocket 라우트 | 2 | `/internal/sessions/{id}`, `/internal/qa-sessions/{id}` |
 | QA tool | 37 | `app/agents/qa/tools/` |
 | QA middleware | 5 | `app/agents/qa/runner.py` |
@@ -27,7 +27,7 @@ python -m uvicorn app.main:app --reload
 python -m pytest
 ```
 
-- `.env` 는 `app.config.Settings` 가 직접 읽음. 설정 50 개가 전부 `.env.example` 에 있음
+- `.env` 는 `app.config.Settings` 가 직접 읽음. 설정 53 개가 전부 `.env.example` 에 있음
 - **Redis 가 필요함** — `lifespan` 이 `REDIS_URL` 로 조건 없이 client 를 만들고,
   시나리오 세션 저장소와 QA 세션 저장소가 그 뒤에 삶.
   `REDIS_URL` 은 `.env.example` 에 없었음
@@ -43,6 +43,30 @@ python -m pytest
 ```bash
 LANGSMITH_TRACING=false python -m pytest -q
 ```
+
+### LLM key 출처
+
+chat 과 embedding 호출의 key 는 이 순서로 정해짐.
+
+1. orchestration 의 admin 이 저장한 key. `GET {ORCHESTRATION_BASE_URL}/internal/settings/llm` 로 가져와
+   `LLM_KEY_CACHE_TTL_SECONDS` (기본 30) 동안 캐시함. provider 가 401 을 주면 캐시를 버리므로
+   key 를 바꿔도 다음 호출부터 적용됨
+2. 환경 변수 `LLM_API_KEY` (`OPENROUTER_API_KEY` 도 읽음)
+
+orchestration 에 닿지 못하거나 key 가 아닌 응답이 오면 환경 변수를 씀. `EMBEDDING_API_KEY` 가 있으면
+embedding 만 그 key 를 씀. key 는 로그에 남기지 않음
+
+### key 가 접근해야 하는 모델
+
+`GET /internal/models/required` 가 `{ "slugs": [...] }` 를 돌려줌. OpenRouter 로 가는 catalog 모델 전부와
+embedding 모델(`EMBEDDING_MODEL`) 이고, `app/llm/models.py` 의 catalog 에서 만들어서 문서와 admin 페이지가
+사본 없이 읽을 수 있음
+
+### Bedrock 은 선택
+
+기본 설치는 Bedrock 을 부르지 않고 `BEDROCK_*` 값이 하나도 없어도 기동함. 시나리오 router 는
+`ROUTER_MODEL` 을 쓰고, 비우면 catalog 의 `DEFAULT_MODEL` 을 씀. Bedrock 자격이 있으면 `ROUTER_MODEL` 에
+`bedrock/...` catalog 값을 넣고 `BEDROCK_REGION`, `BEDROCK_API_KEY` (또는 AWS 기본 자격 증명) 를 설정함
 
 ## 신뢰 경계
 
