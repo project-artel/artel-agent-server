@@ -63,7 +63,10 @@ def test_the_prompt_version_comes_back_resolved() -> None:
 def test_the_prompt_hash_is_the_body_that_was_loaded() -> None:
     """A version directory is a name someone chose; editing `v3` in place would
     otherwise file two different prompts under one bucket."""
-    config = open_session(prompt_version="v1")["run_config"]
+    # `v1` predates the phase cycle, so it carries no `phase_directive` and the
+    # gate is asked off along with it. What this test reads is the hash of the
+    # `system` role, which the rung does not touch.
+    config = open_session(prompt_version="v1", arch={"phase_cycle": "off"})["run_config"]
 
     assert config["prompt_version"] == "v1"
     assert config["prompt_hashes"]["system"] == load_prompt("qa_run", "system", "v1").body_sha256

@@ -289,6 +289,27 @@ def capability_search_line(capability: SceneCapability) -> str:
     return "  " + " ".join(parts)
 
 
+def capability_search_matches(
+    capabilities: list[SceneCapability], contains: str
+) -> list[SceneCapability]:
+    """`contains` 에 걸리는 줄 전부, 지도가 준 순서 그대로."""
+    needle = contains.strip().lower()
+    return [item for item in capabilities if not needle or _matches(item, needle)]
+
+
+def capability_search_page(
+    matched: list[SceneCapability], offset: int
+) -> list[SceneCapability]:
+    """한 번의 조회가 실제로 찍는 줄.
+
+    자르는 규칙이 한 자리에 있어야 한다. `report_step` 의 `capability_key` 검사가 "이 런이
+    실제로 받은 줄" 을 묻는데, 그 답을 렌더 함수 안에서 한 번 더 계산하면 두 규칙이 어긋나는
+    날 검사가 안 받은 키를 받았다고 하거나 그 반대가 된다.
+    """
+    start = max(offset, 0)
+    return matched[start : start + CAPABILITY_PAGE]
+
+
 def render_capability_search(
     scene: str,
     capabilities: list[SceneCapability],
@@ -302,7 +323,7 @@ def render_capability_search(
     `record_new_capability` 사이의 갈림길이다.
     """
     needle = contains.strip().lower()
-    matched = [item for item in capabilities if not needle or _matches(item, needle)]
+    matched = capability_search_matches(capabilities, contains)
     if not matched:
         if needle:
             return (
@@ -314,7 +335,7 @@ def render_capability_search(
         return f"The content map holds no capabilities for {scene}."
 
     start = max(offset, 0)
-    page = matched[start : start + CAPABILITY_PAGE]
+    page = capability_search_page(matched, offset)
     if not page:
         return (
             f"`offset` {start} is past the end of the list — {len(matched)} line(s) "

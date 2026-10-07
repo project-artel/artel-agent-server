@@ -38,6 +38,23 @@ cannot be read either. Nothing complains, which is why this is the one to check
 first. The two orchestration-side settings that fail the same quiet way are in
 the canonical file.
 
+**A vision arm fails the same quiet way, and this repository owns that code
+too.** `_auto_capture` (`app/agents/qa/vision.py`) returns `None` for every
+failure the game can produce and deliberately tells the model nothing, so an
+`every_call` or `by_role` run whose captures never upload reads exactly what an
+`on_demand` run reads. The upload goes from the game straight to MinIO rather
+than through orchestration, and the game runs on Windows while MinIO runs in a
+container inside WSL: a docker-published port Windows cannot reach turns every
+capture into `"error": "The capture upload failed (HTTP 0)."`. On 2026-09-18
+that produced 27 runs, 1,013 automatic captures, 0 pictures, and three arms
+separated by sampling alone.
+
+The cheapest tell reads after the fact, off `llm_usage`: ARTEL-868 measured
+`on_demand` taking 97.3% of its input from cache and `every_call` 1.3%, because
+a picture that changes every call cannot be cached. An `every_call` arm sitting
+at 97% carried no pictures at all. The relay that fixes it, and the checks to
+run before and during, are in the canonical skill.
+
 ## Holding the axes
 
 `app/qa/run_config.py` resolves what a run was, and `runner.py` writes it onto
@@ -68,8 +85,23 @@ Two run rules that decide whether repetition means anything:
 
 ## Reading the result
 
+**`steps_passed` is not a score.** L1 is 24 steps of which **6 are expected to
+fail**, so an honest perfect run scores 18 and **`24/24` means the agent reported
+every false expectation as passed** — the one behaviour the benchmark exists to
+catch. Score against `test_scenario.steps[].expected_passed` instead, take the
+**last** verdict per step (some runs report a step twice and the stored
+`steps_passed` is then inflated by it, silently — other batches show none), and
+report both `agree` out of the step total and
+accuracy among the steps actually judged. The canonical query is in the
+workspace skill's `## Reading the result — and what you cannot read`.
+
+Reading `steps_passed` as depth has already put wrong tables into a pull request
+and a Notion page (2026-09-18).
+
+The axes a comparison holds still:
+
 ```sql
-SELECT qr.id, qr.label, qt.status, qt.steps_passed || '/' || qt.steps_total,
+SELECT qr.id, qr.label, qt.status,
        qt.completed_at - qt.started_at AS took,
        qt.run_config->>'agent_arch', qt.run_config->>'agent_fingerprint',
        qt.run_config->>'prompt_version'

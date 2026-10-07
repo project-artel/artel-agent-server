@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.agents.qa.runner import QaRunner, _log_token_usage
 from app.qa.channel import QaRunChannel
+from app.llm.models import get_model_spec
 from app.qa.envelope import MessageType
 
 
@@ -466,5 +467,45 @@ def test_a_long_tool_result_is_clipped() -> None:
         content = frames_of(sent, MessageType.TOOL_RESULT)[0]["payload"]["content"]
         assert len(content) < 50_000
         assert "more characters" in content
+
+    asyncio.run(run())
+
+
+# --- context usage ------------------------------------------------------------
+
+
+def context_frames(sent: list[dict]) -> list[dict]:
+    return [f["payload"] for f in frames_of(sent, MessageType.LOG) if "context" in f["payload"]]
+
+
+def test_a_model_turn_with_usage_reports_how_full_the_context_was() -> None:
+    async def run() -> None:
+        channel, sent = make_channel()
+        runner = QaRunner()
+        maximum = get_model_spec(runner._config.model).max_input_tokens
+
+        reply = AIMessage(
+            content="상점을 연다.",
+            usage_metadata={"input_tokens": 50_000, "output_tokens": 10, "total_tokens": 50_010},
+        )
+        await runner._log_reasoning(channel, {"model": {"messages": [reply]}})
+
+        [payload] = context_frames(sent)
+        assert payload["context"] == {"used_tokens": 50_000, "max_tokens": maximum}
+        assert payload["category"] == "SYSTEM"
+        assert payload["message"] == f"context 50k / {maximum // 1000}k ({100 * 50_000 // maximum}%)"
+
+    asyncio.run(run())
+
+
+def test_a_model_turn_without_usage_reports_no_context() -> None:
+    async def run() -> None:
+        channel, sent = make_channel()
+
+        await QaRunner()._log_reasoning(
+            channel, {"model": {"messages": [AIMessage(content="상점을 연다.")]}}
+        )
+
+        assert context_frames(sent) == []
 
     asyncio.run(run())

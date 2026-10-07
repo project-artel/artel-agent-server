@@ -33,12 +33,25 @@ from app.agents.qa.knowledge import (
     render_hit,
 )
 from app.agents.qa.runner import QaRunner
+from app.qa.run_config import resolve_run_config
+from app.agents.qa.arch import PhaseCycleMode, QaArchSpec, default_resolved_arch
 from app.agents.qa.tools import QaRunState, build_tools
 from app.qa.schemas import QaCaseRef, QaScenario, QaStep
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import KnowledgeSearchHit, LogCategory, MessageType
 from app.qa.scene import SCENE_VIEW_START_PREFIX
 
+
+# phase gate 를 끈다. 이 파일은 tool 하나하나가 무엇을 하는지 보는 자리이고, gate 는 그 위층
+# 이다. 기본값이 무엇인지는 `tests/test_qa_arch.py` 가 지킨다.
+_NO_PHASE_GATE = default_resolved_arch().model_copy(
+    update={"phase_cycle": PhaseCycleMode.off}
+)
+
+
+def _run_config_without_the_gate():
+    """같은 것을 런 전체에 대해. `build_tools` 가 아니라 `QaRunner` 가 받는 자리다."""
+    return resolve_run_config(arch=QaArchSpec(phase_cycle=PhaseCycleMode.off))
 
 def make(timeout: float = 0.05):
     """A channel whose knowledge search times out fast unless a test answers it."""
@@ -49,7 +62,7 @@ def make(timeout: float = 0.05):
 
     channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=timeout, write_timeout=timeout)
     state = QaRunState(total_steps=1)
-    tools = {tool.name: tool for tool in build_tools(channel, state)}
+    tools = {tool.name: tool for tool in build_tools(channel, state, arch=_NO_PHASE_GATE)}
     return channel, state, tools, sent
 
 
@@ -77,7 +90,7 @@ def make_with_undeliverable(*types: MessageType):
 
     channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=0.05, write_timeout=0.05)
     state = QaRunState(total_steps=1)
-    tools = {tool.name: tool for tool in build_tools(channel, state)}
+    tools = {tool.name: tool for tool in build_tools(channel, state, arch=_NO_PHASE_GATE)}
     return channel, state, tools, sent
 
 
@@ -1841,7 +1854,10 @@ def test_a_run_searches_knowledge_and_carries_on_to_its_verdict(
         ],
     )
 
-    asyncio.run(QaRunner().run(channel, scenario, state))
+    # 대본의 tool 순서는 phase 축이 생기기 전에 쓰였다 — 이 런들은 지식을 판정보다
+    # 먼저 적는데, gate 는 `UPDATE_MEMORY` 를 `VERIFY` 뒤에 둔다. 여기서 보는 것은
+    # 지식 tool 과 런 loop 이므로 gate 를 끄고 본다.
+    asyncio.run(QaRunner(_run_config_without_the_gate()).run(channel, scenario, state))
 
     assert state.finished
     assert len(searches(sent)) == 1
@@ -1994,7 +2010,10 @@ def test_a_run_corrects_an_entry_by_deleting_it_and_recording_the_new_one(
         ],
     )
 
-    asyncio.run(QaRunner().run(channel, scenario, state))
+    # 대본의 tool 순서는 phase 축이 생기기 전에 쓰였다 — 이 런들은 지식을 판정보다
+    # 먼저 적는데, gate 는 `UPDATE_MEMORY` 를 `VERIFY` 뒤에 둔다. 여기서 보는 것은
+    # 지식 tool 과 런 loop 이므로 gate 를 끄고 본다.
+    asyncio.run(QaRunner(_run_config_without_the_gate()).run(channel, scenario, state))
 
     assert state.finished
     assert deletes(sent)[0]["payload"] == {"knowledge_id": "41"}
@@ -2116,7 +2135,10 @@ def test_a_run_corrects_an_entry_in_place_with_the_update_tool(
         ],
     )
 
-    asyncio.run(QaRunner().run(channel, scenario, state))
+    # 대본의 tool 순서는 phase 축이 생기기 전에 쓰였다 — 이 런들은 지식을 판정보다
+    # 먼저 적는데, gate 는 `UPDATE_MEMORY` 를 `VERIFY` 뒤에 둔다. 여기서 보는 것은
+    # 지식 tool 과 런 loop 이므로 gate 를 끄고 본다.
+    asyncio.run(QaRunner(_run_config_without_the_gate()).run(channel, scenario, state))
 
     assert state.finished
     # One frame, naming the entry that already existed. Nothing was deleted and

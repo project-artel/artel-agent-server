@@ -119,7 +119,49 @@ from app.llm.models import LLMModel, get_model_spec
 # drag an element the scene gives an id for, and hit a target that moved between
 # the observation and the click. Three tool names and four tool schemas moved, so
 # the fingerprint moves with the label here.
-QA_ARCH_LABEL = "v5-pointer-target"
+#
+# v6 because `phase_cycle` (below) changes the tool set and a tool schema at every
+# value except its default. `in_verdict` gives `report_step` two more arguments,
+# `capability_key` and `learned`; `lite` puts the run behind a phase state machine
+# and adds `skip_memory_update`; `full` adds `decide_next_action` on top. Each of
+# those is a change of shape under the rule in AGENTS.md. The arms are named in
+# `QaArchSpec.label`, not here, because one deployment runs all four.
+#
+# The bump is NOT optional even though the default is `off`, and even though the
+# default run's tools, tool schemas, middleware list and every other knob are
+# provably where they were. One field added to `QaArchSpec` puts one key into
+# `arch.model_dump()`, and `arch_fingerprint` hashes that dump — so the digest of
+# EVERY structure moves, `off` included. Measured: the pinned default structure
+# hashed `83bc272fee58` before this field and `7235b9a26d43` after it, with nothing
+# else touched. `screen_capture` (ARTEL-868) was the same case and did not bump
+# the label, on the argument that the default run's shape had not moved. That
+# argument does not reach here: at three of this field's four values the default
+# run's shape does move, and a label that named only the `off` shape would leave
+# `lite` and `full` filed under the name of the free tool loop they replace.
+#
+# v7 because the default moved from `off` to `lite`, so every run that names
+# nothing gets the shape v6 described as opt-in: 38 tools instead of 37
+# (`skip_memory_update` joins), `report_step` carrying `capability_key` and
+# `learned`, the phase state machine refusing out-of-phase calls, and three more
+# system prompt roles. The fingerprint moves with it.
+#
+# Moved on the record it leaves, not on the score. Over 16 L1 runs on 2026-09-18,
+# 8 per arm, `lite` agreed with the answer key on 19.1 of 24 steps against `off`'s
+# 18.3 — ranges 16-21 and 12-21, which overlap, so that gap is not a result. What
+# is not close: `lite` left 105 `learned` lines and 10 `capability_key` citations,
+# `off` left 0 of each, for 13% more cost ($9.89 against $8.76). An `off` run
+# finishes knowing exactly what it knew when it started.
+#
+# **Those runs used an older phase table than the one `phase.py` now holds.** They
+# were measured with `ACT` as the only repeating phase; `OBSERVE` and
+# `UPDATE_MEMORY` repeat as well now, which removes refusals the measured arm
+# paid for. The direction of that change is known — strictly fewer refusals, so
+# `lite` costs less and is interrupted less than the numbers above say — but the
+# size is not, because it has not been run. The honest reading is that the
+# measurement supports "`lite` does not score worse and writes things down", and
+# that its cost and refusal figures are an upper bound rather than a reading of
+# this table.
+QA_ARCH_LABEL = "v7-phase-cycle-default"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
@@ -213,6 +255,68 @@ class ScreenCaptureMode(StrEnum):
     by_role = "by_role"
 
 
+class PhaseCycleMode(StrEnum):
+    """How much of `OBSERVE -> DECIDE -> ACT -> VERIFY -> UPDATE_MEMORY` the run is held to.
+
+    Not a bool, because the four values are a cost ladder measured in extra model
+    calls per step: 0, 0, +1, +2. A bool cannot express "ask the same question
+    without spending a round trip on it", and that is the rung worth measuring
+    first — if it works, the two expensive ones need not be bought at all.
+
+    ``off`` is the free tool loop every run has done until now, and its being the
+    default is a condition rather than a preference. ARTEL-667 sent the run back
+    once from `finish_run` and eighteen tests that close a run broke; this axis
+    sends it back at every step. Every test that does not name a value here has to
+    keep costing exactly the round trips it costs today.
+
+    ``remember_in_verdict`` spends no extra model call: `report_step` takes
+    `capability_key` and `learned`, so the `UPDATE_MEMORY` question is answered in
+    the same turn as the verdict. What it addresses is measured — 27 stage runs on
+    prompt v15 made 1,566 tool calls, of which `record_capability_verdict`,
+    `record_new_capability` and `list_scene_capabilities` were called 0 times each,
+    with the prompt, the closing asks and the compaction ledger all asking for them
+    in words. An argument is not another sentence.
+
+    ``lite`` lifts `UPDATE_MEMORY` into a turn of its own behind a phase state
+    machine, which answers an out-of-phase call with a refusal in the tool result.
+    ``full`` adds `DECIDE` on top, at one more model call per step.
+
+    The refusal is a tool result and nothing else. Narrowing the tool list per call
+    — what `ModelRequest.override(tools=...)` allows — is deliberately not done:
+    tool declarations sit at the front of a request, so a list that rotates per
+    phase moves the prompt prefix every turn. Breaking that prefix in a weaker way
+    has been measured at cache reads of 1.3% against 97.3% and $14.22 against $0.87
+    for one run (ARTEL-868).
+    """
+
+    off = "off"
+    remember_in_verdict = "in_verdict"
+    lite = "lite"
+    full = "full"
+
+    @property
+    def remembers_in_verdict(self) -> bool:
+        """Whether `report_step` carries `capability_key` and `learned`.
+
+        True from `in_verdict` upwards. `lite` and `full` keep the arguments even
+        though they also have `skip_memory_update`: the two ask different things —
+        one is the verdict citing the row it checked, the other is the run saying
+        what it is leaving behind — and dropping the arguments at the upper rungs
+        would make `lite` minus `in_verdict` two changes instead of one.
+        """
+        return self is not PhaseCycleMode.off
+
+    @property
+    def gates_phases(self) -> bool:
+        """Whether out-of-phase tool calls are refused. `lite` and `full` only."""
+        return self in (PhaseCycleMode.lite, PhaseCycleMode.full)
+
+    @property
+    def decides_in_its_own_turn(self) -> bool:
+        """Whether `decide_next_action` is in the tool set. `full` only."""
+        return self is PhaseCycleMode.full
+
+
 class QaArchError(ValueError):
     """The requested structure cannot be built for the requested model."""
 
@@ -241,6 +345,13 @@ class QaArchSpec(BaseModel):
     max_issues_per_run: int = Field(default=MAX_ISSUES_PER_RUN, ge=0, le=1_000_000)
     vision: VisionMode = VisionMode.auto
     screen_capture: ScreenCaptureMode = ScreenCaptureMode.on_demand
+    # `off` is the compatibility value: at it the tool set, every tool schema, the
+    # middleware list and every other knob are what they were before this axis
+    # existed. It is no longer the default, so that shape has to be asked for by
+    # name now — including by a run pinned to a prompt version older than `v18`,
+    # which carries no `phase_directive` for the gate's refusals to rest on and is
+    # refused in `resolve_run_config` rather than gated in silence.
+    phase_cycle: PhaseCycleMode = PhaseCycleMode.lite
     fold_stale_scenes: bool = True
     # Folds the neighbour blocks the search volunteers, and only those (ARTEL-277).
     # Separate from `fold_stale_scenes` because the two are independently useful
@@ -319,6 +430,7 @@ class ResolvedArch(BaseModel):
     max_issues_per_run: int
     vision: bool
     screen_capture: ScreenCaptureMode
+    phase_cycle: PhaseCycleMode
     fold_stale_scenes: bool
     fold_stale_knowledge: bool
     compaction: bool
