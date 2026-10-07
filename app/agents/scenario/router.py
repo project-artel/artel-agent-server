@@ -171,13 +171,13 @@ class JevScenarioRouter(ScenarioRouter):
                 "questions": {
                     "target": {
                         "type": "choice",
-                        "instructions": spec.TARGET_INSTRUCTIONS,
-                        "criteria": spec.TARGET_CRITERIA,
+                        "instructions": spec.target_instructions(),
+                        "criteria": spec.target_criteria(),
                     },
                     "route": {
                         "type": "choice",
-                        "instructions": spec.ROUTE_INSTRUCTIONS,
-                        "criteria": spec.ROUTE_CRITERIA,
+                        "instructions": spec.route_instructions(),
+                        "criteria": spec.route_criteria(),
                     },
                 },
             },

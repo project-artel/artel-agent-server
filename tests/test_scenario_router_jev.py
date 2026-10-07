@@ -22,9 +22,8 @@ import pytest
 
 from app.agents.scenario import jev_criteria as spec
 from app.agents.scenario.router import JevScenarioRouter, Route, ScenarioRouter
+from app.prompts import resolve_version
 
-# 이 값을 바꾸려면 `scenario_router/v7/system.md` 와 맞는지 확인하고 함께 바꾼다.
-PINNED_DIGEST = "dcd210c3bdca2f144734952f75b65f455933f41db588682bc9508355aca3adf6"
 
 
 def _answers(route: str, target: str) -> dict:
@@ -112,25 +111,52 @@ def test_the_reply_field_is_left_empty() -> None:
 # ── 명세와 설정 ───────────────────────────────────────────────────────────────
 
 
-def test_the_criteria_have_not_changed_without_anyone_noticing() -> None:
-    assert spec.digest() == PINNED_DIGEST, (
-        "선택지 명세가 바뀌었다. 이것은 `scenario_router/v7/system.md` 의 산문을 옮겨 적은 "
-        "것이므로, 산문과 맞는지 확인하고 측정을 다시 한 뒤 PINNED_DIGEST 를 갱신한다."
+def test_the_criteria_are_locked_like_a_prompt() -> None:
+    """명세가 조용히 바뀌지 않는다 — **전용 핀이 아니라 `prompts-lock.json` 이 잡는다.**
+
+    처음에는 이 모듈이 `digest()` 로 자기 해시를 들고 있었다. 그건 lock 이 이미 하는 일을
+    다시 만든 것이었고, 더 나쁘게는 **산문과의 어긋남을 사람 기억에 맡겼다** — criteria 는
+    같은 판본의 `system.md` 를 옮겨 적은 것이라 둘이 따로 움직이면 측정이 거짓이 된다.
+    판본 디렉터리로 옮기면 판본이 둘을 묶는다.
+    """
+    from app.prompts.lock import compute_lock, read_lock
+
+    computed, locked = compute_lock(), read_lock()
+    key = f"{spec.AGENT}/{resolve_version(spec.AGENT)}/{spec.NAME}"
+    assert key in computed["data"], f"{key} 가 lock 계산에 없다 — data_in 이 못 본다"
+    assert locked.get("data", {}).get(key) == computed["data"][key], (
+        "criteria.json 이 바뀌었는데 lock 을 안 고쳤다. "
+        "`python -m app.prompts.lock --write` 를 돌리고, 같은 판본의 system.md 산문과 "
+        "맞는지도 확인한다."
     )
+
+
+def test_the_criteria_live_beside_the_prose_they_transcribe() -> None:
+    """criteria 와 산문이 **같은 판본 디렉터리**에 있다.
+
+    이것이 어긋남을 막는 실체다. 다른 자리에 두면 산문을 v8 로 올리고 criteria 를 그대로
+    두는 일이 조용히 지나간다.
+    """
+    from app.prompts import PROMPTS_ROOT, data_in, roles_in
+
+    version = resolve_version(spec.AGENT)
+    assert spec.NAME in data_in(spec.AGENT, version)
+    assert "system" in roles_in(spec.AGENT, version)
+    assert (PROMPTS_ROOT / spec.AGENT / version / f"{spec.NAME}.json").is_file()
 
 
 def test_every_route_option_is_fully_described() -> None:
     """1차 측정에서 `question` 이 6/10 이었던 원인이 빈 칸이었다."""
-    for name, option in spec.ROUTE_CRITERIA.items():
+    for name, option in spec.route_criteria().items():
         assert option.get("what"), f"{name}: what 이 비었다"
         assert option.get("examples"), f"{name}: examples 가 비었다"
     for name in ("question", "greeting", "authoring", "modify", "offtopic"):
-        assert spec.ROUTE_CRITERIA[name].get("not_for"), f"{name}: not_for 가 비었다"
+        assert spec.route_criteria()[name].get("not_for"), f"{name}: not_for 가 비었다"
 
 
 def test_the_route_options_match_the_five_routes_the_code_knows() -> None:
     """`ask` 는 선택지가 아니다 — 모델이 고르는 답이 아니라 두 답이 어긋날 때 코드가 내는 결과다."""
-    assert set(spec.ROUTE_CRITERIA) == {r.value for r in Route} - {Route.ASK.value}
+    assert set(spec.route_criteria()) == {r.value for r in Route} - {Route.ASK.value}
 
 
 def test_the_engine_switch_picks_the_router(monkeypatch: pytest.MonkeyPatch) -> None:

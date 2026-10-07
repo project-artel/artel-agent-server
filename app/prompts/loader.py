@@ -34,6 +34,7 @@ one, against a committed hash rather than against git history.
 import hashlib
 import re
 from dataclasses import dataclass
+import json
 from functools import lru_cache
 from pathlib import Path
 from string import Formatter
@@ -234,6 +235,49 @@ def roles_in(agent: str, version: str) -> tuple[str, ...]:
     if not roles:
         raise PromptError(f"{directory}: contains no .md prompt files.")
     return roles
+
+
+def data_in(agent: str, version: str) -> tuple[str, ...]:
+    """한 판본 디렉터리가 담은 **자료 파일** 이름들(`.json` 의 stem), 정렬해서.
+
+    프롬프트가 산문만으로 안 되는 자리가 있다. 결정 전용 모델은 선택지를 **구조로** 받으므로
+    그 명세가 dict 이어야 하는데(`scenario_router` 의 criteria), 그것을 코드에 두면 산문과
+    따로 움직인다 — criteria 는 같은 판본의 `system.md` 를 옮겨 적은 것이라 **둘이 어긋나면
+    측정이 거짓이 된다.** 같은 디렉터리에 두면 판본이 둘을 묶는다.
+
+    `.md` 와 갈라 두는 이유는 역할(role)이 아니기 때문이다. 자료는 모델에게 렌더해 보내는
+    본문이 아니라 코드가 읽는 값이고, placeholder 검사도 할 것이 없다.
+    """
+    directory = PROMPTS_ROOT / agent / version
+    return tuple(sorted(path.stem for path in directory.glob("*.json")))
+
+
+@lru_cache(maxsize=None)
+def _read_data(agent: str, version: str, name: str) -> tuple[str, str]:
+    """`(본문, sha256)`. 본문을 그대로 들고 다니는 것은 해시가 **파일과 같아야** 하기 때문이다."""
+    import hashlib
+
+    path = PROMPTS_ROOT / agent / version / f"{name}.json"
+    source = f"{agent}/{version}/{name}.json"
+    if not path.is_file():
+        raise PromptError(f"{source}: no such data file under {PROMPTS_ROOT}.")
+    body = path.read_text(encoding="utf-8")
+    try:
+        json.loads(body)
+    except ValueError as error:
+        raise PromptError(f"{source}: not valid JSON: {error}") from error
+    return body, hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def load_data(agent: str, name: str, version: str | None = None) -> object:
+    """판본 디렉터리의 JSON 자료를 읽는다. 판본 해소는 `load_prompt` 와 같은 길을 탄다."""
+    body, _ = _read_data(agent, resolve_version(agent, version), name)
+    return json.loads(body)
+
+
+def data_sha256(agent: str, name: str, version: str) -> str:
+    """그 자료의 sha256. `lock` 이 조용한 변경을 잡는 데 쓴다."""
+    return _read_data(agent, version, name)[1]
 
 
 def _configured_version(agent: str) -> str | None:

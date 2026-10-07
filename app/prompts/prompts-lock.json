@@ -1,4 +1,7 @@
 {
+  "data": {
+    "scenario_router/v7/criteria": "c84a41adc285d3f83d9769cd57e804160d7034ab97faad9ab34c16ee1f901b67"
+  },
   "prompts": {
     "game_context/v1/human": "80bcf644a682464baa14d444af01f418c3d05ec076de6fd848c05ad077ddf243",
     "game_context/v1/system": "c61323f87b1ad66869610bb23bbc6605d2453504532e480be868c9b00a7c2d1a",
