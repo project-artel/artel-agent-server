@@ -56,6 +56,16 @@ _FRONTMATTER_FENCE = "---"
 _FRONTMATTER_KEYS = ("version", "note", "placeholders")
 _VERSION_PATTERN = re.compile(r"^v(\d+)$")
 
+# Size caps for the QA prompt, enforced by `validate_prompts` from this version on.
+# A description over the cap fails at boot instead of costing tokens on every
+# turn of every run; older versions shipped before the caps and are never edited.
+QA_SLIM_PROMPT_FROM_VERSION = 18
+TOOL_DESCRIPTION_MAX_CHARS = 500
+SYSTEM_PROMPT_MAX_CHARS = 8000
+
+TOOL_ROLE_PREFIX = "tool_"
+SKILL_ROLE_PREFIX = "skill_"
+
 
 class PromptError(RuntimeError):
     """A prompt file is missing, unreadable, or disagrees with its frontmatter."""
@@ -302,11 +312,50 @@ def load_prompt(agent: str, role: str, version: str | None = None) -> PromptFile
     return _read_prompt(agent, resolve_version(agent, version), role)
 
 
+def load_tool_description(tool_name: str, version: str | None = None) -> PromptFile:
+    """The description of one QA tool, from ``qa_run/<version>/tool_<tool_name>.md``."""
+    return load_prompt("qa_run", f"{TOOL_ROLE_PREFIX}{tool_name}", version)
+
+
+def load_skill(name: str, version: str | None = None) -> PromptFile:
+    """One QA skill, from ``qa_run/<version>/skill_<name>.md``."""
+    return load_prompt("qa_run", f"{SKILL_ROLE_PREFIX}{name}", version)
+
+
+def skill_names(version: str | None = None) -> tuple[str, ...]:
+    """Names of the skills one ``qa_run`` version defines, sorted, without the prefix."""
+    resolved = resolve_version("qa_run", version)
+    return tuple(
+        role.removeprefix(SKILL_ROLE_PREFIX)
+        for role in roles_in("qa_run", resolved)
+        if role.startswith(SKILL_ROLE_PREFIX)
+    )
+
+
 def clear_prompt_cache() -> None:
     """Drop every cached read. For tests that point the loader elsewhere."""
     known_agents.cache_clear()
     available_versions.cache_clear()
     _read_prompt.cache_clear()
+
+
+def _check_qa_prompt_size(prompt: PromptFile) -> None:
+    """Hold ``qa_run`` tool descriptions and the system prompt to their size caps."""
+    number = int(_VERSION_PATTERN.match(prompt.version).group(1))
+    if number < QA_SLIM_PROMPT_FROM_VERSION:
+        return
+    path = f"{PROMPTS_ROOT / prompt.agent / prompt.version / prompt.role}.md"
+    length = len(prompt.body)
+    if prompt.role.startswith(TOOL_ROLE_PREFIX) and length > TOOL_DESCRIPTION_MAX_CHARS:
+        raise PromptError(
+            f"{path}: tool description is {length} characters; the limit is "
+            f"{TOOL_DESCRIPTION_MAX_CHARS}. Move the detail into a skill."
+        )
+    if prompt.role == "system" and length > SYSTEM_PROMPT_MAX_CHARS:
+        raise PromptError(
+            f"{path}: system prompt is {length} characters; the limit is "
+            f"{SYSTEM_PROMPT_MAX_CHARS}. Move the detail into a skill."
+        )
 
 
 def validate_prompts() -> None:
@@ -319,7 +368,9 @@ def validate_prompts() -> None:
     for agent in known_agents():
         for version in available_versions(agent):
             for role in roles_in(agent, version):
-                _read_prompt(agent, version, role)
+                prompt = _read_prompt(agent, version, role)
+                if agent == "qa_run":
+                    _check_qa_prompt_size(prompt)
 
     for agent in SETTINGS_VERSION_KEYS:
         resolve_version(agent)

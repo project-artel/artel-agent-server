@@ -9,13 +9,12 @@
 from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.knowledge import (
-    EXPAND_KNOWLEDGE_DESCRIPTION,
     KNOWLEDGE_RELATIONS,
     KNOWLEDGE_TAGS,
     MAX_EXPAND_DEPTH,
     RESULT_LIMIT,
-    SEARCH_KNOWLEDGE_DESCRIPTION,
     SIMILAR_LABEL,
+    knowledge_tool_description,
     render_expansion,
     render_results,
 )
@@ -33,14 +32,16 @@ def build_knowledge_read_tools(ctx: ToolContext) -> list[BaseTool]:
     channel, state, arch = ctx.channel, ctx.state, ctx.arch
 
     @tool(
-        description=SEARCH_KNOWLEDGE_DESCRIPTION.format(
-            limit=arch.max_searches_per_run, tags=", ".join(KNOWLEDGE_TAGS)
+        description=knowledge_tool_description(
+            "search_knowledge",
+            limit=arch.max_searches_per_run,
+            tags=", ".join(KNOWLEDGE_TAGS),
         )
     )
     async def search_knowledge(
         step: int, thought: str, query: str, tag: str | None = None
     ) -> str:
-        # What the agent reads is SEARCH_KNOWLEDGE_DESCRIPTION, not this.
+        # What the agent reads is tool_search_knowledge.md, not this.
         #
         # Deliberately not routed through `_run`: that path dispatches actions and
         # appends the scene they produced. A search moves nothing on screen, so a
@@ -103,7 +104,8 @@ def build_knowledge_read_tools(ctx: ToolContext) -> list[BaseTool]:
         return with_operator_messages(render_results(answer, remaining), messages)
 
     @tool(
-        description=EXPAND_KNOWLEDGE_DESCRIPTION.format(
+        description=knowledge_tool_description(
+            "expand_knowledge",
             limit=arch.max_expands_per_run,
             relations=", ".join(KNOWLEDGE_RELATIONS),
             similar=SIMILAR_LABEL,
@@ -112,7 +114,7 @@ def build_knowledge_read_tools(ctx: ToolContext) -> list[BaseTool]:
     async def expand_knowledge(
         step: int, thought: str, knowledge_id: str, depth: int = 1
     ) -> str:
-        # What the agent reads is EXPAND_KNOWLEDGE_DESCRIPTION, not this.
+        # What the agent reads is tool_expand_knowledge.md, not this.
         #
         # Three outcomes handled exactly as `search_knowledge` handles them, and
         # for the same reason: none of timeout, refusal or empty answer is a reason

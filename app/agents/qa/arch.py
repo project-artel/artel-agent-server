@@ -31,6 +31,7 @@ import hashlib
 import json
 from enum import StrEnum
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -119,7 +120,18 @@ from app.llm.models import LLMModel, get_model_spec
 # drag an element the scene gives an id for, and hit a target that moved between
 # the observation and the click. Three tool names and four tool schemas moved, so
 # the fingerprint moves with the label here.
-QA_ARCH_LABEL = "v5-pointer-target"
+#
+# v6 because the agent can now read its skills on demand: with `skills=on_demand`
+# a `load_skill` tool joins the tool set, and the long sections of the system
+# prompt (knowledge base, content map, held state) leave it and are read through
+# that tool instead of being resent on every turn. Plan:
+# `.plan/general/2026-10-06-slim-the-qa-prompt-and-load-skills-on-demand.md`.
+# The new `QaArchSpec.skills` axis defaults to `off`, which is the shape every run
+# had before, so the default fingerprint moves only because `arch.model_dump()`
+# gained a key (see the v4 note above); the tool set and the middleware list of
+# the default run did not change. The label moves anyway because the structure now
+# has two shapes and a run must say which side of that axis it was filed on.
+QA_ARCH_LABEL = "v6-skills-on-demand"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
@@ -241,6 +253,9 @@ class QaArchSpec(BaseModel):
     max_issues_per_run: int = Field(default=MAX_ISSUES_PER_RUN, ge=0, le=1_000_000)
     vision: VisionMode = VisionMode.auto
     screen_capture: ScreenCaptureMode = ScreenCaptureMode.on_demand
+    # `off` keeps every skill inlined in the system prompt, as before. `on_demand`
+    # moves the skills behind the `load_skill` tool, which then joins the tool set.
+    skills: Literal["off", "on_demand"] = "off"
     fold_stale_scenes: bool = True
     # Folds the neighbour blocks the search volunteers, and only those (ARTEL-277).
     # Separate from `fold_stale_scenes` because the two are independently useful
@@ -319,6 +334,7 @@ class ResolvedArch(BaseModel):
     max_issues_per_run: int
     vision: bool
     screen_capture: ScreenCaptureMode
+    skills: Literal["off", "on_demand"]
     fold_stale_scenes: bool
     fold_stale_knowledge: bool
     compaction: bool
@@ -482,6 +498,8 @@ def structure_of(arch: ResolvedArch) -> tuple[tuple[str, ...], tuple[str, ...], 
     # is part of what the agent is.
     if arch.compaction:
         tools = tools + [build_compact_tool(state)]
+    # `load_skill` needs no line here: `build_tools` registers it itself when
+    # `arch.skills` is `on_demand`, so the fingerprint reads its real schema.
     names = tuple(tool.name for tool in tools)
     middleware = middleware_names_for(arch)
     return names, middleware, arch_fingerprint(arch, tools, middleware)

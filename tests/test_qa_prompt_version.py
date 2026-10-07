@@ -255,7 +255,7 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v17() -> None:
+def test_the_default_qa_version_is_v18() -> None:
     """A run that names no version has to get the newest prompt.
 
     This is also the trap in adding a version: `resolve_version` returns the
@@ -265,7 +265,10 @@ def test_the_default_qa_version_is_v17() -> None:
     `set_input_axis` before the tool exists teaches the agent to reach for
     something that is not there.
     """
-    assert resolve_version("qa_run") == "v17"
+    # v18 moved the knowledge base, content map and held state sections into
+    # skill files and shortened the tool descriptions, so it is the newest
+    # directory and therefore the default.
+    assert resolve_version("qa_run") == "v18"
 
 
 def test_v12_drops_the_screen_map_and_says_what_a_screen_anchors() -> None:

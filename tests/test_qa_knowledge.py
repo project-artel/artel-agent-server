@@ -561,7 +561,7 @@ def test_the_description_says_when_not_to_use_it() -> None:
     _, _, tools, _ = make()
     description = tools["search_knowledge"].description
 
-    assert "Do NOT" in description
+    assert "Not for what is on screen" in description
     assert "observe_scene" in description
 
 
@@ -1640,7 +1640,7 @@ def test_the_record_description_draws_the_line_it_has_to_draw() -> None:
     for name in KNOWLEDGE_TAGS:
         assert name in description
     # This run's own state is not knowledge.
-    assert "500 gold" in description
+    assert "this run's state" in description
     # A bug is reported, not recorded.
     assert "report_step" in description
 
@@ -1653,16 +1653,22 @@ def test_the_forget_description_sets_the_bar_high_and_points_at_the_repair() -> 
 
     assert str(MAX_FORGETS_PER_RUN) in description
     # One contradiction is more often a bug than stale documentation.
-    assert "ONE contradiction is not enough" in description
+    assert "One contradiction is more often a bug" in description
     assert "report_step" in description
     # Correcting is `update_knowledge`, not a deletion.
-    assert "Do NOT delete in order to correct" in description
     assert "update_knowledge" in description
-    # The delete-then-record route is still described, as the safety net it now is.
-    assert "record_knowledge" in description
-    assert "IMMEDIATELY" in description
+    # The long form of the same bar, and the delete-then-record safety net, live
+    # in the knowledge_base skill; the description points at it by name.
+    assert "knowledge_base skill" in description
     # And deleting is only possible for what the run has read.
-    assert "search_knowledge" in description
+    assert "search hit" in description
+
+    from app.prompts import load_skill
+
+    skill = load_skill("knowledge_base", "v18").body
+    assert "the bar is high" in skill
+    assert "Do not delete in order to correct" in skill
+    assert "call `record_knowledge` immediately afterwards" in skill
 
 
 def test_the_update_description_draws_the_line_against_forget_and_against_a_bug() -> None:
@@ -1677,12 +1683,11 @@ def test_the_update_description_draws_the_line_against_forget_and_against_a_bug(
     for name in KNOWLEDGE_TAGS:
         assert name in description
     # Correct versus delete.
-    assert "forget_knowledge" in description
-    assert "keeps its id" in description
+    assert "keeping its id" in description
     # A disagreement may be a bug, and a bug is reported.
     assert "report_step" in description
     # Partial updates, and the id rule.
-    assert "Send only what changes" in description
+    assert "Send only the fields that change" in description
     assert "search_knowledge" in description
 
 

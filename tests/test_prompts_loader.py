@@ -9,6 +9,7 @@ are all made loud here and at startup.
 
 import pytest
 
+from app import prompts
 from app.prompts import loader
 from app.prompts.loader import (
     PromptError,
@@ -16,9 +17,12 @@ from app.prompts.loader import (
     clear_prompt_cache,
     known_agents,
     load_prompt,
+    load_skill,
+    load_tool_description,
     parse_prompt_file,
     placeholders_in,
     resolve_version,
+    skill_names,
     validate_prompts,
 )
 
@@ -28,6 +32,9 @@ class StubSettings:
 
     def __init__(self, **versions: str | None) -> None:
         self.qa_prompt_version = versions.get("qa_prompt_version")
+        self.qa_compaction_prompt_version = versions.get(
+            "qa_compaction_prompt_version"
+        )
         self.scenario_prompt_version = versions.get("scenario_prompt_version")
         self.game_context_prompt_version = versions.get("game_context_prompt_version")
         self.knowledge_query_prompt_version = versions.get(
@@ -291,6 +298,110 @@ def test_validate_prompts_rejects_an_empty_version_directory(prompt_root) -> Non
 
     with pytest.raises(PromptError, match="no .md prompt files"):
         validate_prompts()
+
+
+# --- tool descriptions and skills ---------------------------------------------
+
+
+def test_tool_descriptions_and_skills_are_qa_run_roles(prompt_root) -> None:
+    write_prompt(prompt_root, "qa_run", "v1", "tool_click", "Click a target.")
+    write_prompt(prompt_root, "qa_run", "v1", "skill_content_map", "Map notes.")
+
+    assert load_tool_description("click") == load_prompt("qa_run", "tool_click")
+    assert load_skill("content_map") == load_prompt("qa_run", "skill_content_map")
+    assert load_tool_description("click").body == "Click a target."
+
+
+def test_a_version_can_be_named_for_a_tool_description_and_a_skill(prompt_root) -> None:
+    write_prompt(prompt_root, "qa_run", "v1", "tool_click", "old")
+    write_prompt(prompt_root, "qa_run", "v2", "tool_click", "new")
+    write_prompt(prompt_root, "qa_run", "v1", "skill_a", "old skill")
+    write_prompt(prompt_root, "qa_run", "v2", "skill_a", "new skill")
+
+    assert load_tool_description("click", "v1").body == "old"
+    assert load_tool_description("click").body == "new"
+    assert load_skill("a", "v1").body == "old skill"
+
+
+def test_a_missing_tool_description_or_skill_is_an_error(prompt_root) -> None:
+    write_prompt(prompt_root, "qa_run", "v1", "system", "body")
+
+    with pytest.raises(PromptError, match="tool_nope.md"):
+        load_tool_description("nope")
+    with pytest.raises(PromptError, match="skill_nope.md"):
+        load_skill("nope")
+
+
+def test_skill_names_lists_only_skills_sorted_without_the_prefix(prompt_root) -> None:
+    for role in ("skill_knowledge_base", "skill_content_map", "system", "tool_click"):
+        write_prompt(prompt_root, "qa_run", "v1", role, "body")
+    write_prompt(prompt_root, "qa_run", "v2", "system", "body")
+
+    assert skill_names("v1") == ("content_map", "knowledge_base")
+    assert skill_names("v2") == ()
+    assert skill_names() == ()  # the latest version, v2
+
+
+def test_the_prompts_package_exports_the_skill_and_tool_loaders() -> None:
+    assert prompts.load_tool_description is load_tool_description
+    assert prompts.load_skill is load_skill
+    assert prompts.skill_names is skill_names
+    assert prompts.TOOL_DESCRIPTION_MAX_CHARS == 500
+    assert prompts.SYSTEM_PROMPT_MAX_CHARS == 8000
+
+
+def _write_all_agents(root) -> None:
+    for agent in tuple(loader.SETTINGS_VERSION_KEYS):
+        write_prompt(root, agent, "v1", "system", "body")
+
+
+def test_validate_prompts_rejects_a_long_tool_description_from_v18(prompt_root) -> None:
+    _write_all_agents(prompt_root)
+    write_prompt(prompt_root, "qa_run", "v18", "system", "body")
+    write_prompt(prompt_root, "qa_run", "v18", "tool_click", "x" * 501)
+
+    with pytest.raises(PromptError, match=r"tool_click\.md.*501 characters"):
+        validate_prompts()
+
+
+def test_validate_prompts_accepts_a_tool_description_at_the_limit(prompt_root) -> None:
+    _write_all_agents(prompt_root)
+    write_prompt(prompt_root, "qa_run", "v18", "system", "body")
+    write_prompt(prompt_root, "qa_run", "v18", "tool_click", "x" * 500)
+
+    validate_prompts()
+
+
+def test_validate_prompts_exempts_versions_before_v18(prompt_root) -> None:
+    _write_all_agents(prompt_root)
+    write_prompt(prompt_root, "qa_run", "v17", "system", "x" * 24_000)
+    write_prompt(prompt_root, "qa_run", "v17", "tool_click", "x" * 5_000)
+
+    validate_prompts()
+
+
+def test_validate_prompts_rejects_a_long_system_prompt_from_v18(prompt_root) -> None:
+    _write_all_agents(prompt_root)
+    write_prompt(prompt_root, "qa_run", "v18", "system", "x" * 8_001)
+
+    with pytest.raises(PromptError, match=r"system\.md.*8001 characters"):
+        validate_prompts()
+
+
+def test_the_size_limits_apply_to_qa_run_only(prompt_root) -> None:
+    _write_all_agents(prompt_root)
+    write_prompt(prompt_root, "scenario", "v18", "system", "x" * 9_000)
+    write_prompt(prompt_root, "scenario", "v18", "tool_click", "x" * 9_000)
+
+    validate_prompts()
+
+
+def test_skills_are_not_held_to_the_tool_description_limit(prompt_root) -> None:
+    _write_all_agents(prompt_root)
+    write_prompt(prompt_root, "qa_run", "v18", "system", "body")
+    write_prompt(prompt_root, "qa_run", "v18", "skill_knowledge_base", "x" * 6_200)
+
+    validate_prompts()
 
 
 # --- the prompts this repository actually ships -------------------------------

@@ -213,7 +213,7 @@ def test_a_neighbour_line_appears_under_its_hit() -> None:
 def test_deleting_something_only_glimpsed_is_refused_with_what_to_do() -> None:
     """The regression this feature could most easily ship.
 
-    `FORGET_KNOWLEDGE_DESCRIPTION` calls deletion the most destructive thing the
+    `tool_forget_knowledge.md` calls deletion the most destructive thing the
     agent does; a clipped one-line summary is not having read the entry. The
     message has to name the reason, or the agent meets a refusal it cannot
     explain — it can see the id right there in the transcript.

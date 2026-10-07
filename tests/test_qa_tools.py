@@ -710,8 +710,16 @@ def test_the_reset_tool_says_what_the_wipe_does_not_reach() -> None:
     description = tools["reset_game"].description
 
     assert "PlayerPrefs" in description
-    assert "Even with the flag on, the game's own save files are untouched." in description
+    assert "Even with the flag on, the game's own save files are untouched" in description
     assert "still needs the operator" in description
+
+    from app.prompts import load_skill
+
+    # The consequences the 500-character description leaves out are in the skill.
+    assert "held_state skill" in description
+    skill = load_skill("held_state", "v18").body
+    assert "The wipe is irreversible" in skill
+    assert "the game's own save files are untouched" in skill
 
 
 def test_resume_reports_the_games_refusal() -> None:

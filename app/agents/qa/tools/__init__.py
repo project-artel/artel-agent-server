@@ -22,14 +22,20 @@ from app.agents.qa.tools.knowledge_tools import build_knowledge_tools
 from app.agents.qa.tools.observation_tools import build_capture_tool, build_observation_tools
 from app.agents.qa.tools.reporting_tools import build_reporting_tools
 from app.agents.qa.tools.screen_tools import build_screen_selector_tools
+from app.agents.qa.tools.skill_tools import build_skill_tools
 from app.agents.qa.tools.state import PendingCapture, QaRunState
 from app.agents.qa.tools.tool_context import ToolContext
 from app.qa.channel import QaRunChannel
 
 
 def build_tools(
-    channel: QaRunChannel, state: QaRunState, arch: ResolvedArch | None = None
+    channel: QaRunChannel,
+    state: QaRunState,
+    arch: ResolvedArch | None = None,
+    prompt_version: str | None = None,
 ) -> list[BaseTool]:
+    """`prompt_version` only picks which skills `load_skill` reads; `None` resolves
+    the way `load_prompt` does."""
     ctx = ToolContext(channel, state, arch or default_resolved_arch())
     # 이 목록의 순서가 계약이다. `app/qa/run_config.py` 가 이 순서를 run config 의
     # `tools` 에 저장하고, 모델도 이 순서로 도구를 받는다. 주제 하나를 위아래로 옮기면
@@ -50,6 +56,10 @@ def build_tools(
     # and a run without it are two different agents, not one agent configured.
     if ctx.arch.vision:
         tools.append(build_capture_tool(ctx))
+    # Last, after the optional capture tool, so a run with `skills=off` keeps the
+    # exact tool list and order it had before the axis existed.
+    if ctx.arch.skills == "on_demand":
+        tools.extend(build_skill_tools(ctx, prompt_version))
     return tools
 
 

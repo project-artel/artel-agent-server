@@ -381,6 +381,40 @@ def test_a_pinned_summarizer_stays_apart_from_the_run_model() -> None:
     assert resolved.model is LLMModel.gpt_5_6_luna
 
 
+# --- the skills axis ----------------------------------------------------------
+
+
+def test_skills_default_to_off() -> None:
+    assert QaArchSpec().skills == "off"
+    assert resolved().skills == "off"
+
+
+def test_an_unknown_skills_value_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        QaArchSpec(skills="always")
+
+
+def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
+    structure_of.cache_clear()
+    try:
+        off_names, _, off_fingerprint = structure_of(
+            resolved(**_PINNED_COMPACTION_KNOBS, skills="off")
+        )
+        on_names, _, on_fingerprint = structure_of(
+            resolved(**_PINNED_COMPACTION_KNOBS, skills="on_demand")
+        )
+    finally:
+        structure_of.cache_clear()
+
+    # `build_tools` registers the real `load_skill` itself, so the fingerprint
+    # reads its real schema (`name`, `thought`) rather than a stand-in.
+    assert "load_skill" not in off_names
+    # `build_tools` appends it before the compaction tool, so compare as sets.
+    assert set(on_names) == set(off_names) | {"load_skill"}
+    assert len(on_names) == len(off_names) + 1
+    assert on_fingerprint != off_fingerprint
+
+
 # --- the label stays paired with the structure it names ------------------------
 
 # Pinned next to the label they were computed under, so a diff to either one
@@ -395,7 +429,7 @@ def test_a_pinned_summarizer_stays_apart_from_the_run_model() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v5-pointer-target"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v6-skills-on-demand"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -459,7 +493,12 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 # key, and then three pointer tool names and four tool schemas changed
 # (ARTEL-880). Only the second is a change of shape, and it is why the label
 # above moved with the digest this time.
-_EXPECTED_DEFAULT_FINGERPRINT = "83bc272fee58"
+#
+# Moved a third time for `QaArchSpec.skills`: the dump the digest hashes gained a
+# key, so every structure's digest follows. The default tool names are unchanged
+# (`skills` defaults to `off`, so `load_skill` is not in the list). The label moved
+# with it because the structure now has a second shape, `on_demand`.
+_EXPECTED_DEFAULT_FINGERPRINT = "4111a3634203"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:

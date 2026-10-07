@@ -23,6 +23,7 @@
 이미 적어 둔 것과 근거가 놓친 것을 가르는 선.
 """
 
+from app.prompts import load_tool_description
 from app.qa.envelope import CapabilityWriteResultPayload
 from app.qa.scene_context import SceneCapability
 
@@ -50,143 +51,19 @@ MAX_SUMMARY_LENGTH = 1_000
 # 들어오고, 안 좁힌 답도 화면 하나를 안 밀어낸다.
 CAPABILITY_PAGE = 20
 
-# 두 쓰기 설명이 공유하는 부분. 같은 것을 두 번 적으면 언젠가 한쪽만 고쳐진다.
-_WHAT_THE_MAP_IS = """The content map is filled by static analysis reading the game's code, and it is
-filled first. Your job is NOT to write down what it already holds — a second copy
-of an existing row teaches nobody anything and has to be merged back by hand
-later. Your job is the part the code could not say: whether what it recorded is
-actually true, and the things that happen in this game which it never mentioned
-at all.
+def capability_tool_description(tool_name: str) -> str:
+    """What the model reads for one capability tool, from `qa_run/<version>/tool_<tool_name>.md`.
 
-`observed` means you pressed it and watched the result. Nothing else is
-`observed`. A thing you concluded from a counter moving, from a label appearing,
-from what the game did the last three times — that is `inferred`, and an
-`inferred` write has to name the observations it stands on. This is not a
-formality: an inference nobody can retrace is a plausible-sounding sentence that
-the map cannot tell apart from a measurement.
+    The length caps and the interaction list are filled from the constants above, so
+    the numbers the agent is told are the ones this side enforces.
+    """
+    return load_tool_description(tool_name).body.format(
+        rationale_max=MAX_RATIONALE_LENGTH,
+        summary_max=MAX_SUMMARY_LENGTH,
+        interactions=", ".join(CAPABILITY_INTERACTIONS),
+        page=CAPABILITY_PAGE,
+    )
 
-One capability is one test-case line: a `given`, a thing done, a result you could
-check. "Plays the game" is not a capability. "Beating the last enemy opens the
-reward panel" is. Write the identifiers verbatim and only join them with words —
-turning `MapMove.position` into "the character moves sideways" is the most
-expensive false sentence this system can hold, because on the measured build
-`MapMove.position` was a lane index and not a screen coordinate.
-
-**Writing this down is not what the run is for.** The run is here to play the
-scenario and to find defects. Record what you had to work out to get a step done
-anyway; a run that goes hunting for map rows to fill has stopped testing."""
-
-RECORD_CAPABILITY_VERDICT_DESCRIPTION = f"""Say that a capability the content map already lists worked, or did not, because you watched it.
-
-Call this when something on the map's list for this scene actually happened in
-front of you — you pressed the control and it did what the row says, or you
-pressed it and it did not, or the thing the row describes as happening happened
-while you played. That is the single most valuable thing you can leave behind: on
-the measured build the map holds 472 capabilities and 2 of them have ever been
-confirmed by anyone, so almost every row you can speak about is one nobody has
-ever checked.
-
-Name the row with `capability_key` — the value in square brackets at the start of
-a capability line, which survives the game being re-imported. Use
-`capability_id` instead only for a row that has no key, which means a row you
-created yourself with `record_new_capability` a moment ago. Send exactly one of
-the two.
-
-`verdict` is `works` or `fails`. `fails` is not a lesser answer and is not a bug
-report — it means the map says one thing and the game does another, which is
-exactly what nobody currently knows about any of those 472 rows. When the game
-itself looks broken, file `report_issue` as well; the two answer different
-questions.
-
-`rationale` is what you saw, with the identifiers in it, at most
-{MAX_RATIONALE_LENGTH} characters. Required. "It worked" is not a rationale — a
-verdict nobody can retrace is one nobody can ever decide was wrong. Write it for
-someone who was not here: what you pressed, what changed, which values moved.
-
-`action_method` is optional and names the tool method you actually sent, such as
-`button_click`. This side fills in the arguments it really sent with that method
-during this run; you do not type them. Leave it out for a capability that is not
-something you press — 418 of those 472 rows are things that happen rather than
-things you do.
-
-The scene is the one you are standing on right now. You do not name it, and a
-verdict on a capability belonging to another scene is refused — a scene you are
-not standing on is one you have not watched, so you have no grounds about it.
-
-{_WHAT_THE_MAP_IS}"""
-
-RECORD_NEW_CAPABILITY_DESCRIPTION = f"""Write down something this game does that the content map never mentioned.
-
-Call this when you watched something happen that is not on the map's list for
-this scene and not reachable from it: a rule the game plainly has, a result an
-action produces, a thing that follows from another thing. Check the list first —
-`list_scene_capabilities` searches everything the map holds for this scene, not
-just the few lines printed in your scene context block — because a row that is
-already there does not need writing again, and a near-duplicate has to be merged
-back by a human later.
-
-`summary` is that one line, at most {MAX_SUMMARY_LENGTH} characters.
-`given_text` is its precondition in one line, when it has one.
-
-`interaction` says how it is triggered: one of {', '.join(CAPABILITY_INTERACTIONS)}.
-Use `none` for something that HAPPENS rather than something you press — that is
-what most of this map is. `input_key` is required when `interaction` is `press`
-and forbidden otherwise. `control_path` and `control_label` are where you pressed
-and the text on it, when there was one.
-
-`origin` is `observed` or `inferred`, and the difference is the whole point of
-this tool:
-
-- `observed` — you pressed it and watched the result. It then REQUIRES a
-  `verdict` of `works` or `fails`, because having watched a result means there is
-  one. Optionally name the tool method you sent in `action_method`.
-- `inferred` — anything short of that. It REQUIRES `based_on`, and it cannot
-  carry a verdict. `based_on` is a list of observation ids this run was handed
-  back by an earlier `record_capability_verdict` or `record_new_capability`; each
-  successful write prints one. An `inferred` write naming no observation is
-  refused here, before it is sent, because an inference that stands on nothing is
-  indistinguishable from a guess once it is in the map.
-
-If you did not watch a result and you have no earlier observation to stand on,
-you do not have a capability to write yet. Go and watch it, then write it as
-`observed`.
-
-`rationale` is required on both, at most {MAX_RATIONALE_LENGTH} characters: what
-you actually saw, with the identifiers in it.
-
-The scene is the one you are standing on right now; you do not name it. The map
-fills in the rest — the row's key, whether it can be turned into a test case, and
-where it lands. You cannot edit or delete a row once it is written, and sending
-the same sentence twice is absorbed rather than duplicated, so a resend costs
-nothing but does not correct anything either.
-
-{_WHAT_THE_MAP_IS}"""
-
-LIST_SCENE_CAPABILITIES_DESCRIPTION = f"""Search everything the content map holds for the scene you are standing on.
-
-Your scene context block prints only the first few lines of each list, because it
-stays in your context for the whole visit. This reaches the rest. On the measured
-build one scene holds 232 capabilities and the block shows 14 of them, so
-whatever you just watched happen is far more likely to be in here than up there.
-
-Use it before `record_new_capability`, to find out whether the thing you just saw
-is already a row — and if it is, `record_capability_verdict` on its key is the
-better call, because it confirms a row nobody has ever checked instead of adding
-a second one beside it.
-
-`contains` narrows the search to lines holding that text, matched anywhere in the
-summary, the precondition, the control label or the control path, ignoring case.
-That is how to use this tool: search for the words of the thing you saw
-(`reward`, `hp`, `Enemy`), not for a page number. Leave it empty to walk the
-whole list, {CAPABILITY_PAGE} lines at a time, and pass `offset` to continue.
-
-Each line begins with the row's `capability_key` in square brackets, which is
-what `record_capability_verdict` takes. A line marked `happens` cannot be
-pressed — it is something the game does, and the only way anyone will ever learn
-whether it is true is somebody watching it and saying so.
-
-This reads the map, not the game. What is actually on screen right now is the
-scene view, and where the two disagree the scene view is right."""
 
 # 답이 안 온 경우에 붙이는 말. 지식 쓰기의 `UNCONFIRMED_WRITE` 와 같은 판단이다 — 침묵을
 # 실패로 옮겨 적으면 모델이 같은 문장을 다시 보낸다.

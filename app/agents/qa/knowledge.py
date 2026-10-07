@@ -50,6 +50,7 @@ screen, so no scene view is produced and none is appended to any result — see
 is the thing to avoid.
 """
 
+from app.prompts import load_tool_description
 from app.qa.envelope import (
     KnowledgeAnchor,
     KnowledgeSearchHit,
@@ -84,7 +85,7 @@ from app.qa.envelope import (
 # reversible thing the agent does and the least watched: a wrong verdict is read
 # by whoever reads the report, while an entry wrongly deleted just quietly stops
 # being there for every run after this one, and the soft delete only helps
-# somebody who already suspects it happened. `FORGET_KNOWLEDGE_DESCRIPTION` is
+# somebody who already suspects it happened. `tool_forget_knowledge.md` is
 # the other half of that defence — this is the half that holds when the wording
 # does not — and `QaArchSpec` refuses a spec that allows deletions without
 # allowing the replacement writes.
@@ -169,220 +170,14 @@ NEIGHBOUR_BLOCK_START_PREFIX = "<<neighbours of "
 NEIGHBOUR_BLOCK_START_SUFFIX = ">>"
 NEIGHBOUR_BLOCK_END = "<</neighbours>>"
 
-# Written out rather than left as a docstring so the per-run cap and the tag list
-# come from the constants above. An agent told only that searching is "limited"
-# spends the budget at the first opportunity, and a tag list that drifts from the
-# one Orchestration accepts turns every filtered search into a refusal.
-SEARCH_KNOWLEDGE_DESCRIPTION = """Ask what this game's design documents say about a rule you cannot see.
+def knowledge_tool_description(tool_name: str, **values: object) -> str:
+    """What the model reads for one knowledge tool, from `qa_run/<version>/tool_<tool_name>.md`.
 
-Use this when the step's `expected` depends on something the screen does not
-show: what a mechanic is supposed to cost, which of two readings of the step is
-the designed one, what is meant to happen when a resource runs out, what counts
-as having finished. These are the questions where the scene tells you WHAT
-happened and you still cannot say whether it was RIGHT.
-
-Do NOT use it to find out what is on screen. `observe_scene` is what reads the
-screen, and it is current; this returns documentation, which may describe a
-screen the build no longer has. In particular, do not reach for this to look up
-a button's id, to check whether an element exists, or to confirm something you
-have just observed.
-
-Do NOT use it once per step. Most steps are decided by looking. A run gets {limit}
-searches in total, and a run that spends them narrating instead of judging
-reaches its deadline with no verdict to report.
-
-`query` is a question in your own words — "골드가 모자랄 때 구매를 누르면
-어떻게 되나" — not a keyword. The knowledge base is searched by meaning, and it
-was indexed as the questions each entry answers, so a question matches it best.
-
-`tag` optionally narrows the search to one topic — one of {tags} —
-and a wrong one hides the answer rather than sharpening it, so leave it out
-whenever you are unsure which the answer would be filed under.
-
-An empty result is an answer. It means the documents do not cover this, not that
-something went wrong — judge the step on what you can see and carry on."""
-
-# The three write descriptions carry the whole usage policy for these tools, per
-# ARTEL-192: the tool description is the single source, and the system prompt is
-# left alone. What each one has to teach is not "how to call it" — the arguments
-# are obvious — but where the line is. For recording, the line between a rule and
-# this run's own state; for correcting and deleting, the line between an entry
-# that should be repaired and one that should simply be gone, and behind both the
-# line between stale knowledge and a bug. An agent that gets any of them wrong
-# degrades the knowledge base for every run after.
-RECORD_KNOWLEDGE_DESCRIPTION = """Write down something you learned about this game, so later runs start knowing it.
-
-Use this when the run taught you a RULE the scenario did not state: what a
-mechanic costs, what a control actually does, what happens when a resource runs
-out, which of two readings of a screen is the designed one. The test for whether
-something belongs here is one question — would it still be true in tomorrow's
-run, on a fresh save?
-
-That question is what rules out this run's own state. "The player has 500 gold",
-"the shop is open", "the boss is at half health" are facts about this moment, not
-about the game, and filing them poisons the answers later runs get. "Buying is
-blocked while gold is below the price" is knowledge; "buying is blocked right
-now" is not.
-
-Do NOT record which screens the game has, or how to get from one to another. That
-map is built from play and kept elsewhere; a copy written here leaves a later run
-holding two maps that disagree, with nothing to say which one moved.
-
-What does belong here is the fact that only holds in one place: a control that
-behaves on this screen unlike anywhere else, a screen whose usual way back does
-nothing, a purchase this shop refuses in a way no other does. Name where it holds
-in `scene_name`, spelled the way the game spells that scene, because an exception
-nobody can locate is one a later run cannot use, and one that reads as a rule about
-the game teaches every other screen something false. Add `screen_id` only when a
-screen's id has been shown to you, copied exactly as it was printed — `scene_name`
-on its own is a complete answer, and a `screen_id` without it is refused. Anything true wherever the player is — how
-the game reads input, what a resource is for, what the objective is — leaves both
-out: a fact tied to one screen is a fact the run standing on the next one never
-finds.
-
-Do NOT record what the scenario already told you. Do NOT record a bug: a build
-behaving wrongly is a finding for `report_step`, not a rule to teach the next
-run — record it here and you have taught every later run that the broken
-behaviour is correct.
-
-`tag` is the topic it is filed under, one of {tags}. `summary` is one sentence,
-the fact itself, phrased as you would answer someone who asked. `description` is
-what stands behind it: the condition, the exception, what you saw that
-established it.
-
-Use `update_knowledge` instead when an entry already covers this and is merely
-wrong: recording a second version of a rule leaves both in the knowledge base,
-and a later run gets them both back and cannot tell which one to believe.
-
-A run gets {limit} knowledge writes in total, shared with `update_knowledge`, so
-spend them on what was worth learning.
-
-Send each fact once. The result tells you whether it was stored and gives the
-entry's id, but a repeat is not caught — it files the same fact twice and both
-say they worked."""
-
-UPDATE_KNOWLEDGE_DESCRIPTION = """Correct a knowledge entry that is wrong or out of date.
-
-This is how knowledge gets FIXED. The entry keeps its id and its history, so the
-project can tell a rule that was repaired from one that was thrown away. That is
-the whole difference between this and `forget_knowledge`: correct what should be
-right, delete only what should be gone with nothing put in its place.
-
-`knowledge_id` must be the id of an entry `search_knowledge` returned to you in
-this run — it is printed with each hit. You cannot correct what you have not read.
-
-Send only what changes: `tag` (one of {tags}), `summary`, `description`. Whatever
-you leave out stays exactly as it is, so fixing one sentence does not mean
-retyping the entry. At least one of the three is required.
-
-The bar is the one `forget_knowledge` sets, and for the same reason. ONE
-disagreement between an entry and what you saw is more often a BUG than stale
-knowledge, and a bug belongs in `report_step` — rewriting the rule to match a
-broken build teaches every later run that the break is correct.
-
-A run gets {limit} knowledge writes in total, shared with `record_knowledge`.
-Send each correction once; a repeat spends another write and changes nothing."""
-
-FORGET_KNOWLEDGE_DESCRIPTION = """Delete a knowledge entry that is no longer true.
-
-This is the most destructive thing you can do in a run and the least watched. A
-wrong verdict gets read by whoever reads the report; a rule you delete by mistake
-just stops being there, for every run after this one, with nobody prompted to
-look. So the bar is high, and you get only {limit} of these.
-
-Delete only when the game plainly contradicts the entry AND the game is the one
-that is right. ONE contradiction is not enough. A single disagreement between a
-documented rule and what you saw is more often a BUG than stale documentation —
-and a bug is something to report with `report_step`, not something to erase the
-rule over. If you cannot tell which of the two you are looking at, report it and
-leave the entry alone. Leaving a stale entry costs a later run one confusing
-search result; deleting a correct one costs it the answer entirely.
-
-`knowledge_id` must be the id of an entry `search_knowledge` returned to you in
-this run — it is printed with each hit. You cannot delete something you have not
-read.
-
-Do NOT delete in order to correct. `update_knowledge` repairs an entry in one
-call and leaves the project able to tell a repair from a discard; deleting and
-re-recording loses that and can leave the knowledge simply gone. If you do take
-that route anyway, call `record_knowledge` IMMEDIATELY afterwards, in the same
-step, before anything else — a run that stops between the two has removed the
-knowledge rather than fixed it, and nothing here can undo it for you.
-
-`thought` is why this entry is wrong. It is the only record of the reasoning
-behind the deletion, so write what someone would need who later asks whether this
-should have been deleted at all."""
-
-
-LINK_KNOWLEDGE_DESCRIPTION = """Record that two knowledge entries are related, and how.
-
-An entry that stands alone is worth less than the same entry placed among its
-neighbours: a later run gets it back with the exception, the precondition or the
-contradiction already attached, instead of having to search three more times for
-them.
-
-`relation` is one of {relations}, and each means something a reader ACTS on:
-
-- `CONTRADICTS` — the two cannot both be true. The most valuable link there is,
-  and the one most often left unrecorded, because the moment you notice it is
-  usually the moment you are busy deciding which of them to believe.
-- `REFINES` — `from` is a narrower case, exception or condition of `to`. Point it
-  FROM the specific TO the general.
-- `DEPENDS_ON` — `from` only holds while `to` holds. A precondition.
-- `REPLACES` — `from` supersedes `to`, which you have deleted or are about to.
-
-If none of the four fits, do NOT link. Two entries being about vaguely the same
-subject is not a relation — searching already finds those, and a link that says
-nothing crowds out the ones that say something.
-
-`note` is required and it is the only record of why you thought the connection was
-real, so write what someone would need who later asks whether it should be there —
-what you saw, and any condition the connection holds under.
-
-Both ids must be ones this run has been shown, either as a search hit or as a
-neighbour line under one.
-
-A run gets {limit} links. Send each one once — a repeat comes back refused."""
-
-UNLINK_KNOWLEDGE_DESCRIPTION = """Remove a relation between two knowledge entries.
-
-The bar is lower than deleting an entry — both entries survive, and what is lost
-is one connection and the sentence behind it. But it is just as quiet: a connection
-you remove simply stops being there, for every run after this one, with nobody
-prompted to look.
-
-The mistake to avoid is removing a link because the BUILD is broken. A connection
-that does not hold today is far more often a bug than a claim that was never true,
-and that belongs in `report_issue` — unlink it and you have deleted what an earlier
-run worked out instead of reporting the breakage. Read the note first: it says what
-the connection was asserted on, and a condition that is not met right now is not
-the same as a connection that was wrong.
-
-Remove a link when the connection itself was wrong: the two entries do not
-actually contradict, the precondition was misread, the narrower case refines
-something else.
-
-Name it the way you saw it — `from_knowledge_id`, `to_knowledge_id` and the same
-`relation`. Your `thought` is the only record of why it went away, so write it there.
-
-A run gets {limit} of these."""
-
-EXPAND_KNOWLEDGE_DESCRIPTION = """Follow a knowledge entry's relations further than the search already showed you.
-
-Every search hit already arrives with its closest neighbours listed under it, so
-reach for this only when you need MORE than that: what lies two hops out, or what
-else in the knowledge base is simply about the same thing.
-
-`depth` 1 is the neighbours you have; 2 goes one further. Anything larger is
-clamped rather than refused.
-
-The answer mixes two kinds of thing and they are NOT worth the same. A neighbour
-marked with a relation from {relations} was asserted by a run that wrote down why —
-its `note` is that reason. One marked `{similar}` is a machine guess from text
-similarity, with nobody standing behind it and no note at all. Treat the first as
-a claim and the second as a hint about where to look next.
-
-`knowledge_id` must be one this run has been shown. A run gets {limit} expansions."""
+    The budget and the tag and relation lists are placeholders filled from the
+    same constants this module and the arch spec own, so the number the agent is
+    told and the number it gets cannot drift apart.
+    """
+    return load_tool_description(tool_name).body.format(**values)
 
 
 def render_neighbour(neighbour) -> str:
