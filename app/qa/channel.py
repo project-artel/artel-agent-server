@@ -27,6 +27,7 @@ from app.qa.envelope import (
     LogCategory,
     LogPayload,
     MessageType,
+    ScreenNamePayload,
     ScreenSelectorProposalPayload,
     ScreenSelectorResultPayload,
     ScreenSelectorRulePayload,
@@ -567,6 +568,28 @@ class QaRunChannel:
             self._frame(
                 MessageType.SCREEN_SELECTOR_VERDICT, payload, correlation_id=correlation_id
             )
+        )
+
+    async def answer_screen_name_request(
+        self, payload: ScreenNamePayload, correlation_id: str
+    ) -> None:
+        """이름 요청 하나에 대한 답을 실어 보낸다 (ARTEL-909). 아무것도 기다리지 않는다.
+
+        `answer_screen_selector_proposal` 과 같은 자리다 — future 도 타임아웃도 없고,
+        저쪽은 이 답에 아무것도 돌려주지 않는다. 답을 부른 것이 tool 이 아니라 frame 이고,
+        그 frame 은 이미 지나갔다.
+
+        **부르는 쪽이 QA 런이 아니다.** 이름 짓기는 런과 떨어진 task 에서 나고, 이
+        메서드는 그 task 가 소켓에 닿는 유일한 지점이다. 여기를 지나게 하는 이유는 봉투의
+        `sequence` 다 — 한 세션의 frame 번호는 한 곳에서 나야 하고, 이름 짓는 쪽이 제
+        카운터를 들면 같은 번호가 두 번 나간다.
+
+        `_raise_if_cancelled` 를 안 부른다. 취소는 QA 런의 사정이고 이 답은 런의 일이
+        아니다 — 다만 소켓이 이미 닫히는 중이면 보낼 곳이 없으므로, 부르는 쪽이
+        `cancelled` 를 보고 건너뛴다(`app/qa/screen_name.py`).
+        """
+        await self._send(
+            self._frame(MessageType.SCREEN_NAME, payload, correlation_id=correlation_id)
         )
 
     async def _request(self, message_type: MessageType, payload, timeout: float) -> Any:
