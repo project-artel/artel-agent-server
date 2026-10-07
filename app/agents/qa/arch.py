@@ -402,6 +402,13 @@ class QaArchSpec(BaseModel):
     # `off` keeps every skill inlined in the system prompt, as before. `on_demand`
     # moves the skills behind the `load_skill` tool, which then joins the tool set.
     skills: Literal["off", "on_demand"] = "off"
+    # The six macro tools and the `macro` skill. `off` is the shape every run had
+    # before macros (ARTEL-926): no macro tool in the list and no `macro` skill in
+    # the prompt or behind `load_skill`, so an A/B on this axis differs by exactly
+    # the macros. Withholding the skill matters as much as withholding the tools —
+    # left in, the Skills section would tell the `off` arm to load something
+    # "before your first `write_macro`", a tool it does not have.
+    macros: Literal["off", "on"] = "on"
     fold_stale_scenes: bool = True
     # Folds the neighbour blocks the search volunteers, and only those (ARTEL-277).
     # Separate from `fold_stale_scenes` because the two are independently useful
@@ -463,6 +470,21 @@ class QaArchSpec(BaseModel):
         return self
 
 
+# The skill that exists only for the macro tools. Named here, beside the axis that
+# decides whether the run has them.
+MACRO_SKILL = "macro"
+
+
+def withheld_skills(arch: "QaArchSpec | ResolvedArch") -> frozenset[str]:
+    """Skill names this structure must not see, though the prompt version has them.
+
+    One place, because three readers list skills — the inlined sections, the Skills
+    section and `load_skill` — and one of them forgetting would leave a line about
+    a tool the run does not have.
+    """
+    return frozenset() if arch.macros == "on" else frozenset({MACRO_SKILL})
+
+
 DEFAULT_ARCH = QaArchSpec()
 
 
@@ -487,6 +509,7 @@ class ResolvedArch(BaseModel):
     screen_capture: ScreenCaptureMode
     phase_cycle: PhaseCycleMode
     skills: Literal["off", "on_demand"]
+    macros: Literal["off", "on"]
     fold_stale_scenes: bool
     fold_stale_knowledge: bool
     fold_stale_skills: bool

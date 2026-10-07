@@ -596,7 +596,11 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 # Moved again within the same label, from `887277ea051d`, when `resume_macro`
 # joined the set for `checkpoint` (ARTEL-949). No run had been filed under
 # `v9-macros` yet, so the label still names the macro shape as it ships.
-_EXPECTED_DEFAULT_FINGERPRINT = "388b1fc3438e"
+#
+# And once more, from `388b1fc3438e`, when `QaArchSpec.macros` joined (ARTEL-926):
+# the dump the digest hashes gained a key. The default is `on`, so the default
+# tool set did not move — `macros=off` is the arm an A/B compares it against.
+_EXPECTED_DEFAULT_FINGERPRINT = "2db1454a7b0f"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
@@ -674,3 +678,57 @@ def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
         "middleware or a loop bound. See this test's docstring for what to do "
         "next."
     )
+
+
+# --- macros 축 (ARTEL-926) -----------------------------------------------------
+
+
+def _with_macros(macros: str, skills: str = "on_demand"):
+    return resolve_arch(
+        QaArchSpec(vision=VisionMode.on, skills=skills, macros=macros),
+        LLMModel.gpt_6_luna,
+    )
+
+
+MACRO_TOOLS = (
+    "write_macro",
+    "edit_macro",
+    "read_macro",
+    "register_macro",
+    "run_macro",
+    "resume_macro",
+)
+
+
+def test_macros_off_offers_none_of_the_six_macro_tools_and_changes_the_fingerprint() -> None:
+    """A/B 의 두 arm 이 macro 만큼 다르고 그 밖에는 같아야 한다."""
+    off_tools, off_middleware, off_print = structure_of(_with_macros("off"))
+    on_tools, on_middleware, on_print = structure_of(_with_macros("on"))
+
+    assert not set(MACRO_TOOLS) & set(off_tools)
+    assert [name for name in on_tools if name not in MACRO_TOOLS] == list(off_tools)
+    assert off_middleware == on_middleware
+    assert off_print != on_print
+
+
+def test_macros_off_withholds_the_macro_skill_from_every_list_of_skills() -> None:
+    """남기면 `off` arm 의 Skills 절이 없는 tool("before your first `write_macro`")을 가리킨다."""
+    from app.agents.qa.arch import _ThrowawayChannel, withheld_skills
+    from app.agents.qa.runner import _skills_directive, system_prompt_with_skills
+    from app.agents.qa.tools import QaRunState, build_tools
+
+    off, on = _with_macros("off"), _with_macros("on")
+
+    assert "`macro`" not in _skills_directive("v19", "on_demand", withheld_skills(off))
+    assert "`macro`" in _skills_directive("v19", "on_demand", withheld_skills(on))
+
+    inlined_off = system_prompt_with_skills("system", "v19", "off", withheld_skills(off))
+    inlined_on = system_prompt_with_skills("system", "v19", "off", withheld_skills(on))
+    assert "## Skill: macro" not in inlined_off
+    assert "## Skill: macro" in inlined_on
+
+    load_skill = {
+        one.name: one
+        for one in build_tools(_ThrowawayChannel(), QaRunState(total_steps=0), off, "v19")
+    }["load_skill"]
+    assert "macro" not in load_skill.description

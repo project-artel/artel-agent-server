@@ -26,6 +26,7 @@ from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.tools.tool_context import ToolContext
 from app.prompts import PromptError, load_skill as load_skill_file
+from app.agents.qa.arch import withheld_skills
 from app.prompts import load_tool_description, skill_names
 
 # The markers a returned skill body is wrapped in. The start marker carries the
@@ -54,7 +55,10 @@ def build_skill_tools(ctx: ToolContext, prompt_version: str | None = None) -> li
     description, the list of names and the bodies all come from the version
     `config.prompt_hashes` recorded.
     """
-    names = skill_names(prompt_version)
+    # 이 구조가 못 보는 skill 은 이름부터 없다. 모르는 이름으로 답하므로, 감춘 skill 을
+    # 부르면 유효한 이름 목록이 돌아오고 거기에도 없다.
+    withheld = withheld_skills(ctx.arch)
+    names = tuple(name for name in skill_names(prompt_version) if name not in withheld)
     # Per run, because `build_tools` is called once per run. Kept here rather than
     # on `QaRunState`, since nothing outside this tool reads it.
     loaded: set[str] = set()

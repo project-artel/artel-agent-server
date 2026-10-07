@@ -15,7 +15,7 @@ from langchain.agents.middleware import wrap_model_call
 from langchain_core.messages import ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
-from app.agents.qa.arch import ResolvedArch
+from app.agents.qa.arch import ResolvedArch, withheld_skills
 from app.agents.qa.compaction import QaCompactionMiddleware
 from app.qa.scene import SCENE_VIEW_START_PREFIX
 from app.agents.qa.context import (
@@ -69,7 +69,12 @@ _FIRST_SKILL_VERSION = 19
 _VERSION_NUMBER = re.compile(r"^v(\d+)$")
 
 
-def system_prompt_with_skills(system_prompt: str, prompt_version: str, skills: str) -> str:
+def system_prompt_with_skills(
+    system_prompt: str,
+    prompt_version: str,
+    skills: str,
+    withheld: frozenset[str] = frozenset(),
+) -> str:
     """The system prompt the run sends, with or without the skill bodies inlined.
 
     From v19 the long sections of the system prompt are `skill_<name>.md` files.
@@ -91,6 +96,8 @@ def system_prompt_with_skills(system_prompt: str, prompt_version: str, skills: s
         return system_prompt
     sections = [system_prompt.rstrip()]
     for name in skill_names(prompt_version):
+        if name in withheld:
+            continue
         sections.append(_as_section(name, load_skill(name, prompt_version).body.strip()))
     return "\n\n".join(sections) + "\n"
 
@@ -98,7 +105,9 @@ def system_prompt_with_skills(system_prompt: str, prompt_version: str, skills: s
 _HEADING = re.compile(r"^(#+)(?= )", re.MULTILINE)
 
 
-def _skills_directive(prompt_version: str, skills: str) -> str:
+def _skills_directive(
+    prompt_version: str, skills: str, withheld: frozenset[str] = frozenset()
+) -> str:
     """The system prompt's Skills section, present only when the agent can load skills.
 
     With `skills="off"` every skill body is already inlined, and the tool
@@ -116,6 +125,7 @@ def _skills_directive(prompt_version: str, skills: str) -> str:
     skill_list = "\n".join(
         f"- `{name}` — {description}"
         for name, description in skill_descriptions(prompt_version).items()
+        if name not in withheld
     )
     return load_prompt(PROMPT_AGENT, "skills_directive", prompt_version).body.format(
         skill_list=skill_list
@@ -480,10 +490,13 @@ class QaRunner:
                 memory_directive=memory_directive,
                 phase_directive=phase_directive,
                 decide_directive=decide_directive,
-                skills_directive=_skills_directive(prompt.version, arch.skills),
+                skills_directive=_skills_directive(
+                    prompt.version, arch.skills, withheld_skills(arch)
+                ),
             ),
             prompt.version,
             arch.skills,
+            withheld_skills(arch),
         )
         first_message = _plan(scenario)
         total_steps = len(scenario.steps)
