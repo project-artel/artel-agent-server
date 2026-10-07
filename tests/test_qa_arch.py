@@ -429,7 +429,7 @@ def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v7-macros"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v8-macros"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -507,7 +507,7 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 # Moved a fourth time for the five macro tools (ARTEL-925): `write_macro`,
 # `edit_macro`, `read_macro`, `register_macro` and `run_macro` joined the set
 # above. That is the first case in the docstring below — the tool set changed —
-# and `v7-macros` is the label bump it asks for. ARTEL-926 still owes the QA run
+# and `v8-macros` is the label bump it asks for — `v7` is taken on `develop`. ARTEL-926 still owes the QA run
 # that gives the new label numbers to be read against; until then the label
 # separates the structures and no run supplies the comparison.
 _EXPECTED_DEFAULT_FINGERPRINT = "3838cacda917"

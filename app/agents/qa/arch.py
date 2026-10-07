@@ -131,9 +131,18 @@ from app.llm.models import LLMModel, get_model_spec
 # gained a key (see the v4 note above); the tool set and the middleware list of
 # the default run did not change. The label moves anyway because the structure now
 # has two shapes and a run must say which side of that axis it was filed on.
-QA_ARCH_LABEL = "v7-macros"
+QA_ARCH_LABEL = "v8-macros"
 
-# v7 because the model now has five macro tools — `write_macro`, `edit_macro`,
+# The two labels above and this one were all written off `develop` at e63fc47 and
+# none of them knows about the others. `develop` has since shipped
+# `v6-phase-cycle` and `v7-phase-cycle-default` (ARTEL-952 and the commits around
+# it), and the branch this one sits on claims `v6-skills-on-demand`. So **two
+# structures currently answer to `v6` and two to `v7` across these branches**,
+# which is the failure the module docstring names. This label is `v8` to leave
+# `develop`'s two alone; `v6-skills-on-demand` below still has to be renumbered
+# when that branch rebases, and nothing here can do that for it.
+#
+# v8 because the model now has five macro tools — `write_macro`, `edit_macro`,
 # `read_macro`, `register_macro`, `run_macro` — and can send a whole sequence of
 # actions in one call instead of one action per turn (ARTEL-914). Five tool schemas
 # appeared, so `arch_fingerprint` moves on its own here.
