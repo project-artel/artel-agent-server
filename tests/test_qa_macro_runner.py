@@ -18,7 +18,7 @@ from app.agents.qa.macro.errors import (
     SCENE_MISMATCH,
     SELECTOR_NOT_FOUND,
 )
-from app.agents.qa.macro.errors import OPERATOR_INTERRUPTED, SCREEN_UNCHANGED
+from app.agents.qa.macro.errors import LOOP_LIMIT, OPERATOR_INTERRUPTED, SCREEN_UNCHANGED
 from app.agents.qa.macro.parser import macro_definition_from_source
 from app.agents.qa.macro.runner import STILL_SCREENS_BEFORE_STOP, run_macro
 from app.qa.acting import ActionOutcome, PressLanding, ScreenChange
@@ -60,10 +60,17 @@ class FakeHost:
     """
 
     def __init__(
-        self, memory: SceneMemory, answers: list[ActionOutcome] | None = None
+        self,
+        memory: SceneMemory,
+        answers: list[ActionOutcome] | None = None,
+        decisions: list[bool] | None = None,
     ) -> None:
         self.memory = memory
         self.sent: list[tuple[list[JsonRpcAction], str, int]] = []
+        # `checkpoint` 마다 이을지(`True`) 그만둘지. 다 쓰면 잇는다.
+        self.decisions = list(decisions or [])
+        # `checkpoint` 에서 멈춘 그 순간의 장부. 이어 돌면 runner 가 비우므로 사본을 둔다.
+        self.paused: list[dict] = []
         # batch 하나에 답 하나. 다 쓰면 그 뒤는 기본값이다 — 128 개를 손으로 적지
         # 않으려는 것이고, 앞의 몇 개만 다르게 두는 테스트가 그 뒤를 안 적어도 된다.
         self.answers = list(answers or [])
@@ -78,6 +85,18 @@ class FakeHost:
 
     def memories(self) -> MacroMemories:
         return MacroMemories(scene=self.memory)
+
+    async def checkpoint(self, result) -> bool:
+        self.paused.append(
+            {
+                "at": str(result.paused_at),
+                "reason": result.paused_reason,
+                "applied": [str(one) for one in result.applied],
+                "pending": [str(one) for one in result.pending],
+                "sent": len(self.sent),
+            }
+        )
+        return self.decisions.pop(0) if self.decisions else True
 
     def methods(self) -> list[list[str]]:
         """배치마다 어떤 method 가 나갔나. 배치 경계를 보는 자리다."""
@@ -885,3 +904,258 @@ def test_a_wedged_game_that_times_out_every_other_batch_still_stops() -> None:
     assert result.failure.code == SCREEN_UNCHANGED
     # 세 번째 `still` 에서 멈춘다. 그 사이의 `unknown` 둘은 세지도 지우지도 않았다.
     assert len(host.sent) == 5
+
+
+# --- 반복 (ARTEL-948) -------------------------------------------------------------
+
+
+def hand_of(*labels: str) -> SceneMemory:
+    """손패 카드 여럿과 슬롯 하나. 같은 글자 카드가 둘인 손패를 만들 수 있다."""
+    cards = [
+        card(f"Root[0]/Hand[2]/Card(Clone)[{index}]", text=label, instance_id=100 + index)
+        for index, label in enumerate(labels)
+    ]
+    return scene_with(*cards, card("Root[0]/Canvas[1]/Slot[9]", instance_id=50))
+
+
+DEAL_EVERY = '''
+def deal(label: string) -> None:
+    slot: object = selector("Root[0]/Canvas[1]/Slot[9]")
+    for each in find_all(label=label, under="Root[0]/Hand[2]"):
+        drag(each, slot)
+'''
+
+
+def test_find_all_walks_both_cards_that_find_would_call_ambiguous() -> None:
+    """손패에 `shoot` 이 두 장이다. `find` 는 멈추고 `find_all` 은 둘 다 돈다."""
+    host = FakeHost(hand_of("shoot", "slash", "shoot"))
+
+    result = drive(host, DEAL_EVERY, "deal", {"label": "shoot"})
+
+    assert result.passed, result.failure
+    assert len(host.sent) == 2
+    assert [str(place) for place in result.applied] == [
+        "deal step 3 of 3 (pass 1)",
+        "deal step 3 of 3 (pass 2)",
+    ]
+
+
+def test_an_empty_find_all_turns_no_passes_and_is_not_a_failure() -> None:
+    host = FakeHost(hand_of("slash"))
+
+    result = drive(host, DEAL_EVERY, "deal", {"label": "shoot"})
+
+    assert result.passed, result.failure
+    assert host.sent == []
+    # 한 회도 안 돈 몸통은 `if` 의 거짓인 가지와 같다 — 원래 안 간다.
+    assert [str(place) for place in result.skipped] == ["deal step 3 of 3"]
+
+
+def test_range_counts_its_passes() -> None:
+    host = FakeHost(battle())
+    source = 'def m() -> None:\n    for _ in range(3):\n        press_key("Space", 0.1)\n'
+
+    result = drive(host, source, "m", {})
+
+    assert result.passed, result.failure
+    assert len(host.sent) == 3
+    assert result.executed == 4  # `for` 한 줄과 몸통 세 회
+
+
+def test_while_reads_its_condition_before_every_pass() -> None:
+    """적이 두 번째 타격에 사라진다. 세 번째는 안 나가야 한다."""
+    alive = scene_with(enemy_with_hp(10))
+    gone = scene_with(card("Root[0]/Other[1]", instance_id=1))
+
+    class EnemyFallsOnTheSecondHit(FakeHost):
+        async def run(self, actions, summary: str, step: int) -> ActionOutcome:
+            outcome = await super().run(actions, summary, step)
+            if len(self.sent) == 2:
+                self.memory = gone
+            return outcome
+
+    host = EnemyFallsOnTheSecondHit(alive)
+    source = (
+        "def m(enemy: object) -> None:\n"
+        "    while exists(enemy):\n"
+        "        click(enemy)\n"
+    )
+
+    result = drive(host, source, "m", {"enemy": LateSelector(selector="Root[0]/Enemy[7]")})
+
+    assert result.passed, result.failure
+    assert len(host.sent) == 2
+
+
+def test_a_while_whose_condition_never_turns_false_stops_at_the_pass_limit() -> None:
+    """조건이 안 바뀌는 `while` 은 상한에서 멈추고, 왜 멈췄는지 말한다."""
+    from app.agents.qa.macro.grammar import MAX_LOOP_PASSES
+
+    host = FakeHost(scene_with(enemy_with_hp(10)))
+    source = (
+        "def m(enemy: object) -> None:\n"
+        "    while exists(enemy):\n"
+        '        press_key("Space", 0.1)\n'
+    )
+
+    result = drive(host, source, "m", {"enemy": LateSelector(selector="Root[0]/Enemy[7]")})
+
+    assert result.failure.code == LOOP_LIMIT
+    assert len(host.sent) == MAX_LOOP_PASSES
+    assert "still true" in result.failure.reason
+    assert result.failure.payload["observed"] == {"exists(enemy)": "True"}
+    # 멈춘 자리는 반복 머리다. 몇 회째에서가 아니라 다음 회에 들어서기 전에 멈췄다.
+    assert str(result.stopped_at) == "m step 1 of 2"
+
+
+def test_a_for_with_more_than_the_limit_to_walk_stops_before_its_first_pass() -> None:
+    from app.agents.qa.macro.grammar import MAX_LOOP_PASSES
+
+    host = FakeHost(hand_of(*(["shoot"] * (MAX_LOOP_PASSES + 1))))
+
+    result = drive(host, DEAL_EVERY, "deal", {"label": "shoot"})
+
+    assert result.failure.code == LOOP_LIMIT
+    assert host.sent == []
+
+
+def test_a_range_given_too_many_passes_by_name_stops_at_run_time() -> None:
+    """리터럴은 저장 때 막는다. 이름으로 온 수는 실행 때 막는다."""
+    host = FakeHost(battle())
+    source = 'def m(n: int) -> None:\n    for _ in range(n):\n        press_key("A", 0.1)\n'
+
+    result = drive(host, source, "m", {"n": 51})
+
+    assert result.failure.code == LOOP_LIMIT
+    assert host.sent == []
+
+
+def test_nested_loops_hit_the_executed_statement_limit() -> None:
+    """회수 상한만으로는 천장이 안 선다. 중첩이면 곱이 된다."""
+    from app.agents.qa.macro.grammar import MAX_EXECUTED_STATEMENTS
+
+    host = FakeHost(battle())
+    source = (
+        "def m() -> None:\n"
+        "    for _ in range(50):\n"
+        "        for i in range(50):\n"
+        '            press_key("A", 0.1)\n'
+    )
+
+    result = drive(host, source, "m", {})
+
+    assert result.failure.code == LOOP_LIMIT
+    assert result.executed == MAX_EXECUTED_STATEMENTS + 1
+    assert len(host.sent) < MAX_EXECUTED_STATEMENTS
+
+
+def test_a_failure_inside_a_loop_names_the_pass_it_stopped_on() -> None:
+    """두 번째 회의 클릭이 빈 자리에 떨어진다. 몇 회째인지가 payload 에 있어야 한다."""
+    empty = ActionOutcome(text="  empty", screen=ScreenChange.moved, landings=(PressLanding.reached_nothing,))
+    host = FakeHost(battle(), answers=[reached(), empty])
+    source = (
+        "def m(card: object) -> None:\n"
+        "    for _ in range(3):\n"
+        "        click(card)\n"
+        '    press_key("Space", 0.1)\n'
+    )
+
+    result = drive(host, source, "m", {"card": LateSelector(selector="Root[0]/Canvas[1]/Attack[3]")})
+
+    assert result.failure.code == REQUIRE_FAILED
+    assert str(result.stopped_at) == "m step 2 of 3 (pass 2)"
+    # 적힌 줄을 한 번씩만 든다. 반복의 남은 회는 따로 안 적힌다.
+    assert [str(place) for place in result.pending] == ["m step 3 of 3"]
+
+
+def test_an_if_skipped_on_an_earlier_pass_is_pending_again_on_a_later_one() -> None:
+    """지난 회의 `skipped` 가 이번 회의 `pending` 을 가리면, 실패 뒤의 분기가 "원래 안 간다" 로 읽힌다."""
+    empty = ActionOutcome(text="  empty", screen=ScreenChange.moved, landings=(PressLanding.reached_nothing,))
+    host = FakeHost(battle(), answers=[reached(), empty])
+    source = (
+        "def m(card: object) -> None:\n"
+        "    for i in range(2):\n"
+        "        click(card)\n"
+        "        if i == 0:\n"
+        '            press_key("A", 0.1)\n'
+        "        else:\n"
+        '            press_key("B", 0.1)\n'
+    )
+    first_pass_press = ActionOutcome(text="  a", screen=ScreenChange.moved, landings=())
+    host.answers = [reached(), first_pass_press, empty]
+
+    result = drive(host, source, "m", {"card": LateSelector(selector="Root[0]/Canvas[1]/Attack[3]")})
+
+    assert result.failure.code == REQUIRE_FAILED
+    # 둘째 회의 click 에서 멈췄다. 그 회의 `if` 는 판정 전이므로 `if` 자신과 두 가지가 다
+    # `pending` 이다. 첫 회에 거짓이던 `else` 가 거기 다시 있는 것이 이 테스트의 요점이다.
+    assert [str(place) for place in result.pending] == [
+        "m step 3 of 5 (pass 2)",
+        "m step 4 of 5 (pass 2)",
+        "m step 5 of 5 (pass 2)",
+    ]
+
+
+# --- checkpoint (ARTEL-949) -------------------------------------------------------
+
+
+CHECKED = '''
+def m(card: object) -> None:
+    click(card)
+    checkpoint("look at the board")
+    press_key("Space", 0.1)
+'''
+
+
+def test_a_checkpoint_hands_back_what_ran_so_far_and_what_has_not() -> None:
+    host = FakeHost(battle())
+
+    result = drive(host, CHECKED, "m", {"card": LateSelector(selector="Root[0]/Canvas[1]/Attack[3]")})
+
+    assert host.paused == [
+        {
+            "at": "m step 2 of 3",
+            "reason": "look at the board",
+            "applied": ["m step 1 of 3"],
+            "pending": ["m step 3 of 3"],
+            "sent": 1,
+        }
+    ]
+    # 이었으므로 끝까지 갔다.
+    assert result.passed, result.failure
+    assert len(host.sent) == 2
+    assert result.paused_at is None and result.pending == []
+
+
+def test_stopping_at_a_checkpoint_sends_nothing_after_it_and_is_not_a_failure() -> None:
+    host = FakeHost(battle(), decisions=[False])
+
+    result = drive(host, CHECKED, "m", {"card": LateSelector(selector="Root[0]/Canvas[1]/Attack[3]")})
+
+    assert len(host.sent) == 1
+    assert result.failure is None
+    assert str(result.abandoned_at) == "m step 2 of 3"
+    assert not result.passed
+    assert [str(place) for place in result.pending] == ["m step 3 of 3"]
+
+
+def test_resuming_keeps_every_name_the_macro_bound_and_the_loop_it_was_in() -> None:
+    """이으면 처음이 아니라 그 줄부터 돈다. bind 한 이름과 반복의 회가 그대로다."""
+    host = FakeHost(hand_of("shoot", "shoot"))
+    source = (
+        "def deal(label: string) -> None:\n"
+        '    slot: object = selector("Root[0]/Canvas[1]/Slot[9]")\n'
+        '    for each in find_all(label=label, under="Root[0]/Hand[2]"):\n'
+        "        checkpoint()\n"
+        "        drag(each, slot)\n"
+    )
+
+    result = drive(host, source, "deal", {"label": "shoot"})
+
+    assert result.passed, result.failure
+    assert [one["at"] for one in host.paused] == [
+        "deal step 3 of 4 (pass 1)",
+        "deal step 3 of 4 (pass 2)",
+    ]
+    # 두 번 멈췄고 두 장을 다 냈다. 처음부터 다시 돌았다면 드래그가 넷이다.
+    assert len(host.sent) == 2

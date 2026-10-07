@@ -308,6 +308,65 @@ class MacroIfStatement(_Statement):
     orelse: tuple["MacroStatement", ...] = ()
 
 
+class MacroFindAllIterable(_Frozen):
+    """`for ... in find_all(...)`. `find` 와 같은 keyword 이고, 여럿을 낸다.
+
+    `for` 에 들어서는 순간 한 번 푼다. 돌면서 다시 풀지 않는다 — 다시 풀면 몸통이 손패를
+    바꿀 때마다 도는 대상이 바뀌어, 한 장을 두 번 내거나 한 장도 안 낼 수 있다. 각 회에
+    받는 것은 `find` 가 내는 것과 같은 기록이라, 그 사이에 죽었으면 쓰는 자리에서
+    `STALE_BINDING` 이 난다.
+    """
+
+    kind: Literal["find_all"] = "find_all"
+    find: MacroFindValue
+
+
+class MacroRangeIterable(_Frozen):
+    """`for ... in range(n)`. `n` 은 int 리터럴이거나 int 로 선언된 이름이다."""
+
+    kind: Literal["range"] = "range"
+    count: MacroLiteral | None = None
+    # 리터럴이 아니면 이름. 둘 중 하나만 찬다.
+    name: str | None = None
+
+
+MacroIterable = Annotated[
+    Union[MacroFindAllIterable, MacroRangeIterable], Field(discriminator="kind")
+]
+
+
+class MacroForStatement(_Statement):
+    """`for <name> in <iterable>:`. 이름의 타입은 도는 대상이 정한다.
+
+    Python 의 `for` 는 이름에 타입을 못 적는다(`for card: object in ...` 은 문법 오류다).
+    그래서 `find_all` 이면 `object`, `range` 이면 `int` 로 정해 두고, 그것을 여기 든다.
+    """
+
+    kind: Literal["for"] = "for"
+    name: str
+    declared_type: MacroType
+    iterable: MacroIterable
+    body: tuple["MacroStatement", ...] = ()
+
+
+class MacroWhileStatement(_Statement):
+    """`while <condition>:`. 조건은 `if` 와 같은 문법이고 매 회 전에 다시 읽는다."""
+
+    kind: Literal["while"] = "while"
+    condition: MacroCondition
+    body: tuple["MacroStatement", ...] = ()
+
+
+class MacroCheckpointStatement(_Statement):
+    """턴을 agent 에게 돌려주는 자리. 실패가 아니다.
+
+    `reason` 은 agent 가 그 자리에서 무엇을 보라는 말이다. 비어 있어도 된다.
+    """
+
+    kind: Literal["checkpoint"] = "checkpoint"
+    reason: str = ""
+
+
 MacroStatement = Annotated[
     Union[
         MacroActionStatement,
@@ -317,11 +376,16 @@ MacroStatement = Annotated[
         MacroFlagStatement,
         MacroAskVerdictStatement,
         MacroIfStatement,
+        MacroForStatement,
+        MacroWhileStatement,
+        MacroCheckpointStatement,
     ],
     Field(discriminator="kind"),
 ]
 
 MacroIfStatement.model_rebuild()
+MacroForStatement.model_rebuild()
+MacroWhileStatement.model_rebuild()
 
 
 # --- `def` 와 정의 -------------------------------------------------------------

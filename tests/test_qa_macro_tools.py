@@ -782,6 +782,7 @@ def test_the_macro_tools_sit_beside_the_action_tools_in_the_offered_list() -> No
         "read_macro",
         "register_macro",
         "run_macro",
+        "resume_macro",
     ]
 
 
@@ -916,6 +917,146 @@ def test_every_macro_tool_body_is_guarded_against_a_leaking_exception() -> None:
         for one in build_tools(channel, QaRunState(total_steps=3), without_phases)
     }
 
-    for name in ("write_macro", "edit_macro", "read_macro", "register_macro", "run_macro"):
+    for name in (
+        "write_macro",
+        "edit_macro",
+        "read_macro",
+        "register_macro",
+        "run_macro",
+        "resume_macro",
+    ):
         assert tools[name].coroutine.__code__.co_name == "answering", name
         assert tools[name].name == name
+
+
+# --- checkpoint 와 resume_macro (ARTEL-949) --------------------------------------
+#
+# 멈춘 macro 는 tool 호출 사이에 산다. 그래서 이 테스트들은 `run_macro` 와 `resume_macro`
+# 를 **한 event loop 안에서** 부른다 — `call` 처럼 호출마다 `asyncio.run` 을 쓰면 멈춘 task
+# 가 첫 loop 와 함께 닫힌다. 실제 런도 loop 하나에서 돈다.
+
+CHECKED = (
+    "def go() -> None:\n"
+    '    press_key("A", 0.1)\n'
+    '    checkpoint("look at the board")\n'
+    '    press_key("B", 0.1)\n'
+)
+
+
+def registered_checked():
+    channel, state, tools, sent = make()
+    with_cards(channel)
+    call(tools["write_macro"], name="go", source=CHECKED)
+    call(tools["register_macro"], name="go")
+    return channel, state, tools, sent
+
+
+def invoke(tool, **arguments):
+    return tool.ainvoke({"step": 1, "thought": "testing", **arguments})
+
+
+def test_run_macro_hands_the_turn_back_at_a_checkpoint_and_resume_carries_on() -> None:
+    _channel, state, tools, sent = registered_checked()
+
+    async def scenario():
+        paused = await invoke(tools["run_macro"], name="go")
+        sent_while_paused = len(actions(sent))
+        carried_on = await invoke(tools["resume_macro"], proceed=True)
+        return paused, sent_while_paused, carried_on
+
+    paused, sent_while_paused, carried_on = asyncio.run(scenario())
+
+    assert "PAUSED" in paused and "look at the board" in paused
+    assert "not a failure" in paused
+    assert "Not sent yet: go step 3 of 3" in paused
+    # 멈춰 있는 동안에는 첫 action 하나만 나갔다.
+    assert sent_while_paused == 1
+    assert "ran to the end" in carried_on
+    assert len(actions(sent)) == 2
+    assert state.paused_macro is None
+
+
+def test_resume_with_proceed_false_sends_nothing_after_the_checkpoint() -> None:
+    _channel, state, tools, sent = registered_checked()
+
+    async def scenario():
+        await invoke(tools["run_macro"], name="go")
+        return await invoke(tools["resume_macro"], proceed=False)
+
+    stopped = asyncio.run(scenario())
+
+    assert "as you asked" in stopped and "not a failure" in stopped
+    assert len(actions(sent)) == 1
+    assert state.paused_macro is None
+
+
+def test_run_macro_is_refused_while_another_macro_is_paused() -> None:
+    """둘을 같이 두면 게임을 모는 쪽이 둘이 된다."""
+    _channel, state, tools, sent = registered_checked()
+
+    async def scenario():
+        await invoke(tools["run_macro"], name="go")
+        refused = await invoke(tools["run_macro"], name="go")
+        paused_after = state.paused_macro
+        await invoke(tools["resume_macro"], proceed=False)
+        return refused, paused_after
+
+    refused, paused_after = asyncio.run(scenario())
+
+    assert "paused at a checkpoint" in refused and "resume_macro" in refused
+    assert paused_after is not None
+    assert len(actions(sent)) == 1
+
+
+def test_resume_refuses_a_step_other_than_the_one_the_macro_was_called_for() -> None:
+    _channel, state, tools, _sent = registered_checked()
+
+    async def scenario():
+        await invoke(tools["run_macro"], name="go")
+        refused = await tools["resume_macro"].ainvoke(
+            {"step": 2, "thought": "t", "proceed": True}
+        )
+        still_paused = state.paused_macro is not None
+        await invoke(tools["resume_macro"], proceed=False)
+        return refused, still_paused
+
+    refused, still_paused = asyncio.run(scenario())
+
+    assert "step 1" in refused and "Nothing was sent" in refused
+    assert still_paused
+
+
+def test_resume_with_nothing_paused_says_so() -> None:
+    _channel, _state, tools, _sent = make()
+
+    assert "nothing to resume" in call(tools["resume_macro"], proceed=True)
+
+
+def test_cancelling_the_call_that_waits_on_a_macro_stops_the_macro_too() -> None:
+    """task 는 기다리는 쪽과 함께 끝난다. 안 그러면 런이 끝난 뒤에도 macro 가 혼자 보낸다."""
+    from app.agents.qa.macro.session import MacroSession
+
+    async def scenario():
+        gate = asyncio.Event()
+        sent_after: list[str] = []
+
+        async def macro():
+            await gate.wait()
+            sent_after.append("sent")
+            raise AssertionError("must not run")
+
+        session = MacroSession("m", 1)
+        session.start(macro())
+        waiting = asyncio.create_task(session.settle())
+        await asyncio.sleep(0)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        gate.set()
+        await asyncio.sleep(0)
+        return session.task.cancelled(), sent_after
+
+    cancelled, sent_after = asyncio.run(scenario())
+
+    assert cancelled
+    assert sent_after == []

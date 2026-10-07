@@ -353,11 +353,25 @@ READER_NAME_LIST = ", ".join(f"{name}()" for name in READER_NAMES)
 FIND = "find"
 SELECTOR = "selector"
 
+# `for` 가 도는 대상 둘. 둘 다 `for ... in` 의 오른쪽에만 선다 — 목록 타입이 없으므로
+# 대입이나 조건에는 못 쓴다.
+#
+# `find_all` 은 `find` 와 같은 keyword 를 받고 여럿을 낸다. `find` 는 둘 이상 잡히면
+# `SELECTOR_AMBIGUOUS` 로 멈추는데, 손패에 같은 글자 카드가 둘인 것은 도는 대상으로는
+# 정상이다. 그 구멍을 닫는 것이 이 이름이다.
+#
+# `range` 는 횟수가 정해진 반복이다. 대입이 없는 언어라 `while` 로는 셀 수가 없다.
+FIND_ALL = "find_all"
+RANGE = "range"
+
 # 보고하지 않는 두 statement. `flag` 는 알릴 뿐이고 `ask_verdict` 는 그 step 에 판정이
 # 필요하다고 세운다. 판정은 QA agent 가 한다.
 FLAG = "flag"
 ASK_VERDICT = "ask_verdict"
 REQUIRE = "require"
+# 턴을 agent 에게 돌려주는 statement. 실패가 아니고, agent 가 `resume_macro` 로 그
+# 자리부터 잇거나 그만둔다.
+CHECKPOINT = "checkpoint"
 
 # `find` 의 keyword. `label`·`name` 중 최소 하나가 있어야 한다.
 FIND_KEYWORDS: tuple[str, ...] = ("label", "name", "under")
@@ -412,4 +426,19 @@ PAIRED_TOOLS: tuple[PairedTools, ...] = (
 MAX_CALL_DEPTH = 3
 # 가장 많이 도는 경로의 statement 총수. 32 곱하기 4 다. 전부 action 이면 게임과 128번
 # 왕복하므로 이 수는 천장이지 목표가 아니다.
+#
+# 반복이 들어오면서 이 수는 **적힌 길이**가 됐다. 반복 몸통은 한 번만 센다 — 몇 번 돌지는
+# 저장 때 모른다. 그래서 실행된 양의 상한은 아래 둘이 실행 시점에 진다.
 MAX_STATEMENTS = 128
+
+# 반복 하나가 들어설 때마다 도는 회수의 상한. `while` 의 조건이 영영 안 바뀌는 글을 쓸
+# 수 있으므로 있어야 한다. `range(n)` 의 `n` 과 `find_all` 이 낸 개수도 이것을 넘으면
+# 첫 회를 돌기 전에 멈춘다.
+#
+# 50 인 이유: 대화창 넘기기·손패 내기·적 때리기 어느 것도 한 macro 에서 50 번을 넘지
+# 않는다. 넘는다면 macro 가 아니라 화면을 다시 볼 일이다.
+MAX_LOOP_PASSES = 50
+
+# macro 한 번이 실행하는 statement 의 상한. 반복이 중첩되면 회수가 곱이 되므로, 회수
+# 상한만으로는 천장이 안 선다. 저장 때 세는 128 의 실행 시점 짝이다.
+MAX_EXECUTED_STATEMENTS = 1000

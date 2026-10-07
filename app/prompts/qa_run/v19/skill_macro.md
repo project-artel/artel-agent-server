@@ -15,15 +15,17 @@ other `def` in the same source is a helper it may call. Every parameter and
 every assignment carries a type, and the types are: int, float, string, bool, object.
 Every `def` returns `-> None`, because a macro hands back no value.
 
-**The six statements.**
+**The statements.**
 - an action: `click`, `double_click`, `drag`, `move_pointer`, `press_key`, `enter_text`, `hold_mouse_button`, `release_mouse_button`, `hold_key`, `release_key`, `set_input_axis`, `set_input_button`, `pause_game_time`, `resume_game_time`, or a helper `def` from this same source
 - `require(<condition>, "<remedy>")` — both arguments are required. The remedy
   is what the agent reading the failure is told to do about it
 - a typed assignment: `card: object = find(label="shoot")`
 - `if` / `elif` / `else`
+- `for <name> in find_all(...)` / `for <name> in range(n)`, and `while <condition>`
 - `flag("<message>")` — tells you what the macro saw, and nothing more
 - `ask_verdict("<expected>")` — says the step `run_macro` was called with needs
   judging. There is no step number to write: it is always that step
+- `checkpoint("<what to look at>")` — hands the turn back to you mid-macro
 
 **Aiming.** A target is `selector("<unity/hierarchy/path>")`, a parameter on the
 `def` line, or a name bound by `find(...)` or `selector(...)`. There is no syntax
@@ -49,6 +51,29 @@ and `actionable()`, `exists()` and `absent()` as a bool, so those are checked
 when you store the macro. What `member()`, `observable()` and `static()` return
 is up to the game, so a mismatch there stops the macro on the line that bound it.
 
+**Loops.** Prefer `for` whenever you know what you are walking over: its end is
+fixed when it starts. `for card in find_all(label=..., name=..., under=...)`
+takes the same keywords as `find` and walks EVERY match, in the order the game
+reported them — two cards with the same label, which `find` refuses as
+ambiguous, are normal here, and no match at all is zero passes, not a failure.
+The matches are taken once, when the loop starts; each pass gets one of them as
+`card`, an `object`. `for i in range(n)` counts n passes, with `n` a whole
+number or a name declared `int`, and `i` an `int`. `while <condition>` re-reads
+its condition before every pass and is for waiting on a change you cannot count
+— a health bar reaching zero, a dialogue running out. A loop's name, and every
+name bound inside it, ends with the loop. `break`, `continue` and a loop's
+`else` are refused: a pass runs its whole body; to stop early, use a `while`
+whose condition turns false, and to skip part of a pass, put it under an `if`.
+
+**Checkpoints.** `checkpoint("check the slot holds both cards")` ends the
+macro's turn right there and hands you what it did so far, marked PAUSED — not
+a failure. Look at the screen, then call `resume_macro` with `proceed: true` to
+carry on from the next line, with every name it bound still bound, or
+`proceed: false` to stop it there and send nothing more. Each checkpoint costs
+you a turn, so place one only where a person would want to look: before
+committing to something that cannot be undone, or after a step whose result no
+`require` can describe.
+
 **Conditions.** One condition is ONE comparison (`==`, `!=`, `>`, `<`, `>=`,
 `<=`) or ONE reader call. `and`, `or` and `not` are refused — write two
 `require` calls, so each says on its own what to do when it fails. The readers
@@ -72,9 +97,10 @@ An object's `==` is decided by which object it is, not by what it holds. Every
 other shape — a sprite, an animator state, a number the game could not read —
 refuses every operator rather than quietly answering false.
 
-**Refused outright:** `for`, `while`, `and`, `or`, `not`, a dot (`card.id`), a
-nested `def`, `import`, `lambda`, an f-string, `return`, a docstring,
-re-assignment and arithmetic. And these, each for its own reason:
+**Refused outright:** `and`, `or`, `not`, a dot (`card.id`), a nested `def`,
+`import`, `lambda`, an f-string, `return`, a docstring, re-assignment,
+arithmetic, `break`, `continue`, and a list or any other call after `for ... in`.
+And these, each for its own reason:
 
 - `click_button` is deprecated — it invokes a Button's `onClick` directly, so it sees no occlusion. Write `click` instead
 - `reset_game` is not allowed in a macro — a stored script must not be able to throw the run's progress away. Call the tool yourself when a step needs it
@@ -85,13 +111,20 @@ re-assignment and arithmetic. And these, each for its own reason:
 **What you hold, you release.** `hold_key` / `release_key`, `hold_mouse_button` / `release_mouse_button`, `pause_game_time` / `resume_game_time` are counted along every path through
 the macro, and a macro that ends any path still holding one is refused when you
 register it. That includes holding inside one branch of an `if` and releasing
-outside it: hold and release in the same branch, or in neither. Nothing releases
+outside it: hold and release in the same branch, or in neither. Inside a loop,
+hold and release in the same pass — a pass that presses without letting go
+presses once more on every turn. A `checkpoint` may not sit between a hold and
+its release, because the turn would end with the game held. Nothing releases
 these for you, and a key left down changes every step after the macro.
 
-**The limits, checked when you register rather than while it runs:** at most
-128 statements along the longest path, and a call chain at most
-3 deep counting the entry point. Caught at registration because
-an action already sent to the game cannot be taken back.
+**The limits.** Checked when you register: at most 128 statements
+written along the longest path, counting each loop body once, and a call chain
+at most 3 deep counting the entry point. Checked while it runs,
+because how often a loop turns is not known until then: a loop turns at most
+50 times, and one call runs at most 1000
+statements. Past either, the macro stops with `LOOP_LIMIT`, and what it already
+sent stays sent. A step number in the result is the written line; `(pass N)`
+says which turn of the loop around it.
 
 **A caution about `==` on a number.** It is allowed, and on a continuous value
 — a position, a timer — it is treacherous. The SDK rounds a number to four
@@ -99,7 +132,7 @@ decimals before sending it, so a value sitting still still wobbles in its last
 place. The idiom is two `require` calls with `<` and `>` around the value you
 expect, rather than one with `==`. This is advice, not a refusal.
 
-## The lifecycle — write, read, edit, register, run
+## The lifecycle — write, read, edit, register, run, resume
 
 **`write_macro` stores a draft and nothing else.** The draft is parsed and you are
 told what it would do, or exactly what is wrong with it. Nothing is registered and
@@ -145,9 +178,19 @@ action already sent cannot be taken back, so calling the macro again starts from
 board that is not where it started last time. Anything the macro flagged comes back
 too, and so does any verdict it asked for. A flagged line is for you to read; a
 verdict it asked for is about the step you called it with, and that step still needs
-your own `report_step`.
+your own `report_step`. A request inside a loop stands once per pass; they are all
+about that one step, so read them together and report it once.
 
-## Two macros that pass, with the reasoning written into them
+**`resume_macro` answers a macro paused at a `checkpoint`.** The answer to `run_macro`
+says PAUSED, what reached the game so far and what has not been sent yet. Nothing more
+is sent while it waits. Look at the screen if you need to, then call `resume_macro`:
+`proceed: true` carries it on from the line after the checkpoint, `proceed: false`
+stops it there. Its `step` is the step the macro was called for. Until you answer,
+`run_macro` is refused — two things driving the game at once would interleave their
+actions. A run that ends with a macro still paused just drops it; a checkpoint never
+sits between a hold and its release, so nothing is left held.
+
+## Three macros that pass, with the reasoning written into them
 
 What these do that a first draft usually does not:
 
@@ -163,6 +206,10 @@ What these do that a first draft usually does not:
   check holds whatever the starting value was
 - a number is bounded with `<` and `>`, never pinned with `==`
 - what is held is released in the same body that held it
+- a loop walks a `find_all` or a `range` whenever the count is knowable, and keeps
+  `while` for waiting on a change
+- a `checkpoint` sits only where a person would want to look, because each one costs
+  a turn
 
 A macro that names the screen, opens a panel only when it is shut, runs the
 procedure, and asks for a verdict on the step that called it:
@@ -227,6 +274,42 @@ def confirm_combination() -> None:
     button: object = find(name="ConfirmCombine")
     require(actionable(button), "Both slots need a card before Confirm turns on.")
     click(button)
+```
+
+A macro that walks every matching card, stops for you to look, then loops until
+the enemy is gone:
+
+```python
+def clear_the_wave(card_label: string) -> None:
+    # Name the screen first, as every macro should.
+    require(scene() == "Battle", "Go to the Battle scene before calling this.")
+
+    # `for` over everything `find_all` matches. Two cards with the same label are
+    # normal here — `find` would refuse them as ambiguous — and an empty hand is
+    # zero passes, not a failure. The matches are taken once, when the loop starts.
+    slot: object = find(name="CombineSlot")
+    for card in find_all(label=card_label, under="DebugCanvas[4]/Hand[1]"):
+        drag(card, slot)
+
+    # Look before committing. The macro hands the turn back here: if the slot is
+    # wrong, `resume_macro` with `proceed: false` stops it before anything is spent.
+    checkpoint("check the slot holds every card you meant to play")
+
+    # `while` re-reads its condition before every pass, and is for a change you
+    # cannot count in advance. It stops with LOOP_LIMIT after 50 passes, so a
+    # condition that never turns false cannot run forever.
+    enemy: object = find(name="Enemy")
+    while exists(enemy):
+        # Bound inside the loop, so it is found afresh on every pass and ends with
+        # the loop.
+        attack: object = find(name="AttackButton")
+        click(attack)
+
+    # `range(n)` counts passes. The victory banner takes three presses to dismiss.
+    for _ in range(3):
+        press_key("Space", 0.1)
+
+    flag("played every matching card and attacked until the enemy was gone")
 ```
 
 A macro that types into a field and releases everything it held:

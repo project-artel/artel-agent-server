@@ -26,14 +26,17 @@ from dataclasses import dataclass
 from app.agents.qa.macro.errors import MacroRejection
 from app.agents.qa.macro.grammar import (
     ASK_VERDICT,
+    CHECKPOINT,
     DECLARABLE_TYPE_NAMES,
     DECLARABLE_TYPES,
     FIND,
+    FIND_ALL,
     FIND_KEYWORDS,
     FIND_REQUIRED_KEYWORDS,
     FLAG,
     FORBIDDEN_TOOLS,
     MAX_CALL_DEPTH,
+    MAX_LOOP_PASSES,
     MAX_STATEMENTS,
     PAIRED_TOOLS,
     PairedTools,
@@ -41,6 +44,7 @@ from app.agents.qa.macro.grammar import (
     READERS_BY_NAME,
     ReaderSpec,
     REPORTING_NAMES,
+    RANGE,
     REQUIRE,
     SELECTOR,
     TOOL_NAME_LIST,
@@ -60,18 +64,23 @@ from app.agents.qa.macro.model import (
     MacroAskVerdictStatement,
     MacroAssignStatement,
     MacroAssignValue,
+    MacroCheckpointStatement,
     MacroComparisonCondition,
     MacroCondition,
     MacroDefinition,
+    MacroFindAllIterable,
     MacroFindValue,
     MacroFlagStatement,
+    MacroForStatement,
     MacroFunction,
     MacroHelperCallStatement,
     MacroIfStatement,
+    MacroIterable,
     MacroLiteral,
     MacroLiteralArgument,
     MacroLiteralOperand,
     MacroLiteralValue,
+    MacroRangeIterable,
     MacroReadValue,
     MacroNameArgument,
     MacroNameOperand,
@@ -91,6 +100,7 @@ from app.agents.qa.macro.model import (
     MacroStringRef,
     MacroTarget,
     MacroTargetArgument,
+    MacroWhileStatement,
 )
 
 # `def` 줄과 대입에 적을 수 있는 타입 이름 → enum.
@@ -141,12 +151,15 @@ _NO_DOT = (
 _STATEMENT_KINDS = (
     "an action call (one of the game tools, or a helper `def` in this same source), "
     "`require(<condition>, <remedy>)`, a typed assignment (`name: object = find(...)`), "
-    "`if`, `flag(<message>)`, or `ask_verdict(<expected>)`"
+    "`if`, `for`, `while`, `flag(<message>)`, `ask_verdict(<expected>)`, or "
+    "`checkpoint(<reason>)`"
 )
 
 
 # reader 를 bind 한 이름의 `origin`. target 자리 거절이 읽는다.
 _READ = "read"
+# `for` 가 bind 한 이름의 `origin`.
+_LOOP = "loop"
 
 # 도착 모양이 정해진 reader 를 bind 할 때 선언할 수 있는 타입. `number` 는 `int` 와
 # `float` 둘 다 받는다 — SDK 가 반올림해 보내므로 도착한 값만 보고는 둘을 못 가른다
@@ -241,6 +254,8 @@ def macro_definition_from_source(name: str, source: str) -> MacroDefinition:
     graph.reject_over_depth()
     graph.reject_over_statements()
     graph.reject_unpaired()
+    # 짝이 맞는다는 판정 뒤에 둔다. 그래야 각 자리의 카운터 값이 하나로 정해진다.
+    graph.reject_checkpoint_while_holding()
     return definition
 
 
@@ -575,8 +590,9 @@ class _FunctionReader:
         bound = ", ".join(sorted(self.parameters) + sorted(self._visible())) or "none yet"
         raise MacroRejection(
             f"`{node.id}` is not bound in `def {self.name}`. A bare name is always "
-            "either a parameter on the `def` line or a name bound by `find(...)` or "
-            f"`selector(...)` earlier in this same body. Bound here: {bound}.",
+            "either a parameter on the `def` line, or a name bound earlier in this same "
+            "body by an assignment or by the `for` it is inside. A name bound inside an "
+            f"`if` or a loop ends with that body. Bound here: {bound}.",
             node.lineno,
         )
 
@@ -607,7 +623,10 @@ class _FunctionReader:
     # -- 몸통 --
 
     def body(
-        self, nodes: list[ast.stmt], owner: ast.AST
+        self,
+        nodes: list[ast.stmt],
+        owner: ast.AST,
+        loop_name: tuple[str, MacroType] | None = None,
     ) -> tuple[MacroStatement, ...]:
         if not nodes:
             raise MacroRejection(
@@ -617,6 +636,10 @@ class _FunctionReader:
             )
         self.scopes.append({})
         try:
+            if loop_name is not None:
+                # `for` 의 이름은 그 몸통 안에서만 산다. 대입과 같은 규칙으로 bind 하므로
+                # parameter 나 바깥 이름을 가리는 것도 같은 거절을 받는다.
+                self._bind(loop_name[0], loop_name[1], _LOOP, owner)
             return tuple(self._statement(node) for node in nodes)
         finally:
             # 몸통이 끝나면 그 안에서 bind 한 이름도 끝난다. 밖에서 쓰면 bind 되지 않은
@@ -628,6 +651,10 @@ class _FunctionReader:
             return self._assignment(node)
         if isinstance(node, ast.If):
             return self._conditional(node)
+        if isinstance(node, ast.For):
+            return self._for(node)
+        if isinstance(node, ast.While):
+            return self._while(node)
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
             return self._call_statement(node.value)
         self._reject_statement(node)
@@ -647,20 +674,18 @@ class _FunctionReader:
                 "name's value never changes after it is bound.",
                 line,
             )
-        if isinstance(node, (ast.For, ast.AsyncFor)):
+        if isinstance(node, ast.AsyncFor):
             raise MacroRejection(
-                "`for` is not allowed. How many times it would turn is unknown when the "
-                "macro is stored, so the statement total would be unknown too — and that "
-                "total is what `step N of M` and the 128-statement limit are counted "
-                "from. Write the statements out, or use `if`.",
-                line,
+                "`async for` is not allowed. Write a plain `for`.", line
             )
-        if isinstance(node, ast.While):
+        if isinstance(node, (ast.Break, ast.Continue)):
+            # 몸통 중간에서 빠져나가면 `pending` 과 `skipped` 의 뜻이 한 번 더 흔들린다.
+            # 필요해지면 그때 연다.
+            keyword = "break" if isinstance(node, ast.Break) else "continue"
             raise MacroRejection(
-                "`while` is not allowed, for the same reason `for` is not: how many "
-                "times it would turn is unknown when the macro is stored, so the "
-                "statement total would be unknown too. Write the statements out, or use "
-                "`if`.",
+                f"`{keyword}` is not allowed. A loop runs its body whole on every pass. "
+                "To stop early, make it a `while` whose condition turns false; to skip "
+                "part of a pass, put that part under an `if`.",
                 line,
             )
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -755,6 +780,13 @@ class _FunctionReader:
                 )
             if node.func.id in READERS_BY_NAME:
                 return self._read_value(node, declared, name), _READ
+            if node.func.id in (FIND_ALL, RANGE):
+                raise MacroRejection(
+                    f"`{name}` is bound to `{node.func.id}(...)`, which hands a loop "
+                    "several things and stands only after `for <name> in`. A name holds "
+                    "one value; to bind one object, use `find(...)`.",
+                    node.lineno,
+                )
 
         raise MacroRejection(
             f"`{name}` is bound to something a macro cannot bind. The right-hand side is "
@@ -808,10 +840,10 @@ class _FunctionReader:
             getattr(node, "lineno", None),
         )
 
-    def _find(self, node: ast.Call) -> MacroFindValue:
+    def _find(self, node: ast.Call, called: str = FIND) -> MacroFindValue:
         if node.args:
             raise MacroRejection(
-                "`find` takes keyword arguments only: "
+                f"`{called}` takes keyword arguments only: "
                 f"{', '.join(f'{keyword}=' for keyword in FIND_KEYWORDS)}. `label=` "
                 "matches the text an object is showing on screen and `name=` matches the "
                 "last segment of its selector, so a bare argument would not say which "
@@ -822,25 +854,25 @@ class _FunctionReader:
         for keyword in node.keywords:
             if keyword.arg is None:
                 raise MacroRejection(
-                    "`**` is not allowed in a `find` call.", node.lineno
+                    f"`**` is not allowed in a `{called}` call.", node.lineno
                 )
             if keyword.arg not in FIND_KEYWORDS:
                 raise MacroRejection(
-                    f"`find` has no `{keyword.arg}=` argument. It takes "
+                    f"`{called}` has no `{keyword.arg}=` argument. It takes "
                     f"{', '.join(f'{name}=' for name in FIND_KEYWORDS)}.",
                     node.lineno,
                 )
             if keyword.arg in given:
                 raise MacroRejection(
-                    f"`{keyword.arg}=` is given twice in this `find` call.", node.lineno
+                    f"`{keyword.arg}=` is given twice in this `{called}` call.", node.lineno
                 )
             given[keyword.arg] = self._string_ref(
-                keyword.value, f"`{keyword.arg}=` in `find`"
+                keyword.value, f"`{keyword.arg}=` in `{called}`"
             )
 
         if not any(keyword in given for keyword in FIND_REQUIRED_KEYWORDS):
             raise MacroRejection(
-                "`find` needs at least one of `label=` or `name=`. `under=` only narrows "
+                f"`{called}` needs at least one of `label=` or `name=`. `under=` only narrows "
                 "the search; on its own it names nothing.",
                 node.lineno,
             )
@@ -895,6 +927,123 @@ class _FunctionReader:
             body=body,
             orelse=orelse,
         )
+
+    # -- 반복 --
+
+    def _for(self, node: ast.For) -> MacroForStatement:
+        """`for <name> in find_all(...)` 이거나 `for <name> in range(n)`.
+
+        이름의 타입은 도는 대상이 정한다. Python 의 `for` 는 이름에 타입을 못 적으므로
+        여기서 정해 둔다 — `find_all` 이면 `object`, `range` 이면 `int`.
+        """
+        if node.orelse:
+            raise MacroRejection(
+                "`for ... else` is not allowed. Put what should follow the loop after "
+                "it, unindented.",
+                node.lineno,
+            )
+        if not isinstance(node.target, ast.Name):
+            raise MacroRejection(
+                "a `for` binds one bare name per pass. Unpacking (`for a, b in ...`) is "
+                "not allowed.",
+                node.lineno,
+            )
+        iterable, declared = self._iterable(node.iter)
+        body = self.body(node.body, node, loop_name=(node.target.id, declared))
+        return MacroForStatement(
+            source=_written(node, self.lines, header_only=True),
+            name=node.target.id,
+            declared_type=declared,
+            iterable=iterable,
+            body=body,
+        )
+
+    def _iterable(self, node: ast.expr) -> tuple[MacroIterable, MacroType]:
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in (FIND_ALL, RANGE)
+        ):
+            raise MacroRejection(
+                "a `for` walks over one of two things: `find_all(label=..., name=..., "
+                "under=...)`, which hands it every object that matches, or `range(n)`, "
+                "which counts n passes. A list or any other call is not allowed.",
+                getattr(node, "lineno", None),
+            )
+        if node.func.id == FIND_ALL:
+            return MacroFindAllIterable(find=self._find(node, FIND_ALL)), MacroType.object_
+        return self._range(node), MacroType.int_
+
+    def _range(self, node: ast.Call) -> MacroRangeIterable:
+        if node.keywords or len(node.args) != 1:
+            raise MacroRejection(
+                "`range` takes exactly one argument here: how many passes, as a whole "
+                "number or a name declared `int`. Start and step are not allowed.",
+                node.lineno,
+            )
+        argument = node.args[0]
+        literal = _literal(argument)
+        if literal is not None:
+            if literal.shape is not MacroShape.number or not isinstance(literal.value, int):
+                raise MacroRejection(
+                    "`range` counts passes, so its argument is a whole number.",
+                    node.lineno,
+                )
+            if not 0 <= literal.value <= MAX_LOOP_PASSES:
+                raise MacroRejection(
+                    f"`range({literal.value})` asks for {literal.value} passes, and a "
+                    f"loop turns at most {MAX_LOOP_PASSES} times. Split the work, or "
+                    "observe the screen between macros.",
+                    node.lineno,
+                )
+            return MacroRangeIterable(count=literal)
+        if isinstance(argument, ast.Name):
+            bound = self._require_bound(argument)
+            if bound.declared_type is not MacroType.int_:
+                raise MacroRejection(
+                    f"`range({argument.id})` needs `{argument.id}` declared `int`; it is "
+                    f"declared `{bound.declared_type.value}`.",
+                    node.lineno,
+                )
+            return MacroRangeIterable(name=argument.id)
+        raise MacroRejection(
+            "`range` takes a whole number or a name declared `int`. Arithmetic is not "
+            "allowed.",
+            node.lineno,
+        )
+
+    def _while(self, node: ast.While) -> MacroWhileStatement:
+        """조건은 `if` 와 같은 문법이고 runner 가 매 회 전에 다시 읽는다."""
+        if node.orelse:
+            raise MacroRejection(
+                "`while ... else` is not allowed. Put what should follow the loop after "
+                "it, unindented.",
+                node.lineno,
+            )
+        condition = self._condition(node.test)
+        body = self.body(node.body, node)
+        return MacroWhileStatement(
+            source=_written(node, self.lines, header_only=True),
+            condition=condition,
+            body=body,
+        )
+
+    def _checkpoint(self, node: ast.Call, written: str) -> MacroCheckpointStatement:
+        if node.keywords or len(node.args) > 1:
+            raise MacroRejection(
+                "`checkpoint` takes nothing, or one string saying what to look at here.",
+                node.lineno,
+            )
+        reason = ""
+        if node.args:
+            reason = _string_literal(node.args[0], "the reason of `checkpoint`").strip()
+            if not reason:
+                raise MacroRejection(
+                    "the reason of `checkpoint` cannot be empty. Say what to look at "
+                    "before going on, or write `checkpoint()` with no argument.",
+                    node.lineno,
+                )
+        return MacroCheckpointStatement(source=written, reason=reason)
 
     # -- 조건 --
 
@@ -1200,6 +1349,14 @@ class _FunctionReader:
             return self._flag(node, written)
         if name == ASK_VERDICT:
             return self._ask_verdict(node, written)
+        if name == CHECKPOINT:
+            return self._checkpoint(node, written)
+        if name in (FIND_ALL, RANGE):
+            raise MacroRejection(
+                f"`{name}(...)` stands only after `for <name> in`. It hands the loop "
+                "the things to walk over; on its own line it does nothing.",
+                node.lineno,
+            )
 
         if name in TOOLS_BY_NAME:
             spec = TOOLS_BY_NAME[name]
@@ -1496,6 +1653,8 @@ def _called_helpers(statements: tuple[MacroStatement, ...]) -> list[str]:
         elif isinstance(statement, MacroIfStatement):
             names.extend(_called_helpers(statement.body))
             names.extend(_called_helpers(statement.orelse))
+        elif isinstance(statement, (MacroForStatement, MacroWhileStatement)):
+            names.extend(_called_helpers(statement.body))
     return names
 
 
@@ -1582,10 +1741,15 @@ class _CallGraph:
         return self._statements[name]
 
     def _count(self, statements: tuple[MacroStatement, ...]) -> int:
-        """그 몸통에서 가장 많이 도는 경로의 statement 수.
+        """그 몸통에서 가장 많이 도는 경로의 **적힌** statement 수.
 
         `if` 는 적힌 statement 를 세는 것을 바꾸지 않는다 — 최대값은 가지들 중 큰 쪽이라
         여전히 정적이다. helper 호출은 호출 그 자체 하나에 그 helper 의 총수를 더한다.
+
+        **반복 몸통은 한 번만 센다.** 몇 번 돌지는 저장 때 모른다. 그래서 이 수는 실행될
+        양이 아니라 적힌 길이의 상한이 됐고, 실행된 양은 runner 가 `MAX_LOOP_PASSES` 와
+        `MAX_EXECUTED_STATEMENTS` 로 실행 시점에 센다(ARTEL-948). 앞서 이 자리의 근거였던
+        "저장 때 잡는 것이 언제나 낫다" 는 반복이 들어오면 성립하지 않는다 — 셀 수가 없다.
 
         세는 것만 편다, 실행은 안 편다. 상한을 세려고 호출 트리를 펴는 것이지 실행할 때
         펴는 것이 아니다.
@@ -1596,6 +1760,8 @@ class _CallGraph:
                 total += 1 + max(
                     self._count(statement.body), self._count(statement.orelse)
                 )
+            elif isinstance(statement, (MacroForStatement, MacroWhileStatement)):
+                total += 1 + self._count(statement.body)
             elif isinstance(statement, MacroHelperCallStatement):
                 total += 1 + self.statements_in(statement.callee)
             else:
@@ -1606,10 +1772,9 @@ class _CallGraph:
         measured = self.statements_in(self.definition.entry.name)
         if measured > MAX_STATEMENTS:
             raise MacroRejection(
-                f"the longest path through this macro turns {measured} statements, and "
-                f"the limit is {MAX_STATEMENTS}. Caught here rather than part-way "
-                "through a run: once an action has gone to the game it cannot be taken "
-                "back. Split the macro, or drop statements from the heaviest branch."
+                f"the longest path through this macro is {measured} statements long, "
+                f"counting each loop body once, and the limit is {MAX_STATEMENTS}. "
+                "Split the macro, or drop statements from the heaviest branch."
             )
 
     # -- 눌렀으면 풀어야 하는 tool --
@@ -1665,11 +1830,75 @@ class _CallGraph:
                 inner = _Tally(
                     delta=taken.delta, lowest=min(taken.lowest, other.lowest)
                 )
+            elif isinstance(statement, (MacroForStatement, MacroWhileStatement)):
+                # 한 회가 0 이면 몇 회를 돌든 끝에 0 이다. 그래서 이 규칙 하나로 반복이
+                # 있어도 저장 때 판정이 선다.
+                one_pass = self._tally_body(statement.body, pair)
+                if one_pass.delta != 0:
+                    raise MacroRejection(
+                        f"one pass of `{statement.source}` leaves {pair.counter} at "
+                        f"{one_pass.delta:+d}. Hold and release it inside the same pass "
+                        "— a loop runs its body again and again, so a pass that presses "
+                        "without letting go presses once more on every turn."
+                    )
+                inner = _Tally(delta=0, lowest=one_pass.lowest)
             else:
                 continue
             lowest = min(lowest, delta + inner.lowest)
             delta += inner.delta
         return _Tally(delta=delta, lowest=lowest)
+
+    def reject_checkpoint_while_holding(self) -> None:
+        """누름과 뗌 사이의 `checkpoint` 를 거절한다.
+
+        거기서 턴이 끝나면 게임이 키를 누른 채로, 또는 시간이 멈춘 채로 턴을 넘긴다.
+        `reject_unpaired` 는 macro 전체가 0 인지만 보므로 이것을 못 잡는다. 그리고 이
+        규칙 덕에 멈춘 macro 를 버려도 게임에 눌린 채로 남는 것이 없다.
+
+        `if` 의 두 가지와 반복 한 회가 같은 값을 남긴다는 것이 이미 판정됐으므로, 각
+        statement 앞의 카운터 값이 경로와 상관없이 하나로 정해진다. 그 값을 진입점부터
+        내려가며 들고 간다.
+        """
+        seen: set[tuple[str, tuple[int, ...]]] = set()
+
+        def walk(
+            statements: tuple[MacroStatement, ...], levels: tuple[int, ...]
+        ) -> tuple[int, ...]:
+            for statement in statements:
+                if isinstance(statement, MacroCheckpointStatement):
+                    for pair, level in zip(PAIRED_TOOLS, levels):
+                        if level != 0:
+                            raise MacroRejection(
+                                f"`{statement.source}` sits while {pair.counter} is "
+                                f"still taken (`{pair.opens}` before it, `{pair.closes}` "
+                                "after). The turn would end with the game in that "
+                                f"state. Move the checkpoint before `{pair.opens}` or "
+                                f"after `{pair.closes}`."
+                            )
+                elif isinstance(statement, MacroActionStatement):
+                    levels = tuple(
+                        level
+                        + (1 if statement.callee == pair.opens else 0)
+                        - (1 if statement.callee == pair.closes else 0)
+                        for pair, level in zip(PAIRED_TOOLS, levels)
+                    )
+                elif isinstance(statement, MacroIfStatement):
+                    walk(statement.orelse, levels)
+                    levels = walk(statement.body, levels)
+                elif isinstance(statement, (MacroForStatement, MacroWhileStatement)):
+                    walk(statement.body, levels)
+                elif isinstance(statement, MacroHelperCallStatement):
+                    key = (statement.callee, levels)
+                    if key not in seen:
+                        seen.add(key)
+                        walk(self.statements_of(statement.callee), levels)
+                    levels = tuple(
+                        level + self.tally_of(statement.callee, pair).delta
+                        for pair, level in zip(PAIRED_TOOLS, levels)
+                    )
+            return levels
+
+        walk(self.statements_of(self.definition.entry.name), (0,) * len(PAIRED_TOOLS))
 
     def reject_unpaired(self) -> None:
         """누른 것을 안 푼 macro 를 거절한다.
@@ -1677,7 +1906,8 @@ class _CallGraph:
         tool 을 직접 부르는 agent 는 그 tool 의 docstring("Nothing releases this for
         you.")을 다음 턴에 다시 읽는다. macro 는 글이 저작 시점에 고정이라 읽어 줄 다음
         턴이 없고, 눌린 채로 남은 키는 그 뒤의 모든 step 을 조용히 바꾼다. 반복이 없어
-        경로가 유한하므로 여기서 셀 수 있다.
+        반복 몸통은 한 회 안에서 0 이어야 하므로(`_tally_body`) 반복이 있어도 여기서 셀 수
+        있다.
         """
         for pair in PAIRED_TOOLS:
             total = self.tally_of(self.definition.entry.name, pair)

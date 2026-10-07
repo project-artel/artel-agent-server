@@ -36,6 +36,7 @@ MACRO_TOOLS = (
     "edit_macro",
     "register_macro",
     "run_macro",
+    "resume_macro",
 )
 # 예시 안의 ```python 울타리. 진입점 `def` 의 이름으로 parser 를 부른다.
 _FENCE = re.compile(r"```python\n(.*?)```", re.DOTALL)
@@ -75,9 +76,10 @@ def test_the_skill_carries_what_grammar_py_assembles(section: str) -> None:
     )
 
 
-def test_the_skill_holds_two_examples() -> None:
-    """하나로 줄면 가르치는 것이 준다 — 분기와 helper 가 든 긴 것, 짝을 보여 주는 짧은 것."""
-    assert len(examples_in_the_skill()) == 2
+def test_the_skill_holds_three_examples() -> None:
+    """하나로 줄면 가르치는 것이 준다 — 분기와 helper 가 든 긴 것, 반복과 checkpoint 가 든
+    것, 짝을 보여 주는 짧은 것."""
+    assert len(examples_in_the_skill()) == 3
 
 
 def test_every_example_in_the_skill_passes_the_parser() -> None:
@@ -100,6 +102,10 @@ def test_an_example_shows_a_branch_and_a_helper_and_a_held_key() -> None:
     assert "if absent(" in sources
     assert "def confirm_combination" in sources
     assert "hold_key(" in sources and "release_key(" in sources
+    # 반복 둘과 checkpoint. 처음 요청이 이것들이 드러나는 예시였다.
+    assert "in find_all(" in sources and "in range(" in sources
+    assert "while " in sources
+    assert "checkpoint(" in sources
 
 
 @pytest.mark.parametrize("name", MACRO_TOOLS)

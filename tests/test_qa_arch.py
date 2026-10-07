@@ -554,6 +554,7 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
     "read_macro",
     "register_macro",
     "run_macro",
+    "resume_macro",
     "wait_for_operator",
     "report_step",
     "report_issue",
@@ -591,7 +592,11 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 # set changed — and `v9-macros` is the label bump it asks for. ARTEL-926 still owes
 # the QA run that gives the new label numbers to be read against; until then the
 # label separates the structures and no run supplies the comparison.
-_EXPECTED_DEFAULT_FINGERPRINT = "887277ea051d"
+#
+# Moved again within the same label, from `887277ea051d`, when `resume_macro`
+# joined the set for `checkpoint` (ARTEL-949). No run had been filed under
+# `v9-macros` yet, so the label still names the macro shape as it ships.
+_EXPECTED_DEFAULT_FINGERPRINT = "388b1fc3438e"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:

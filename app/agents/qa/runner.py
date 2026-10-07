@@ -728,6 +728,12 @@ class QaRunner:
             return state, None
         except Exception as error:  # noqa: BLE001 - the reason has to reach the timeline
             return state, f"The run stopped on an error: {error}"
+        finally:
+            # `checkpoint` 에서 멈춘 채 남은 macro 를 끊는다. 눌러 둔 것은 없다 — parser 가
+            # 누름과 뗌 사이의 `checkpoint` 를 거절한다(`app/agents/qa/macro/session.py`).
+            if state.paused_macro is not None:
+                state.paused_macro.cancel()
+                state.paused_macro = None
         if not state.finished:
             return state, "The agent stopped without closing the run."
         return state, None

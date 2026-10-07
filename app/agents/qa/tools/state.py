@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.agents.qa.macro.book import MacroBook
+from app.agents.qa.macro.session import MacroSession
 from app.qa.envelope import ActionResultItem, JsonRpcAction
 from app.qa.schemas import QaStepResult
 
@@ -181,6 +182,10 @@ class QaRunState:
         # 등록한다 — 가 규칙을 들고 있기 때문이다. 그 규칙이 `MacroBook` 에 있으면 tool
         # 없이 단위 테스트가 되고, 여기 흩어 놓으면 tool 을 통해서만 재어진다.
         self.macros = MacroBook()
+        # `checkpoint` 에서 멈춰 선 macro 호출. `resume_macro` 가 이것을 잇거나 버린다.
+        # 하나뿐이다 — 게임을 모는 쪽이 둘이 되면 안 되므로, 멈춘 것이 있는 동안
+        # `run_macro` 는 새 macro 를 안 부른다.
+        self.paused_macro: MacroSession | None = None
         # Handed to the vision middleware on the next model call. The tool cannot
         # return the image itself — an image block on a tool result is rejected by
         # the chat/completions API every model here is reached through.

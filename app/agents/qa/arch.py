@@ -191,10 +191,13 @@ from app.llm.models import LLMModel, get_model_spec
 # `skills` and `fold_stale_skills` keys; with `skills=off` the middleware list is
 # unchanged.
 #
-# v9 because the model now has five macro tools — `write_macro`, `edit_macro`,
-# `read_macro`, `register_macro`, `run_macro` — and can send a whole sequence of
-# actions in one call instead of one action per turn (ARTEL-914). Five tool schemas
-# appeared, so `arch_fingerprint` moves on its own here.
+# v9 because the model now has six macro tools — `write_macro`, `edit_macro`,
+# `read_macro`, `register_macro`, `run_macro` and `resume_macro` — and can send a
+# whole sequence of actions in one call instead of one action per turn (ARTEL-914).
+# Six tool schemas appeared, so `arch_fingerprint` moves on its own here. A macro
+# may loop (`for`, `while`, ARTEL-948) and may hand the turn back at a `checkpoint`
+# and carry on through `resume_macro` (ARTEL-949); those landed before any run was
+# filed under this label.
 #
 # The macro grammar does NOT ride on those five descriptions. Each is under the
 # 500-character cap `validate_prompts` enforces, and the grammar and the two

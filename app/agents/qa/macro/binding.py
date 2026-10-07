@@ -217,10 +217,14 @@ def _without_scene(key: str, scene: str) -> str:
     return key[len(prefix) :] if scene and key.startswith(prefix) else key
 
 
-def resolve_find(
+def _matches(
     memories: MacroMemories, scope: MacroScope, value: MacroFindValue
-) -> FoundObject:
-    """`find(...)` 를 지금의 `PulseMemory` 에 대고 푼다."""
+) -> tuple[list[FoundObject], str]:
+    """`find` 와 `find_all` 이 같이 쓰는 매칭. 잡힌 것과, 거절 문장에 넣을 물음.
+
+    둘이 다른 규칙으로 맞추면 한 macro 안에서 `find` 와 `find_all` 이 다른 객체를 본다.
+    그래서 매칭은 여기 하나다.
+    """
     memory = memories.pulse
     _require_readable(memory)
 
@@ -244,6 +248,14 @@ def resolve_find(
         for keyword, given in (("label", label), ("name", name), ("under", under))
         if given is not None
     )
+    return hits, asked
+
+
+def resolve_find(
+    memories: MacroMemories, scope: MacroScope, value: MacroFindValue
+) -> FoundObject:
+    """`find(...)` 를 지금의 `PulseMemory` 에 대고 푼다."""
+    hits, asked = _matches(memories, scope, value)
     if not hits:
         # 대상의 첫 판독이 아직 안 왔을 수 있다. macro 정의 자체가 낡은 경우보다 이 관측
         # 순서 문제가 더 흔하다 — scene 전환 직후나 카드를 새로 뽑은 직후가 그 경우다.
@@ -262,10 +274,30 @@ def resolve_find(
             SELECTOR_AMBIGUOUS,
             f"find({asked}) matched {len(hits)} objects, so the name is not unique and "
             "nothing was sent to the game. Narrow it with `under=`, or with `label=` if "
-            "the two show different text.",
+            "the two show different text. To act on every one of them, walk them with "
+            f"`for <name> in find_all({asked}):`.",
             {"asked": asked, "matched": sorted(hit.key for hit in hits)},
         )
     return hits[0]
+
+
+def resolve_find_all(
+    memories: MacroMemories, scope: MacroScope, value: MacroFindValue
+) -> list[FoundObject]:
+    """`find_all(...)` 을 푼다. 잡힌 것 전부를 게임이 알려 준 순서대로 낸다.
+
+    **0 개는 실패가 아니다.** 손패가 비었으면 반복이 한 번도 안 도는 것이 맞다. `find` 가
+    0 개에서 `SELECTOR_NOT_FOUND` 를 내는 것과 갈리는 자리다 — 하나를 겨누는 것과 있는 것
+    전부를 도는 것은 빈 결과의 뜻이 다르다.
+
+    **둘 이상도 실패가 아니다.** `find` 가 `SELECTOR_AMBIGUOUS` 로 멈추는 손패의 같은 글자
+    카드 두 장이, 도는 대상으로는 정상이다.
+
+    `for` 에 들어설 때 한 번 푼다. 각 회에 받는 것은 `find` 가 내는 것과 같은 기록이라
+    그 사이에 죽었으면 쓰는 자리에서 `STALE_BINDING` 이 난다.
+    """
+    hits, _asked = _matches(memories, scope, value)
+    return hits
 
 
 def _by_selector(memories: MacroMemories, selector: str) -> FoundObject | None:

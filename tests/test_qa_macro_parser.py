@@ -234,7 +234,7 @@ def test_an_assignment_cannot_hide_a_parameter() -> None:
             "for",
         ),
         (
-            "def m(card: object) -> None:\n    while exists(card):\n        click(card)\n",
+            "def m(card: object) -> None:\n    while exists(card):\n        break\n",
             "while",
         ),
         ("def m() -> None:\n    if true:\n        pause_game_time()\n", "True"),
@@ -924,3 +924,110 @@ def test_broken_python_is_refused_with_the_line_it_broke_on() -> None:
     with pytest.raises(MacroRejection) as rejected:
         macro_definition_from_source("m", "def m(card: object) -> None:\n    click(\n")
     assert rejected.value.line is not None
+
+
+# --- 반복과 checkpoint (ARTEL-948, ARTEL-949) ---------------------------------------
+
+
+def test_a_for_over_find_all_binds_an_object_inside_its_body() -> None:
+    from app.agents.qa.macro.model import MacroForStatement
+
+    definition = parse(
+        "def m(slot: object) -> None:\n"
+        '    for card in find_all(label="shoot", under="Root[0]/Hand[2]"):\n'
+        "        drag(card, slot)\n"
+    )
+    loop = definition.entry.statements[0]
+
+    assert isinstance(loop, MacroForStatement)
+    assert loop.declared_type.value == "object"
+    assert loop.iterable.kind == "find_all"
+
+
+def test_a_for_over_range_binds_an_int() -> None:
+    definition = parse(
+        'def m() -> None:\n    for i in range(3):\n        press_key("Space", 0.1)\n'
+    )
+
+    assert definition.entry.statements[0].declared_type.value == "int"
+
+
+@pytest.mark.parametrize(
+    "source, said",
+    [
+        ('def m() -> None:\n    for x in [1, 2]:\n        press_key("A", 0.1)\n', "find_all"),
+        ('def m() -> None:\n    for a, b in range(2):\n        press_key("A", 0.1)\n', "Unpacking"),
+        ('def m() -> None:\n    for _ in range(2):\n        press_key("A", 0.1)\n    else:\n        press_key("B", 0.1)\n', "else"),
+        ('def m() -> None:\n    for _ in range(99):\n        press_key("A", 0.1)\n', "at most"),
+        ('def m() -> None:\n    for _ in range(2.5):\n        press_key("A", 0.1)\n', "whole number"),
+        ('def m(s: string) -> None:\n    for _ in range(s):\n        press_key("A", 0.1)\n', "`int`"),
+        ('def m() -> None:\n    for c in find_all(under="Root[0]"):\n        click(c)\n', "label="),
+        ('def m(e: object) -> None:\n    while exists(e):\n        continue\n', "continue"),
+        ('def m(e: object) -> None:\n    while exists(e):\n        click(e)\n    else:\n        click(e)\n', "else"),
+        ('def m() -> None:\n    cards: object = find_all(label="a")\n', "for <name> in"),
+        ('def m() -> None:\n    find_all(label="a")\n', "for <name> in"),
+        ('def m() -> None:\n    checkpoint("")\n', "empty"),
+        ('def m() -> None:\n    checkpoint("a", "b")\n', "one string"),
+    ],
+)
+def test_a_wrong_loop_or_checkpoint_is_refused_with_what_to_write(source: str, said: str) -> None:
+    assert said in rejection(source)
+
+
+def test_the_loop_name_ends_with_the_loop() -> None:
+    reason = rejection(
+        "def m(slot: object) -> None:\n"
+        '    for card in find_all(label="a"):\n'
+        "        drag(card, slot)\n"
+        "    click(card)\n"
+    )
+
+    assert "not bound" in reason
+
+
+def test_a_pass_that_holds_without_releasing_is_refused() -> None:
+    """한 회가 0 이면 몇 회를 돌든 0 이다. 그 규칙 하나로 저장 때 판정이 선다."""
+    reason = rejection(
+        'def m() -> None:\n    for _ in range(2):\n        hold_key("W")\n'
+    )
+
+    assert "same pass" in reason
+
+
+def test_a_pass_that_holds_and_releases_passes() -> None:
+    parse(
+        "def m() -> None:\n"
+        "    for _ in range(2):\n"
+        '        hold_key("W")\n'
+        '        press_key("D", 0.2)\n'
+        '        release_key("W")\n'
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'def m() -> None:\n    hold_key("W")\n    checkpoint()\n    release_key("W")\n',
+        "def m() -> None:\n    pause_game_time()\n    checkpoint()\n    resume_game_time()\n",
+        'def m() -> None:\n    hold_key("W")\n    look()\n    release_key("W")\n\n'
+        "def look() -> None:\n    checkpoint()\n",
+    ],
+    ids=["held key", "frozen time", "inside a helper"],
+)
+def test_a_checkpoint_between_a_press_and_its_release_is_refused(source: str) -> None:
+    """거기서 턴이 끝나면 게임이 키를 누른 채로, 시간이 멈춘 채로 턴을 넘긴다."""
+    assert "checkpoint" in rejection(source)
+
+
+def test_a_checkpoint_after_the_release_passes() -> None:
+    parse(
+        'def m() -> None:\n    hold_key("W")\n    release_key("W")\n    checkpoint()\n'
+    )
+
+
+def test_a_loop_body_counts_once_toward_the_written_length() -> None:
+    """반복 몸통은 한 번만 센다. 128 은 적힌 길이의 상한이 됐다."""
+    from app.agents.qa.macro.grammar import MAX_STATEMENTS
+
+    body = "".join('        press_key("A", 0.1)\n' for _ in range(MAX_STATEMENTS - 1))
+    parse(f"def m() -> None:\n    for _ in range(50):\n{body}")

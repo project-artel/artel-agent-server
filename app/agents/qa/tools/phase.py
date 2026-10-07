@@ -123,6 +123,10 @@ _TOOL_PHASE: dict[str, RunPhase] = {
     "read_macro": RunPhase.act,
     "register_macro": RunPhase.act,
     "run_macro": RunPhase.act,
+    # `checkpoint` 에서 멈춘 macro 를 잇는 tool. 멈춘 macro 는 ACT 안에서 멈췄으므로
+    # 잇는 것도 ACT 다 — 다른 phase 에 두면 멈춘 자리로 돌아가는 호출이 뒤로 가는
+    # 호출이 되어 거절당한다.
+    "resume_macro": RunPhase.act,
     # VERIFY — 판정 하나.
     "report_step": RunPhase.verify,
     # UPDATE_MEMORY — 런을 넘어 남는 것을 적는 자리, 그리고 적을 것이 없다고 답하는 자리.

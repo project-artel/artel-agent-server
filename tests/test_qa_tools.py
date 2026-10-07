@@ -1255,6 +1255,7 @@ def test_the_agent_is_offered_exactly_these_tools() -> None:
         "read_macro",
         "register_macro",
         "run_macro",
+        "resume_macro",
         "wait_for_operator",
         "report_step",
         "report_issue",

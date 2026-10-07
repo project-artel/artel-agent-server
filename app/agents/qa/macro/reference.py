@@ -17,6 +17,8 @@ from app.agents.qa.macro.grammar import (
     DECLARABLE_TYPE_NAMES,
     FORBIDDEN_TOOLS,
     MAX_CALL_DEPTH,
+    MAX_EXECUTED_STATEMENTS,
+    MAX_LOOP_PASSES,
     MAX_STATEMENTS,
     PAIRED_TOOLS,
     READER_NAMES,
@@ -65,15 +67,17 @@ other `def` in the same source is a helper it may call. Every parameter and
 every assignment carries a type, and the types are: {DECLARABLE_TYPE_NAMES}.
 Every `def` returns `-> None`, because a macro hands back no value.
 
-**The six statements.**
+**The statements.**
 - an action: {_TOOLS}, or a helper `def` from this same source
 - `require(<condition>, "<remedy>")` — both arguments are required. The remedy
   is what the agent reading the failure is told to do about it
 - a typed assignment: `card: object = find(label="shoot")`
 - `if` / `elif` / `else`
+- `for <name> in find_all(...)` / `for <name> in range(n)`, and `while <condition>`
 - `flag("<message>")` — tells you what the macro saw, and nothing more
 - `ask_verdict("<expected>")` — says the step `run_macro` was called with needs
   judging. There is no step number to write: it is always that step
+- `checkpoint("<what to look at>")` — hands the turn back to you mid-macro
 
 **Aiming.** A target is `selector("<unity/hierarchy/path>")`, a parameter on the
 `def` line, or a name bound by `find(...)` or `selector(...)`. There is no syntax
@@ -99,6 +103,29 @@ and `actionable()`, `exists()` and `absent()` as a bool, so those are checked
 when you store the macro. What `member()`, `observable()` and `static()` return
 is up to the game, so a mismatch there stops the macro on the line that bound it.
 
+**Loops.** Prefer `for` whenever you know what you are walking over: its end is
+fixed when it starts. `for card in find_all(label=..., name=..., under=...)`
+takes the same keywords as `find` and walks EVERY match, in the order the game
+reported them — two cards with the same label, which `find` refuses as
+ambiguous, are normal here, and no match at all is zero passes, not a failure.
+The matches are taken once, when the loop starts; each pass gets one of them as
+`card`, an `object`. `for i in range(n)` counts n passes, with `n` a whole
+number or a name declared `int`, and `i` an `int`. `while <condition>` re-reads
+its condition before every pass and is for waiting on a change you cannot count
+— a health bar reaching zero, a dialogue running out. A loop's name, and every
+name bound inside it, ends with the loop. `break`, `continue` and a loop's
+`else` are refused: a pass runs its whole body; to stop early, use a `while`
+whose condition turns false, and to skip part of a pass, put it under an `if`.
+
+**Checkpoints.** `checkpoint("check the slot holds both cards")` ends the
+macro's turn right there and hands you what it did so far, marked PAUSED — not
+a failure. Look at the screen, then call `resume_macro` with `proceed: true` to
+carry on from the next line, with every name it bound still bound, or
+`proceed: false` to stop it there and send nothing more. Each checkpoint costs
+you a turn, so place one only where a person would want to look: before
+committing to something that cannot be undone, or after a step whose result no
+`require` can describe.
+
 **Conditions.** One condition is ONE comparison (`==`, `!=`, `>`, `<`, `>=`,
 `<=`) or ONE reader call. `and`, `or` and `not` are refused — write two
 `require` calls, so each says on its own what to do when it fails. The readers
@@ -116,22 +143,30 @@ An object's `==` is decided by which object it is, not by what it holds. Every
 other shape — a sprite, an animator state, a number the game could not read —
 refuses every operator rather than quietly answering false.
 
-**Refused outright:** `for`, `while`, `and`, `or`, `not`, a dot (`card.id`), a
-nested `def`, `import`, `lambda`, an f-string, `return`, a docstring,
-re-assignment and arithmetic. And these, each for its own reason:
+**Refused outright:** `and`, `or`, `not`, a dot (`card.id`), a nested `def`,
+`import`, `lambda`, an f-string, `return`, a docstring, re-assignment,
+arithmetic, `break`, `continue`, and a list or any other call after `for ... in`.
+And these, each for its own reason:
 
 {_FORBIDDEN}
 
 **What you hold, you release.** {_PAIRS} are counted along every path through
 the macro, and a macro that ends any path still holding one is refused when you
 register it. That includes holding inside one branch of an `if` and releasing
-outside it: hold and release in the same branch, or in neither. Nothing releases
+outside it: hold and release in the same branch, or in neither. Inside a loop,
+hold and release in the same pass — a pass that presses without letting go
+presses once more on every turn. A `checkpoint` may not sit between a hold and
+its release, because the turn would end with the game held. Nothing releases
 these for you, and a key left down changes every step after the macro.
 
-**The limits, checked when you register rather than while it runs:** at most
-{MAX_STATEMENTS} statements along the longest path, and a call chain at most
-{MAX_CALL_DEPTH} deep counting the entry point. Caught at registration because
-an action already sent to the game cannot be taken back."""
+**The limits.** Checked when you register: at most {MAX_STATEMENTS} statements
+written along the longest path, counting each loop body once, and a call chain
+at most {MAX_CALL_DEPTH} deep counting the entry point. Checked while it runs,
+because how often a loop turns is not known until then: a loop turns at most
+{MAX_LOOP_PASSES} times, and one call runs at most {MAX_EXECUTED_STATEMENTS}
+statements. Past either, the macro stops with `LOOP_LIMIT`, and what it already
+sent stays sent. A step number in the result is the written line; `(pass N)`
+says which turn of the loop around it."""
 
 
 # 연속값 권고. 거절이 아니라 관용구를 주는 것이라 `GRAMMAR` 밖에 둔다 — skill 파일도

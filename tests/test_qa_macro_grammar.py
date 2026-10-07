@@ -264,6 +264,7 @@ def test_the_macro_table_names_exactly_the_tools_a_macro_may_call() -> None:
             "read_macro",
             "register_macro",
             "run_macro",
+            "resume_macro",
             # phase cycle 의 tool 둘. 게임을 움직이지 않고 런이 어느 phase 에 있는지만
             # 옮긴다 — `decide_next_action` 은 `full` 에서만 나온다.
             "skip_memory_update",

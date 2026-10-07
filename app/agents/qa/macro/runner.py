@@ -29,10 +29,18 @@ batch 하나에 대응시켜야 "이 statement 는 안 나갔다" 는 말이 참
 판단에 쓰는 값은 `MacroHost.run` 이 내는 `ActionOutcome` 이다. 문장이 아니라 **문장이
 되기 전의 데이터**를 받는다.
 
-**상한은 세지 않는다.** statement 총수 128 과 호출 깊이 3 은 `register_macro` 가 저장
-시점에 정적으로 판정해, 넘는 macro 를 아예 등록하지 않는다. 그래서 여기에는 상한에
-걸려 멈추는 경로도 그 전용 코드도 없다. 저장 때 잡는 것이 런타임에 잡는 것보다 언제나
-낫다.
+**상한의 반은 여기서 센다.** 호출 깊이 3 과 적힌 길이 128 은 `register_macro` 가 저장
+시점에 판정한다. 반복(ARTEL-948)은 몇 번 돌지 저장 때 모르므로, 실행된 양은 여기서
+센다 — 반복 하나당 `MAX_LOOP_PASSES` 회, macro 전체에서 `MAX_EXECUTED_STATEMENTS` 개.
+넘으면 `LOOP_LIMIT` 로 멈춘다. 앞서 이 자리는 "저장 때 잡는 것이 언제나 낫다" 였는데,
+반복이 들어오면 그 근거가 성립하지 않는다 — 셀 수가 없다. 그 대가로 상한에 걸린
+macro 는 이미 나간 action 을 되돌리지 못한다.
+
+**`checkpoint` 에서 턴을 돌려준다(ARTEL-949).** runner 는 그 자리에서 `MacroHost.checkpoint`
+를 기다린다. host 는 거기까지의 결과를 agent 에게 보내고, agent 가 잇겠다고 할 때까지
+돌아오지 않는다. 묶인 이름·호출 사슬·반복의 위치가 전부 이 coroutine 안에 그대로 살아
+있으므로, 이어 돌면 처음이 아니라 그 줄부터 돈다. 멈춰 있는 동안 아무것도 안 보내므로
+게임을 모는 쪽은 언제나 하나다.
 
 **세는 것만 편다, 실행은 안 편다.** helper 호출은 펼치지 않고 호출로 돈다. `step N of M`
 은 `def` 마다 1부터 세고, payload 가 어느 `def` 의 몇 번인지와 호출 사슬을 함께 싣는다.
@@ -50,6 +58,7 @@ from app.agents.qa.macro.binding import (
     evaluate,
     read_to_bind,
     resolve_find,
+    resolve_find_all,
     resolve_target,
 )
 from app.agents.qa.macro.errors import (
@@ -58,16 +67,25 @@ from app.agents.qa.macro.errors import (
     REQUIRE_FAILED,
     SCENE_MISMATCH,
     SCREEN_UNCHANGED,
+    LOOP_LIMIT,
     MacroFailure,
 )
-from app.agents.qa.macro.grammar import TOOLS_BY_NAME, ToolParameter, ToolSpec
+from app.agents.qa.macro.grammar import (
+    MAX_EXECUTED_STATEMENTS,
+    MAX_LOOP_PASSES,
+    TOOLS_BY_NAME,
+    ToolParameter,
+    ToolSpec,
+)
 from app.agents.qa.macro.model import (
     MacroActionStatement,
     MacroAskVerdictStatement,
     MacroAssignStatement,
+    MacroCheckpointStatement,
     MacroDefinition,
     MacroFindValue,
     MacroFlagStatement,
+    MacroForStatement,
     MacroFunction,
     MacroHelperCallStatement,
     MacroIfStatement,
@@ -77,6 +95,7 @@ from app.agents.qa.macro.model import (
     MacroRequireStatement,
     MacroSelectorValue,
     MacroStatement,
+    MacroWhileStatement,
 )
 from app.qa.acting import ActionOutcome, PressLanding, ScreenChange
 from app.qa.envelope import JsonRpcAction
@@ -120,6 +139,14 @@ class MacroHost(Protocol):
 
     def memories(self) -> MacroMemories: ...
 
+    async def checkpoint(self, result: "MacroRunResult") -> bool:
+        """`checkpoint` 에서 턴을 돌려주고, agent 가 정할 때까지 기다린다.
+
+        `result` 는 거기까지의 장부이고 `paused_at` 이 찬 채로 온다. 이으면 `True`, 그만두면
+        `False` 다. 그만두면 runner 는 아무것도 더 안 보낸다.
+        """
+        ...
+
 
 @dataclass(frozen=True)
 class MacroPlace:
@@ -132,9 +159,20 @@ class MacroPlace:
     function: str
     number: int
     total: int
+    # 감싼 반복마다 몇 회째인가. 바깥이 앞이고, 반복 밖이면 빈 tuple 이다.
+    #
+    # `number` 와 `total` 은 **적힌** 위치로 둔다. agent 가 고치는 것은 적힌 줄이라, 실행된
+    # 순번은 줄을 못 가리킨다. 반복 안의 statement 는 여러 번 돌므로 그 중 몇 번째인지를
+    # 여기 붙인다. 실행된 총수는 `MacroRunResult.executed` 가 따로 든다.
+    passes: tuple[int, ...] = ()
 
     def __str__(self) -> str:
-        return f"{self.function} step {self.number} of {self.total}"
+        written = f"{self.function} step {self.number} of {self.total}"
+        if not self.passes:
+            return written
+        if len(self.passes) == 1:
+            return f"{written} (pass {self.passes[0]})"
+        return f"{written} (passes {', '.join(str(one) for one in self.passes)})"
 
 
 @dataclass(frozen=True)
@@ -177,10 +215,18 @@ class MacroRunResult:
     # 멈춘 자리와 그 자리까지의 호출 사슬.
     stopped_at: MacroPlace | None = None
     chain: list[MacroPlace] = field(default_factory=list)
+    # 실행된 statement 수. 반복이 있으면 적힌 수와 다르다.
+    executed: int = 0
+    # `checkpoint` 에서 턴을 돌려준 자리와 그 이유. 이어 돌면 다시 비운다.
+    paused_at: MacroPlace | None = None
+    paused_reason: str = ""
+    # agent 가 `checkpoint` 에서 그만두기로 한 자리. 실패가 아니다.
+    abandoned_at: MacroPlace | None = None
 
     @property
     def passed(self) -> bool:
-        return self.failure is None
+        """끝까지 갔나. 실패해도, `checkpoint` 에서 그만둬도 아니다."""
+        return self.failure is None and self.abandoned_at is None
 
 
 # --- 번호 ---------------------------------------------------------------------
@@ -198,12 +244,20 @@ def numbered(statements: tuple[MacroStatement, ...], start: int = 1) -> list[tup
         number = next_number
         next_number += 1
         flat.append((number, statement))
-        if isinstance(statement, MacroIfStatement):
-            for inner in (statement.body, statement.orelse):
-                nested = numbered(inner, next_number)
-                flat.extend(nested)
-                next_number += len(nested)
+        for inner in _bodies(statement):
+            nested = numbered(inner, next_number)
+            flat.extend(nested)
+            next_number += len(nested)
     return flat
+
+
+def _bodies(statement: MacroStatement) -> tuple[tuple[MacroStatement, ...], ...]:
+    """statement 가 품은 몸통들. 번호를 매기고 범위를 잴 때 같은 순서로 내려간다."""
+    if isinstance(statement, MacroIfStatement):
+        return (statement.body, statement.orelse)
+    if isinstance(statement, (MacroForStatement, MacroWhileStatement)):
+        return (statement.body,)
+    return ()
 
 
 class _Frame:
@@ -221,10 +275,21 @@ class _Frame:
         self.skipped: set[int] = set()
         # 지금 처리 중인 번호. `pending` 의 경계가 이 값이다.
         self.at = 0
+        # 지금 안에 서 있는 반복마다, 그 몸통이 차지하는 번호와 지금 몇 회째인가. 바깥이
+        # 앞이다.
+        self.loops: list[tuple[set[int], int]] = []
 
     def place(self, number: int) -> MacroPlace:
+        """번호 하나의 자리. 그 번호를 품은 반복의 회만 붙인다.
+
+        지금 서 있는 회를 번호와 상관없이 붙이면, 멈춘 자리 뒤의 `pending` 이 반복 **밖**
+        의 줄인데도 `(pass 2)` 를 단다 — 그 줄은 몇 회째의 것이 아니다.
+        """
         return MacroPlace(
-            function=self.function.name, number=number, total=self.total
+            function=self.function.name,
+            number=number,
+            total=self.total,
+            passes=tuple(turn for span, turn in self.loops if number in span),
         )
 
     def number_of(self, statement: MacroStatement) -> int:
@@ -321,6 +386,7 @@ class _Runner:
                 "skipped": [str(one) for one in self.result.skipped],
                 "flags": [one.message for one in self.result.flags],
                 "verdict_requests": [one.expected for one in self.result.verdict_requests],
+                "executed": self.result.executed,
             }
         )
 
@@ -350,6 +416,22 @@ class _Runner:
     ) -> bool:
         place = frame.place(number)
         try:
+            self.result.executed += 1
+            if self.result.executed > MAX_EXECUTED_STATEMENTS:
+                raise MacroFailure(
+                    LOOP_LIMIT,
+                    f"this macro has run {MAX_EXECUTED_STATEMENTS} statements, the most "
+                    "one call may run, and was about to run more. Nothing after this "
+                    "was sent. Loops inside loops multiply — check that each loop "
+                    "really ends.",
+                    {"executed": MAX_EXECUTED_STATEMENTS},
+                )
+            if isinstance(statement, MacroForStatement):
+                return await self._for(frame, place, statement)
+            if isinstance(statement, MacroWhileStatement):
+                return await self._while(frame, place, statement)
+            if isinstance(statement, MacroCheckpointStatement):
+                return await self._checkpoint(frame, place, statement)
             if isinstance(statement, MacroAssignStatement):
                 self._assign(frame, statement)
                 return True
@@ -460,6 +542,130 @@ class _Runner:
             return await self._statements(frame, going)
         finally:
             self.observed.pop()
+
+    async def _for(
+        self, frame: _Frame, place: MacroPlace, statement: MacroForStatement
+    ) -> bool:
+        """도는 대상을 들어설 때 한 번 정하고, 각 회에 이름을 다시 bind 한다.
+
+        `find_all` 을 회마다 다시 풀지 않는다. 몸통이 손패를 바꿀 때마다 도는 대상이
+        바뀌면 한 장을 두 번 내거나 한 장도 안 낼 수 있다.
+        """
+        iterable = statement.iterable
+        if iterable.kind == "find_all":
+            items: list[Any] = resolve_find_all(
+                self.memories(), frame.scope, iterable.find
+            )
+            what = f"find_all matched {len(items)} objects"
+        else:
+            count = (
+                iterable.count.value
+                if iterable.count is not None
+                else frame.scope.value(iterable.name)
+            )
+            # Python 의 `range` 와 같게 음수는 0 회다.
+            items = list(range(max(int(count), 0)))
+            what = f"range was asked for {len(items)} passes"
+        if len(items) > MAX_LOOP_PASSES:
+            raise MacroFailure(
+                LOOP_LIMIT,
+                f"`{statement.source}` would turn {len(items)} times ({what}), and a "
+                f"loop turns at most {MAX_LOOP_PASSES}. Nothing in the loop was sent. "
+                "Narrow it with `under=` or `label=`, or split the work.",
+                {"passes": len(items), "limit": MAX_LOOP_PASSES},
+            )
+        return await self._passes(
+            frame, statement, ((statement.name, item) for item in items), None
+        )
+
+    async def _while(
+        self, frame: _Frame, place: MacroPlace, statement: MacroWhileStatement
+    ) -> bool:
+        """매 회 전에 조건을 다시 읽는다. 상한 회수를 돌고도 참이면 멈춘다."""
+        return await self._passes(frame, statement, None, statement)
+
+    async def _passes(
+        self,
+        frame: _Frame,
+        loop: MacroForStatement | MacroWhileStatement,
+        bindings: Iterator[tuple[str, Any]] | None,
+        guard: MacroWhileStatement | None,
+    ) -> bool:
+        """`for` 와 `while` 이 같이 쓰는 회의 장부.
+
+        회가 바뀔 때마다 이 몸통 안의 `skipped` 표시를 지운다. 지난 회에 거짓이던 `if`
+        가 이번 회에는 아직 판정되지 않았으므로, 남겨 두면 실패 지점 뒤의 그 분기가
+        `pending` 에서 빠져 "원래 안 가는 것" 으로 읽힌다.
+        """
+        loop_number = frame.number_of(loop)
+        span = set(_spanned(loop.body, frame))
+        frame.loops.append((span, 0))
+        passes = 0
+        try:
+            while True:
+                observed: dict[str, Any] = {}
+                if guard is not None:
+                    if not evaluate(self.memories(), frame.scope, guard.condition, observed):
+                        break
+                    if passes == MAX_LOOP_PASSES:
+                        frame.at = loop_number
+                        raise MacroFailure(
+                            LOOP_LIMIT,
+                            f"`{guard.source}` was still true after {MAX_LOOP_PASSES} "
+                            "passes, the most a loop may turn. Nothing after this was "
+                            "sent. Either the game never made the condition false, or "
+                            "the condition is not the one that changes — observe the "
+                            "screen to tell which.",
+                            {
+                                "passes": MAX_LOOP_PASSES,
+                                "observed": _printable(observed),
+                            },
+                        )
+                else:
+                    assert bindings is not None
+                    taken = next(bindings, None)
+                    if taken is None:
+                        break
+                    frame.scope.bind(*taken)
+                passes += 1
+                frame.loops[-1] = (span, passes)
+                frame.skipped -= span
+                self.observed.append(observed)
+                try:
+                    if not await self._statements(frame, loop.body):
+                        return False
+                finally:
+                    self.observed.pop()
+        finally:
+            frame.loops.pop()
+        frame.at = loop_number
+        if passes == 0:
+            # 한 회도 안 돈 몸통은 `if` 의 거짓인 가지와 같다. 실패가 아니고, 원래 안 간다.
+            for number in sorted(span):
+                frame.skipped.add(number)
+                self.result.skipped.append(frame.place(number))
+        return True
+
+    async def _checkpoint(
+        self, frame: _Frame, place: MacroPlace, statement: MacroCheckpointStatement
+    ) -> bool:
+        """턴을 돌려주고 agent 의 답을 기다린다. 실패가 아니다.
+
+        기다리는 동안의 `pending` 은 이 자리 뒤의 것이다. 이어 돌면 비운다 — 끝났을 때의
+        `pending` 은 끝난 자리가 정한다.
+        """
+        self.result.paused_at = place
+        self.result.paused_reason = statement.reason
+        self.result.pending = self.pending()
+        go_on = await self.host.checkpoint(self.result)
+        self.result.paused_at = None
+        self.result.paused_reason = ""
+        if go_on:
+            self.result.pending = []
+            return True
+        self.result.abandoned_at = place
+        self.result.chain = self.chain()
+        return False
 
     async def _helper(
         self, frame: _Frame, statement: MacroHelperCallStatement
@@ -600,9 +806,8 @@ def _spanned(statements: tuple[MacroStatement, ...], frame: _Frame) -> list[int]
     numbers: list[int] = []
     for statement in statements:
         numbers.append(frame.number_of(statement))
-        if isinstance(statement, MacroIfStatement):
-            numbers.extend(_spanned(statement.body, frame))
-            numbers.extend(_spanned(statement.orelse, frame))
+        for inner in _bodies(statement):
+            numbers.extend(_spanned(inner, frame))
     return sorted(numbers)
 
 

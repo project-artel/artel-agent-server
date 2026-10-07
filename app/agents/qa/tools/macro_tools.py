@@ -38,6 +38,7 @@ from app.agents.qa.macro.errors import MacroFailure, MacroRejection
 from app.agents.qa.macro.grammar import DECLARABLE_TYPE_NAMES, MacroType
 from app.agents.qa.macro.model import MacroDefinition, MacroParameter
 from app.agents.qa.macro.parser import macro_definition_from_source
+from app.agents.qa.macro.session import MacroSession
 from app.agents.qa.macro.runner import (
     MacroPlace,
     MacroRunResult,
@@ -107,13 +108,28 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         `run` 은 모델이 읽는 문장만 내므로, 그것으로는 문장을 다시 파싱하는 수밖에 없다.
         """
 
+        def __init__(self, session: MacroSession) -> None:
+            self.session = session
+
         async def run(self, actions, summary: str, step: int) -> ActionOutcome:
             return await ctx.act(actions, summary, step)
 
         def memories(self) -> MacroMemories:
             return MacroMemories(scene=channel.scene)
 
-    host = _Host()
+        async def checkpoint(self, result: MacroRunResult) -> bool:
+            # 턴을 돌려주는 자리다. `run_macro` 나 `resume_macro` 가 `settle` 로 이것을
+            # 알아채고 답을 돌려준 뒤, agent 가 `resume_macro` 를 부를 때까지 여기 선다.
+            return await self.session.pause(result)
+
+    async def _drive(session: MacroSession) -> str:
+        """macro 가 멈춰 서거나 끝날 때까지 기다리고, 그 자리를 글로 낸다.
+
+        멈췄으면 그 session 을 런의 상태에 둔다. `resume_macro` 가 거기서 찾는다.
+        """
+        result, paused = await session.settle()
+        state.paused_macro = session if paused else None
+        return ctx.answer(_render(result), channel.drain_operator_messages())
 
     def _standing_screen() -> str:
         """등록하는 순간 agent 가 서 있는 `screen.id`. 모르면 빈 문자열.
@@ -464,6 +480,14 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         macro_name = (name or "").strip()
         if not macro_name:
             return "`name` must say which macro to call, so nothing was sent to the game."
+        if state.paused_macro is not None:
+            # 둘을 같이 두면 게임을 모는 쪽이 둘이 된다. 멈춘 것을 먼저 정리하게 한다.
+            paused = state.paused_macro
+            return (
+                f"{paused.name} is paused at a checkpoint, so nothing was sent. Call "
+                "`resume_macro` first — `proceed: true` carries it on from where it "
+                "stopped, `proceed: false` drops it without sending anything else."
+            )
 
         registered = state.macros.registered(macro_name)
         if registered is None and state.macros.draft(macro_name) is not None:
@@ -492,13 +516,35 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
             # 게임에 아무것도 보내기 전이다. 첫 statement 를 처리하기 전에 끝난다.
             return problem
 
-        result = await execute_macro(host, definition, bound, step)
-        return ctx.answer(_render(result), channel.drain_operator_messages())
+        session = MacroSession(macro_name, step)
+        session.start(execute_macro(_Host(session), definition, bound, step))
+        return await _drive(session)
+
+    @tool(description=load_tool_description("resume_macro").body)
+    @_answers_instead_of_raising
+    async def resume_macro(step: int, thought: str, proceed: bool = True) -> str:
+        # What the agent reads is `qa_run/<version>/tool_resume_macro.md`, not this.
+        session = state.paused_macro
+        if session is None:
+            return (
+                "No macro is paused at a checkpoint, so there is nothing to resume. "
+                "`run_macro` starts one."
+            )
+        if step != session.step:
+            # macro 하나가 시나리오 step 하나에 속한다. 이어 도는 action 도 그 step 에
+            # 적히므로, 다른 step 으로 이으라는 말은 받지 않는다.
+            return (
+                f"{session.name} was called for scenario step {session.step}, so it "
+                f"resumes as step {session.step}, not {step}. Nothing was sent."
+            )
+        state.paused_macro = None
+        session.resume(proceed)
+        return await _drive(session)
 
     # `@tool` 이 이름을 함수에서 가져가므로 tool 이 자기 이름과 어긋난 문자열 아래
     # 등록될 일이 없다. 그래서 runner 의 같은 이름 함수를 `execute_macro` 로 받는다 —
     # 뒤에서 `.name` 을 고치면 langchain 이 함수에서 떠낸 argument schema 와 어긋난다.
-    return [write_macro, edit_macro, read_macro, register_macro, run_macro]
+    return [write_macro, edit_macro, read_macro, register_macro, run_macro, resume_macro]
 
 
 def _known(state: QaRunState) -> set[str]:
@@ -650,7 +696,22 @@ def _mismatch(where: str, declared: MacroType, value: Any) -> str:
 def _render(result: MacroRunResult) -> str:
     """단계별 결과. 어디까지 갔는지가 이 글의 중심이다."""
     lines: list[str] = []
-    if result.failure is None:
+    if result.paused_at is not None:
+        # 실패가 아니다. 저자가 "여기서 한 번 보고 가라" 고 찍은 자리다.
+        reason = f" — {result.paused_reason}" if result.paused_reason else ""
+        lines.append(
+            f"{result.name} PAUSED at a checkpoint, {result.paused_at}{reason}. This is "
+            "not a failure: the macro's author asked you to look here before it goes "
+            "on. Nothing more is sent until you call `resume_macro` — `proceed: true` "
+            "carries it on from this line with everything it bound, `proceed: false` "
+            "stops it here."
+        )
+    elif result.abandoned_at is not None:
+        lines.append(
+            f"{result.name} stopped at the checkpoint {result.abandoned_at}, as you "
+            "asked. This is not a failure, and nothing after the checkpoint was sent."
+        )
+    elif result.failure is None:
         lines.append(
             f"{result.name} ran to the end. "
             f"{len(result.applied)} action(s) reached the game."
@@ -680,8 +741,17 @@ def _render(result: MacroRunResult) -> str:
             lines.append(f"The value that arrived there: {arrived}")
 
     lines.append(_places("Reached the game", result.applied))
-    lines.append(_places("Did NOT reach the game", result.pending))
-    lines.append(_places("Skipped by an `if`", result.skipped))
+    not_yet = "Not sent yet" if result.paused_at is not None else "Did NOT reach the game"
+    lines.append(_places(not_yet, result.pending))
+    lines.append(_places("Skipped by an `if` or a loop that ran no passes", result.skipped))
+    if any(place.passes for place in result.applied + result.pending):
+        # 반복이 있으면 번호는 적힌 줄이고, 몇 회째인지는 괄호에 있다. `pending` 은 적힌
+        # 줄을 한 번씩만 든다 — 반복의 남은 회는 거기 따로 안 적힌다.
+        lines.append(
+            f"{result.executed} statement(s) ran in all. A step number is the written "
+            "line; `(pass N)` says which turn of the loop around it. A loop's remaining "
+            "passes are not listed one by one."
+        )
 
     if result.outcomes:
         lines.append("What the game said:")
@@ -698,6 +768,14 @@ def _render(result: MacroRunResult) -> str:
             f"NEEDS A VERDICT — scenario step {asked.step}, asked at {asked.place}. "
             f"Expected: {asked.expected}.{_observed(asked.observed)} Judge it yourself "
             "and call `report_step`."
+        )
+    if len(result.verdict_requests) > 1:
+        # 반복 안의 `ask_verdict` 는 회마다 선다. 판정할 step 은 하나다 — macro 를 부른
+        # step 이다. 회마다 따로 판정하라는 뜻으로 읽히면 같은 step 을 여러 번 보고한다.
+        lines.append(
+            f"These {len(result.verdict_requests)} requests are all about scenario step "
+            f"{result.verdict_requests[0].step}: read them together and answer that step "
+            "with one `report_step`."
         )
     return "\n".join(line for line in lines if line)
 

@@ -43,6 +43,12 @@ SCREEN_UNCHANGED = "SCREEN_UNCHANGED"
 # macro 가 도는 동안 operator 가 말을 걸었다. 게임의 잘못도 macro 의 잘못도 아니라
 # 둘 중 어느 코드로도 낼 수 없다. step 을 실패로 적지 않는다.
 OPERATOR_INTERRUPTED = "OPERATOR_INTERRUPTED"
+# 반복이 상한에 닿았다 — `while` 의 조건이 50 회째에도 참이었거나, `for` 가 돌 것이
+# 50 개를 넘었거나, macro 가 실행한 statement 가 1000 개를 넘었다. `REQUIRE_FAILED` 와
+# 가른다. 그쪽은 저자가 적은 조건이 거짓이었다는 말이고, 이쪽은 저자가 기다린 변화가
+# 정해진 회수 안에 안 왔다는 말이다. 게임이 안 바뀐 것인지 조건을 잘못 적은 것인지는
+# agent 가 정한다.
+LOOP_LIMIT = "LOOP_LIMIT"
 
 RUNTIME_CODES = (
     REQUIRE_FAILED,
