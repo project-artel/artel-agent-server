@@ -83,6 +83,20 @@ class UncoveredCases(BaseModel):
     scenes: list[UncoveredScene] = Field(default_factory=list)
 
 
+class SavedScenario(BaseModel):
+    """저쪽이 이번 제출로 저장한 시나리오 하나 (ARTEL-937).
+
+    하나를 냈는데 검수가 둘로 나눌 수 있고, 같은 제목이면 새로 만들지 않고 기존 것을 고친다.
+    그래서 무엇을 새로 만들고 무엇을 고쳤는지는 우리가 낸 `scenario_id` 가 아니라 이것을 믿는다.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    scenario_id: int = Field(alias="scenarioId")
+    title: str
+    created: bool
+
+
 class ScenarioAccepted(BaseModel):
     """시나리오 하나를 넘긴 것에 대한 저쪽의 답.
 
@@ -104,6 +118,8 @@ class ScenarioAccepted(BaseModel):
     absorbed: list[str] = Field(default_factory=list)
     kept: list[str] = Field(default_factory=list)
     detail: str | None = None
+    # 이번 제출로 저장한 것(ARTEL-937). 옛 서버는 안 보내므로 비어 있을 수 있다.
+    saved: list[SavedScenario] = Field(default_factory=list)
 
 
 class ScenarioPath(BaseModel):
@@ -336,8 +352,12 @@ class ScenarioChannel:
             self._search_waiter = None
             self._pending_search_id = None
 
-    async def report(self, stage: str) -> None:
+    async def report(self, stage: str, done: int | None = None, total: int | None = None) -> None:
         """Say where the turn is. Fire-and-forget: nothing waits for an answer.
+
+        `done`/`total` 은 셀 수 있는 노드에만 붙는다(문장 쓰기의 묶음 n/N). 한 줄로 "3/7" 을
+        말할 수 있어야 그 구간이 **움직이고 있다**는 것이 보인다 — 실측(run 87)에서 문장 쓰기
+        한 묶음이 29~54초였고, 그 사이 프레임이 하나도 없으면 멈춘 것과 같아 보였다.
 
         The far side sees every tool call as a frame, but not the model turns in
         between — and those are most of the wall clock. Without this, a turn that
@@ -348,8 +368,13 @@ class ScenarioChannel:
         and a socket that has gone away will fail again on the result frame, where
         the failure actually means something.
         """
+        frame: dict[str, object] = {"type": "progress", "stage": stage}
+        if done is not None:
+            frame["done"] = done
+        if total is not None:
+            frame["total"] = total
         try:
-            await self._send({"type": "progress", "stage": stage})
+            await self._send(frame)
         except Exception:  # noqa: BLE001 - see docstring
             logger.debug("[scenario] progress frame dropped (%s)", stage, exc_info=True)
 

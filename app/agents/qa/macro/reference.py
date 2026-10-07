@@ -1,6 +1,6 @@
 """`grammar.py` 가 받는 것을 글로 조립한다. 모델이 읽는 글은 아니다.
 
-모델이 읽는 것은 `app/prompts/qa_run/v18/skill_macro.md` 다. prompt 는 데이터로
+모델이 읽는 것은 `app/prompts/qa_run/v19/skill_macro.md` 다. prompt 는 데이터로
 버전 디렉터리에 살고 `prompts-lock.json` 이 그 본문을 해시하므로, 코드가 런타임에
 조립한 글로 대신할 수 없다 — 해시할 파일이 없어진다.
 

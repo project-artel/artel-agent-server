@@ -9,13 +9,20 @@ import asyncio
 
 import pytest
 
-from app.agents.qa.arch import default_resolved_arch
+from app.agents.qa.arch import (
+    PhaseCycleMode,
+    QaArchSpec,
+    VisionMode,
+    default_resolved_arch,
+    resolve_arch,
+)
 from app.agents.qa.tools import macro_tools
 from app.agents.qa.macro.errors import COMPARISON_REJECTED, MACRO_NODE_REJECTED
 from app.agents.qa.macro.grammar import TOOL_NAMES
 from app.agents.qa.tools import QaRunState, build_tools
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import MessageType
+from app.llm.models import LLMModel
 from app.qa.pulse import PulseReading
 
 SIMPLE = '''def deal_a_card(card: object) -> None:
@@ -23,6 +30,10 @@ SIMPLE = '''def deal_a_card(card: object) -> None:
     slot: object = selector("Root[0]/Canvas[1]/Slot[4]")
     drag(card, slot)
 '''
+
+
+async def _discard(frame: dict) -> None:
+    return None
 
 
 def make(total_steps: int = 3, timeout: float = 0.05):
@@ -893,7 +904,17 @@ def test_every_macro_tool_body_is_guarded_against_a_leaking_exception() -> None:
     이름과 argument schema 가 그대로인 것은 `tests/test_qa_arch.py` 의 fingerprint pin
     이 따로 지킨다 — langchain 이 `__wrapped__` 를 따라가 서명을 떠내기 때문이다.
     """
-    _, _, tools, _ = make()
+    # phase cycle 을 끄고 만든다. 켜면 `tools/__init__.py` 의 `_phase_gated` 가 모든 tool
+    # 을 `guarded` 로 한 겹 더 감싸는데, 그 wrapper 는 `__wrapped__` 를 안 남겨서 맨 바깥만
+    # 보이고 그 안의 이 guard 는 안 보인다. 재려는 것은 macro 본문의 guard 다.
+    channel = QaRunChannel(qa_try_id=9, send=_discard, action_timeout=0.05, write_timeout=0.05)
+    without_phases = resolve_arch(
+        QaArchSpec(vision=VisionMode.on, phase_cycle=PhaseCycleMode.off), LLMModel.gpt_6_luna
+    )
+    tools = {
+        one.name: one
+        for one in build_tools(channel, QaRunState(total_steps=3), without_phases)
+    }
 
     for name in ("write_macro", "edit_macro", "read_macro", "register_macro", "run_macro"):
         assert tools[name].coroutine.__code__.co_name == "answering", name

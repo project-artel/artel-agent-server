@@ -121,7 +121,49 @@ from app.llm.models import LLMModel, get_model_spec
 # the observation and the click. Three tool names and four tool schemas moved, so
 # the fingerprint moves with the label here.
 #
-# v6 because the agent can now read its skills on demand: with `skills=on_demand`
+# v6 because `phase_cycle` (below) changes the tool set and a tool schema at every
+# value except its default. `in_verdict` gives `report_step` two more arguments,
+# `capability_key` and `learned`; `lite` puts the run behind a phase state machine
+# and adds `skip_memory_update`; `full` adds `decide_next_action` on top. Each of
+# those is a change of shape under the rule in AGENTS.md. The arms are named in
+# `QaArchSpec.label`, not here, because one deployment runs all four.
+#
+# The bump is NOT optional even though the default is `off`, and even though the
+# default run's tools, tool schemas, middleware list and every other knob are
+# provably where they were. One field added to `QaArchSpec` puts one key into
+# `arch.model_dump()`, and `arch_fingerprint` hashes that dump — so the digest of
+# EVERY structure moves, `off` included. Measured: the pinned default structure
+# hashed `83bc272fee58` before this field and `7235b9a26d43` after it, with nothing
+# else touched. `screen_capture` (ARTEL-868) was the same case and did not bump
+# the label, on the argument that the default run's shape had not moved. That
+# argument does not reach here: at three of this field's four values the default
+# run's shape does move, and a label that named only the `off` shape would leave
+# `lite` and `full` filed under the name of the free tool loop they replace.
+#
+# v7 because the default moved from `off` to `lite`, so every run that names
+# nothing gets the shape v6 described as opt-in: 38 tools instead of 37
+# (`skip_memory_update` joins), `report_step` carrying `capability_key` and
+# `learned`, the phase state machine refusing out-of-phase calls, and three more
+# system prompt roles. The fingerprint moves with it.
+#
+# Moved on the record it leaves, not on the score. Over 16 L1 runs on 2026-09-18,
+# 8 per arm, `lite` agreed with the answer key on 19.1 of 24 steps against `off`'s
+# 18.3 — ranges 16-21 and 12-21, which overlap, so that gap is not a result. What
+# is not close: `lite` left 105 `learned` lines and 10 `capability_key` citations,
+# `off` left 0 of each, for 13% more cost ($9.89 against $8.76). An `off` run
+# finishes knowing exactly what it knew when it started.
+#
+# **Those runs used an older phase table than the one `phase.py` now holds.** They
+# were measured with `ACT` as the only repeating phase; `OBSERVE` and
+# `UPDATE_MEMORY` repeat as well now, which removes refusals the measured arm
+# paid for. The direction of that change is known — strictly fewer refusals, so
+# `lite` costs less and is interrupted less than the numbers above say — but the
+# size is not, because it has not been run. The honest reading is that the
+# measurement supports "`lite` does not score worse and writes things down", and
+# that its cost and refusal figures are an upper bound rather than a reading of
+# this table.
+#
+# v8 because the agent can now read its skills on demand: with `skills=on_demand`
 # a `load_skill` tool joins the tool set, and the long sections of the system
 # prompt (knowledge base, content map, held state) leave it and are read through
 # that tool instead of being resent on every turn. Plan:
@@ -131,28 +173,39 @@ from app.llm.models import LLMModel, get_model_spec
 # gained a key (see the v4 note above); the tool set and the middleware list of
 # the default run did not change. The label moves anyway because the structure now
 # has two shapes and a run must say which side of that axis it was filed on.
-QA_ARCH_LABEL = "v8-macros"
-
-# The two labels above and this one were all written off `develop` at e63fc47 and
-# none of them knows about the others. `develop` has since shipped
-# `v6-phase-cycle` and `v7-phase-cycle-default` (ARTEL-952 and the commits around
-# it), and the branch this one sits on claims `v6-skills-on-demand`. So **two
-# structures currently answer to `v6` and two to `v7` across these branches**,
-# which is the failure the module docstring names. This label is `v8` to leave
-# `develop`'s two alone; `v6-skills-on-demand` below still has to be renumbered
-# when that branch rebases, and nothing here can do that for it.
 #
-# v8 because the model now has five macro tools — `write_macro`, `edit_macro`,
+# This shape was written as `v6-skills-on-demand` on a branch that grew alongside
+# the phase cycle, and develop took v6 and v7 for the phase cycle first. No run
+# outside local measurement was filed under that name, so it is renumbered to v8
+# rather than kept, and v6 keeps meaning the phase cycle. The two axes are
+# independent: `skills` and `phase_cycle` can be set in any combination, and the
+# phase gate never refuses `load_skill`, because a skill is needed at the moment it
+# applies, which can be any phase.
+#
+# Folding loaded skills is part of the same `on_demand` shape, not a new one. With
+# `skills=on_demand` and the `fold_stale_skills` knob on, a middleware of the same
+# name keeps the newest loaded skill in full and replaces older ones with a note
+# naming the skill to load again (`app/agents/qa/context.py`). It landed together
+# with the `skills` axis, so no run was filed under this label without it. The
+# default fingerprint moves only because `arch.model_dump()` gained the
+# `skills` and `fold_stale_skills` keys; with `skills=off` the middleware list is
+# unchanged.
+#
+# v9 because the model now has five macro tools — `write_macro`, `edit_macro`,
 # `read_macro`, `register_macro`, `run_macro` — and can send a whole sequence of
 # actions in one call instead of one action per turn (ARTEL-914). Five tool schemas
 # appeared, so `arch_fingerprint` moves on its own here.
 #
 # The macro grammar does NOT ride on those five descriptions. Each is under the
 # 500-character cap `validate_prompts` enforces, and the grammar and the two
-# worked examples sit in `qa_run/v18/skill_macro.md`, read through `load_skill`
+# worked examples sit in `qa_run/v19/skill_macro.md`, read through `load_skill`
 # when the skills axis is `on_demand` and inlined into the system prompt when it
 # is `off`. So the macro text costs a turn only when the model asks for it, which
 # is the whole point of the axis above.
+#
+# This was `v8-macros` until the branch underneath renumbered itself to
+# `v8-skills-on-demand` (above). No run was filed under `v8-macros`.
+QA_ARCH_LABEL = "v9-macros"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
@@ -246,6 +299,68 @@ class ScreenCaptureMode(StrEnum):
     by_role = "by_role"
 
 
+class PhaseCycleMode(StrEnum):
+    """How much of `OBSERVE -> DECIDE -> ACT -> VERIFY -> UPDATE_MEMORY` the run is held to.
+
+    Not a bool, because the four values are a cost ladder measured in extra model
+    calls per step: 0, 0, +1, +2. A bool cannot express "ask the same question
+    without spending a round trip on it", and that is the rung worth measuring
+    first — if it works, the two expensive ones need not be bought at all.
+
+    ``off`` is the free tool loop every run has done until now, and its being the
+    default is a condition rather than a preference. ARTEL-667 sent the run back
+    once from `finish_run` and eighteen tests that close a run broke; this axis
+    sends it back at every step. Every test that does not name a value here has to
+    keep costing exactly the round trips it costs today.
+
+    ``remember_in_verdict`` spends no extra model call: `report_step` takes
+    `capability_key` and `learned`, so the `UPDATE_MEMORY` question is answered in
+    the same turn as the verdict. What it addresses is measured — 27 stage runs on
+    prompt v15 made 1,566 tool calls, of which `record_capability_verdict`,
+    `record_new_capability` and `list_scene_capabilities` were called 0 times each,
+    with the prompt, the closing asks and the compaction ledger all asking for them
+    in words. An argument is not another sentence.
+
+    ``lite`` lifts `UPDATE_MEMORY` into a turn of its own behind a phase state
+    machine, which answers an out-of-phase call with a refusal in the tool result.
+    ``full`` adds `DECIDE` on top, at one more model call per step.
+
+    The refusal is a tool result and nothing else. Narrowing the tool list per call
+    — what `ModelRequest.override(tools=...)` allows — is deliberately not done:
+    tool declarations sit at the front of a request, so a list that rotates per
+    phase moves the prompt prefix every turn. Breaking that prefix in a weaker way
+    has been measured at cache reads of 1.3% against 97.3% and $14.22 against $0.87
+    for one run (ARTEL-868).
+    """
+
+    off = "off"
+    remember_in_verdict = "in_verdict"
+    lite = "lite"
+    full = "full"
+
+    @property
+    def remembers_in_verdict(self) -> bool:
+        """Whether `report_step` carries `capability_key` and `learned`.
+
+        True from `in_verdict` upwards. `lite` and `full` keep the arguments even
+        though they also have `skip_memory_update`: the two ask different things —
+        one is the verdict citing the row it checked, the other is the run saying
+        what it is leaving behind — and dropping the arguments at the upper rungs
+        would make `lite` minus `in_verdict` two changes instead of one.
+        """
+        return self is not PhaseCycleMode.off
+
+    @property
+    def gates_phases(self) -> bool:
+        """Whether out-of-phase tool calls are refused. `lite` and `full` only."""
+        return self in (PhaseCycleMode.lite, PhaseCycleMode.full)
+
+    @property
+    def decides_in_its_own_turn(self) -> bool:
+        """Whether `decide_next_action` is in the tool set. `full` only."""
+        return self is PhaseCycleMode.full
+
+
 class QaArchError(ValueError):
     """The requested structure cannot be built for the requested model."""
 
@@ -274,6 +389,13 @@ class QaArchSpec(BaseModel):
     max_issues_per_run: int = Field(default=MAX_ISSUES_PER_RUN, ge=0, le=1_000_000)
     vision: VisionMode = VisionMode.auto
     screen_capture: ScreenCaptureMode = ScreenCaptureMode.on_demand
+    # `off` is the compatibility value: at it the tool set, every tool schema, the
+    # middleware list and every other knob are what they were before this axis
+    # existed. It is no longer the default, so that shape has to be asked for by
+    # name now — including by a run pinned to a prompt version older than `v18`,
+    # which carries no `phase_directive` for the gate's refusals to rest on and is
+    # refused in `resolve_run_config` rather than gated in silence.
+    phase_cycle: PhaseCycleMode = PhaseCycleMode.lite
     # `off` keeps every skill inlined in the system prompt, as before. `on_demand`
     # moves the skills behind the `load_skill` tool, which then joins the tool set.
     skills: Literal["off", "on_demand"] = "off"
@@ -283,6 +405,11 @@ class QaArchSpec(BaseModel):
     # to turn off: what they fold is recovered by different tools out of
     # different budgets.
     fold_stale_knowledge: bool = True
+    # Folds every loaded skill but the newest, and only when `skills` is
+    # `on_demand`: with `off` the skills are in the system prompt and there is
+    # nothing loaded to fold. Separate from the two folds above because what it
+    # folds is recovered by a third tool, `load_skill`.
+    fold_stale_skills: bool = True
     # Compaction rewrites what the model reads once a run grows past a fraction of
     # its context, so a run with it and a run without it are two agents even with
     # the same tools. `None` defers to the deployment's own setting, which is what
@@ -355,9 +482,11 @@ class ResolvedArch(BaseModel):
     max_issues_per_run: int
     vision: bool
     screen_capture: ScreenCaptureMode
+    phase_cycle: PhaseCycleMode
     skills: Literal["off", "on_demand"]
     fold_stale_scenes: bool
     fold_stale_knowledge: bool
+    fold_stale_skills: bool
     compaction: bool
     compaction_trigger_fraction: float
     compaction_keep_messages: int

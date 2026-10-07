@@ -34,6 +34,28 @@ THINKING = "thinking"
 # 워크플로 C(문장 쓰기)·E(수정)의 노드 경계 보고 — 오케 AuthoringStage.WRITING 그대로.
 WRITING = "writing"
 
+# ── 워크플로 노드 (ARTEL-952) ─────────────────────────────────────────────────
+#
+# `THINKING` 은 루프 시절 값이다 — 모델 호출마다 울려서 "몇 바퀴 돌았나" 를 세는 용도였다.
+# 워크플로에는 바퀴가 없고 **노드가 있고, 각 노드가 끝나는 시점을 이쪽이 안다.**
+#
+# 실측(run 87 trace, 2026-10-06)이 왜 노드가 필요한지 보여 준다. 턴 하나에 진행 줄이 둘뿐이고
+# 그 사이가 이렇게 벌어졌다:
+#
+#     ▶ 턴을 보낸다        17:02:03
+#     (50.3초 침묵)        ← B 묶기·순서
+#     나눈다·메운다·검수·저장  17:02:53~54  (0.45초)
+#     (54.2초 침묵)        ← C 문장 쓰기, 묶음 하나
+#     나눈다·메운다·검수·저장  17:03:48     (0.34초)
+#     ◀ 답을 냈다          **없음** — 여기서 죽었다
+#
+# 104초 동안 두 줄이었고, 끝에서 죽은 것과 구분이 안 됐다.
+GROUPING = "grouping"        # B 시작 — 케이스를 묶고 순서를 잡는다
+GROUPED = "grouped"          # B 끝 — 묶음 몇 개가 나왔는지 수와 함께
+BRIDGING = "bridging"        # B 미니 루프 — 걷기 검증에서 어긋나 다시 묶는다
+SAVING = "saving"            # D — 제출·검수·저장
+MODIFYING = "modifying"      # E — 기존 시나리오를 고친다
+
 
 class ProgressCallback(AsyncCallbackHandler):
     """Reports each model turn on the authoring session's socket."""

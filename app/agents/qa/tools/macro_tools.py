@@ -1,6 +1,6 @@
 """성공한 action 순서를 macro 로 적어 두고 다시 부르는 tool 다섯.
 
-문구는 `app/prompts/qa_run/v18/tool_<name>.md` 다섯 파일에 있고, 문법과 예시와 수명주기
+문구는 `app/prompts/qa_run/v19/tool_<name>.md` 다섯 파일에 있고, 문법과 예시와 수명주기
 전체는 `skill_macro.md` 에 있다. 다섯 설명이 각각 500자 상한 아래라 매 호출마다 나가는
 글은 2.5KB 가 안 되고, 13KB 짜리 본문은 모델이 `load_skill("macro")` 를 부를 때만 간다.
 `app/agents/qa/macro/reference.py` 는 그 파일이 `grammar.py` 와 맞는지 재는 기준이다.

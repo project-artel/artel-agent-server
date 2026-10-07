@@ -50,6 +50,7 @@ SETTINGS_VERSION_KEYS: dict[str, str] = {
     "game_context": "game_context_prompt_version",
     "knowledge_query": "knowledge_query_prompt_version",
     "screen_verdict": "screen_verdict_prompt_version",
+    "screen_name": "screen_name_prompt_version",
 }
 
 _FRONTMATTER_FENCE = "---"
@@ -59,7 +60,7 @@ _VERSION_PATTERN = re.compile(r"^v(\d+)$")
 # Size caps for the QA prompt, enforced by `validate_prompts` from this version on.
 # A description over the cap fails at boot instead of costing tokens on every
 # turn of every run; older versions shipped before the caps and are never edited.
-QA_SLIM_PROMPT_FROM_VERSION = 18
+QA_SLIM_PROMPT_FROM_VERSION = 19
 TOOL_DESCRIPTION_MAX_CHARS = 500
 SYSTEM_PROMPT_MAX_CHARS = 8000
 

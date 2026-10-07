@@ -22,6 +22,7 @@ from app.agents.qa.context import (
     FOLDED_VIEW_PREFIX,
     fold_stale_knowledge,
     fold_stale_scenes,
+    fold_stale_skills,
 )
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.agents.qa.tools import QaRunState, build_tools
@@ -35,6 +36,9 @@ from app.qa.schemas import QaScenario, QaStep
 from app.qa.run_config import (
     COMPACTION_PROMPT_AGENT,
     COMPACTION_ROLE,
+    DECIDE_ROLE,
+    MEMORY_ROLE,
+    PHASE_ROLE,
     PROMPT_AGENT,
     SYSTEM_ROLE,
     VISION_ROLE,
@@ -60,7 +64,7 @@ _TURN_PRODUCING_NODES = frozenset({"model", "tools"})
 
 
 # The first `qa_run` version whose system prompt leaves the skills out.
-_FIRST_SKILL_VERSION = 18
+_FIRST_SKILL_VERSION = 19
 
 _VERSION_NUMBER = re.compile(r"^v(\d+)$")
 
@@ -68,13 +72,13 @@ _VERSION_NUMBER = re.compile(r"^v(\d+)$")
 def system_prompt_with_skills(system_prompt: str, prompt_version: str, skills: str) -> str:
     """The system prompt the run sends, with or without the skill bodies inlined.
 
-    From v18 the long sections of the system prompt are `skill_<name>.md` files.
+    From v19 the long sections of the system prompt are `skill_<name>.md` files.
     With `skills="on_demand"` the agent reads them through `load_skill`, so the
     prompt goes out as written. With `skills="off"` every skill body is appended
     here, in name order, so the model reads all of it on every call the way it
     did in v17. That is the comparison arm: one prompt version, two shapes.
 
-    A version before v18 has no skill files and is returned unchanged whatever
+    A version before v19 has no skill files and is returned unchanged whatever
     the axis says.
 
     Appended after `str.format` has run on the system prompt, so a brace in a
@@ -214,6 +218,11 @@ def middleware_names_for(arch: ResolvedArch) -> tuple[str, ...]:
     # different tools out of different budgets.
     if arch.fold_stale_knowledge:
         names.append("fold_knowledge_neighbours")
+    # Only when the run loads its skills. With `skills=off` every skill is in the
+    # system prompt, no tool result carries one, and a middleware with nothing to
+    # fold would still move the fingerprint.
+    if arch.skills == "on_demand" and arch.fold_stale_skills:
+        names.append("fold_stale_skills")
     # Only when the run can see. On a text-only run it would have nothing to
     # inject and nothing to trim.
     if arch.vision:
@@ -259,6 +268,7 @@ def build_middleware(
         ),
         "fold_scene_views": lambda: _fold_scene_views,
         "fold_knowledge_neighbours": lambda: _fold_knowledge_neighbours,
+        "fold_stale_skills": lambda: _fold_skills,
         "capture_vision": lambda: QaCaptureVisionMiddleware(state, channel, arch),
         "log_token_usage": lambda: _log_token_usage,
     }
@@ -285,6 +295,16 @@ async def _fold_knowledge_neighbours(request, handler):
     only has six. See `app/agents/qa/context.py`.
     """
     return await handler(request.override(messages=fold_stale_knowledge(request.messages)))
+
+
+@wrap_model_call
+async def _fold_skills(request, handler):
+    """Fold every loaded skill but the newest out of what one model call receives.
+
+    Model-input only, like the two folds above. A folded skill leaves a note naming
+    it, so the agent can call `load_skill` again. See `app/agents/qa/context.py`.
+    """
+    return await handler(request.override(messages=fold_stale_skills(request.messages)))
 
 
 def _context_shape(messages) -> str:
@@ -419,10 +439,36 @@ class QaRunner:
             if arch.vision
             else ""
         )
+        # The same arrangement one axis over. The paragraph this replaces asks for
+        # a separate `record_capability_verdict` call, and that is still the only
+        # way on a run with `phase_cycle=off` — so the base text keeps saying it,
+        # and this directive overrides it only where `report_step` really does
+        # take the answer. Empty otherwise, which is what makes the rendered
+        # prompt of an `off` run the v17 text it has always been.
+        memory_directive = (
+            load_prompt(PROMPT_AGENT, MEMORY_ROLE, config.prompt_version).body
+            if arch.phase_cycle.remembers_in_verdict
+            else ""
+        )
+        # phase 를 강제하는 런에만, 그리고 `DECIDE` 가 자기 turn 을 갖는 런에만. 안 실리면
+        # 빈 문자열이라 렌더 결과가 그만큼 그대로다.
+        phase_directive = (
+            load_prompt(PROMPT_AGENT, PHASE_ROLE, config.prompt_version).body
+            if arch.phase_cycle.gates_phases
+            else ""
+        )
+        decide_directive = (
+            load_prompt(PROMPT_AGENT, DECIDE_ROLE, config.prompt_version).body
+            if arch.phase_cycle.decides_in_its_own_turn
+            else ""
+        )
         system_prompt = system_prompt_with_skills(
             prompt.body.format(
                 language_directive=LANGUAGE_DIRECTIVES[config.language],
                 vision_directive=vision_directive,
+                memory_directive=memory_directive,
+                phase_directive=phase_directive,
+                decide_directive=decide_directive,
                 skills_directive=_skills_directive(prompt.version, arch.skills),
             ),
             prompt.version,
@@ -581,6 +627,7 @@ class QaRunner:
                 if kind != "ai":
                     continue
 
+                await self._report_context(channel, message)
                 text = self._text_of(message)
                 calls = getattr(message, "tool_calls", None) or []
                 logger.info(
@@ -595,6 +642,20 @@ class QaRunner:
                     await channel.note(text, LogCategory.THOUGHT)
                 for call in calls:
                     await self._log_tool_call(channel, call)
+
+    async def _report_context(self, channel: QaRunChannel, message) -> None:
+        """Tell the timeline how full the context was on this model call.
+
+        `input_tokens` is what the provider counted for the call, cached prefix
+        included, so it is the number compaction's trigger should be read against.
+        A call that came back without usage reports nothing rather than a zero.
+        """
+        usage = getattr(message, "usage_metadata", None) or {}
+        used = usage.get("input_tokens")
+        maximum = get_model_spec(self._config.model).max_input_tokens
+        if not isinstance(used, int) or used <= 0 or maximum <= 0:
+            return
+        await channel.context_usage(used, maximum)
 
     @staticmethod
     def _step_of(args: dict) -> int | None:
