@@ -461,3 +461,28 @@ def test_the_phase_gate_never_refuses_load_skill() -> None:
         cycle.phase = phase
         assert cycle.refusal_for("load_skill") is None
     assert cycle.refusals == 0
+
+
+@pytest.mark.parametrize("skills", ["off", "on_demand"])
+def test_a_v19_run_records_a_hash_for_every_skill_it_can_read(skills) -> None:
+    """The skill text reaches the model inlined when off and through `load_skill`
+    when on demand, so both record each skill under its own role. Recorded from
+    `skills_directive` alone, a description edit would leave the run's hashes
+    where they were while the Skills section the model read had changed."""
+    from app.agents.qa.arch import QaArchSpec
+    from app.qa.run_config import resolve_run_config
+
+    config = resolve_run_config(prompt_version="v19", arch=QaArchSpec(skills=skills))
+
+    for name in skill_names("v19"):
+        recorded = config.prompt_hashes[f"skill_{name}"]
+        assert recorded == load_skill(name, "v19").body_sha256
+    assert ("skills_directive" in config.prompt_hashes) == (skills == "on_demand")
+
+
+def test_a_run_on_a_version_without_skill_files_records_no_skill_hash() -> None:
+    from app.qa.run_config import resolve_run_config
+
+    config = resolve_run_config(prompt_version="v18")
+
+    assert not [role for role in config.prompt_hashes if role.startswith("skill_")]
