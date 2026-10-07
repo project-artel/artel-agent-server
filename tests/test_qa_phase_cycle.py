@@ -41,7 +41,7 @@ from app.qa.channel import QaRunChannel
 
 def arch_for(mode: PhaseCycleMode):
     return resolve_arch(
-        QaArchSpec(vision=VisionMode.on, phase_cycle=mode), LLMModel.gpt_chat_latest
+        QaArchSpec(vision=VisionMode.on, phase_cycle=mode), LLMModel.gpt_6_luna
     )
 
 

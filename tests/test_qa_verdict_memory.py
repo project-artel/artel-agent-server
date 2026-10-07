@@ -22,7 +22,7 @@ from app.qa.scene_context import SceneCapability, SceneContext, SceneContextEntr
 
 def arch_for(mode: PhaseCycleMode):
     return resolve_arch(
-        QaArchSpec(vision=VisionMode.on, phase_cycle=mode), LLMModel.gpt_chat_latest
+        QaArchSpec(vision=VisionMode.on, phase_cycle=mode), LLMModel.gpt_6_luna
     )
 
 
