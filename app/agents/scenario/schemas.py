@@ -173,6 +173,9 @@ class ScenarioAgentRequest(BaseModel):
     test_case_list: list[TestCaseListItem] = Field(default_factory=list)
     # Recent conversation, text-only, already windowed by the session layer.
     history: list[BaseMessage] = Field(default_factory=list)
+    # 세션 창 밖으로 밀려난 대화가 있는가(ARTEL-942). 잘라 낸 뒤의 `history` 만으로는 알 수 없고,
+    # 모델이 "원래 없던 말" 과 "밀려난 말" 을 가르려면 이것이 필요하다.
+    history_truncated: bool = False
     # Authoritative current draft (may contain the user's manual edits). Legacy;
     # run-scoped authoring uses `current_scenarios` below instead.
     draft: ScenarioDraft | None = None

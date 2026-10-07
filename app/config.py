@@ -108,6 +108,15 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     session_ttl_seconds: int = 3600
     history_max_turns: int = 100_000
+    # 저작 B·E 가 프롬프트로 읽는 과거 대화의 크기 상한(ARTEL-942). 위의 턴 수 상한은 Redis 에
+    # 쌓이는 개수만 묶고 크기는 안 묶는다 — 기본값이 사실상 무제한이고, 한 번에 수만 자를 붙여
+    # 넣는 입력도 있다. 그래서 프롬프트에 넣을 때 글자 수로 한 번 더 묶는다.
+    #
+    # 실측(런 80~84): Agent 답 최대 723자·평균 344자, 사용자 말 최대 38자, 실제 대화 20개(10턴)
+    # 4,104자. 전체 상한은 그 10턴의 약 두 배, 한 메시지 상한은 가장 긴 답의 약 세 배다. 넘치면
+    # 오래된 대화부터 빠지고 잘렸다고 표시된다 — 압축(요약)은 하지 않는다.
+    scenario_history_max_chars: int = 8_000
+    scenario_history_message_max_chars: int = 2_000
 
     # Default prompt version per agent, matching a directory under
     # app/prompts/<agent>/. Unset means the highest version present, so a new

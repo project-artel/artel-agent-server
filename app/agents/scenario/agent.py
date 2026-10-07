@@ -135,9 +135,19 @@ _CANNED = {
 
 
 def _hint(request: ScenarioAgentRequest) -> str:
-    """라우터에게 주는 문맥 한 줄 — 최근 대화의 마지막 사용자·어시스턴트 발화만."""
-    tail = [m for m in request.history[-2:]]
-    return " / ".join(str(getattr(m, "content", ""))[:120] for m in tail)
+    """라우터에게 주는 문맥 — 직전 턴(마지막 사용자·Agent 발화)을 **자르지 않고** (ARTEL-942).
+
+    "그거 말고", "응 그렇게 해줘" 는 직전 답을 모르면 수정인지 새 저작인지 가를 수 없다. 예전에는
+    120자에서 잘랐는데, 답은 평균 344자라 사용자가 가리키는 것(답 끝의 질문, 뺀 것)이 잘려
+    나갔다. 실측(POC 3, 지칭어 후속 말 6개×2회): 120자 9/12, 직전 턴 12/12, 창 전체 8/12.
+    창 전체는 2배 비용에 오히려 나빴다 — 대화가 길면 직전 답이 묻힌다. 직전 턴은 호출당
+    +$0.0002 다. 아주 긴 메시지는 B·E 와 같은 상한으로 자른다.
+    """
+    from app.agents.scenario.workflow import _history_limits
+
+    _, per_message = _history_limits()
+    tail = [str(getattr(m, "content", "")) for m in request.history[-2:]]
+    return " / ".join(t if len(t) <= per_message else t[:per_message] + " …(이하 생략)" for t in tail)
 
 
 class ScenarioAgent:
