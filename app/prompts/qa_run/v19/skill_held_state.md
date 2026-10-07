@@ -2,6 +2,7 @@
 version: v19
 note: The v17 system prompt's section State you set, and screens that will not hold still, moved here whole so the agent loads it with load_skill before holding input, setting an axis or button, or pausing game time. Edits are only for reading standalone - the top heading, and set_input_button named where v17 said release the button. The last paragraph (observe_scene with wait_seconds, and not looping on a game that stopped answering) is also kept in the v19 system prompt because it applies on every screen. The Tool details section adds the rules cut from the v17 tool descriptions of click, double_click, drag, move_pointer, click_button, the hold and release tools, set_input_axis, set_input_button, pause_game_time, resume_game_time, reset_game and observe_scene when those descriptions were shortened to 500 characters.
 placeholders: []
+description: held input, axes, paused time, and undoing them. Load before `hold_key`, `hold_mouse_button`, `set_input_axis`, `set_input_button` or `pause_game_time`.
 ---
 # State you set, and screens that will not hold still
 

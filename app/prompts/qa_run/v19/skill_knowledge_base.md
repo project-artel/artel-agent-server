@@ -2,6 +2,7 @@
 version: v19
 note: The v17 system prompt's section The knowledge base, moved here whole so the agent loads it with load_skill before writing knowledge. Edits are only for reading standalone - the top heading, this skill in place of this section, and one paragraph carried over from v17's scene context subsection on knowledge lines (an id and a one-line summary, cited through used_knowledge_ids). The Tool details section adds the rules cut from the v17 tool descriptions of search_knowledge, record_knowledge, update_knowledge, forget_knowledge, link_knowledge, unlink_knowledge and expand_knowledge when those descriptions were shortened to 500 characters; per-run limits are left to the tool descriptions.
 placeholders: []
+description: what to record about the game, where it holds, what to link and cite. Load before your first `record_knowledge`, `update_knowledge`, `link_knowledge` or `unlink_knowledge`.
 ---
 # The knowledge base
 

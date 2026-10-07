@@ -2,6 +2,7 @@
 version: v19
 note: The v17 system prompt's section The content map, and writing what you learned into it, moved here whole so the agent loads it with load_skill before writing a verdict or a new capability. Edits are only for reading standalone - the top heading, and the block named as the scene context block. Three paragraphs from v17's scene context subsection that the v19 system prompt no longer carries are added at the end - a missing capability does not mean it cannot be done, a capability line is not a target, and the block's two lists with the 232-against-14 count. The Tool details and Screen selectors sections add the rules cut from the v17 tool descriptions of record_capability_verdict, record_new_capability, list_scene_capabilities, include_screen_selector and exclude_screen_selector when those descriptions were shortened to 500 characters; length caps and page size are left to the tool descriptions.
 placeholders: []
+description: confirming or refuting the content map's rows. Load before `record_capability_verdict` or `record_new_capability`, and when a step you report matches a capability the scene context listed.
 ---
 # The content map, and writing what you learned into it
 

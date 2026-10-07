@@ -4,6 +4,7 @@ from app.prompts.loader import (
     PROMPTS_ROOT,
     SETTINGS_VERSION_KEYS,
     PromptError,
+    SKILL_DESCRIPTION_MAX_CHARS,
     SYSTEM_PROMPT_MAX_CHARS,
     TOOL_DESCRIPTION_MAX_CHARS,
     PromptFile,
@@ -17,6 +18,7 @@ from app.prompts.loader import (
     placeholders_in,
     resolve_version,
     roles_in,
+    skill_descriptions,
     skill_names,
     validate_prompts,
 )
@@ -25,6 +27,7 @@ __all__ = [
     "PROMPTS_ROOT",
     "SETTINGS_VERSION_KEYS",
     "PromptError",
+    "SKILL_DESCRIPTION_MAX_CHARS",
     "SYSTEM_PROMPT_MAX_CHARS",
     "TOOL_DESCRIPTION_MAX_CHARS",
     "PromptFile",
@@ -38,6 +41,7 @@ __all__ = [
     "placeholders_in",
     "resolve_version",
     "roles_in",
+    "skill_descriptions",
     "skill_names",
     "validate_prompts",
 ]

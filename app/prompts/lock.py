@@ -64,9 +64,15 @@ def compute_lock() -> dict:
     """What the lock should say about the prompts currently on disk.
 
     Keyed ``<agent>/<version>/<role>`` and carrying ``body_sha256``, which
-    excludes the frontmatter: ``note`` is documentation, and rewording it does
-    not change what the model read. ``v8`` shipping the same body as ``v7`` under
-    a different note is a real case, so the hash has to be about the body alone.
+    excludes ``note``: it is documentation, and rewording it does not change
+    what the model read. ``v8`` shipping the same body as ``v7`` under a
+    different note is a real case, so the hash has to be about the body.
+
+    A skill's ``description`` is the one piece of frontmatter the model does
+    read — it becomes that skill's line in the system prompt's Skills section —
+    so for a ``skill_*`` file with one the hash covers ``description`` and body
+    together (see ``loader.content_sha256``). Only skills may carry a
+    description, so the entries of every other role are unchanged by this.
 
     Every version is named explicitly, which keeps this off ``Settings`` —
     ``resolve_version`` only consults ``*_PROMPT_VERSION`` when no version is
