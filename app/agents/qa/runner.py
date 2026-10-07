@@ -22,6 +22,7 @@ from app.agents.qa.context import (
     FOLDED_VIEW_PREFIX,
     fold_stale_knowledge,
     fold_stale_scenes,
+    fold_stale_skills,
 )
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.agents.qa.tools import QaRunState, build_tools
@@ -214,6 +215,11 @@ def middleware_names_for(arch: ResolvedArch) -> tuple[str, ...]:
     # different tools out of different budgets.
     if arch.fold_stale_knowledge:
         names.append("fold_knowledge_neighbours")
+    # Only when the run loads its skills. With `skills=off` every skill is in the
+    # system prompt, no tool result carries one, and a middleware with nothing to
+    # fold would still move the fingerprint.
+    if arch.skills == "on_demand" and arch.fold_stale_skills:
+        names.append("fold_stale_skills")
     # Only when the run can see. On a text-only run it would have nothing to
     # inject and nothing to trim.
     if arch.vision:
@@ -259,6 +265,7 @@ def build_middleware(
         ),
         "fold_scene_views": lambda: _fold_scene_views,
         "fold_knowledge_neighbours": lambda: _fold_knowledge_neighbours,
+        "fold_stale_skills": lambda: _fold_skills,
         "capture_vision": lambda: QaCaptureVisionMiddleware(state, channel, arch),
         "log_token_usage": lambda: _log_token_usage,
     }
@@ -285,6 +292,16 @@ async def _fold_knowledge_neighbours(request, handler):
     only has six. See `app/agents/qa/context.py`.
     """
     return await handler(request.override(messages=fold_stale_knowledge(request.messages)))
+
+
+@wrap_model_call
+async def _fold_skills(request, handler):
+    """Fold every loaded skill but the newest out of what one model call receives.
+
+    Model-input only, like the two folds above. A folded skill leaves a note naming
+    it, so the agent can call `load_skill` again. See `app/agents/qa/context.py`.
+    """
+    return await handler(request.override(messages=fold_stale_skills(request.messages)))
 
 
 def _context_shape(messages) -> str:

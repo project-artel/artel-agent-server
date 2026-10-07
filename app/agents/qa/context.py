@@ -39,6 +39,12 @@ from app.agents.qa.knowledge import (
     NEIGHBOUR_BLOCK_START_PREFIX,
     NEIGHBOUR_BLOCK_START_SUFFIX,
 )
+from app.agents.qa.tools.skill_tools import (
+    SKILL_BLOCK_END_PREFIX,
+    SKILL_BLOCK_END_SUFFIX,
+    SKILL_BLOCK_START_PREFIX,
+    SKILL_BLOCK_START_SUFFIX,
+)
 from app.qa.scene import SCENE_VIEW_END, SCENE_VIEW_START_PREFIX, SCENE_VIEW_START_SUFFIX
 
 # How many of the newest scene views survive folding, in full — counted across
@@ -218,4 +224,77 @@ def fold_stale_knowledge(
         result[index] = message.model_copy(
             update={"content": _fold_neighbours(message.content)}
         )
+    return result
+
+
+# How many of the newest loaded skills survive folding, counted per message — one
+# `load_skill` call produces one message, so this is "the newest N loads keep
+# their text". One, because a skill is read right before the work it covers, and
+# the work the agent is doing now is the one the newest load was for.
+DEFAULT_KEEP_SKILLS = 1
+
+# The end marker names the skill again, and `(?P=name)` requires it to be the same
+# name, so a span always runs from one skill's start to that same skill's end.
+_SKILL_PATTERN = re.compile(
+    re.escape(SKILL_BLOCK_START_PREFIX)
+    + r"(?P<name>[^>\s]+)"
+    + re.escape(SKILL_BLOCK_START_SUFFIX)
+    + r".*?"
+    + re.escape(SKILL_BLOCK_END_PREFIX)
+    + r"(?P=name)"
+    + re.escape(SKILL_BLOCK_END_SUFFIX),
+    re.DOTALL,
+)
+
+
+def _skill_placeholder(name: str) -> str:
+    # Plain text rather than the marker syntax, for the reason `_placeholder`
+    # gives. It says outright that the rules are gone, because an agent that
+    # remembers loading a skill would otherwise act as if it still had the text.
+    return (
+        f'[skill {name} folded to save context. Its rules are no longer in front '
+        f'of you. Call load_skill("{name}") to read it again.]'
+    )
+
+
+def _fold_skills(content: str) -> str:
+    return _SKILL_PATTERN.sub(lambda match: _skill_placeholder(match.group("name")), content)
+
+
+def fold_stale_skills(
+    messages: list[BaseMessage], keep: int = DEFAULT_KEEP_SKILLS
+) -> list[BaseMessage]:
+    """Return `messages` with all but the newest `keep` loaded skills folded.
+
+    Same contract as `fold_stale_scenes`: pure, model-input only, idempotent,
+    `ToolMessage.content` only, unchanged messages returned as the same objects.
+
+    A skill is the span `load_skill` (`app/agents/qa/tools/skill_tools.py`) wraps
+    between `<<skill NAME>>` and `<<end skill NAME>>`. Only that span is replaced:
+    the "already loaded" note a reload puts above it stays, and so does anything
+    else in the message.
+
+    A skill body runs to about 10,000 characters. Left alone, every skill the run
+    ever loaded would be resent on every turn until compaction, which is the cost
+    moving the skills out of the system prompt was meant to remove. The trade is
+    the one `fold_stale_knowledge` makes for neighbour blocks: the text is exactly
+    recoverable, here by `load_skill` with the name the placeholder gives, and
+    reading it again costs one tool call out of no allowance.
+
+    Interaction with compaction: `SummarizationMiddleware` replaces old messages
+    wholesale, so a folded skill may be summarised away entirely. Not a conflict —
+    this fold is model-input only and never touches what is stored.
+    """
+    result: list[BaseMessage] = list(messages)
+    kept = 0
+    for index in range(len(result) - 1, -1, -1):
+        message = result[index]
+        if not isinstance(message, ToolMessage) or not isinstance(message.content, str):
+            continue
+        if not _SKILL_PATTERN.search(message.content):
+            continue
+        kept += 1
+        if kept <= keep:
+            continue
+        result[index] = message.model_copy(update={"content": _fold_skills(message.content)})
     return result

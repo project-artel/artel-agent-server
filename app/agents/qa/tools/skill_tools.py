@@ -6,12 +6,16 @@ The tool only reads a prompt file. It sends nothing to the game and changes no
 run state, so the result carries no scene view and no operator messages, the same
 as the knowledge read tools (`knowledge_read_tools.py`).
 
-The result is a `ToolMessage` like any other. Neither fold in
-`app/agents/qa/context.py` touches it: they replace only the marked spans
-`SceneMemory.render` and the knowledge search write, and a skill body carries
-neither marker. `tests/test_qa_skill_tools.py` pins that. Compaction can still
-summarise it away, which is why the description says to load again after a
-compaction.
+The body comes back wrapped in `<<skill NAME>>` and `<<end skill NAME>>`, so
+`fold_stale_skills` in `app/agents/qa/context.py` can find exactly that span and
+replace it with a short note once a newer skill has been loaded. A skill body runs
+to about 10,000 characters, and without the fold every one the run ever loaded
+would be resent on every turn until compaction. The scene and knowledge folds do
+not touch it: they replace only the spans `SceneMemory.render` and the knowledge
+search mark, and a skill body carries neither. `tests/test_qa_skill_tools.py`
+pins both directions. Compaction can still summarise a loaded skill away, which
+is one more reason the description says to load a skill again when its rules are
+no longer in front of the agent.
 
 The tool is offered only when `arch.skills == "on_demand"`. With `off`,
 `runner.system_prompt_with_skills` puts every skill body in the system prompt
@@ -23,6 +27,23 @@ from langchain_core.tools import BaseTool, tool
 from app.agents.qa.tools.tool_context import ToolContext
 from app.prompts import PromptError, load_skill as load_skill_file
 from app.prompts import load_tool_description, skill_names
+
+# The markers a returned skill body is wrapped in. The start marker carries the
+# skill's name, the way a neighbour block's start marker carries the hit's id: a
+# folded skill has to tell the agent which name to pass to `load_skill`. The end
+# marker repeats the name so one skill's end can never close another's span.
+SKILL_BLOCK_START_PREFIX = "<<skill "
+SKILL_BLOCK_START_SUFFIX = ">>"
+SKILL_BLOCK_END_PREFIX = "<<end skill "
+SKILL_BLOCK_END_SUFFIX = ">>"
+
+
+def wrap_skill(name: str, body: str) -> str:
+    """`body` between the start and end markers for skill `name`."""
+    return (
+        f"{SKILL_BLOCK_START_PREFIX}{name}{SKILL_BLOCK_START_SUFFIX}\n{body}\n"
+        f"{SKILL_BLOCK_END_PREFIX}{name}{SKILL_BLOCK_END_SUFFIX}"
+    )
 
 
 def build_skill_tools(ctx: ToolContext, prompt_version: str | None = None) -> list[BaseTool]:
@@ -53,14 +74,17 @@ def build_skill_tools(ctx: ToolContext, prompt_version: str | None = None) -> li
             body = load_skill_file(wanted, prompt_version).body
         except PromptError as error:
             return f"The skill {wanted!r} could not be read: {error}"
+        block = wrap_skill(wanted, body)
         if wanted in loaded:
-            # Answered in full anyway: a reload usually means compaction removed
-            # the first copy, and refusing would leave the agent without the text.
+            # Answered in full anyway: a reload usually means a fold or compaction
+            # removed the first copy, and refusing would leave the agent without
+            # the text. The note stays outside the markers, so a later fold
+            # replaces only the body and the note still says this was a reload.
             return (
                 f"(You already loaded {wanted!r} earlier in this run. Here it is "
-                f"again.)\n\n{body}"
+                f"again.)\n\n{block}"
             )
         loaded.add(wanted)
-        return body
+        return block
 
     return [load_skill]

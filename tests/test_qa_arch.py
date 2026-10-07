@@ -498,7 +498,12 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 # key, so every structure's digest follows. The default tool names are unchanged
 # (`skills` defaults to `off`, so `load_skill` is not in the list). The label moved
 # with it because the structure now has a second shape, `on_demand`.
-_EXPECTED_DEFAULT_FINGERPRINT = "4111a3634203"
+#
+# Moved a fourth time for `QaArchSpec.fold_stale_skills`: the dump gained a key
+# again. The default middleware list is unchanged, because the skill fold is wired
+# only when `skills` is `on_demand`. The label stays: the fold is part of the
+# `on_demand` shape, and it landed before `v6-skills-on-demand` was merged.
+_EXPECTED_DEFAULT_FINGERPRINT = "4f5bccfede52"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:

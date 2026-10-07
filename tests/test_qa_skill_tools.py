@@ -14,11 +14,16 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.agents.qa import runner as runner_module
 from app.agents.qa.arch import default_resolved_arch
-from app.agents.qa.context import fold_stale_knowledge, fold_stale_scenes
+from app.agents.qa.context import fold_stale_knowledge, fold_stale_scenes, fold_stale_skills
 from app.agents.qa.knowledge import NEIGHBOUR_BLOCK_START_PREFIX
-from app.agents.qa.runner import _skills_directive, system_prompt_with_skills
+from app.agents.qa.runner import (
+    _skills_directive,
+    middleware_names_for,
+    system_prompt_with_skills,
+)
 from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.tools import skill_tools
+from app.agents.qa.tools.skill_tools import wrap_skill
 from app.prompts import load_prompt, load_skill, load_tool_description, skill_names
 from app.qa.channel import QaRunChannel
 from app.qa.scene import SCENE_VIEW_END, SCENE_VIEW_START_PREFIX, SCENE_VIEW_START_SUFFIX
@@ -85,9 +90,12 @@ def call(tool, name: str) -> str:
     return asyncio.run(tool.ainvoke({"name": name, "thought": "about to search"}))
 
 
-def test_load_skill_returns_the_body(stub_skills) -> None:
+def test_load_skill_returns_the_body_between_named_markers(stub_skills) -> None:
     tool = make_tools("on_demand")["load_skill"]
-    assert call(tool, "knowledge_base") == SKILLS["knowledge_base"]
+    result = call(tool, "knowledge_base")
+    assert result == wrap_skill("knowledge_base", SKILLS["knowledge_base"])
+    assert result.startswith("<<skill knowledge_base>>\n")
+    assert result.endswith("\n<<end skill knowledge_base>>")
 
 
 def test_an_unknown_name_lists_the_valid_ones(stub_skills) -> None:
@@ -103,14 +111,18 @@ def test_a_reload_returns_the_body_again_and_says_so(stub_skills) -> None:
     call(tool, "content_map")
     again = call(tool, "content_map")
     assert "already loaded" in again
-    assert again.endswith(SKILLS["content_map"])
+    # The note sits outside the markers, so a fold replaces only the body.
+    assert again.index("already loaded") < again.index("<<skill content_map>>")
+    assert again.endswith(wrap_skill("content_map", SKILLS["content_map"]))
     # Another skill is still a first load.
-    assert call(tool, "knowledge_base") == SKILLS["knowledge_base"]
+    assert call(tool, "knowledge_base") == wrap_skill("knowledge_base", SKILLS["knowledge_base"])
 
 
 def test_each_run_starts_with_nothing_loaded(stub_skills) -> None:
     call(make_tools("on_demand")["load_skill"], "content_map")
-    assert call(make_tools("on_demand")["load_skill"], "content_map") == SKILLS["content_map"]
+    assert call(make_tools("on_demand")["load_skill"], "content_map") == wrap_skill(
+        "content_map", SKILLS["content_map"]
+    )
 
 
 # --- the system prompt --------------------------------------------------------
@@ -238,35 +250,90 @@ def scene_view(at: int) -> str:
     return f"{SCENE_VIEW_START_PREFIX}{at}{SCENE_VIEW_START_SUFFIX}\nscene: Lobby\n{SCENE_VIEW_END}"
 
 
-def conversation(skill_body: str) -> list:
-    """A skill loaded early, then two acting turns whose views push it back."""
-    return [
+def loaded(name: str, body: str) -> str:
+    """What `load_skill` returns for a first load."""
+    return wrap_skill(name, body)
+
+
+def conversation(skill_result: str, later_skill: str | None = None) -> list:
+    """A skill loaded early, then two acting turns whose views push it back.
+
+    With `later_skill`, a second skill is loaded after the views, so the first one
+    is no longer the newest.
+    """
+    messages = [
         HumanMessage(content="Begin."),
         AIMessage(content="", tool_calls=[{"name": "load_skill", "args": {}, "id": "s"}]),
-        ToolMessage(content=skill_body, tool_call_id="s", name="load_skill"),
+        ToolMessage(content=skill_result, tool_call_id="s", name="load_skill"),
         AIMessage(content="", tool_calls=[{"name": "observe_scene", "args": {}, "id": "a"}]),
         ToolMessage(content=scene_view(1), tool_call_id="a", name="observe_scene"),
         AIMessage(content="", tool_calls=[{"name": "observe_scene", "args": {}, "id": "b"}]),
         ToolMessage(content=scene_view(2), tool_call_id="b", name="observe_scene"),
     ]
+    if later_skill is not None:
+        messages += [
+            AIMessage(content="", tool_calls=[{"name": "load_skill", "args": {}, "id": "t"}]),
+            ToolMessage(content=later_skill, tool_call_id="t", name="load_skill"),
+        ]
+    return messages
 
 
 @pytest.mark.parametrize("fold", [fold_stale_scenes, fold_stale_knowledge])
-def test_neither_fold_touches_a_loaded_skill(fold) -> None:
-    messages = conversation(SKILLS["knowledge_base"])
+def test_neither_other_fold_touches_a_loaded_skill(fold) -> None:
+    messages = conversation(
+        loaded("knowledge_base", SKILLS["knowledge_base"]),
+        loaded("content_map", SKILLS["content_map"]),
+    )
     folded = fold(messages, keep=0)
     assert folded[2] is messages[2]
+    assert folded[8] is messages[8]
 
 
-def test_no_v18_skill_carries_a_marker_a_fold_looks_for() -> None:
-    """The folds replace only a full marked span: a start marker with its number
-    or id, the body, and the end marker. A skill body that quoted a whole span
-    would lose it on the next turn; naming a marker in prose, as `<<scene view N>>`
-    does, is not a span and is left alone."""
+def test_the_skill_fold_touches_no_scene_view() -> None:
+    messages = conversation(
+        loaded("knowledge_base", SKILLS["knowledge_base"]),
+        loaded("content_map", SKILLS["content_map"]),
+    )
+    folded = fold_stale_skills(messages, keep=0)
+    assert folded[4] is messages[4]
+    assert folded[6] is messages[6]
+
+
+def test_an_older_skill_folds_once_a_newer_one_is_loaded() -> None:
+    messages = conversation(
+        loaded("knowledge_base", SKILLS["knowledge_base"]),
+        loaded("content_map", SKILLS["content_map"]),
+    )
+    folded = fold_stale_skills(messages)
+    assert SKILLS["knowledge_base"] not in folded[2].content
+    assert 'load_skill("knowledge_base")' in folded[2].content
+    assert folded[8] is messages[8]
+
+
+def test_a_single_loaded_skill_survives_any_number_of_turns() -> None:
+    messages = conversation(loaded("knowledge_base", SKILLS["knowledge_base"]))
+    assert fold_stale_skills(messages)[2] is messages[2]
+
+
+def test_no_v18_skill_carries_a_marker_another_fold_looks_for() -> None:
+    """The scene and knowledge folds replace only a full marked span: a start
+    marker with its number or id, the body, and the end marker. A skill body that
+    quoted a whole span would lose it on the next turn; naming a marker in prose,
+    as `<<scene view N>>` does, is not a span and is left alone."""
     for name in skill_names("v18"):
-        messages = conversation(load_skill(name, "v18").body)
+        messages = conversation(loaded(name, load_skill(name, "v18").body))
         folded = fold_stale_knowledge(fold_stale_scenes(messages, keep=0), keep=0)
         assert folded[2] is messages[2], name
+
+
+def test_every_real_v18_skill_folds_whole() -> None:
+    """A real body must not end its own span early, or part of it would survive the fold."""
+    for name in skill_names("v18"):
+        body = load_skill(name, "v18").body
+        messages = conversation(loaded(name, body))
+        folded = fold_stale_skills(messages, keep=0)[2].content
+        assert folded.startswith(f"[skill {name} folded"), name
+        assert body.strip().splitlines()[-1] not in folded, name
 
 
 def test_naming_a_marker_in_prose_is_not_folded() -> None:
@@ -274,5 +341,32 @@ def test_naming_a_marker_in_prose_is_not_folded() -> None:
         f"A view is marked `{SCENE_VIEW_START_PREFIX}N{SCENE_VIEW_START_SUFFIX}`, and "
         f"neighbours `{NEIGHBOUR_BLOCK_START_PREFIX}id>>`."
     )
-    messages = conversation(body)
+    messages = conversation(loaded("knowledge_base", body))
     assert fold_stale_knowledge(fold_stale_scenes(messages, keep=0), keep=0)[2] is messages[2]
+
+
+# --- folding, through the middleware list ------------------------------------
+
+
+def arch_with(**update):
+    return default_resolved_arch().model_copy(update=update)
+
+
+def test_the_skill_fold_is_wired_only_when_skills_load_on_demand() -> None:
+    assert "fold_stale_skills" in middleware_names_for(arch_with(skills="on_demand"))
+    assert "fold_stale_skills" not in middleware_names_for(arch_with(skills="off"))
+
+
+def test_the_knob_off_leaves_skills_unfolded() -> None:
+    names = middleware_names_for(arch_with(skills="on_demand", fold_stale_skills=False))
+    assert "fold_stale_skills" not in names
+    # The other two folds do not depend on it.
+    assert "fold_scene_views" in names
+    assert "fold_knowledge_neighbours" in names
+
+
+def test_with_skills_off_the_knob_changes_nothing() -> None:
+    """With `off` no tool result carries a skill, so the knob has nothing to switch."""
+    on = middleware_names_for(arch_with(skills="off", fold_stale_skills=True))
+    off = middleware_names_for(arch_with(skills="off", fold_stale_skills=False))
+    assert on == off

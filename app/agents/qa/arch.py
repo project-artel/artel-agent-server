@@ -131,6 +131,15 @@ from app.llm.models import LLMModel, get_model_spec
 # gained a key (see the v4 note above); the tool set and the middleware list of
 # the default run did not change. The label moves anyway because the structure now
 # has two shapes and a run must say which side of that axis it was filed on.
+#
+# Folding loaded skills is part of the same `on_demand` shape, not a new one. With
+# `skills=on_demand` and the `fold_stale_skills` knob on, a middleware of the same
+# name keeps the newest loaded skill in full and replaces older ones with a note
+# naming the skill to load again (`app/agents/qa/context.py`). It landed
+# before `v6-skills-on-demand` was ever merged, so no run was filed under this label
+# without it, and the label stays. The default fingerprint moves once more only
+# because `arch.model_dump()` gained the `fold_stale_skills` key; with `skills=off`
+# the middleware list is unchanged.
 QA_ARCH_LABEL = "v6-skills-on-demand"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
@@ -262,6 +271,11 @@ class QaArchSpec(BaseModel):
     # to turn off: what they fold is recovered by different tools out of
     # different budgets.
     fold_stale_knowledge: bool = True
+    # Folds every loaded skill but the newest, and only when `skills` is
+    # `on_demand`: with `off` the skills are in the system prompt and there is
+    # nothing loaded to fold. Separate from the two folds above because what it
+    # folds is recovered by a third tool, `load_skill`.
+    fold_stale_skills: bool = True
     # Compaction rewrites what the model reads once a run grows past a fraction of
     # its context, so a run with it and a run without it are two agents even with
     # the same tools. `None` defers to the deployment's own setting, which is what
@@ -337,6 +351,7 @@ class ResolvedArch(BaseModel):
     skills: Literal["off", "on_demand"]
     fold_stale_scenes: bool
     fold_stale_knowledge: bool
+    fold_stale_skills: bool
     compaction: bool
     compaction_trigger_fraction: float
     compaction_keep_messages: int
