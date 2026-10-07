@@ -170,11 +170,17 @@ QA agent 가 성공한 조작 묶음을 macro 로 적어 두고 다시 부를 �
     `screens` 의 값 모양은 `ARTEL-919` 가 정하므로 해석하지 않고 그대로 모아 둔다.
   - `run_macro(step, thought, name, args)` — 등록된 것만. 선언 타입 검사와 좌표·`#` id
     문자열 검사를 첫 statement 전에 끝낸다.
-  - 설명은 `app/agents/qa/macro/descriptions.py` 가 든다 — `screen.py` 와
-    `capability.py` 의 선례다. 받을 수 있는 것의 목록(tool 열넷·reader 여덟·연산자
-    여섯·타입 다섯·상한 둘)은 `grammar.py` 의 데이터에서 조립한다. 손으로 다시 적으면
-    모델이 읽는 글이 parser 와 어긋난다. `write_macro` 의 설명에 number 의 `==` 권고와
-    `<`·`>` 를 `require` 둘로 쓰는 관용구를 싣는다.
+  - 설명은 `app/prompts/qa_run/v18/tool_<name>.md` 다섯 파일이다. 각자 500자 아래이고
+    끝에서 macro skill 을 가리킨다. 문법과 수명주기와 예시 둘은
+    `app/prompts/qa_run/v18/skill_macro.md` 에 있고 `load_skill("macro")` 로 읽는다 —
+    매 호출 20,098자가 2,398자가 된다.
+  - 받을 수 있는 것의 목록(tool 열넷·reader 여덟·연산자 여섯·타입 다섯·상한 둘)은
+    `app/agents/qa/macro/reference.py` 가 `grammar.py` 의 데이터에서 조립한다. 그것이
+    모델이 읽는 글은 아니다 — prompt 는 데이터로 버전 디렉터리에 살고
+    `prompts-lock.json` 이 본문을 해시하므로 런타임에 조립한 글로 대신할 수 없다.
+    `tests/test_qa_macro_reference.py` 가 조립한 글을 skill 파일 안에서 글자 그대로
+    찾아, 손으로 다시 적은 글이 parser 와 어긋나는 것을 테스트에서 잡는다.
+  - number 의 `==` 권고와 `<`·`>` 를 `require` 둘로 쓰는 관용구는 skill 에 싣는다.
 
 - [ ] **Step 6: Tests**
   - `tests/test_qa_macro_parser.py` — 허용 사례와 거절 사례를 각각 표로. 이슈의
