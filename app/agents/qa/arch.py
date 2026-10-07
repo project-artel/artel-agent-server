@@ -119,7 +119,20 @@ from app.llm.models import LLMModel, get_model_spec
 # drag an element the scene gives an id for, and hit a target that moved between
 # the observation and the click. Three tool names and four tool schemas moved, so
 # the fingerprint moves with the label here.
-QA_ARCH_LABEL = "v5-pointer-target"
+#
+# v6 because the model now has five macro tools — `write_macro`, `edit_macro`,
+# `read_macro`, `register_macro`, `run_macro` — and can send a whole sequence of
+# actions in one call instead of one action per turn (ARTEL-914). Two things moved
+# at once, and both are on the list the module docstring above keeps:
+#
+# * the tool set. Five tool schemas appeared, so `arch_fingerprint` moves on its
+#   own here.
+# * what the model reads on every call. `write_macro` carries the macro grammar
+#   and two worked examples in its description, 11,006 characters of it, and
+#   `arch_fingerprint` hashes a tool's schema but nothing about its description.
+#   A later edit to that text moves nothing but this label, which is the case the
+#   hand-bumped label exists for.
+QA_ARCH_LABEL = "v6-macros"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

@@ -395,7 +395,7 @@ def test_a_pinned_summarizer_stays_apart_from_the_run_model() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v5-pointer-target"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v6-macros"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,

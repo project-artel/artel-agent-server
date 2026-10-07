@@ -8,6 +8,8 @@
 받는 것이 어긋난다 — 그 어긋남은 모델이 거절을 받을 때까지 아무 데도 안 보인다.
 """
 
+from dataclasses import dataclass
+
 from app.agents.qa.macro.grammar import (
     DECLARABLE_TYPE_NAMES,
     FORBIDDEN_TOOLS,
@@ -115,6 +117,145 @@ these for you, and a key left down changes every step after the macro.
 {MAX_CALL_DEPTH} deep counting the entry point. Caught at registration because
 an action already sent to the game cannot be taken back."""
 
+
+@dataclass(frozen=True)
+class MacroExample:
+    """모델이 읽는 예시 하나.
+
+    `source` 는 `macro_definition_from_source` 를 실제로 통과하는 글이다. 설명 문자열
+    안에 글로만 박아 두면 문법이 바뀔 때 예시가 조용히 거절되는 글이 되고, 그 거절은
+    모델이 베껴 써서 런에서 받을 때까지 아무 데도 안 보인다. 그래서 목록으로 들고
+    `tests/test_qa_macro_descriptions.py` 가 이것을 돌며 parser 에 넣는다.
+    """
+
+    # 진입점 `def` 의 이름. 테스트가 `macro_definition_from_source` 에 그대로 넘긴다.
+    name: str
+    # 예시 위에 붙는 한 줄. 무엇을 보여 주는 예시인지 말한다.
+    shows: str
+    source: str
+
+
+# 첫 예시가 긴 것은 일부러다. 저자가 틀리는 자리는 문법이 아니라 순서와 분기다 —
+# 화면을 안 세우고 시작하고, 분기 안에서만 확인하고, `require` 의 둘째 인자에 무엇을
+# 할지가 아니라 무엇이 틀렸는지를 적는다. 짧은 조각 여러 개로는 그 셋이 안 보인다.
+#
+# 둘째 예시가 따로 있는 이유는 `hold_key` / `release_key` 짝과 `enter_text` 가 첫
+# 예시의 절차에 자연스럽게 안 들어가기 때문이다. 억지로 끼우면 그 자리에서 왜 누르고
+# 왜 푸는지가 안 읽힌다.
+EXAMPLES: tuple[MacroExample, ...] = (
+    MacroExample(
+        name="attack_first_enemy_with",
+        shows=(
+            "names the screen, opens a panel only when it is shut, runs the "
+            "procedure, and says which step now needs judging"
+        ),
+        source='''def attack_first_enemy_with(card_label: string, element_label: string) -> None:
+    # Name the screen before touching anything. A macro called on the wrong screen
+    # aims at objects that are not there, and every require after this one would
+    # then blame the wrong thing.
+    require(scene() == "Battle", "Go to the Battle scene before calling this.")
+
+    # The combine panel may already be open from an earlier step, so open it only
+    # when it is shut. `absent(...)` and not `not exists(...)`: there is no `not`.
+    panel: object = selector("DebugCanvas[4]/CombinePanel[2]")
+    if absent(panel):
+        opener: object = find(name="CombineButton")
+        require(actionable(opener), "Combine is locked this turn; end the turn first.")
+        click(opener)
+
+    # Check what the branch was for, outside the branch. This holds whether the panel
+    # was already open or this macro just opened it.
+    require(exists(panel), "The combine panel did not open; read the screen and retry.")
+
+    # Found by the text they show, so this macro works for any pair the caller names
+    # instead of for one hard-coded hand. `under=` keeps the lookup inside the hand,
+    # where the same label on a tooltip cannot make it ambiguous.
+    card: object = find(label=card_label, under="DebugCanvas[4]/Hand[1]")
+    element: object = find(label=element_label, under="DebugCanvas[4]/Hand[1]")
+    slot: object = find(name="CombineSlot")
+
+    # The procedure. One statement is one batch, so a statement that fails stops the
+    # macro there and everything below it is reported as never sent.
+    drag(card, slot)
+    drag(element, slot)
+    confirm_combination()
+
+    # A reading cannot be bound to a name — an assignment takes `find(...)`,
+    # `selector(...)` or one literal, nothing else. So write the bound down and
+    # compare against that instead of against a value read before the click.
+    starting_health: float = 100
+    enemy: object = find(name="Enemy")
+    click(enemy)
+
+    # Two bounds rather than one `==`. A number arrives rounded to four decimals, so
+    # a value sitting still still wobbles in its last place.
+    require(member(enemy, "Health.current") < starting_health, "The attack landed but took no health.")
+    require(member(enemy, "Health.current") > 0, "The enemy died outright; this step wanted chip damage.")
+
+    # `flag` tells you what the macro saw, and nothing more.
+    flag("combined the two cards and attacked the first enemy")
+
+    # `ask_verdict` says a scenario step now has something to judge. The step number
+    # is written out as a literal, so a macro that asks for a verdict is tied to that
+    # one step. The macro judges nothing: you still call `report_step` after it
+    # returns.
+    ask_verdict(4, "the enemy loses health equal to the combined card's power")
+
+
+def confirm_combination() -> None:
+    # A helper keeps a named sub-procedure in one place. Its statements count toward
+    # the same limit as the entry point's.
+    button: object = find(name="ConfirmCombine")
+    require(actionable(button), "Both slots need a card before Confirm turns on.")
+    click(button)
+''',
+    ),
+    MacroExample(
+        name="rename_the_save_slot",
+        shows="types into a field and releases everything it held",
+        source='''def rename_the_save_slot(field_label: string, new_name: string) -> None:
+    box: object = find(label=field_label)
+    require(actionable(box), "The name field is not editable right now.")
+
+    # `enter_text` takes a target here even though the tool itself takes an id: the
+    # macro resolves the selector to the object and reads the id for you.
+    enter_text(box, new_name)
+
+    # What you hold, you release, on every path through the macro. Nothing releases
+    # it for you, and a key left down changes every step after the macro returns.
+    hold_key("LeftControl")
+    press_key("S", 0.1)
+    release_key("LeftControl")
+
+    require(text(box) == new_name, "The field did not keep the text; check it is editable.")
+''',
+    ),
+)
+
+_EXAMPLE_SOURCES = "\n\n".join(
+    f"A macro that {example.shows}:\n\n```python\n{example.source.strip()}\n```"
+    for example in EXAMPLES
+)
+
+# 예시 블록. `write_macro` 에만 싣는다 — tool 설명은 매 호출마다 전송되므로 두 설명이
+# 이것을 나눠 들면 같은 글을 두 번 보낸다. 쓸 때 읽어야 하는 글이고, 고칠 때는 이미
+# 쓴 글이 눈앞에 있다.
+EXAMPLES_BLOCK = f"""**Two macros that pass, with the reasoning written into them.** What these do
+that a first draft usually does not:
+
+- the screen is named in the first statement, so a wrong-screen call fails on
+  that line instead of on an aim ten lines down
+- every `require` remedy says what to DO about the failure, because the agent
+  reading it has only that sentence to go on
+- the `if` opens the panel and the `require` AFTER it checks the panel is open,
+  so the check holds whether the branch ran or not
+- objects are found by the text they show, with `under=` narrowing where it
+  could be ambiguous, so the macro is not tied to one hand or one layout
+- a number is bounded with `<` and `>`, never pinned with `==`
+- what is held is released in the same body that held it
+
+{_EXAMPLE_SOURCES}"""
+
 # 연속값 권고. 거절이 아니라 관용구를 주는 것이라 `write_macro` 에만 싣는다.
 _NUMBER_EQUALITY = """**A caution about `==` on a number.** It is allowed, and on a continuous value
 — a position, a timer — it is treacherous. The SDK rounds a number to four
@@ -140,7 +281,9 @@ To change part of one, read it with `read_macro` and change that part with
 
 {GRAMMAR}
 
-{_NUMBER_EQUALITY}"""
+{_NUMBER_EQUALITY}
+
+{EXAMPLES_BLOCK}"""
 
 EDIT_MACRO_DESCRIPTION = f"""Change part of a macro draft by replacing text in it.
 
