@@ -280,8 +280,9 @@ class MacroFlagStatement(_Statement):
 
 
 class MacroAskVerdictStatement(_Statement):
+    # step 을 들지 않는다. 판정할 step 은 `run_macro` 호출이 받은 것이고 runner 가
+    # 그것을 붙인다 — 여기 따로 들면 호출의 step 과 어긋날 자리가 생긴다.
     kind: Literal["ask_verdict"] = "ask_verdict"
-    step: int
     # 언제 써도 참인 문장이다. macro 글은 저작 시점에 고정이라 이번 런에서 본 것을
     # 인용할 수 없으므로, 본 것을 적으면 거짓이 된다.
     expected: str

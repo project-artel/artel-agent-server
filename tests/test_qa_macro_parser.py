@@ -491,15 +491,30 @@ def test_flag_and_ask_verdict_pass_with_the_arguments_they_take() -> None:
     definition = parse(
         'def m(card: object) -> None:\n'
         '    flag("the card bounced back instead of landing")\n'
-        '    ask_verdict(3, "the enemy should lose hp when the attack lands")\n'
+        '    ask_verdict("the enemy should lose hp when the attack lands")\n'
     )
     flagged, asked = definition.entry.statements
 
     assert isinstance(flagged, MacroFlagStatement)
     assert flagged.message.startswith("the card bounced")
     assert isinstance(asked, MacroAskVerdictStatement)
-    assert asked.step == 3
     assert asked.expected.startswith("the enemy should")
+    # step 을 들지 않는다. 판정할 step 은 `run_macro` 호출이 정한다.
+    assert "step" not in MacroAskVerdictStatement.model_fields
+
+
+def test_a_step_number_in_ask_verdict_is_refused_with_what_to_write_instead() -> None:
+    """번호를 적게 두면 그 번호가 `run_macro` 의 step 과 어긋날 수 있다.
+
+    어긋났었다. `ask_verdict(4, ...)` 로 등록한 macro 를 `run_macro(step=7)` 로 부르면
+    agent 에게 4번 step 을 판정하라고 말했다. 거절 문장이 번호를 빼라고 말해야 모델이 한
+    번에 고친다.
+    """
+    reason = rejection('def m() -> None:\n    ask_verdict(4, "the card lands")\n')
+
+    assert "step number" in reason
+    assert "run_macro" in reason
+    assert "ask_verdict(<expected>)" in reason
 
 
 @pytest.mark.parametrize(
@@ -508,11 +523,11 @@ def test_flag_and_ask_verdict_pass_with_the_arguments_they_take() -> None:
         "flag()",
         'flag("a", "b")',
         'flag("")',
+        "ask_verdict()",
         "ask_verdict(3)",
-        'ask_verdict(0, "x")',
-        'ask_verdict(3, "")',
-        'ask_verdict("3", "x")',
-        'ask_verdict(3.5, "x")',
+        'ask_verdict("")',
+        'ask_verdict("a", "b")',
+        'ask_verdict(expected="x")',
     ],
 )
 def test_the_wrong_shape_of_flag_or_ask_verdict_is_refused(written: str) -> None:

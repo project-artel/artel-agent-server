@@ -146,7 +146,7 @@ class MacroFlagged:
 
 @dataclass(frozen=True)
 class MacroVerdictRequest:
-    """`ask_verdict` 가 세운 의무. 그 step 에 판정이 필요하다는 말이다.
+    """`ask_verdict` 가 세운 의무. 이 macro 를 부른 step 에 판정이 필요하다는 말이다.
 
     `expected` 는 macro 가 적은 기대이고 `observed` 는 runner 가 읽은 값이다. 둘이 짝이
     되어야 agent 가 판정할 수 있다 — 에러 payload 가 `expected` 와 `observed` 두 칸으로
@@ -368,7 +368,9 @@ class _Runner:
                 self.result.verdict_requests.append(
                     MacroVerdictRequest(
                         place=place,
-                        step=statement.step,
+                        # 이 macro 를 부른 `run_macro` 의 step 이다. macro 원문에는 step 이
+                        # 없다 — 있으면 호출의 step 과 어긋날 수 있다.
+                        step=self.step,
                         expected=statement.expected,
                         observed=self.surrounding(),
                     )

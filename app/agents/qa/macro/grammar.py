@@ -368,7 +368,7 @@ REPORTING_NAMES: dict[str, str] = {
     "report_step": (
         "`report_step` is not part of the macro grammar. A verdict needs the scenario, "
         "the earlier steps, what the operator said and the knowledge this run read, and a "
-        "macro holds none of those — use `ask_verdict(<step>, <expected>)` to say a step "
+        "macro holds none of those — use `ask_verdict(<expected>)` to say this step "
         "needs judging, and judge it yourself"
     ),
     "report_case": (

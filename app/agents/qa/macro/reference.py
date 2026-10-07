@@ -72,7 +72,8 @@ Every `def` returns `-> None`, because a macro hands back no value.
 - a typed assignment: `card: object = find(label="shoot")`
 - `if` / `elif` / `else`
 - `flag("<message>")` — tells you what the macro saw, and nothing more
-- `ask_verdict(<step>, "<expected>")` — says that scenario step needs judging
+- `ask_verdict("<expected>")` — says the step `run_macro` was called with needs
+  judging. There is no step number to write: it is always that step
 
 **Aiming.** A target is `selector("<unity/hierarchy/path>")`, a parameter on the
 `def` line, or a name bound by `find(...)` or `selector(...)`. There is no syntax

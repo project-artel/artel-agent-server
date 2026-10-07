@@ -701,26 +701,28 @@ def test_a_macro_cannot_call_run_macro_or_any_other_macro_tool() -> None:
 def test_a_step_a_macro_asked_about_still_has_to_be_reported() -> None:
     """새 강제 장치를 만들지 않는다. `finish_run` 이 이미 강제한다.
 
-    `ask_verdict` 가 세운 step 은 시나리오 step 이고, `QaRunState.unreported_steps` 가
-    판정 없는 시나리오 step 을 세므로 그 수에 그대로 더해진다.
+    `ask_verdict` 가 청하는 step 은 `run_macro` 를 부른 시나리오 step 이고,
+    `QaRunState.unreported_steps` 가 판정 없는 시나리오 step 을 세므로 거기 그대로 남는다.
     """
     channel, state, tools, sent = make(total_steps=3)
     with_cards(channel)
     source = (
         "def look() -> None:\n"
         '    if exists(selector("Root[0]/Hand[2]/Card(Clone)[3]")):\n'
-        '        ask_verdict(2, "a dealt card should be pressable")\n'
+        '        ask_verdict("a dealt card should be pressable")\n'
     )
     call(tools["write_macro"], name="look", source=source)
     call(tools["register_macro"], name="look")
 
     answer = asyncio.run(
         tools["run_macro"].ainvoke(
-            {"step": 1, "thought": "t", "name": "look", "arguments": {}}
+            {"step": 2, "thought": "t", "name": "look", "arguments": {}}
         )
     )
 
     assert "NEEDS A VERDICT" in answer
+    # 부른 step 을 묻는다. macro 원문에는 step 이 없다.
+    assert "scenario step 2" in answer
     assert "report_step" in answer
     # 그 step 은 아직 판정이 없다. `finish_run` 이 첫 시도를 되민다.
     assert 2 in state.unreported_steps()

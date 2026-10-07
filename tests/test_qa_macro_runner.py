@@ -301,7 +301,7 @@ def m(card: object) -> None:
         flag("the card was pressable")
     else:
         move_pointer(card)
-        ask_verdict(4, "a card that cannot be pressed should say why")
+        ask_verdict("a card that cannot be pressed should say why")
     press_key("Space", 0.1)
 '''
 
@@ -344,9 +344,10 @@ def test_a_flag_and_a_verdict_request_are_collected_apart() -> None:
 
     quiet = two_cards(host)["card_b"]
     host.memory.pulse.held[quiet.key].offers = None
-    other = drive(host, BRANCHY, "m", {"card": quiet})
+    other = drive(host, BRANCHY, "m", {"card": quiet}, step=4)
 
     assert other.flags == []
+    # 부른 step 이다. `BRANCHY` 원문에는 step 번호가 없다.
     assert [one.step for one in other.verdict_requests] == [4]
     assert other.verdict_requests[0].expected.startswith("a card that cannot")
 
@@ -380,7 +381,7 @@ def test_nested_ifs_put_every_layer_of_reader_values_on_observed() -> None:
         'def m(enemy: object) -> None:\n'
         '    if text(enemy) == "0":\n'
         "        if exists(enemy):\n"
-        '            ask_verdict(5, "a defeated enemy should leave the field")\n'
+        '            ask_verdict("a defeated enemy should leave the field")\n'
     )
     result = drive(host, source, "m", {"enemy": _found(host, "0")})
 
@@ -388,6 +389,21 @@ def test_nested_ifs_put_every_layer_of_reader_values_on_observed() -> None:
         "text(enemy)": "0",
         "exists(enemy)": True,
     }
+
+
+def test_ask_verdict_asks_about_the_step_run_macro_was_called_with() -> None:
+    """macro 원문에는 step 이 없다. 판정을 청하는 step 은 그 macro 를 부른 step 이다.
+
+    같은 macro 를 다른 step 에서 부르면 다른 step 을 묻는다. 예전에는 원문에 적힌 번호를
+    그대로 냈고, 그 번호는 호출의 step 과 상관이 없었다.
+    """
+    source = 'def m() -> None:\n    ask_verdict("the board is dealt")\n'
+
+    called_at_three = drive(FakeHost(battle()), source, "m", {}, step=3)
+    called_at_seven = drive(FakeHost(battle()), source, "m", {}, step=7)
+
+    assert [one.step for one in called_at_three.verdict_requests] == [3]
+    assert [one.step for one in called_at_seven.verdict_requests] == [7]
 
 
 def test_a_statement_with_no_enclosing_if_still_stands_with_an_empty_observed() -> None:

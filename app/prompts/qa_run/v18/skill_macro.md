@@ -21,7 +21,8 @@ Every `def` returns `-> None`, because a macro hands back no value.
 - a typed assignment: `card: object = find(label="shoot")`
 - `if` / `elif` / `else`
 - `flag("<message>")` — tells you what the macro saw, and nothing more
-- `ask_verdict(<step>, "<expected>")` — says that scenario step needs judging
+- `ask_verdict("<expected>")` — says the step `run_macro` was called with needs
+  judging. There is no step number to write: it is always that step
 
 **Aiming.** A target is `selector("<unity/hierarchy/path>")`, a parameter on the
 `def` line, or a name bound by `find(...)` or `selector(...)`. There is no syntax
@@ -64,7 +65,7 @@ re-assignment and arithmetic. And these, each for its own reason:
 
 - `click_button` is deprecated — it invokes a Button's `onClick` directly, so it sees no occlusion. Write `click` instead
 - `reset_game` is not allowed in a macro — a stored script must not be able to throw the run's progress away. Call the tool yourself when a step needs it
-- `report_step` is not part of the macro grammar. A verdict needs the scenario, the earlier steps, what the operator said and the knowledge this run read, and a macro holds none of those — use `ask_verdict(<step>, <expected>)` to say a step needs judging, and judge it yourself
+- `report_step` is not part of the macro grammar. A verdict needs the scenario, the earlier steps, what the operator said and the knowledge this run read, and a macro holds none of those — use `ask_verdict(<expected>)` to say this step needs judging, and judge it yourself
 - `report_case` is not part of the macro grammar: a test case's verdict is derived from its steps' verdicts, so there is nothing for a macro to report
 - `report_issue` is not part of the macro grammar. File the defect yourself after the macro returns; `flag(<message>)` is how a macro tells you it saw something
 
@@ -129,8 +130,9 @@ What comes back says how far it got. The actions that reached the game are liste
 apart from the ones that did not, and apart again from the ones an `if` skipped — an
 action already sent cannot be taken back, so calling the macro again starts from a
 board that is not where it started last time. Anything the macro flagged comes back
-too, and so does any step it says needs judging. A flagged line is for you to read;
-a step it names still needs your own `report_step`.
+too, and so does any verdict it asked for. A flagged line is for you to read; a
+verdict it asked for is about the step you called it with, and that step still needs
+your own `report_step`.
 
 ## Two macros that pass, with the reasoning written into them
 
@@ -148,7 +150,7 @@ What these do that a first draft usually does not:
 - what is held is released in the same body that held it
 
 A macro that names the screen, opens a panel only when it is shut, runs the
-procedure, and says which step now needs judging:
+procedure, and asks for a verdict on the step that called it:
 
 ```python
 def attack_first_enemy_with(card_label: string, element_label: string) -> None:
@@ -197,11 +199,11 @@ def attack_first_enemy_with(card_label: string, element_label: string) -> None:
     # `flag` tells you what the macro saw, and nothing more.
     flag("combined the two cards and attacked the first enemy")
 
-    # `ask_verdict` says a scenario step now has something to judge. The step number
-    # is written out as a literal, so a macro that asks for a verdict is tied to that
-    # one step. The macro judges nothing: you still call `report_step` after it
-    # returns.
-    ask_verdict(4, "the enemy loses health equal to the combined card's power")
+    # `ask_verdict` says the step this macro was called for now has something to
+    # judge. It takes no step number: the step is the one `run_macro` was called
+    # with, so the same macro asks about whichever step calls it. The macro judges
+    # nothing — you still call `report_step` after it returns.
+    ask_verdict("the enemy loses health equal to the combined card's power")
 
 
 def confirm_combination() -> None:

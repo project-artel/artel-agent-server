@@ -140,7 +140,7 @@ _NO_DOT = (
 _STATEMENT_KINDS = (
     "an action call (one of the game tools, or a helper `def` in this same source), "
     "`require(<condition>, <remedy>)`, a typed assignment (`name: object = find(...)`), "
-    "`if`, `flag(<message>)`, or `ask_verdict(<step>, <expected>)`"
+    "`if`, `flag(<message>)`, or `ask_verdict(<expected>)`"
 )
 
 
@@ -1230,7 +1230,7 @@ class _FunctionReader:
             raise MacroRejection(
                 "`flag` takes exactly one argument: a message written out as a string. "
                 "It only tells the agent what the macro saw — it names no step and sets "
-                "no obligation. `ask_verdict(<step>, <expected>)` is the one that does.",
+                "no obligation. `ask_verdict(<expected>)` is the one that does.",
                 node.lineno,
             )
         message = _string_literal(node.args[0], "the message of `flag`").strip()
@@ -1242,26 +1242,26 @@ class _FunctionReader:
         return MacroFlagStatement(source=written, message=message)
 
     def _ask_verdict(self, node: ast.Call, written: str) -> MacroAskVerdictStatement:
-        if node.keywords or len(node.args) != 2:
+        # step 번호는 적지 않는다. `run_macro` 호출이 받은 step 을 안쪽 statement 가 전부
+        # 물려받는데, 여기 번호를 따로 적게 하면 그 번호가 호출의 step 과 어긋날 자리가
+        # 생긴다. 실제로 어긋났다 — `ask_verdict(4, ...)` 로 등록한 macro 를
+        # `run_macro(step=7)` 로 부르면 agent 에게 4번 step 을 판정하라고 말했다.
+        if not node.keywords and len(node.args) == 2 and _literal(node.args[0]) is not None:
             raise MacroRejection(
-                "`ask_verdict` takes exactly two arguments: the scenario step number, "
-                "and what should be true at that step, written out as a string.",
+                "`ask_verdict` does not take a step number. The step is the one "
+                "`run_macro` was called with, so a number here could only disagree with "
+                "it. Write `ask_verdict(<expected>)` with the expectation alone.",
                 node.lineno,
             )
-        step = _literal(node.args[0])
-        if step is None or step.shape is not MacroShape.number or not isinstance(step.value, int):
+        if node.keywords or len(node.args) != 1:
             raise MacroRejection(
-                "the first argument of `ask_verdict` is a scenario step number, written "
-                "out as a whole number of 1 or more.",
-                node.lineno,
-            )
-        if step.value < 1:
-            raise MacroRejection(
-                f"`ask_verdict` was given step {step.value}. Scenario steps start at 1.",
+                "`ask_verdict` takes exactly one argument: what should be true at this "
+                "step, written out as a string. The step is the one `run_macro` was "
+                "called with.",
                 node.lineno,
             )
         expected = _string_literal(
-            node.args[1], "the expectation of `ask_verdict`"
+            node.args[0], "the expectation of `ask_verdict`"
         ).strip()
         if not expected:
             raise MacroRejection(
@@ -1270,7 +1270,7 @@ class _FunctionReader:
                 "not what you happened to see on one run.",
                 node.lineno,
             )
-        return MacroAskVerdictStatement(source=written, step=step.value, expected=expected)
+        return MacroAskVerdictStatement(source=written, expected=expected)
 
     # -- 인자 --
 

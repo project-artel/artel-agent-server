@@ -42,7 +42,7 @@ def attack(card: object, speed: float = 1.5) -> None:
         strike(speed)
         flag("the card was pressable")
     else:
-        ask_verdict(2, "a card that cannot be pressed should say why")
+        ask_verdict("a card that cannot be pressed should say why")
 
 def aim(card: object) -> None:
     move_pointer(card)
