@@ -622,6 +622,58 @@ def test_a_macro_registered_now_runs_from_the_next_step() -> None:
     assert cycle.phase is RunPhase.act
 
 
+def test_a_macro_can_be_registered_mid_act_without_leaving_act() -> None:
+    """try 62 가 ACT 에서 쓴 macro 를 바로 등록하려다 거절당했고, 초안은 런과 함께 사라졌다."""
+    cycle = _lite()
+    for name in ("observe_scene", "press_key", "write_macro"):
+        cycle.advance(name)
+    assert cycle.phase is RunPhase.act
+
+    assert cycle.refusal_for("register_macro") is None
+    cycle.advance("register_macro")
+
+    # 등록이 ACT 를 끝내지 않는다. 조작을 이어 가고 판정으로 넘어간다.
+    assert cycle.phase is RunPhase.act
+    assert cycle.refusal_for("press_key") is None
+    assert cycle.refusal_for("report_step") is None
+
+
+def test_a_registration_outside_update_memory_does_not_answer_it() -> None:
+    """ACT 에서 등록했다고 이 step 의 지식화가 끝난 것은 아니다. UPDATE_MEMORY 는 따로 답해야 한다."""
+    cycle = _lite()
+    for name in ("observe_scene", "press_key", "register_macro", "report_step"):
+        assert cycle.refusal_for(name) is None, name
+        cycle.advance(name)
+    assert cycle.phase is RunPhase.update_memory
+
+    assert cycle.refusal_for("observe_scene") is None
+    assert cycle.refusal_for("click") is not None
+
+
+def test_registering_outside_update_memory_does_not_reset_the_refusal_streak() -> None:
+    """`ALWAYS_ALLOWED` 처럼, ACT 에서 사이에 낀 등록은 모델이 자리를 고쳤다는 뜻이 아니다."""
+    cycle = _lite()
+    for name in ("observe_scene", "press_key"):
+        cycle.advance(name)
+    assert cycle.refusal_for("record_knowledge") is not None
+    assert cycle.refusal_for("register_macro") is None
+    assert cycle.refusal_for("record_knowledge") is not None
+    # 셋째 연속 거절 자리에서 통과한다. 등록이 끼었어도 연속은 이어진다.
+    assert cycle.refusal_for("record_knowledge") is None
+    assert cycle.forced_passes == 1
+
+
+def test_registering_in_update_memory_clears_the_refusal_streak() -> None:
+    """자기 phase 에서 부른 등록은 다른 맞는 호출과 같다."""
+    cycle = _lite()
+    _into_update_memory(cycle)
+    assert cycle.refusal_for("click") is not None
+    assert cycle.refusal_for("register_macro") is None
+    assert cycle.refusal_for("click") is not None
+    assert cycle.refusal_for("click") is not None
+    assert cycle.forced_passes == 0
+
+
 def test_macro_drafts_can_be_written_and_read_in_any_phase() -> None:
     """초안은 런 밖에 아무것도 안 바꾼다. ACT 에서 실패한 macro 를 읽고 고칠 수 있어야 한다."""
     cycle = _lite()

@@ -240,7 +240,15 @@ from app.llm.models import LLMModel, get_model_spec
 # drafted for, since that comment is the line the next run reads. A run with `macros=off`
 # or a build with no macros reads exactly what it did under v11. Nothing hashed moves: the
 # tool schemas are unchanged and the list is part of a message, not of a tool.
-QA_ARCH_LABEL = "v12-macro-discovery"
+#
+# v13 because `register_macro` is no longer refused outside UPDATE_MEMORY (`ANY_PHASE` in
+# `tools/phase.py`). Called during UPDATE_MEMORY it still answers that phase; called in any
+# other phase it runs and moves no phase. Under v12, try 62 of `macro-continuity-l1`
+# (2026-10-08) wrote a macro during ACT, had its registration refused, never retried it in
+# UPDATE_MEMORY, and the draft was dropped with the run. The macro paragraph of the phase
+# directive says so in one more sentence. Nothing hashed moves: the phase table is not
+# hashed and neither is the directive's text.
+QA_ARCH_LABEL = "v13-macro-register-anywhere"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

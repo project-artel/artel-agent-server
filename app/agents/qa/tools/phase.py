@@ -131,9 +131,23 @@ _TOOL_PHASE: dict[str, RunPhase] = {
     # 등록한 macro 는 다음 런이 쓴다. knowledge 항목과 같은 "런을 넘어 남는 기록" 이라 이
     # 단계를 끝낼 수 있다. 그래서 이 단계가 macro 를 만드는 자리가 된다 — agent 가 매 step
     # "무엇을 남길까" 를 묻는 바로 그때 "반복한 순서가 있었나" 도 묻게 한다. 이 순간에 등록한
-    # macro 는 다음 step 의 ACT 부터 돌린다.
+    # macro 는 다음 step 의 ACT 부터 돌린다. 다른 phase 에서도 거절하지 않는다(`ANY_PHASE`).
     "register_macro": RunPhase.update_memory,
 }
+
+
+# 어느 phase 에서든 통과하지만, 자기 phase 에서 불리면 그 phase 의 답으로도 치는 tool.
+#
+# `register_macro` 하나다. 등록은 이 런 밖에 남는 기록이라 `UPDATE_MEMORY` 의 답이 되지만,
+# 그 자리에서만 받으면 agent 가 등록하려고 마음먹은 순간과 허용되는 순간이 어긋난다.
+# `macro-continuity-l1`(2026-10-08) try 62 가 ACT 에서 `write_macro` 로 macro 를 쓰고 바로
+# `register_macro` 를 불렀다가 거절당했고, `UPDATE_MEMORY` 에서 다시 부르지 않아 초안이 런과
+# 함께 사라졌다. 거절문은 "건너편에서 기다린다" 고 말하지만 실제로 붙잡아 두는 것은 없다.
+#
+# `ALWAYS_ALLOWED` 에 넣지 않는 이유: 그 목록의 tool 은 어느 phase 도 끝내지 않는다. 등록은
+# `UPDATE_MEMORY` 에서 불리면 그 step 의 지식화를 끝내야 하므로 표에도 남는다. 다른 phase 에서
+# 불리면 phase 를 옮기지 않는다 — ACT 한가운데서 등록했다고 VERIFY 를 건너뛰면 안 된다.
+ANY_PHASE = frozenset({"register_macro"})
 
 
 _LITE_ORDER = (RunPhase.observe, RunPhase.act, RunPhase.verify, RunPhase.update_memory)
@@ -319,8 +333,12 @@ class PhaseCycle:
             # 거절 연속 카운터를 건드리지 않는다. 이 tool 들은 어느 phase 에서 불려도 옳으
             # 므로, 사이에 하나 끼었다고 모델이 자리를 고친 것은 아니다.
             return None
-
         at = _TOOL_PHASE.get(tool_name)
+        if tool_name in ANY_PHASE and at is not self.phase:
+            # 자기 phase 밖에서는 `ALWAYS_ALLOWED` 와 같은 이유로 연속 카운터를 건드리지 않는다.
+            # 자기 phase 에서는 아래 평범한 길로 간다 — 맞는 자리에서 부른 것이다.
+            return None
+
         if at is None or at is self.phase or self._reachable(at):
             self._consecutive_refusals = 0
             return None
@@ -356,6 +374,9 @@ class PhaseCycle:
             self._held = False
             return
         at = _TOOL_PHASE.get(tool_name)
+        if tool_name in ANY_PHASE and at is not self.phase:
+            # 자기 phase 밖에서 돈 것은 아무 phase 도 옮기거나 끝내지 않는다(`ANY_PHASE`).
+            return
         if at is self.phase:
             # 반복 phase 는 자기 tool 로 안 끝난다. 같은 step 안에서 몇 번이고 더 부를 수
             # 있고, 돈 것은 `_satisfied` 로만 남는다 — `UPDATE_MEMORY` 를 떠나도 되는지가
