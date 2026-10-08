@@ -17,11 +17,12 @@ from langchain_core.messages.utils import count_tokens_approximately
 
 from app.agents.qa.arch import ResolvedArch, withheld_skills
 from app.agents.qa.compaction import QaCompactionMiddleware
-from app.qa.scene import SCENE_VIEW_START_PREFIX
 from app.agents.qa.context import (
+    FOLDED_PULSE_VIEW_PREFIX,
     FOLDED_VIEW_PREFIX,
+    count_full_views,
+    fold_scenes,
     fold_stale_knowledge,
-    fold_stale_scenes,
     fold_stale_skills,
 )
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
@@ -327,7 +328,7 @@ def build_middleware(
             trim_tokens=arch.compaction_trim_tokens,
             on_compacted=on_compacted,
         ),
-        "fold_scene_views": lambda: _fold_scene_views,
+        "fold_scene_views": lambda: _fold_scene_views_for(state, channel),
         "fold_knowledge_neighbours": lambda: _fold_knowledge_neighbours,
         "fold_stale_skills": lambda: _fold_skills,
         "capture_vision": lambda: QaCaptureVisionMiddleware(state, channel, arch),
@@ -336,15 +337,33 @@ def build_middleware(
     return [builders[name]() for name in middleware_names_for(arch)]
 
 
-@wrap_model_call
-async def _fold_scene_views(request, handler):
-    """Fold stale scene views out of what one model call actually receives.
+def _fold_scene_views_for(state: QaRunState, channel: QaRunChannel):
+    """Fold stale scene and `pulse` views out of what one model call actually receives.
 
     `request.override` replaces only this call's messages, not the graph's own
     state, so the timeline and the console logging below keep the full text —
     see `app/agents/qa/context.py` for the fold itself.
+
+    런마다 만든다. `fold` 가 새 batch 를 지웠는지 알려면 지난 호출에서 몇 개를 `fold` 했는지
+    (`state.views_folded`)와 비교해야 하고, 알았으면 그 런의 `PulseMemory` 에 말해야 한다.
     """
-    return await handler(request.override(messages=fold_stale_scenes(request.messages)))
+
+    @wrap_model_call(name="_fold_scene_views")
+    async def fold_scene_views(request, handler):
+        fold = fold_scenes(request.messages)
+        # 새 batch 가 `fold` 됐다. 지금 모델이 받는 것은 가장 새 view 하나와 `placeholder` 뿐이고, 그
+        # view 는 델타라 지워진 view 에서 한 번 말하고 가만히 있던 값이 어디에도 없다. 그래서
+        # 다음 도구 결과의 `pulse` view 가 가진 값을 전부 다시 그리게 한다. 이 호출 한 번은 그
+        # 값 없이 판단하고, 그 다음 도구 결과부터 돌아온다.
+        #
+        # 같아질 때도 기록한다. 압축이 옛 메시지를 요약으로 바꾸면 이 수가 줄고, 다음 batch 가
+        # 다시 커질 때 그것도 새 `fold` 로 세야 한다.
+        if fold.views_folded > state.views_folded:
+            channel.scene.pulse.redraw_all_values_next()
+        state.views_folded = fold.views_folded
+        return await handler(request.override(messages=fold.messages))
+
+    return fold_scene_views
 
 
 @wrap_model_call
@@ -400,10 +419,11 @@ def _context_shape(messages) -> str:
         if isinstance(message, ToolMessage):
             # 접힌 자리와 전문으로 남은 자리를 가른다. `fold_stale_scenes` 가 실제로
             # 얼마나 누르는지는 이 둘의 비에서만 나온다.
-            if FOLDED_VIEW_PREFIX in text:
-                folded += 1
-            elif SCENE_VIEW_START_PREFIX in text:
-                kept += 1
+            #
+            # 메시지가 아니라 view 를 센다. `pulse` view 도 센다 — scene view 만 세던 때는
+            # 실제 런이 `pulse` view 만 받아서 매 호출 `folded=0 kept=0` 이었다.
+            folded += text.count(FOLDED_VIEW_PREFIX) + text.count(FOLDED_PULSE_VIEW_PREFIX)
+            kept += count_full_views(text)
 
         kind = type(message).__name__.removesuffix("Message").lower()
         by_kind[kind] = by_kind.get(kind, 0) + size

@@ -24,7 +24,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from app.agents.qa.compaction import render_progress_ledger
-from app.agents.qa.context import FOLDED_VIEW_PREFIX
+from app.agents.qa.context import DEFAULT_MAX_FULL_VIEWS, FOLDED_VIEW_PREFIX
 from app.api.qa_sessions import OpenQaSessionRequest
 from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState
@@ -539,18 +539,28 @@ def scenario() -> QaScenario:
 
 
 def drive(
-    monkeypatch: pytest.MonkeyPatch, scenes: list[str], scene_context: SceneContext | None
+    monkeypatch: pytest.MonkeyPatch,
+    scenes: list[str],
+    scene_context: SceneContext | None,
+    looks: int = 2,
 ) -> tuple[ScriptedModel, QaRunChannel]:
+    observations = [
+        {
+            "tool_calls": [
+                {"name": "observe_scene", "args": {"step": 1, "thought": f"{index}번째로 본다"}, "id": f"look-{index}"}
+            ]
+        }
+        for index in range(1, looks + 1)
+    ]
     model = ScriptedModel(
         turns=[
-            {"tool_calls": [{"name": "observe_scene", "args": {"step": 1, "thought": "본다"}, "id": "1"}]},
-            {"tool_calls": [{"name": "observe_scene", "args": {"step": 1, "thought": "또 본다"}, "id": "2"}]},
+            *observations,
             {
                 "tool_calls": [
                     {
                         "name": "report_step",
                         "args": {"step": 1, "passed": True, "message": "봤다", "thought": "판정"},
-                        "id": "3",
+                        "id": "report",
                     }
                 ]
             },
@@ -559,7 +569,7 @@ def drive(
                     {
                         "name": "finish_run",
                         "args": {"passed": True, "summary": "끝", "thought": "종료"},
-                        "id": "4",
+                        "id": "finish",
                     }
                 ]
             },
@@ -652,11 +662,13 @@ def test_the_block_survives_the_fold_that_swallows_the_view_it_sits_under(
 ) -> None:
     """`fold` 되는 것은 화면이고, 블록은 그 화면이 무엇인지에 대한 설명이다.
 
-    `fold_stale_scenes` 는 가장 새 씬 뷰 하나만 전문으로 남긴다. 블록을 실은 것은 그
-    씬에 처음 들어선 도구 결과이므로, 마커 안에 있었다면 두 번째 씬 뷰가 도착하는
-    순간 사라졌을 것이다.
+    `fold_stale_scenes` 는 전문 view 가 `DEFAULT_MAX_FULL_VIEWS` 개를 넘으면 가장 새 씬 뷰
+    하나만 남긴다. 블록을 실은 것은 그 씬에 처음 들어선 도구 결과이므로, 마커 안에
+    있었다면 그 `fold` 에서 사라졌을 것이다.
     """
-    model, _channel = drive(monkeypatch, ["BattleScene"], context())
+    model, _channel = drive(
+        monkeypatch, ["BattleScene"], context(), looks=DEFAULT_MAX_FULL_VIEWS + 1
+    )
 
     sent = model.received[-1]
     folded = [
