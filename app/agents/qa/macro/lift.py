@@ -41,6 +41,11 @@ _REAL_NAME = {("enter_text", "target"): "target_id"}
 # 초안이 되려면 step 하나에 이만큼은 보냈어야 한다. 하나뿐인 클릭은 순서가 아니다.
 MIN_DRAFT_ACTIONS = 2
 
+# 초안 첫 주석에 싣는 step 행위 문장의 길이. 이 주석이 다음 런의 macro 목록 한 줄이 되고,
+# 그 줄에는 이름과 인자와 scene 도 들어간다. 시나리오 step 의 행위는 한 문장이 보통이라
+# 100자면 거의 안 잘리고, 긴 설명이 들어와도 목록의 줄이 둘로 늘지 않는다.
+MAX_STEP_TEXT_CHARS = 100
+
 
 @dataclass(frozen=True)
 class LiftedTarget:
@@ -158,9 +163,13 @@ def _area(rect: dict | None) -> float:
 
 
 def draft_for_step(
-    records: list[DispatchRecord], step: int, taken: set[str]
+    records: list[DispatchRecord], step: int, taken: set[str], step_text: str = ""
 ) -> tuple[Draft | None, str]:
     """한 step 에 보낸 것을 macro 초안 하나로. `(초안, 안 만든 이유)`.
+
+    본문 첫 주석이 그 step 을 말한다(`_summary_comment`). 다음 런이 scene context 에서 이
+    macro 를 목록으로 만나는데, 그 줄의 설명이 이 주석 한 줄이기 때문이다. `step_text` 는
+    시나리오가 그 step 에 적은 행위 문장이고, 모르면 빈 문자열이다.
 
     게임에 안 닿은 호출(빈 자리를 누른 클릭)은 뺀다 — 해 본 것이지 한 것이 아니다. 못 올린
     호출이 하나라도 있으면 만들지 않는다. 같은 줄이 연달아 나오면 `for _ in range(n)` 으로
@@ -190,7 +199,7 @@ def draft_for_step(
 
     name = _free_name(f"replay_step_{step}", taken)
     scene = sent[0].scene
-    head = [f"def {name}() -> None:", f"    # Drafted from the {len(sent)} actions sent for step {step}."]
+    head = [f"def {name}() -> None:", f"    {_summary_comment(step, step_text, len(sent))}"]
     if scene:
         head.append(
             f"    require(scene() == {json.dumps(scene, ensure_ascii=False)}, "
@@ -202,6 +211,21 @@ def draft_for_step(
     except MacroRejection as rejected:
         return None, f"the draft did not parse: {rejected}"
     return Draft(name=name, source=source, actions=len(sent)), ""
+
+
+def _summary_comment(step: int, step_text: str, actions: int) -> str:
+    """초안 본문의 첫 주석. 이 줄이 등록된 macro 의 `summary` 로 목록에 실린다.
+
+    `# Step 3: 대화를 끝까지 넘긴다 — 13 actions, drafted from a hand-driven run.` 모양이다.
+    step 의 행위 문장은 공백을 한 칸으로 접고 `MAX_STEP_TEXT_CHARS` 에서 자른다 — 여러 줄
+    문장이 들어오면 주석이 둘이 되어 첫 줄만 summary 로 읽히고, 긴 문장은 목록 한 줄을
+    혼자 채운다. 문장을 모르면 step 번호와 동작 수만 적는다.
+    """
+    text = " ".join(step_text.split())
+    if len(text) > MAX_STEP_TEXT_CHARS:
+        text = text[:MAX_STEP_TEXT_CHARS].rstrip() + "…"
+    label = f"Step {step}: {text} — " if text else f"Step {step}: "
+    return f"# {label}{actions} actions, drafted from a hand-driven run."
 
 
 def _unit(record: DispatchRecord, index: int) -> list[str]:

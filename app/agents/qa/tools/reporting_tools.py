@@ -149,7 +149,11 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             return ""
         state.drafted_steps.add(step)
         taken = set(state.macros.drafts) | set(state.macros.registrations)
-        draft, _why = draft_for_step(state.dispatches, step, taken)
+        # 시나리오 밖의 번호(모델이 지어낸 step)는 문장이 없다. 범위를 보고 빈 문자열로 둔다.
+        in_range = 1 <= step <= len(state.step_texts)
+        draft, _why = draft_for_step(
+            state.dispatches, step, taken, state.step_texts[step - 1] if in_range else ""
+        )
         if draft is None:
             return ""
         state.macros.write(draft.name, draft.source)

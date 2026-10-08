@@ -77,8 +77,12 @@ class QaRunState:
         self,
         total_steps: int,
         step_meta: list[tuple[int | None, bool]] | None = None,
+        step_texts: list[str] | None = None,
     ) -> None:
         self.total_steps = total_steps
+        # 시나리오가 각 스텝에 적은 행위 문장, 1번 스텝이 0번 자리. macro 초안의 첫 주석이
+        # 이것을 싣는다(`draft_for_step`). 비면 문장을 모르는 것이고 초안은 번호만 적는다.
+        self.step_texts: list[str] = step_texts or []
         # 스텝별 (case_id, is_verification). report_step이 각 판정에 이를 붙이고, TC 판정(파생)은
         # `case_units`가 이 표로 구간을 잘라 그 구간 검증 스텝의 판정으로 정한다. 비면 단일-계층
         # 폴백(case_id/is_verification 미상) — 구식 호출자·테스트 호환용.

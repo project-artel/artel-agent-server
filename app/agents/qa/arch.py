@@ -228,7 +228,19 @@ from app.llm.models import LLMModel, get_model_spec
 # after `v10-macro-memory` (`macro-ab-l1-memory`, 2026-10-08) left B with zero macros in
 # six runs, as `v9-macros` had in twelve. Nothing hashed moves: the tool schemas are
 # unchanged and the draft lives in a tool's answer.
-QA_ARCH_LABEL = "v11-macro-drafts"
+#
+# v12 because a run with macros on now reads a list of the macros earlier runs registered on
+# this build, once, at the end of the scenario's opening message (ARTEL-934, ARTEL-935).
+# Until then a run could call a registered macro only if it already knew the name, and
+# nothing told it one existed, so what run 1 registered was unreachable by run 2. The list
+# is one line per macro, at most 12 (`MAX_MACROS_IN_FIRST_MESSAGE`), with a note saying how
+# many were cut. It is drawn there rather than under the scene view or at the tail of every
+# call because the opening message is fixed when the run starts, so the prompt prefix does
+# not change on later turns (ARTEL-621). A draft's first comment now names the step it was
+# drafted for, since that comment is the line the next run reads. A run with `macros=off`
+# or a build with no macros reads exactly what it did under v11. Nothing hashed moves: the
+# tool schemas are unchanged and the list is part of a message, not of a tool.
+QA_ARCH_LABEL = "v12-macro-discovery"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

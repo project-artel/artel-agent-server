@@ -80,6 +80,16 @@ MAX_KNOWLEDGE_IN_SCENE_CONTEXT = 6
 # 아니라 방금 본 것에 해당하는 줄을 찾는 것이라, 검색이 그 일에 맞는 모양이다.
 MAX_NOT_A_STEP_IN_SCENE_CONTEXT = 6
 
+# 첫 메시지의 macro 목록이 그리는 줄 수 (ARTEL-935).
+#
+# orchestration 이 이름순으로 30개까지 보낸다. 이 목록은 시나리오의 첫 메시지에 한 번 앉고
+# 런이 끝날 때까지 문맥에 남으므로(compaction 이 돌면 요약으로 바뀐다), 줄 하나는 모든 호출이
+# 치르는 값이다. macro 한 줄은 이름과 인자와 설명과 scene 을 합쳐 100~150자라 12줄이면
+# 1.5KB 안쪽이다. capability 8줄 · knowledge 6줄과 같은 규모에서 고른 수이고, 30줄 전부는
+# 4KB 를 넘겨 첫 메시지의 시나리오 본문과 자리를 다툰다. 잘린 macro 는 목록에서 안 보이지만
+# 사라진 것이 아니다 — `_cut_note` 가 자른 수를 말한다.
+MAX_MACROS_IN_FIRST_MESSAGE = 12
+
 # Per free-text field. A summary is written as one line, but nothing enforces
 # that on the way in, and one pathological entry must not be able to double the
 # block. Clipped rather than dropped, and the clip is visible, so the agent can
@@ -224,6 +234,33 @@ class SceneContextEntry(_Payload):
         return [*self.capabilities, *self.not_a_step_capabilities]
 
 
+class SceneMacroParameter(_Payload):
+    """macro 가 받는 인자 하나. 이름과 선언된 type 이 전부다."""
+
+    name: str = ""
+    type: str = ""
+
+
+class SceneMacroScreen(_Payload):
+    """macro 를 단 `screen` 하나. 목록에는 scene 이름만 그린다."""
+
+    screen_id: str = ""
+    scene_name: str = ""
+
+
+class SceneMacro(_Payload):
+    """지난 런이 이 빌드에 등록한 macro 하나 (ARTEL-934, ARTEL-935).
+
+    `summary` 는 macro 본문의 첫 `#` 주석 줄이고 없으면 `None` 이다. `screens` 가 비어
+    있으면 어디서 쓰는지 아직 모른다는 뜻이다 — 쓸 수 없다는 뜻이 아니다.
+    """
+
+    name: str = ""
+    parameters: list[SceneMacroParameter] = Field(default_factory=list)
+    summary: str | None = None
+    screens: list[SceneMacroScreen] = Field(default_factory=list)
+
+
 class SceneContext(_Payload):
     """Every scene of one build, as fetched once at the start of a run.
 
@@ -239,6 +276,38 @@ class SceneContext(_Payload):
     content_map_id: str | None = None
     capture: str | None = None
     scenes: list[SceneContextEntry] = Field(default_factory=list)
+    # 이 빌드에 등록된 macro, 이름순 최대 30개 (ARTEL-934). `macros_total` 은 자르기 전의 수라
+    # `len(macros)` 보다 클 수 있다. 이 칸을 모르는 orchestration 에서는 비고 0이다.
+    macros: list[SceneMacro] = Field(default_factory=list)
+    macros_total: int = 0
+
+    def macro_section(self) -> str:
+        """시나리오 첫 메시지 끝에 붙는 macro 목록. 없으면 빈 문자열.
+
+        **첫 메시지에 붙이는 이유.** 이 목록은 씬과 무관하게 빌드 전체의 것이라 `<<scene
+        context>>` 블록(씬에 처음 들어갈 때 도구 결과 밑에 그려진다)에 얹으면 씬마다 같은
+        목록이 다시 실린다. 매 모델 호출 끝에 붙였다 떼는 방식은 프롬프트 접두를 매 턴
+        깨뜨린다(ARTEL-621). 첫 메시지는 런이 시작할 때 한 번 정해지고 뒤로 바뀌지 않아 접두의
+        일부가 된다 — 이 글은 `self` 만 읽으므로 두 번째 턴에 다시 그려도 같은 글이다.
+
+        빈 목록에는 아무것도 안 낸다. "등록된 macro 가 없다" 는 문장은 이 칸을 모르는
+        orchestration 에서도 똑같이 나오는데, 그때 그 문장은 배포 상태를 말한 것이다.
+        """
+        if not self.macros:
+            return ""
+        shown = self.macros[:MAX_MACROS_IN_FIRST_MESSAGE]
+        total = max(self.macros_total, len(self.macros))
+        heading = "Macros registered by earlier runs of this build"
+        if len(shown) < total:
+            heading = f"{heading} ({_cut_note(len(shown), total, 'macros')})"
+        lines = [heading + ":"]
+        lines.extend(_macro_line(macro) for macro in shown)
+        lines.append(
+            "These were registered by earlier runs of this build: `run_macro` calls one by "
+            "name and `read_macro` shows its source. Check the scene first — a macro "
+            "tagged with a scene was written there."
+        )
+        return "\n\n" + "\n".join(lines)
 
     def entry_for(self, scene_name: str | None) -> SceneContextEntry | None:
         """The slice for one scene, by exact name.
@@ -325,6 +394,29 @@ def _capability_line(capability: SceneCapability) -> str:
         # capability would double the block for something that is usually short.
         line = f"{line}  given: {_clip(capability.given_text)}"
     return line
+
+
+def _macro_line(macro: SceneMacro) -> str:
+    """macro 하나를 한 줄로: `name(param: type, ...) — summary  [SceneName]`.
+
+    scene 이름은 `screens` 에서 중복을 접고 처음 나온 순서를 지킨다. `screens` 가 비면
+    `[no screen yet]` — 쓸 곳을 아직 모르는 것이지 쓸 수 없는 것이 아니다. 이름이 비어
+    오는 `screen` 은 `screen <id>` 로 적는다.
+    """
+    parameters = ", ".join(
+        f"{parameter.name}: {parameter.type}" if parameter.type else parameter.name
+        for parameter in macro.parameters
+    )
+    line = f"  {macro.name}({parameters})"
+    if macro.summary:
+        line = f"{line} — {_clip(macro.summary)}"
+
+    scenes: list[str] = []
+    for screen in macro.screens:
+        label = screen.scene_name or (f"screen {screen.screen_id}" if screen.screen_id else "")
+        if label and label not in scenes:
+            scenes.append(label)
+    return f"{line}  [{', '.join(scenes) if scenes else 'no screen yet'}]"
 
 
 def _cut_note(shown: int, total: int, what: str) -> str:

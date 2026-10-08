@@ -156,6 +156,36 @@ def test_only_the_named_step_is_drafted() -> None:
     assert "range(3)" in draft.source
 
 
+def test_the_first_comment_names_the_step_so_it_can_stand_as_a_summary() -> None:
+    """이 주석 한 줄이 다음 런의 macro 목록에서 `summary` 가 된다 (ARTEL-935)."""
+    draft, _why = draft_for_step([press(3) for _ in range(13)], 3, set(), "대화를 끝까지 넘긴다")
+
+    first_comment = next(line for line in draft.source.splitlines() if "#" in line).strip()
+    assert first_comment == (
+        "# Step 3: 대화를 끝까지 넘긴다 — 13 actions, drafted from a hand-driven run."
+    )
+    macro_definition_from_source(draft.name, draft.source)
+
+
+def test_a_step_text_is_clipped_and_kept_on_one_line() -> None:
+    long_text = "첫 줄\n둘째 줄   " + "가" * 300
+
+    draft, _why = draft_for_step([press(1), press(1)], 1, set(), long_text)
+
+    comments = [line for line in draft.source.splitlines() if line.strip().startswith("#")]
+    assert len(comments) == 1
+    assert comments[0].startswith("    # Step 1: 첫 줄 둘째 줄 가가")
+    assert "…" in comments[0]
+    assert len(comments[0].split(" — ")[0]) <= len("    # Step 1: ") + 100 + 1
+    macro_definition_from_source(draft.name, draft.source)
+
+
+def test_a_draft_without_a_step_text_still_says_which_step() -> None:
+    draft, _why = draft_for_step([press(2), press(2)], 2, set())
+
+    assert "    # Step 2: 2 actions, drafted from a hand-driven run.\n" in draft.source
+
+
 def test_a_taken_name_gets_a_suffix() -> None:
     draft, _why = draft_for_step([press(1), press(1)], 1, {"replay_step_1"})
 
@@ -225,6 +255,25 @@ def test_report_step_offers_a_draft_that_one_register_call_keeps() -> None:
         tools["register_macro"].ainvoke({"step": 1, "thought": "t", "name": "replay_step_1"})
     )
     assert state.macros.registered("replay_step_1") is not None, registered
+
+
+def test_the_draft_report_step_offers_names_the_step_from_the_scenario() -> None:
+    state, tools = make("on")
+    state.step_texts = ["대화를 끝까지 넘긴다", "두 번째", "세 번째"]
+
+    answer = run_step(tools)
+
+    assert "# Step 1: 대화를 끝까지 넘긴다 — 4 actions, drafted from a hand-driven run." in answer
+    assert state.macros.draft("replay_step_1").splitlines()[1].startswith("    # Step 1: 대화를")
+
+
+def test_a_step_number_outside_the_scenario_still_drafts_without_a_text() -> None:
+    state, tools = make("on")
+    state.step_texts = []
+
+    answer = run_step(tools)
+
+    assert "# Step 1: 4 actions, drafted from a hand-driven run." in answer
 
 
 def test_a_run_with_macros_off_is_never_offered_a_draft() -> None:

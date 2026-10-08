@@ -181,6 +181,24 @@ def _action_line(step: QaStep) -> str:
     return f"{line}  ({'; '.join(extras)})" if extras else line
 
 
+def _macro_discovery(arch: ResolvedArch, channel: QaRunChannel) -> str:
+    """시나리오 첫 메시지에 붙는, 지난 런이 이 빌드에 등록한 macro 목록 (ARTEL-935).
+
+    macro 를 켠 런에만, 그리고 목록이 있을 때만 글이 나온다. `macros=off` 인 런은 종전과
+    같은 글을 읽는다 — A/B 가 갈라 보는 것이 그 차이 하나여야 한다.
+
+    **첫 메시지인 이유.** 매 호출 끝에 붙였다 떼면 프롬프트 접두가 턴마다 깨진다
+    (`tool_context.py` 의 `answer` 와 ARTEL-621). 씬 문맥 블록에 얹으면 목록이 씬마다
+    다시 실려 같은 글이 여러 번 쌓인다. 첫 메시지는 런이 시작할 때 한 번 정해지고 접두의
+    일부로 남는다. `channel.scene.scene_context` 는 `QaExecutionService` 가 시나리오를
+    시작하기 전에 한 번 받아 얹으므로(`service.py`) 이 시점에 이미 있다.
+    """
+    if arch.macros != "on":
+        return ""
+    context = channel.scene.scene_context
+    return context.macro_section() if context is not None else ""
+
+
 def _step_plan(scenario: QaScenario) -> list[tuple[int | None, bool]]:
     """스텝별 (case_id, is_verification). **연속 동일 case_id = 한 TC 구간**이고, 그 구간의
     **마지막 스텝 = 검증 스텝**(is_verification=True). case_id 없는 스텝은 검증이 아니다.
@@ -516,7 +534,7 @@ class QaRunner:
             arch.skills,
             withheld_skills(arch),
         )
-        first_message = _plan(scenario)
+        first_message = _plan(scenario) + _macro_discovery(arch, channel)
         total_steps = len(scenario.steps)
         tools = build_tools(channel, state, arch, prompt.version)
 
@@ -749,7 +767,11 @@ class QaRunner:
         deadline still carries the verdicts it managed to record.
         """
         step_meta = _step_plan(scenario)
-        state = QaRunState(total_steps=len(scenario.steps), step_meta=step_meta)
+        state = QaRunState(
+            total_steps=len(scenario.steps),
+            step_meta=step_meta,
+            step_texts=[step.action for step in scenario.steps],
+        )
         deadline = self._config.arch.deadline_seconds
         try:
             await asyncio.wait_for(self.run(channel, scenario, state), timeout=deadline)
