@@ -1,4 +1,4 @@
-"""런이 지금 `OBSERVE -> DECIDE -> ACT -> VERIFY -> UPDATE_MEMORY` 중 어디에 있나.
+"""런이 지금 `OBSERVE -> DECIDE -> ACT -> VERIFY -> (REVIEW_DRAFT) -> UPDATE_MEMORY` 중 어디에 있나.
 
 `PhaseCycleMode.lite` 와 `full` 에서만 산다. `off` 와 `in_verdict` 는 이 파일을 아예 만들지
 않는다 — `build_phase_cycle` 이 `None` 을 돌려주고, tool 은 종전대로 언제나 실행된다.
@@ -7,9 +7,12 @@
 
 모델에게 "이 전환이 의미 있나" 를 묻지 않는다. 물으면 재려는 축이 둘이 된다 — phase 가
 도움이 되는가와 모델이 phase 를 옳게 고르는가. 아래 `_TOOL_PHASE` 표가 tool 이름 하나를
-phase 하나에 붙이고, 런은 **더 뒤 phase 의 tool 을 불러서** 앞으로 간다. `VERIFY` 와
-`DECIDE` 는 자기 tool 로 끝나지만 `OBSERVE`·`ACT`·`UPDATE_MEMORY` 는 안 끝난다 — 한 step 이
-보는 것도 누르는 것도 적는 것도 한 번으로 안 끝나기 때문이다(`_REPEATABLE`).
+phase 하나에 붙이고, 런은 **더 뒤 phase 의 tool 을 불러서** 앞으로 간다. `VERIFY`·`DECIDE`·
+`REVIEW_DRAFT` 는 자기 tool 로 끝나지만 `OBSERVE`·`ACT`·`UPDATE_MEMORY` 는 안 끝난다 — 한
+step 이 보는 것도 누르는 것도 적는 것도 한 번으로 안 끝나기 때문이다(`_REPEATABLE`).
+
+`REVIEW_DRAFT` 하나만 tool 이름이 아니라 tool 이 한 일로 들어간다. macro `draft` 를 내밀었는지는
+`report_step` 이라는 이름만으로 알 수 없어서, 내민 tool 이 `expect_draft_review` 로 알린다.
 
 ## 거절은 tool result 한 줄이다
 
@@ -32,12 +35,24 @@ from app.agents.qa.arch import PhaseCycleMode
 
 
 class RunPhase(StrEnum):
-    """다섯 단계. 값이 `qa_log` 와 거절 문구에 그대로 실린다."""
+    """여섯 phase. 값이 `qa_log` 와 거절 문구에 그대로 실린다.
+
+    `REVIEW_DRAFT` 는 macro `draft` 를 내민 step 에만 있다. 나머지 다섯은 매 step 의 고리에 있다
+    (`full` 은 다섯, `lite` 는 `DECIDE` 를 뺀 넷).
+    """
 
     observe = "OBSERVE"
     decide = "DECIDE"
     act = "ACT"
     verify = "VERIFY"
+    # 질문 하나에 phase 하나를 둔다. 종전에는 `draft` 를 등록할지도 `UPDATE_MEMORY` 에서
+    # 물었고, `skip_memory_update` 한 번("no new game rule")이 지식 질문과 `draft` 질문에 함께
+    # 답했다. 직전 실험에서 내민 `draft` 34 개 중 등록된 것이 1 개였고, 약 20 개는 등록도
+    # 거절도 없이 지나갔다. v14 는 `skip_memory_update` 의 `reason` 이 `draft` 이름을 안 대면
+    # 한 번 되돌리는 것으로 막았지만, 그것은 한 tool 이 두 질문을 받는 구조를 그대로 둔 채였다.
+    # 그래서 `draft` 를 내민 step 에서만 `VERIFY` 와 `UPDATE_MEMORY` 사이에 이 phase 를 넣고,
+    # `register_macro` 나 `decline_macro_draft` 하나로만 끝나게 한다.
+    review_draft = "REVIEW_DRAFT"
     update_memory = "UPDATE_MEMORY"
 
 
@@ -55,6 +70,8 @@ class RunPhase(StrEnum):
 # - `write_macro`, `edit_macro`, `read_macro` — macro 초안은 이 런 밖에 아무것도 안 바꾼다.
 #   그리고 어느 단계에서든 불려야 한다 — `UPDATE_MEMORY` 에서 방금 한 순서를 적고, `ACT` 에서
 #   실패한 macro 를 읽고 고친다. 초안은 지식이 아니므로 `UPDATE_MEMORY` 를 끝내지 않는다.
+#   `REVIEW_DRAFT` 도 끝내지 않는다 — 내민 `draft` 를 `edit_macro` 로 고친 뒤 `register_macro`
+#   로 답하는 길이 거기서 열려 있어야 한다.
 ALWAYS_ALLOWED = frozenset(
     {
         "write_macro",
@@ -114,7 +131,7 @@ _TOOL_PHASE: dict[str, RunPhase] = {
     "reset_game": RunPhase.act,
     # macro 를 돌리는 둘은 ACT 다 — 게임을 움직인다. `checkpoint` 에서 멈춘 macro 도 ACT
     # 안에서 멈췄으므로 잇는 `resume_macro` 도 ACT 다. 초안을 다루는 셋은 위 `ALWAYS_ALLOWED`
-    # 에 있고, 등록은 아래 `UPDATE_MEMORY` 다.
+    # 에 있고, 등록은 아래 `UPDATE_MEMORY` 다(`REVIEW_DRAFT` 의 답도 된다).
     "run_macro": RunPhase.act,
     "resume_macro": RunPhase.act,
     # VERIFY — 판정 하나.
@@ -132,8 +149,28 @@ _TOOL_PHASE: dict[str, RunPhase] = {
     # 단계를 끝낼 수 있다. 그래서 이 단계가 macro 를 만드는 자리가 된다 — agent 가 매 step
     # "무엇을 남길까" 를 묻는 바로 그때 "반복한 순서가 있었나" 도 묻게 한다. 이 순간에 등록한
     # macro 는 다음 step 의 ACT 부터 돌린다. 다른 phase 에서도 거절하지 않는다(`ANY_PHASE`).
+    # `REVIEW_DRAFT` 에서 불리면 그 phase 의 답이 된다(`_ALSO_ANSWERS`).
     "register_macro": RunPhase.update_memory,
+    # REVIEW_DRAFT — 내민 `draft` 를 등록하지 않겠다는 답. 등록은 위 `register_macro` 다.
+    "decline_macro_draft": RunPhase.review_draft,
 }
+
+
+# 표의 자기 phase 말고도 답이 되는 phase. `register_macro` 하나다.
+#
+# 표는 tool 하나에 phase 하나라서, 등록이 `UPDATE_MEMORY` 와 `REVIEW_DRAFT` 둘에 답한다는
+# 것을 거기 적을 수 없다. 등록을 `REVIEW_DRAFT` 로 옮기면 `draft` 없이 손으로 쓴 macro 를
+# `UPDATE_MEMORY` 에서 등록하는 길(v10 부터)이 끊긴다.
+_ALSO_ANSWERS: dict[str, frozenset[RunPhase]] = {
+    "register_macro": frozenset({RunPhase.review_draft}),
+}
+
+
+def _answers(tool_name: str, phase: RunPhase) -> bool:
+    """이 tool 이 그 phase 의 답이 되나."""
+    return _TOOL_PHASE.get(tool_name) is phase or phase in _ALSO_ANSWERS.get(
+        tool_name, frozenset()
+    )
 
 
 # 어느 phase 에서든 통과하지만, 자기 phase 에서 불리면 그 phase 의 답으로도 치는 tool.
@@ -150,12 +187,22 @@ _TOOL_PHASE: dict[str, RunPhase] = {
 ANY_PHASE = frozenset({"register_macro"})
 
 
-_LITE_ORDER = (RunPhase.observe, RunPhase.act, RunPhase.verify, RunPhase.update_memory)
+# 두 순서 모두 `REVIEW_DRAFT` 를 `VERIFY` 와 `UPDATE_MEMORY` 사이에 적어 두지만, 그 칸은 런이
+# 실제로 거기 앉아 있을 때만 고리에 든다(`PhaseCycle._steps`). `draft` 가 없는 step 은 종전과
+# 같은 넷(`lite`) 또는 다섯(`full`) 칸을 돈다.
+_LITE_ORDER = (
+    RunPhase.observe,
+    RunPhase.act,
+    RunPhase.verify,
+    RunPhase.review_draft,
+    RunPhase.update_memory,
+)
 _FULL_ORDER = (
     RunPhase.observe,
     RunPhase.decide,
     RunPhase.act,
     RunPhase.verify,
+    RunPhase.review_draft,
     RunPhase.update_memory,
 )
 
@@ -165,8 +212,9 @@ _FULL_ORDER = (
 # 2 로 둔 이유는 왕복 산수다. 거절 하나는 모델 호출 하나를 쓰고 게임도 상태도 안 움직인다.
 # 첫 거절은 값이 있다 — 모델이 이 phase 가 무엇을 기다리는지 그때 처음 듣는다. 둘째까지도
 # 같은 tool 을 부르면 문구를 못 읽은 것이고, 셋째 거절이 그것을 바꿀 근거가 없다. 그러니 한
-# 스텝에서 낭비하는 왕복 상한이 phase 당 2, 다섯 단계면 10 이다. 3 으로 두면 15 가 되는데,
-# 얻는 것은 "한 번 더 물어보면 맞힐지도 모른다" 뿐이다.
+# 스텝에서 낭비하는 왕복 상한이 phase 당 2, 다섯 phase 면 10 이다(`draft` 를 내민 step 은
+# `REVIEW_DRAFT` 까지 여섯이라 12). 3 으로 두면 15 가 되는데, 얻는 것은 "한 번 더 물어보면
+# 맞힐지도 모른다" 뿐이다.
 #
 # 통과시킬 때 그냥 지나가게 두지 않고 **모델이 부른 tool 의 phase 로 옮긴다.** 모델이 두 번
 # 연속으로 같은 곳을 가리켰으면 이쪽 표가 아니라 모델이 런의 실제 자리를 알고 있는 것이고,
@@ -213,6 +261,10 @@ _REPEATABLE = frozenset({RunPhase.observe, RunPhase.act, RunPhase.update_memory}
 #
 # `DECIDE` 는 여기 없다. `full` arm 의 전부가 그 phase 이고, 건너뛸 수 있으면 그 arm 이
 # `lite` 와 같아진다.
+#
+# `REVIEW_DRAFT` 도 여기 없다. 건너뛸 수 있으면 `draft` 가 다시 답 없이 지나가고, 그것이 이
+# phase 를 만든 이유다. 대신 고리에 드는 것이 `draft` 를 내민 step 뿐이라, 그 밖의 step 에서는
+# 건너뛸 칸 자체가 없다.
 _SKIPPABLE = frozenset({RunPhase.observe, RunPhase.act})
 
 # 반복이면서 건너뛸 수는 없는 자리가 `UPDATE_MEMORY` 하나뿐이라는 것이, 이 파일이 `_satisfied`
@@ -230,8 +282,8 @@ def _tools_that_end(phase: RunPhase, offered: frozenset[str] | None = None) -> s
     """
     names = sorted(
         name
-        for name, at in _TOOL_PHASE.items()
-        if at is phase and (offered is None or name in offered)
+        for name in _TOOL_PHASE.keys() | _ALSO_ANSWERS.keys()
+        if _answers(name, phase) and (offered is None or name in offered)
     )
     return ", ".join(f"`{name}`" for name in names)
 
@@ -239,8 +291,9 @@ def _tools_that_end(phase: RunPhase, offered: frozenset[str] | None = None) -> s
 class PhaseCycle:
     """한 런의 phase 와 거절 수. `lite`·`full` 에서만 만들어진다.
 
-    순수 상태다 — 게임도 채널도 안 건드리고, 아는 것은 tool 이름뿐이다. 단위 테스트가 전부
-    덮는 이유이자, 파일럿을 기다리는 동안 미리 지을 수 있었던 이유다.
+    순수 상태다 — 게임도 채널도 안 건드리고, 아는 것은 tool 이름과 `expect_draft_review` 알림
+    뿐이다. 단위 테스트가 전부 덮는 이유이자, 파일럿을 기다리는 동안 미리 지을 수 있었던
+    이유다.
     """
 
     def __init__(
@@ -250,6 +303,10 @@ class PhaseCycle:
         offered: frozenset[str] | None = None,
     ) -> None:
         self._order = order
+        # `REVIEW_DRAFT` 를 뺀 고리. `draft` 를 안 내민 step 은 이것을 돈다 — `_steps` 를 보라.
+        self._order_without_review = tuple(
+            phase for phase in order if phase is not RunPhase.review_draft
+        )
         # 이 런이 가진 tool. 거절 문구가 이 안의 이름만 댄다.
         self._offered = offered
         self._max_consecutive_refusals = max_consecutive_refusals
@@ -263,9 +320,31 @@ class PhaseCycle:
         # 지금 phase 의 tool 이 이 바퀴에서 한 번이라도 돌았나. 반복 phase 를 떠나도 되는지가
         # 여기 달렸다 — `_may_leave` 를 보라.
         self._satisfied = False
+        # 지금 돌고 있는 tool 이 macro `draft` 를 내밀었나. `expect_draft_review` 가 켜고,
+        # 같은 호출의 `advance` 가 읽고 끈다.
+        self._draft_expected = False
+
+    def _steps(self) -> tuple[RunPhase, ...]:
+        """지금 도는 고리. `REVIEW_DRAFT` 칸은 런이 거기 앉아 있을 때만 든다.
+
+        `draft` 를 내민 step 은 `advance` 가 `VERIFY` 다음에 `REVIEW_DRAFT` 로 바로 보낸다.
+        그 밖의 때에 칸을 고리에 두면 `UPDATE_MEMORY` 로 가는 길마다 건너뛸 수 없는 칸이 끼어
+        모든 step 이 막힌다. 앉아 있을 때만 넣으면 거기서 다음 칸이 `UPDATE_MEMORY` 이고,
+        떠나는 순간 고리가 종전 모양으로 돌아온다.
+        """
+        if self.phase is RunPhase.review_draft:
+            return self._order
+        return self._order_without_review
 
     def _after(self, phase: RunPhase) -> RunPhase:
-        return self._order[(self._order.index(phase) + 1) % len(self._order)]
+        steps = self._steps()
+        return steps[(steps.index(phase) + 1) % len(steps)]
+
+    def _after_closing(self, phase: RunPhase, draft_expected: bool) -> RunPhase:
+        """`phase` 를 자기 tool 로 닫은 뒤 앉을 자리. `draft` 를 내민 판정이면 `REVIEW_DRAFT` 다."""
+        if phase is RunPhase.verify and draft_expected and RunPhase.review_draft in self._order:
+            return RunPhase.review_draft
+        return self._after(phase)
 
     def _enter(self, phase: RunPhase) -> None:
         """phase 를 옮기고, 그 자리의 일이 아직 안 됐다고 표시한다.
@@ -280,8 +359,9 @@ class PhaseCycle:
 
     def _ahead(self, at: RunPhase) -> int:
         """지금 자리에서 저기까지 몇 칸 앞인가. 고리이므로 뒤란 없다."""
-        here = self._order.index(self.phase)
-        return (self._order.index(at) - here) % len(self._order)
+        steps = self._steps()
+        here = steps.index(self.phase)
+        return (steps.index(at) - here) % len(steps)
 
     def _may_leave(self) -> bool:
         """지금 phase 를 떠날 수 있나 — 건너뛸 수 있거나, 자기 tool 이 한 번은 돌았거나."""
@@ -295,18 +375,28 @@ class PhaseCycle:
         """
         if not self._may_leave():
             return self.phase
-        here = self._order.index(self.phase)
+        steps = self._steps()
+        here = steps.index(self.phase)
         for step in range(1, self._ahead(at)):
-            between = self._order[(here + step) % len(self._order)]
+            between = steps[(here + step) % len(steps)]
             if between not in _SKIPPABLE:
                 return between
         return None
 
     def _reachable(self, at: RunPhase | None) -> bool:
-        """지금 자리에서 저 phase 로 바로 갈 수 있나."""
-        if at is None or at is self.phase:
+        """지금 자리에서 저 phase 로 바로 갈 수 있나.
+
+        `REVIEW_DRAFT` 는 걸어서 닿는 자리가 아니다. `draft` 를 내민 판정만 그리로 보낸다.
+        """
+        if at is None or at is self.phase or at is RunPhase.review_draft:
             return False
         return self._blocking_phase(at) is None
+
+    def _phase_of(self, tool_name: str) -> RunPhase | None:
+        """이 tool 이 지금 자리에서 속하는 phase. 지금 phase 의 답이 되면 지금 phase 다."""
+        if _answers(tool_name, self.phase):
+            return self.phase
+        return _TOOL_PHASE.get(tool_name)
 
     def hold(self) -> None:
         """이 호출은 자기 phase 를 끝낸 것으로 치지 말라고 tool 이 말하는 자리.
@@ -314,14 +404,31 @@ class PhaseCycle:
         gate 는 tool 이 **돌았는지**만 안다. 안에서 무엇을 답했는지는 못 본다. 그 차이가
         구멍을 하나 낸다 — `skip_memory_update` 를 빈 `reason` 으로 부르면 tool 은 거절하는데
         gate 는 `UPDATE_MEMORY` 가 끝난 것으로 읽고, 물어보려던 질문을 빈 인자 하나로 넘어갈
-        수 있게 된다. `report_step` 에서 `learned` 를 빠뜨린 경우도 같다.
+        수 있게 된다. `report_step` 에서 `learned` 를 빠뜨린 경우도 같고, `decline_macro_draft`
+        가 빈 `reason` 이나 내밀지 않은 `draft` 이름을 받은 경우도 같다.
 
-        그래서 그 두 자리만 이것을 부른다. **인자가 비어서 질문 자체가 답을 안 받은 경우**가
+        그래서 그 자리들만 이것을 부른다. **인자가 비어서 질문 자체가 답을 안 받은 경우**가
         기준이다. 지도나 지식 쓰기가 인자 모양 때문에 거절당한 것은 여기 안 든다 — 그쪽은
         모델이 적으려고는 한 것이고, 거기까지 넓히면 거절 문구가 달린 모든 갈래가 phase 를
         아는 자리가 되어 `phase.py` 에 검사를 모아 둔 뜻이 없어진다.
+
+        `hold` 한 호출은 `expect_draft_review` 도 지운다. 받아들여지지 않은 판정에 `draft` 가
+        붙었을 리 없지만, 붙었다고 해도 다음 판정으로 넘어가면 안 된다.
         """
         self._held = True
+
+    def expect_draft_review(self) -> None:
+        """지금 도는 `report_step` 이 macro `draft` 를 내밀었다고 알린다.
+
+        gate 는 tool 이름만 보므로 판정에 `draft` 가 붙었는지 모른다. 그래서 `draft` 를 만든
+        `reporting_tools._macro_draft` 가 tool 본문 안에서 이것을 부르고, tool 이 돌아온 뒤
+        같은 호출의 `advance` 가 `UPDATE_MEMORY` 대신 `REVIEW_DRAFT` 로 보낸다. 순서는
+        `tools/__init__.py` 의 `_phase_gated` 가 정한다 — `refusal_for`, tool 본문, `advance`.
+
+        한 호출 안에서만 산다. `refusal_for` 가 호출 첫머리에서 지우고 `advance` 가 읽고
+        지우므로, 예외로 끝나 `advance` 가 안 돈 호출의 표시가 다음 tool 로 넘어가지 않는다.
+        """
+        self._draft_expected = True
 
     def refusal_for(self, tool_name: str) -> str | None:
         """이 tool 을 지금 부르면 안 되는 이유, 부를 수 있으면 `None`.
@@ -329,11 +436,12 @@ class PhaseCycle:
         `None` 이 아닌 값을 돌려준 호출은 **실행되지 않는다.** 문자열 하나가 tool result 로
         가고 런은 그대로 간다 — 거절로 런을 실패시키지 않는다.
         """
+        self._draft_expected = False
         if tool_name in ALWAYS_ALLOWED:
             # 거절 연속 카운터를 건드리지 않는다. 이 tool 들은 어느 phase 에서 불려도 옳으
             # 므로, 사이에 하나 끼었다고 모델이 자리를 고친 것은 아니다.
             return None
-        at = _TOOL_PHASE.get(tool_name)
+        at = self._phase_of(tool_name)
         if tool_name in ANY_PHASE and at is not self.phase:
             # 자기 phase 밖에서는 `ALWAYS_ALLOWED` 와 같은 이유로 연속 카운터를 건드리지 않는다.
             # 자기 phase 에서는 아래 평범한 길로 간다 — 맞는 자리에서 부른 것이다.
@@ -346,22 +454,40 @@ class PhaseCycle:
         if self._consecutive_refusals >= self._max_consecutive_refusals:
             self.forced_passes += 1
             self._consecutive_refusals = 0
-            self._enter(at)
+            # `REVIEW_DRAFT` 로는 옮기지 않는다. `draft` 없이 그 자리에 앉히면 답할 것이 없는
+            # 질문에 갇히고, 그 자리를 끝내는 `decline_macro_draft` 는 내밀지 않은 `draft` 에
+            # `hold` 로 답한다. 통과만 시키고 phase 는 그대로 둔다.
+            if at is not RunPhase.review_draft:
+                self._enter(at)
             return None
 
         self._consecutive_refusals += 1
         self.refusals += 1
+        if at is RunPhase.review_draft:
+            return (
+                f"Not now — this run is in the {self.phase.value} phase and no macro draft "
+                f"is waiting for an answer. Nothing ran and nothing was recorded. "
+                f"`{tool_name}` answers a draft right after a passing `report_step` offers "
+                "one; carry on with the step."
+            )
         # 막고 있는 자리를 문구가 직접 댄다. 지금 앉은 phase 일 때도 있고, 가는 길에 낀 다른
         # phase 일 때도 있다 — `OBSERVE` 에서 지식을 적으려 하면 막는 것은 사이의 `VERIFY`
         # 다. 앉은 자리만 대면 그 경우에 시키는 대로 해도 또 거절당한다.
         blocking = self._blocking_phase(at) or self.phase
-        return (
+        refusal = (
             f"Not now — this run is in the {self.phase.value} phase and `{tool_name}` "
             f"belongs to {at.value}. Nothing ran and nothing was recorded. "
             f"{blocking.value} ends when you call one of: "
             f"{_tools_that_end(blocking, self._offered)}. Do that first; `{tool_name}` will be "
             "waiting on the other side of it."
         )
+        if blocking is RunPhase.review_draft and (
+            self._offered is None or "edit_macro" in self._offered
+        ):
+            # "고쳐서 등록한다" 는 답이 막힌 것처럼 읽히면 안 된다. `edit_macro` 는 이 phase 를
+            # 끝내지 않고 지나간다.
+            refusal += " `edit_macro` works here if the draft needs fixing before you register it."
+        return refusal
 
     def advance(self, tool_name: str) -> None:
         """실행된 tool 하나를 반영한다.
@@ -370,10 +496,11 @@ class PhaseCycle:
         전이가 아예 없기 때문이다 — `_ahead` 가 고리를 한 방향으로만 세고, `OBSERVE` 는
         `ACT` 에서 세 칸 앞이라 사이에 낀 `VERIFY` 가 막는다.
         """
+        draft_expected, self._draft_expected = self._draft_expected, False
         if self._held:
             self._held = False
             return
-        at = _TOOL_PHASE.get(tool_name)
+        at = self._phase_of(tool_name)
         if tool_name in ANY_PHASE and at is not self.phase:
             # 자기 phase 밖에서 돈 것은 아무 phase 도 옮기거나 끝내지 않는다(`ANY_PHASE`).
             return
@@ -384,7 +511,7 @@ class PhaseCycle:
             if self.phase in _REPEATABLE:
                 self._satisfied = True
                 return
-            self._enter(self._after(self.phase))
+            self._enter(self._after_closing(self.phase, draft_expected))
             return
         if self._reachable(at):
             # `report_step` 이 `ACT` 와 `VERIFY` 를 함께 닫는다 — 판정이 곧 조작을 그만둔다는
@@ -393,9 +520,11 @@ class PhaseCycle:
             #
             # 반복 phase 로 들어갈 때는 그 자리에 앉는다. 자기 tool 이 안 닫는 자리이므로,
             # 이 한 호출로 끝났다고 치고 넘기면 두 번째 호출이 거절당한다.
-            self._enter(at if at in _REPEATABLE else self._after(at))
             if at in _REPEATABLE:
+                self._enter(at)
                 self._satisfied = True
+                return
+            self._enter(self._after_closing(at, draft_expected))
 
 
 def build_phase_cycle(

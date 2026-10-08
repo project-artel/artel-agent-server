@@ -789,6 +789,7 @@ def test_the_macro_tools_sit_beside_the_action_tools_in_the_offered_list() -> No
         "register_macro",
         "run_macro",
         "resume_macro",
+        "decline_macro_draft",
     ]
 
 
@@ -930,6 +931,7 @@ def test_every_macro_tool_body_is_guarded_against_a_leaking_exception() -> None:
         "register_macro",
         "run_macro",
         "resume_macro",
+        "decline_macro_draft",
     ):
         assert tools[name].coroutine.__code__.co_name == "answering", name
         assert tools[name].name == name

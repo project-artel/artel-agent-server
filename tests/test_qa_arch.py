@@ -498,7 +498,7 @@ def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v14-macro-draft-answer"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v15-macro-draft-review"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -555,6 +555,7 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
     "register_macro",
     "run_macro",
     "resume_macro",
+    "decline_macro_draft",
     "wait_for_operator",
     "report_step",
     "report_issue",
@@ -600,7 +601,10 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 # And once more, from `388b1fc3438e`, when `QaArchSpec.macros` joined (ARTEL-926):
 # the dump the digest hashes gained a key. The default is `on`, so the default
 # tool set did not move — `macros=off` is the arm an A/B compares it against.
-_EXPECTED_DEFAULT_FINGERPRINT = "2db1454a7b0f"
+#
+# And once more, from `2db1454a7b0f`, when `decline_macro_draft` joined the macro tools.
+# The default is `macros=on`, so the default tool set moved with it.
+_EXPECTED_DEFAULT_FINGERPRINT = "450105a42315"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
@@ -697,6 +701,7 @@ MACRO_TOOLS = (
     "register_macro",
     "run_macro",
     "resume_macro",
+    "decline_macro_draft",
 )
 
 

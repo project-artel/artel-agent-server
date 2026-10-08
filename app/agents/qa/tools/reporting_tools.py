@@ -141,9 +141,14 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
     def _macro_draft(step: int, passed: bool) -> str:
         """이 step 에 손으로 보낸 것을 macro 초안으로 만들어 내민다. macro 를 켠 런에만.
 
-        판정이 받아들여진 응답에 붙는다 — `UPDATE_MEMORY` 로 넘어가는 그 순간에 agent 가
-        읽는다. 초안은 `MacroBook` 에 써 두므로 agent 가 할 일은 `register_macro` 한 번이다.
-        만들지 못했으면 아무 말도 안 붙인다(`app/agents/qa/macro/lift.py`).
+        판정이 받아들여진 응답에 붙는다. 초안은 `MacroBook` 에 써 두므로 agent 가 할 일은
+        `register_macro` 한 번이다. 만들지 못했으면 아무 말도 안 붙인다
+        (`app/agents/qa/macro/lift.py`).
+
+        phase 를 강제하는 런이면 `expect_draft_review` 로 알린다. 이 함수는 `report_step` 본문
+        안에서 돌고 gate 의 `advance` 는 본문이 돌아온 뒤에 돌므로, 같은 호출의 `advance` 가
+        `UPDATE_MEMORY` 대신 `REVIEW_DRAFT` 로 보낸다. 초안을 못 만든 판정은 알리지 않으므로
+        그 step 은 종전대로 `UPDATE_MEMORY` 로 간다.
 
         **통과한 판정에만 붙는다.** 실패한 step 에 보낸 것은 게임이 받아 주지 않은 순서라
         macro 가 되면 안 된다. 실패 판정은 `drafted_steps` 에도 올리지 않는다 — 같은 step 을
@@ -166,6 +171,8 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         state.macros.write(draft.name, draft.source)
         state.macros.remember_read(draft.name)
         state.offered_drafts[step] = draft.name
+        if state.phase_cycle is not None:
+            state.phase_cycle.expect_draft_review()
         return offer(draft)
 
     async def _record_verdict(

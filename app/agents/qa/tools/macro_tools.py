@@ -9,6 +9,9 @@
 `edit_macro` 로 고치고, `register_macro` 로 부를 수 있게 한다. `run_macro` 는 등록된
 것만 부른다. 초안은 런의 상태(`QaRunState.macros`)에 살고 `content_map` 에 안 쓰인다.
 
+`decline_macro_draft` 는 수명주기 밖이다. 통과한 step 에 시스템이 내민 초안을 등록하지
+않겠다고 이유와 함께 답하는 tool 이고, 초안 글은 지우지 않는다.
+
 **등록된 것은 런을 넘어 산다** (ARTEL-921). `register_macro` 가 `MACRO_REGISTER` 로
 `content_map` 에 적고, `read_macro` 와 `run_macro` 는 이 런이 모르는 이름을 만나면
 `MACRO_READ` 로 저쪽에 묻는다 — 지난 런이 등록한 것을 이번 런이 부르는 길이 그것이다.
@@ -45,6 +48,7 @@ from app.agents.qa.macro.runner import (
     run_macro as execute_macro,
 )
 from app.agents.qa.tools.action_tools import parse_target
+from app.agents.qa.tools.phase import RunPhase
 from app.agents.qa.tools.state import QaRunState
 from app.agents.qa.tools.tool_context import ToolContext
 from app.prompts import load_tool_description
@@ -397,6 +401,17 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         )
         return f"{macro_name} ({where}):\n\n{source}"
 
+    def _review_stays_open() -> None:
+        """등록이 실패했으면 `REVIEW_DRAFT` 를 끝난 것으로 치지 않는다.
+
+        `REVIEW_DRAFT` 는 초안 하나에 답하는 자리라, 등록이 거절된 호출로 끝나면 그 초안은 답
+        없이 사라진다. 그래서 그 phase 안에서만 `hold()` 한다. 다른 phase 의 실패는 종전대로
+        둔다 — 인자 모양 때문에 거절된 쓰기를 `hold()` 에 넣지 않는다는 `phase.py` 의 기준이
+        거기서는 그대로 맞다. 연속 거절 상한이 있어 이 `hold()` 로 런이 갇히지는 않는다.
+        """
+        if state.phase_cycle is not None and state.phase_cycle.phase is RunPhase.review_draft:
+            state.phase_cycle.hold()
+
     @tool(description=load_tool_description("register_macro").body)
     @_answers_instead_of_raising
     async def register_macro(
@@ -412,6 +427,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         book = state.macros
         draft = book.draft(macro_name)
         if draft is None:
+            _review_stays_open()
             if book.registered(macro_name) is not None:
                 return (
                     f"{macro_name} is already registered and has no draft, so there is "
@@ -425,6 +441,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
 
         definition, problem = _parsed(macro_name, draft)
         if definition is None:
+            _review_stays_open()
             # 아무것도 등록하지 않는다. 저장된 뒤에 허용 목록이 좁아진 정의가 실행
             # 한복판에서 처음 거절되는 것을 막는 것이 이 검사의 자리다.
             return (
@@ -436,6 +453,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         problem = _named_screens_problem(named)
         if problem is not None:
             # 초안은 그대로다. 거절은 아무 자취도 남기지 않는다.
+            _review_stays_open()
             return problem
 
         standing = _standing_screen()
@@ -544,7 +562,59 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
     # `@tool` 이 이름을 함수에서 가져가므로 tool 이 자기 이름과 어긋난 문자열 아래
     # 등록될 일이 없다. 그래서 runner 의 같은 이름 함수를 `execute_macro` 로 받는다 —
     # 뒤에서 `.name` 을 고치면 langchain 이 함수에서 떠낸 argument schema 와 어긋난다.
-    return [write_macro, edit_macro, read_macro, register_macro, run_macro, resume_macro]
+    @tool(description=load_tool_description("decline_macro_draft").body)
+    @_answers_instead_of_raising
+    async def decline_macro_draft(
+        step: int, thought: str, name: str, reason: str
+    ) -> str:
+        # What the agent reads is `qa_run/<version>/tool_decline_macro_draft.md`, not this.
+        #
+        # 통과한 step 의 초안은 등록하는 것이 기본이고, 이 tool 은 그 기본을 거절하는 유일한
+        # 길이다. 그래서 거절하는 쪽에 값을 매긴다 — 어느 초안인지 이름을 대게 하고, 다음
+        # 런이 그것을 재생하면 무엇이 틀어지는지 `reason` 에 적게 한다.
+        macro_name = (name or "").strip()
+        offered = state.offered_drafts.get(step)
+        if not macro_name or offered != macro_name:
+            # 다른 이름으로 거절을 받아 주면 정작 내밀어 둔 초안은 답 없이 남는다.
+            # `REVIEW_DRAFT` 가 열려 있어야 하므로 `hold` 로 phase 를 붙든다.
+            if state.phase_cycle is not None:
+                state.phase_cycle.hold()
+            named = (
+                f"the draft offered for step {step} is `{offered}`"
+                if offered is not None
+                else f"no macro draft was offered for step {step}"
+            )
+            return f"`{macro_name}` is not that draft — {named}. Nothing was recorded."
+
+        why = (reason or "").strip()
+        if not why:
+            # 빈 `reason` 하나로 질문을 넘어갈 수 있으면 물어본 적이 없는 것과 같다.
+            # `skip_memory_update` 가 빈 `reason` 을 대하는 것과 같은 규율이다.
+            if state.phase_cycle is not None:
+                state.phase_cycle.hold()
+            return (
+                "`reason` is empty, so nothing was recorded and the draft "
+                f"`{macro_name}` is still unanswered. Say what replaying it in the next "
+                "run would do wrong; if you cannot, register it with `register_macro`."
+            )
+
+        # 초안 글은 `state.macros` 에 그대로 둔다. 해로울 것이 없고, 마음이 바뀐 agent 가
+        # `edit_macro` 와 `register_macro` 로 되돌릴 길이 남는다.
+        state.declined_drafts[macro_name] = why
+        return (
+            f"`{macro_name}` is dropped and will not be offered to later runs. "
+            "Nothing was registered."
+        )
+
+    return [
+        write_macro,
+        edit_macro,
+        read_macro,
+        register_macro,
+        run_macro,
+        resume_macro,
+        decline_macro_draft,
+    ]
 
 
 def _known(state: QaRunState) -> set[str]:

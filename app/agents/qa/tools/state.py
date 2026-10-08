@@ -197,11 +197,13 @@ class QaRunState:
         self.dispatches: list[DispatchRecord] = []
         # macro 초안을 이미 내민 step. 같은 step 을 다시 판정해도 초안을 또 만들지 않는다.
         self.drafted_steps: set[int] = set()
-        # step 마다 내민 초안의 이름과, 그 초안을 `skip_memory_update` 에서 이미 물었는지.
-        # 통과한 판정에만 초안이 붙으므로 `drafted_steps` 의 부분집합이다. 물은 초안은 한
-        # 번만 되묻는다 — 같은 거절이 되풀이되어 런을 가두면 안 된다.
+        # step 마다 내민 초안의 이름. 통과한 판정에만 초안이 붙으므로 `drafted_steps` 의
+        # 부분집합이다. `decline_macro_draft` 가 받은 `name` 이 그 step 에 내민 `draft` 인지
+        # 여기서 본다.
         self.offered_drafts: dict[int, str] = {}
-        self.asked_drafts: set[str] = set()
+        # `decline_macro_draft` 로 거절한 `draft` 이름 → 그 `reason`. 등록한 것은 `macros` 에
+        # 남고, 거절한 것은 여기 남는다 — 둘 다 없는 `draft` 가 답을 못 받은 것이다.
+        self.declined_drafts: dict[str, str] = {}
         # 마지막 action 의 결과 데이터. 기록하는 쪽이 그 action 이 게임에 닿았는지 본다.
         self.last_outcome = None
         # Handed to the vision middleware on the next model call. The tool cannot

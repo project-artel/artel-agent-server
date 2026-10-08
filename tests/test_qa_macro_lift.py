@@ -302,17 +302,37 @@ def test_hand_sent_actions_are_recorded_in_order_with_their_targets_lifted() -> 
     assert [record.scene_after for record in state.dispatches] == ["Battle"] * 4
 
 
-def test_the_offer_names_the_draft_in_all_three_answers() -> None:
+def test_the_offer_makes_registering_the_default_and_names_what_declining_costs() -> None:
     text = offer(Draft(name="replay_step_3", source="def replay_step_3() -> None:\n", actions=13))
 
-    answers = text.split("Pick one:\n")[1].splitlines()
+    lines = text.splitlines()
+    answers = [line for line in lines if line.startswith("- ")]
     assert len(answers) == 3
     assert "register_macro" in answers[0] and "`replay_step_3`" in answers[0]
     assert "edit_macro" in answers[1] and "`replay_step_3`" in answers[1]
-    assert "skip_memory_update" in answers[2] and "`replay_step_3`" in answers[2]
-    assert "later builds" in text
-    assert "UPDATE_MEMORY" in text and "dropped when the run ends" in text
+    assert "decline_macro_draft" in answers[2] and "`replay_step_3`" in answers[2]
+    assert "what" in answers[2] and "`reason`" in answers[2]
+    assert "This step passed" in text and "later builds" in text
+    assert "sends these actions by hand again: 13 tool calls" in text
+    assert "dropped when the run ends" in text
+    assert "skip_memory_update" not in text and "UPDATE_MEMORY" not in text
     assert "one-off" not in text
+
+
+def test_the_offer_says_a_while_loop_presses_until_the_scene_changes() -> None:
+    looped = Draft(
+        name="replay_step_3",
+        source='def replay_step_3() -> None:\n    while scene() == "Story":\n        press_key("Space", 0.1)\n',
+        actions=13,
+    )
+    counted = Draft(
+        name="replay_step_3",
+        source='def replay_step_3() -> None:\n    for _ in range(13):\n        press_key("Space", 0.1)\n',
+        actions=13,
+    )
+
+    assert "until the scene changes" in offer(looped)
+    assert "until the scene changes" not in offer(counted)
 
 
 def test_report_step_offers_a_draft_that_one_register_call_keeps() -> None:

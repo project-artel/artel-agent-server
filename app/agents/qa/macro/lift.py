@@ -324,27 +324,35 @@ def _free_name(base: str, taken: set[str]) -> str:
 
 
 def offer(draft: Draft) -> str:
-    """`report_step` 의 답에 붙는 글. 사실 하나와 답 셋(등록·고쳐서 등록·두기)을 적는다.
+    """`report_step` 의 답에 붙는 글. 등록이 기본이고 거절은 이름과 이유를 대야 한다.
 
     "한 번뿐이면 두라" 고 쓰면 agent 가 모든 step 을 한 번뿐인 것으로 읽는다(24회 실험에서
-    초안 거의 전부가 거절됐다). 같은 시나리오가 다음 빌드에서 다시 돌고 그 런이 같은 step
-    에 닿는다는 사실을 먼저 적고, 두려면 `skip_memory_update` 의 `reason` 에 이름을 대게 한다.
+    초안 거의 전부가 거절됐다). 그 뒤 "다음 런이 등록된 macro 를 본다" 는 사실을 적어도 "다음
+    런에서 다시 쓸 일이 없다" 며 거절했다(2026-10-08). 그래서 이 글은 등록하지 않는 쪽의 값을
+    센다 — 다음 런이 같은 action 을 손으로 다시 보내는 횟수다. 거절은 `decline_macro_draft`
+    뿐이고, 거기서 이름과 이유(재생하면 무엇이 틀어지는지)를 요구한다.
+
+    연타가 `while scene() == ` 로 쓰였으면 보낸 횟수가 아니라 scene 이 바뀔 때까지 누른다는
+    것을 한 구절로 적는다. 아니면 agent 가 `N` 번을 고정 횟수로 읽고 고치려 든다.
     """
+    loop = (
+        " The macro presses until the scene changes, not a fixed number of times."
+        if "while scene() ==" in draft.source
+        else ""
+    )
     return (
         f"\n\nMacro draft ready — `{draft.name}` replays the {draft.actions} actions you "
         "sent for this step, with every id and coordinate turned into a selector or a "
         "`find`:\n\n```python\n"
         f"{draft.source}```\n"
-        "This scenario runs again on later builds. The next run reaches this same step "
-        "and starts with a list of the macros registered on this build; `"
-        f"{draft.name}` would be in it. If nothing is registered, the next run sends "
-        "these actions by hand again. Under the phase cycle a registration also answers "
-        "UPDATE_MEMORY. An unregistered draft is dropped when the run ends. Pick one:\n"
-        f"1. Keep it as it is: call `register_macro` with name `{draft.name}`.\n"
-        f"2. Fix it first: call `edit_macro` on `{draft.name}` (the draft counts as "
-        "already read), then `register_macro`. For example, replace a fixed press count "
-        "with a loop when the screen decides when to stop, or add a `require` that a "
-        "panel exists before clicking it.\n"
-        f"3. Leave it: call `skip_memory_update` and say in its `reason` why `{draft.name}` "
-        "is not worth keeping."
+        "This step passed, this scenario runs again on later builds, and the next run "
+        "reaches this step and is shown the macros registered on this build. Without "
+        f"`{draft.name}`, the next run sends these actions by hand again: "
+        f"{draft.actions} tool calls.{loop} An unregistered draft is dropped when the run "
+        "ends.\n"
+        f"- Default: call `register_macro` with name `{draft.name}`.\n"
+        f"- If something in it is wrong, fix it with `edit_macro` on `{draft.name}` first "
+        "(the draft counts as already read), then register it.\n"
+        "- Only if replaying it in the next run would do something wrong, call "
+        f"`decline_macro_draft` with name `{draft.name}` and say in `reason` what."
     )

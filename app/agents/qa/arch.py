@@ -259,7 +259,19 @@ from app.llm.models import LLMModel, get_model_spec
 # `edit_macro` accepts it. `skip_memory_update` refuses once a reason that does not name a
 # pending draft. The macro paragraph says the scenario runs again. Nothing hashed moves: the
 # tool schemas are unchanged.
-QA_ARCH_LABEL = "v14-macro-draft-answer"
+#
+# v15 because the macro draft gets a phase of its own, and with it a tool. Under v14 one
+# `skip_memory_update` still answered both "what did this step teach about the game" and "keep
+# this draft", and in v14 try 80 the agent read the draft and the fact that the next run sees
+# registered macros and still declined. A step whose passing verdict offers a draft now goes
+# VERIFY -> REVIEW_DRAFT -> UPDATE_MEMORY; REVIEW_DRAFT is answered by `register_macro` or the
+# new `decline_macro_draft` (name and what replaying it would do wrong), and a refused
+# registration keeps it open. Steps without a draft go VERIFY -> UPDATE_MEMORY as before, and
+# `skip_memory_update` is back to meaning only "no knowledge to write" (v14's one-time
+# refusal is gone). The offer makes registering the default for a passed step and states the
+# cost of not registering in tool calls. `decline_macro_draft` joins the default tool set, so
+# `arch_fingerprint` moves.
+QA_ARCH_LABEL = "v15-macro-draft-review"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
