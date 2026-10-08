@@ -271,7 +271,18 @@ from app.llm.models import LLMModel, get_model_spec
 # refusal is gone). The offer makes registering the default for a passed step and states the
 # cost of not registering in tool calls. `decline_macro_draft` joins the default tool set, so
 # `arch_fingerprint` moves.
-QA_ARCH_LABEL = "v15-macro-draft-review"
+#
+# v16 because a run with macros on is now told that macros are how it operates and the
+# action tools fill in (ARTEL-917, asked for on 2026-10-08). In `macro-continuity-l1-v14`
+# five of six first runs carried macros to their second run, but 6 of the 14 `run_macro`
+# calls in the second runs were refused for coming outside ACT and one second run carried
+# two macros and ran none. The macro paragraph now opens with the order for each step — a
+# registered macro first, then a macro written for any sequence, then hand actions only for
+# single presses, looks and recovery — `report_step`'s answer names the registered macro for
+# the next step, and a `run_macro` refused in UPDATE_MEMORY or REVIEW_DRAFT says to make it
+# the next step's first action. The action tools' descriptions are unchanged because a run
+# with macros off reads them too. Nothing hashed moves.
+QA_ARCH_LABEL = "v16-macro-first"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

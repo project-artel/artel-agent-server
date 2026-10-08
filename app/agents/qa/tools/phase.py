@@ -274,6 +274,17 @@ _SKIPPABLE = frozenset({RunPhase.observe, RunPhase.act})
 assert not (_SKIPPABLE & {RunPhase.update_memory})
 
 
+# macro 를 돌리는 tool. 이 둘이 `UPDATE_MEMORY` 나 `REVIEW_DRAFT` 에서 거절당하면 거절만으로는
+# 부족하다. `macro-continuity-l1` 에서 run 2 가 `UPDATE_MEMORY` 에 `run_macro` 를 불렀다가
+# 거절당하고 그 macro 를 다시 부르지 않았다. 거절 문구가 "나중에 다시 오라" 는 말만 하면 agent 는
+# 그 macro 를 이미 처리한 것으로 읽는다. 거절 경로에는 macro 이름 인자가 없으므로 "the macro" 로 쓴다.
+MACRO_RUNNING_TOOLS = frozenset({"run_macro", "resume_macro"})
+_MEMORY_PHASES = frozenset({RunPhase.update_memory, RunPhase.review_draft})
+MACRO_AFTER_MEMORY_SENTENCE = (
+    " Answer that phase first, then make the macro the first action of the next step."
+)
+
+
 def _tools_that_end(phase: RunPhase, offered: frozenset[str] | None = None) -> str:
     """그 phase 를 끝내는 tool 이름을, 거절 문구에 넣을 한 줄로.
 
@@ -487,6 +498,8 @@ class PhaseCycle:
             # "고쳐서 등록한다" 는 답이 막힌 것처럼 읽히면 안 된다. `edit_macro` 는 이 phase 를
             # 끝내지 않고 지나간다.
             refusal += " `edit_macro` works here if the draft needs fixing before you register it."
+        if tool_name in MACRO_RUNNING_TOOLS and blocking in _MEMORY_PHASES:
+            refusal += MACRO_AFTER_MEMORY_SENTENCE
         return refusal
 
     def advance(self, tool_name: str) -> None:

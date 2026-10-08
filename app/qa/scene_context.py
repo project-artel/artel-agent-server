@@ -303,9 +303,10 @@ class SceneContext(_Payload):
         lines = [heading + ":"]
         lines.extend(_macro_line(macro) for macro in shown)
         lines.append(
-            "These were registered by earlier runs of this build: `run_macro` calls one by "
-            "name and `read_macro` shows its source. Check the scene first — a macro "
-            "tagged with a scene was written there."
+            "These were registered by earlier runs of this build. When a step has one, run "
+            "it with `run_macro` as that step's first action and act by hand only if it "
+            "fails; `read_macro` shows its source. Check the scene first — a macro tagged "
+            "with a scene was written there."
         )
         return "\n\n" + "\n".join(lines)
 

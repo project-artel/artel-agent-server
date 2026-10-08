@@ -6,6 +6,7 @@
 
 from langchain_core.tools import BaseTool, tool
 
+from app.agents.qa.macro.for_step import macros_for_step, render_step_macro_hint
 from app.agents.qa.macro.lift import draft_for_step, offer
 from app.agents.qa.tools.phase import MAX_CONSECUTIVE_REFUSALS
 from app.agents.qa.tools.state import QaRunState
@@ -175,6 +176,19 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             state.phase_cycle.expect_draft_review()
         return offer(draft)
 
+    def _next_step_macro(next_step: int) -> str:
+        """다음 step 에 맞는 등록된 macro 이름을 대는 문장. macro 를 켠 런에만.
+
+        목록은 첫 메시지에 한 번 실리고 멀어지므로, 다음 step 번호가 적히는 이 답에서 한 번 더
+        말한다. 이 런의 등록을 지난 런의 것보다 앞에 둔다(`macro/for_step.py`).
+        """
+        if arch.macros != "on":
+            return ""
+        context = channel.scene.scene_context
+        scene_macros = context.macros if context is not None else []
+        found = macros_for_step(next_step, state.macros.registrations, scene_macros)
+        return render_step_macro_hint(next_step, found)
+
     async def _record_verdict(
         step: int,
         passed: bool,
@@ -310,7 +324,7 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         body = f"Recorded. {remaining} step(s) left — continue with step {step + 1}."
         if not passed:
             body = f"{body} A failed step is not a reason to stop."
-        return _answer(f"{body}{note}", channel.drain_operator_messages())
+        return _answer(f"{body}{note}{_next_step_macro(step + 1)}", channel.drain_operator_messages())
 
     # 두 모양을 `if` 로 가른다. 인자 하나를 `None` 기본값으로 늘 달아 두는 길도 있지만, 그러면
     # `off` 런의 tool schema 가 움직이고 `arch_fingerprint` 가 그것을 tool 의 `args` 로 잡는다

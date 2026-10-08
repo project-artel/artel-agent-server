@@ -103,7 +103,7 @@ def test_the_section_says_where_the_macros_came_from_and_what_to_do_once() -> No
 
     instruction = [line for line in section.splitlines() if line.startswith("These were registered")]
     assert len(instruction) == 1
-    assert "`run_macro` calls one by name" in instruction[0]
+    assert "run it with `run_macro` as that step's first action" in instruction[0]
     assert "`read_macro` shows its source" in instruction[0]
     assert "Check the scene first" in instruction[0]
 
