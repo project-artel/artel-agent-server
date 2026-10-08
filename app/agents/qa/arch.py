@@ -248,7 +248,18 @@ from app.llm.models import LLMModel, get_model_spec
 # UPDATE_MEMORY, and the draft was dropped with the run. The macro paragraph of the phase
 # directive says so in one more sentence. Nothing hashed moves: the phase table is not
 # hashed and neither is the directive's text.
-QA_ARCH_LABEL = "v13-macro-register-anywhere"
+#
+# v14 because the macro draft and what the agent is asked about it changed (`macro-continuity-l1`,
+# 2026-10-08: 34 drafts offered, 1 registered). A run of key presses that ended in a scene
+# change is drafted as `while scene() == "<scene>":` instead of the exact count, since the
+# action recording now keeps the scene after each call (`DispatchRecord.scene_after`). Drafts
+# are offered only for passed verdicts. The offer states that the scenario runs again and the
+# next run is shown this build's registered macros, and gives three answers — register, fix
+# with `edit_macro` then register, or decline by name — and an offered draft counts as read so
+# `edit_macro` accepts it. `skip_memory_update` refuses once a reason that does not name a
+# pending draft. The macro paragraph says the scenario runs again. Nothing hashed moves: the
+# tool schemas are unchanged.
+QA_ARCH_LABEL = "v14-macro-draft-answer"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

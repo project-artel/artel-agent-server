@@ -46,6 +46,13 @@ MIN_DRAFT_ACTIONS = 2
 # 100자면 거의 안 잘리고, 긴 설명이 들어와도 목록의 줄이 둘로 늘지 않는다.
 MAX_STEP_TEXT_CHARS = 100
 
+# scene 이 바뀔 때까지 누르는 연타는 `while scene() == "<scene>":` 하나로 쓴다. 따로 상한을
+# 두지 않는다: runner 가 `while` 한 번을 `MAX_LOOP_PASSES` 회에서 `LOOP_LIMIT` 로 끊고,
+# 문법에 `break` 와 `return` 이 없어 바깥에 상한용 `for` 를 한 겹 더 씌울 방법도 없다.
+# 보낸 횟수가 그 상한보다 커도 같은 곳에서 멈춘다. `range(n)` 은 n 이 상한을 넘으면 저장 때
+# 거절되므로, 이 쪽이 오히려 긴 대화에서 더 안전하다.
+_SCENE_BOUNDED_TOOLS = frozenset({"press_key"})
+
 
 @dataclass(frozen=True)
 class LiftedTarget:
@@ -71,6 +78,9 @@ class DispatchRecord:
     unliftable: str = ""
     # 게임에 닿았나. 누름이 하나도 안 닿았거나 사람이 마우스를 쥐었으면 `False` 다.
     landed: bool = True
+    # tool 이 돌아온 뒤 게임이 알린 scene. 모르면 빈 문자열이다. 같은 키 연타의 마지막
+    # 호출에서 이 값이 `scene` 과 다르면 그 연타는 "scene 이 바뀔 때까지" 누른 것이다.
+    scene_after: str = ""
 
 
 @dataclass(frozen=True)
@@ -172,8 +182,10 @@ def draft_for_step(
     시나리오가 그 step 에 적은 행위 문장이고, 모르면 빈 문자열이다.
 
     게임에 안 닿은 호출(빈 자리를 누른 클릭)은 뺀다 — 해 본 것이지 한 것이 아니다. 못 올린
-    호출이 하나라도 있으면 만들지 않는다. 같은 줄이 연달아 나오면 `for _ in range(n)` 으로
-    접는다 — 대화를 넘기는 키 연타가 이 경우다.
+    호출이 하나라도 있으면 만들지 않는다. 같은 줄이 연달아 나오면 `for _ in range(n)` 한 줄로
+    바꾼다 — 대화를 넘기는 키 연타가 이 경우다. 단 그 연타가 한 scene 에서 시작해 다른 scene
+    으로 끝났으면 누른 횟수가 아니라 scene 이 바뀐 시점이 끝이므로
+    `while scene() == "<scene>"` 으로 쓴다(`_fold`).
     """
     sent = [record for record in records if record.step == step and record.landed]
     if len(sent) < MIN_DRAFT_ACTIONS:
@@ -191,8 +203,7 @@ def draft_for_step(
             run += 1
         lines = _rename(units[index], index)
         if run > 1:
-            body.append(f"for _ in range({run}):")
-            body.extend(f"    {line}" for line in lines)
+            body.extend(_fold(lines, sent[index : index + run]))
         else:
             body.extend(lines)
         index += run
@@ -211,6 +222,33 @@ def draft_for_step(
     except MacroRejection as rejected:
         return None, f"the draft did not parse: {rejected}"
     return Draft(name=name, source=source, actions=len(sent)), ""
+
+
+def _fold(lines: list[str], run: list[DispatchRecord]) -> list[str]:
+    """같은 줄이 `len(run)` 번 연달아 나온 것을 반복문으로.
+
+    키 연타가 한 scene 안에서만 눌렸고 마지막 누름 뒤의 scene 이 다른 값으로 알려졌으면
+    `while scene() == "<scene>"` 이다. 대화 길이는 런마다 다르므로 13번이라는 횟수는 우연이고
+    사실은 "StoryScene 이 끝날 때까지" 눌렀다. 마지막 scene 을 모르면(빈 문자열) 바뀌었다고
+    말할 근거가 없으니 `range(n)` 으로 둔다.
+    """
+    first, last = run[0], run[-1]
+    until_changed = (
+        first.tool in _SCENE_BOUNDED_TOOLS
+        and first.scene
+        and all(record.scene == first.scene for record in run)
+        and last.scene_after
+        and last.scene_after != first.scene
+    )
+    if until_changed:
+        header = [
+            f"# Press until {first.scene} is left, however many presses that takes "
+            f"({len(run)} were sent by hand).",
+            f"while scene() == {json.dumps(first.scene, ensure_ascii=False)}:",
+        ]
+    else:
+        header = [f"for _ in range({len(run)}):"]
+    return header + [f"    {line}" for line in lines]
 
 
 def _summary_comment(step: int, step_text: str, actions: int) -> str:
@@ -286,15 +324,27 @@ def _free_name(base: str, taken: set[str]) -> str:
 
 
 def offer(draft: Draft) -> str:
-    """`report_step` 의 답에 붙는 글. agent 가 할 일은 등록할지 정하는 것뿐이다."""
+    """`report_step` 의 답에 붙는 글. 사실 하나와 답 셋(등록·고쳐서 등록·두기)을 적는다.
+
+    "한 번뿐이면 두라" 고 쓰면 agent 가 모든 step 을 한 번뿐인 것으로 읽는다(24회 실험에서
+    초안 거의 전부가 거절됐다). 같은 시나리오가 다음 빌드에서 다시 돌고 그 런이 같은 step
+    에 닿는다는 사실을 먼저 적고, 두려면 `skip_memory_update` 의 `reason` 에 이름을 대게 한다.
+    """
     return (
         f"\n\nMacro draft ready — `{draft.name}` replays the {draft.actions} actions you "
         "sent for this step, with every id and coordinate turned into a selector or a "
         "`find`:\n\n```python\n"
         f"{draft.source}```\n"
-        f"If you would do this again — this step repeats later, or a later run will need "
-        f"it — call `register_macro` with name `{draft.name}`; it then runs with one "
-        "`run_macro` call. Under the phase cycle that registration also answers "
-        "UPDATE_MEMORY. If it is a one-off, leave it: an unregistered draft is dropped "
-        "when the run ends."
+        "This scenario runs again on later builds. The next run reaches this same step "
+        "and starts with a list of the macros registered on this build; `"
+        f"{draft.name}` would be in it. If nothing is registered, the next run sends "
+        "these actions by hand again. Under the phase cycle a registration also answers "
+        "UPDATE_MEMORY. An unregistered draft is dropped when the run ends. Pick one:\n"
+        f"1. Keep it as it is: call `register_macro` with name `{draft.name}`.\n"
+        f"2. Fix it first: call `edit_macro` on `{draft.name}` (the draft counts as "
+        "already read), then `register_macro`. For example, replace a fixed press count "
+        "with a loop when the screen decides when to stop, or add a `require` that a "
+        "panel exists before clicking it.\n"
+        f"3. Leave it: call `skip_memory_update` and say in its `reason` why `{draft.name}` "
+        "is not worth keeping."
     )

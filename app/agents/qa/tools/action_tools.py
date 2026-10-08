@@ -285,6 +285,8 @@ def _recorded(tool: BaseTool, ctx: ToolContext) -> BaseTool:
         ctx.state.last_outcome = None
         result = await inner(*args, **kwargs)
         outcome = ctx.state.last_outcome
+        # 돌아온 뒤의 scene. 키 연타가 scene 을 바꿨는지는 이 값으로 안다(`lift._fold`).
+        scene_after = (ctx.channel.scene.scene or ctx.channel.scene.pulse.scene or "").strip()
         if outcome is not None:
             ctx.state.dispatches.append(
                 DispatchRecord(
@@ -299,6 +301,7 @@ def _recorded(tool: BaseTool, ctx: ToolContext) -> BaseTool:
                     targets=targets,
                     unliftable=unliftable,
                     landed=_landed(outcome),
+                    scene_after=scene_after,
                 )
             )
         return result

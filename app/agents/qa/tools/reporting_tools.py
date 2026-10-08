@@ -138,14 +138,21 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             "you mean."
         )
 
-    def _macro_draft(step: int) -> str:
+    def _macro_draft(step: int, passed: bool) -> str:
         """이 step 에 손으로 보낸 것을 macro 초안으로 만들어 내민다. macro 를 켠 런에만.
 
         판정이 받아들여진 응답에 붙는다 — `UPDATE_MEMORY` 로 넘어가는 그 순간에 agent 가
         읽는다. 초안은 `MacroBook` 에 써 두므로 agent 가 할 일은 `register_macro` 한 번이다.
         만들지 못했으면 아무 말도 안 붙인다(`app/agents/qa/macro/lift.py`).
+
+        **통과한 판정에만 붙는다.** 실패한 step 에 보낸 것은 게임이 받아 주지 않은 순서라
+        macro 가 되면 안 된다. 실패 판정은 `drafted_steps` 에도 올리지 않는다 — 같은 step 을
+        나중에 통과로 다시 판정하면 그때 초안을 낼 수 있어야 한다.
+
+        내민 초안은 읽은 것으로 친다. 초안 원문이 응답에 그대로 실렸으므로 `edit_macro` 가
+        `read_macro` 를 또 요구하면 고쳐서 등록할 길이 막힌다.
         """
-        if arch.macros != "on" or step in state.drafted_steps:
+        if arch.macros != "on" or not passed or step in state.drafted_steps:
             return ""
         state.drafted_steps.add(step)
         taken = set(state.macros.drafts) | set(state.macros.registrations)
@@ -157,6 +164,8 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         if draft is None:
             return ""
         state.macros.write(draft.name, draft.source)
+        state.macros.remember_read(draft.name)
+        state.offered_drafts[step] = draft.name
         return offer(draft)
 
     async def _record_verdict(
@@ -277,7 +286,7 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
                 f"has been shown, so they were not recorded: {rejected}. The verdict "
                 "stands. Cite only ids printed to you by a search or a neighbour line."
             )
-        note = "".join(f"\n\n{line}" for line in notes) + _macro_draft(step)
+        note = "".join(f"\n\n{line}" for line in notes) + _macro_draft(step, passed)
         if remaining <= 0:
             # 무엇을 남길지 묻는 자리이자 이유는 `render_closing_asks` 가 들고 있다. 여기서
             # 말하는 것은 그 자리가 여기라는 것뿐이다 — 매 스텝마다 붙이면 표가 뜻을 잃고,

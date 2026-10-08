@@ -41,6 +41,26 @@ def build_phase_tools(ctx: ToolContext) -> list[BaseTool]:
                 "worth keeping — if writing that line is not worth it, there was "
                 "probably something to record after all."
             )
+        pending = state.offered_drafts.get(step)
+        if (
+            pending is not None
+            and state.macros.registered(pending) is None
+            and pending not in state.asked_drafts
+            and pending not in why
+        ):
+            # 초안을 내밀었는데 이름도 안 대고 넘어가는 호출을 한 번만 되돌린다. agent 가
+            # 초안을 못 봤거나 게임 상태 얘기로 답을 대신한 경우이고, 둘째 호출부터는 말이
+            # 무엇이든 통과시킨다 — 되묻는 것이 목적이지 가두는 것이 아니다.
+            state.asked_drafts.add(pending)
+            if state.phase_cycle is not None:
+                state.phase_cycle.hold()
+            return (
+                f"Nothing was recorded and this step's UPDATE_MEMORY is still open: the "
+                f"macro draft `{pending}` has no answer yet. Register it as is with "
+                f"`register_macro`, fix it with `edit_macro` and then register it, or call "
+                f"`skip_memory_update` again with a `reason` that says why `{pending}` is "
+                "not kept."
+            )
         return _answer(
             "Noted: nothing from this step goes to the knowledge base or the content map.",
             channel.drain_operator_messages(),

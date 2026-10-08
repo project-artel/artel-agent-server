@@ -498,7 +498,7 @@ def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v13-macro-register-anywhere"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v14-macro-draft-answer"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,

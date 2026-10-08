@@ -10,10 +10,12 @@ import pytest
 
 from app.agents.qa.arch import PhaseCycleMode, QaArchSpec, VisionMode, resolve_arch
 from app.agents.qa.macro.lift import (
+    Draft,
     DispatchRecord,
     LiftedTarget,
     draft_for_step,
     lift_target,
+    offer,
 )
 from app.agents.qa.macro.parser import macro_definition_from_source
 from app.agents.qa.tools import QaRunState, build_tools
@@ -110,6 +112,62 @@ def test_repeated_key_presses_fold_into_a_range_loop() -> None:
     assert 'press_key("Space", 0.1)' in draft.source
     assert 'require(scene() == "Story"' in draft.source
     macro_definition_from_source(draft.name, draft.source)
+
+
+def story_press(scene_after: str) -> DispatchRecord:
+    return DispatchRecord(
+        tool="press_key", step=3, scene="StoryScene",
+        arguments={"key_code": "Space", "duration_seconds": 0.1}, scene_after=scene_after,
+    )
+
+
+def test_presses_that_end_in_a_scene_change_draft_a_loop_bounded_by_the_scene() -> None:
+    """대화 길이는 런마다 다르다. 13번은 우연이고 사실은 StoryScene 이 끝날 때까지 눌렀다."""
+    records = [story_press("StoryScene") for _ in range(12)] + [story_press("Map_scene")]
+
+    draft, why = draft_for_step(records, 3, set())
+
+    assert why == ""
+    assert 'while scene() == "StoryScene":' in draft.source
+    assert "range(" not in draft.source
+    assert '        press_key("Space", 0.1)' in draft.source
+    macro_definition_from_source(draft.name, draft.source)
+
+
+def test_presses_with_no_scene_change_keep_the_fixed_count() -> None:
+    records = [story_press("StoryScene") for _ in range(4)]
+
+    draft, _why = draft_for_step(records, 3, set())
+
+    assert "for _ in range(4):" in draft.source
+    assert "while" not in draft.source
+    macro_definition_from_source(draft.name, draft.source)
+
+
+def test_presses_whose_scene_after_is_unknown_keep_the_fixed_count() -> None:
+    """scene 을 모르면(빈 문자열) 바뀌었다고 말할 근거가 없다."""
+    records = [story_press("") for _ in range(4)]
+
+    draft, _why = draft_for_step(records, 3, set())
+
+    assert "for _ in range(4):" in draft.source
+    assert "while" not in draft.source
+
+
+def test_a_run_that_started_in_another_scene_keeps_the_fixed_count() -> None:
+    """연타 중간에 scene 이 달라졌으면 한 scene 을 기다린 연타가 아니다."""
+    records = [story_press("StoryScene"), story_press("Map_scene")]
+    records.append(
+        DispatchRecord(
+            tool="press_key", step=3, scene="Map_scene",
+            arguments={"key_code": "Space", "duration_seconds": 0.1}, scene_after="Shop",
+        )
+    )
+
+    draft, _why = draft_for_step(records, 3, set())
+
+    assert "while" not in draft.source
+    assert "for _ in range(3):" in draft.source
 
 
 def test_a_spawned_target_is_bound_with_find_right_before_its_use() -> None:
@@ -241,6 +299,20 @@ def test_hand_sent_actions_are_recorded_in_order_with_their_targets_lifted() -> 
 
     assert [record.tool for record in state.dispatches] == ["press_key"] * 3 + ["click"]
     assert state.dispatches[-1].targets["target"] == LiftedTarget("label", "shoot")
+    assert [record.scene_after for record in state.dispatches] == ["Battle"] * 4
+
+
+def test_the_offer_names_the_draft_in_all_three_answers() -> None:
+    text = offer(Draft(name="replay_step_3", source="def replay_step_3() -> None:\n", actions=13))
+
+    answers = text.split("Pick one:\n")[1].splitlines()
+    assert len(answers) == 3
+    assert "register_macro" in answers[0] and "`replay_step_3`" in answers[0]
+    assert "edit_macro" in answers[1] and "`replay_step_3`" in answers[1]
+    assert "skip_memory_update" in answers[2] and "`replay_step_3`" in answers[2]
+    assert "later builds" in text
+    assert "UPDATE_MEMORY" in text and "dropped when the run ends" in text
+    assert "one-off" not in text
 
 
 def test_report_step_offers_a_draft_that_one_register_call_keeps() -> None:
