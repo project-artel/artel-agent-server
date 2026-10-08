@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.agents.qa.macro.book import MacroBook
+from app.agents.qa.macro.lift import DispatchRecord
 from app.agents.qa.macro.session import MacroSession
 from app.qa.envelope import ActionResultItem, JsonRpcAction
 from app.qa.schemas import QaStepResult
@@ -186,6 +187,14 @@ class QaRunState:
         # 하나뿐이다 — 게임을 모는 쪽이 둘이 되면 안 되므로, 멈춘 것이 있는 동안
         # `run_macro` 는 새 macro 를 안 부른다.
         self.paused_macro: MacroSession | None = None
+        # agent 가 손으로 부른 action tool, 부른 순서대로(ARTEL-915). `dispatched_action_params`
+        # 는 method 마다 마지막 한 벌만 남겨 순서도 tool 도 없다 — 그쪽은 capability 의 재현
+        # 칸이 쓰는 것이라 뜻을 안 바꾸고, 이 기록을 옆에 둔다. macro 초안이 여기서 나온다.
+        self.dispatches: list[DispatchRecord] = []
+        # macro 초안을 이미 내민 step. 같은 step 을 다시 판정해도 초안을 또 만들지 않는다.
+        self.drafted_steps: set[int] = set()
+        # 마지막 action 의 결과 데이터. 기록하는 쪽이 그 action 이 게임에 닿았는지 본다.
+        self.last_outcome = None
         # Handed to the vision middleware on the next model call. The tool cannot
         # return the image itself — an image block on a tool result is rejected by
         # the chat/completions API every model here is reached through.

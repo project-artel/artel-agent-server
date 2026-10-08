@@ -6,6 +6,7 @@
 
 from langchain_core.tools import BaseTool, tool
 
+from app.agents.qa.macro.lift import draft_for_step, offer
 from app.agents.qa.tools.phase import MAX_CONSECUTIVE_REFUSALS
 from app.agents.qa.tools.state import QaRunState
 from app.agents.qa.tools.tool_context import ToolContext
@@ -137,6 +138,23 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             "you mean."
         )
 
+    def _macro_draft(step: int) -> str:
+        """이 step 에 손으로 보낸 것을 macro 초안으로 만들어 내민다. macro 를 켠 런에만.
+
+        판정이 받아들여진 응답에 붙는다 — `UPDATE_MEMORY` 로 넘어가는 그 순간에 agent 가
+        읽는다. 초안은 `MacroBook` 에 써 두므로 agent 가 할 일은 `register_macro` 한 번이다.
+        만들지 못했으면 아무 말도 안 붙인다(`app/agents/qa/macro/lift.py`).
+        """
+        if arch.macros != "on" or step in state.drafted_steps:
+            return ""
+        state.drafted_steps.add(step)
+        taken = set(state.macros.drafts) | set(state.macros.registrations)
+        draft, _why = draft_for_step(state.dispatches, step, taken)
+        if draft is None:
+            return ""
+        state.macros.write(draft.name, draft.source)
+        return offer(draft)
+
     async def _record_verdict(
         step: int,
         passed: bool,
@@ -255,7 +273,7 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
                 f"has been shown, so they were not recorded: {rejected}. The verdict "
                 "stands. Cite only ids printed to you by a search or a neighbour line."
             )
-        note = "".join(f"\n\n{line}" for line in notes)
+        note = "".join(f"\n\n{line}" for line in notes) + _macro_draft(step)
         if remaining <= 0:
             # 무엇을 남길지 묻는 자리이자 이유는 `render_closing_asks` 가 들고 있다. 여기서
             # 말하는 것은 그 자리가 여기라는 것뿐이다 — 매 스텝마다 붙이면 표가 뜻을 잃고,

@@ -219,7 +219,16 @@ from app.llm.models import LLMModel, get_model_spec
 # `v9-macros` (the `macro-ab-l1b` and `macro-ab-l1-nudge` measurements, 2026-10-07). The
 # label is the only thing that can tell them apart from runs after this, which is the
 # case the module docstring says the hand-bumped label exists for.
-QA_ARCH_LABEL = "v10-macro-memory"
+#
+# v11 because a run with macros on is now handed a macro draft instead of being asked to
+# write one (ARTEL-915, ARTEL-916). Every action tool the agent calls by hand is recorded
+# in order, with its target lifted to a `selector(...)` or a `find(...)` against the pulse
+# memory of that moment, and when a step's verdict is accepted, `report_step`'s answer
+# carries a draft of that step's actions that one `register_macro` call keeps. This came
+# after `v10-macro-memory` (`macro-ab-l1-memory`, 2026-10-08) left B with zero macros in
+# six runs, as `v9-macros` had in twelve. Nothing hashed moves: the tool schemas are
+# unchanged and the draft lives in a tool's answer.
+QA_ARCH_LABEL = "v11-macro-drafts"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

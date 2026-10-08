@@ -80,6 +80,18 @@ class ToolContext:
     async def act(
         self, actions: list[JsonRpcAction], summary: str, step: int
     ) -> ActionOutcome:
+        """`_act` 를 돌리고 그 결과를 `state.last_outcome` 에 남긴다.
+
+        남기는 이유는 action tool 의 기록이다(`action_tools._recorded`). tool 은 문장만
+        돌려받으므로, 그 action 이 게임에 닿았는지는 여기 남은 데이터로 본다.
+        """
+        outcome = await self._act(actions, summary, step)
+        self.state.last_outcome = outcome
+        return outcome
+
+    async def _act(
+        self, actions: list[JsonRpcAction], summary: str, step: int
+    ) -> ActionOutcome:
         """`run` 과 같은 일을 하되, 문장과 **그 문장이 되기 전의 데이터**를 함께 낸다.
 
         부르는 쪽이 macro runner 다. 그쪽은 batch 사이에 모델 턴을 안 쓰는 것이 존재
