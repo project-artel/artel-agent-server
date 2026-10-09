@@ -1,5 +1,7 @@
 from functools import lru_cache
 
+from typing import Literal
+
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -43,6 +45,34 @@ class Settings(BaseSettings):
     # 180 s is above the slowest authoring turn measured (a 66-case project ran
     # ~70 s) with room for a reasoning model, and far below a wait a person
     # accepts without being told something is wrong.
+    # 입구 라우터를 어느 모델로 돌릴까. **롤백이 이 한 줄이다.**
+    #
+    # `haiku` 는 종전 그대로(범용 대화 모델에 분류를 맡긴다). `jev` 는 갈래를 고르는 일만
+    # 하는 결정 전용 모델이다 — 실측(실제 사용자 말 163줄, ARTEL-944)에서 지연 중앙값
+    # 1,702ms → 240ms, 판정당 $0.0020140 → $0.0001152, 정확도 95.7% → 98.2%.
+    #
+    # 기본값을 `jev` 로 옮긴 근거(실측 2026-10-06, 정답표 163줄 + 트립와이어 33줄):
+    #
+    #                       haiku            jev
+    #   맞음               155/163 95.1%   161/163 98.8%
+    #   답을 낸 자리        95.7%           100.0%
+    #   거절·여분·겉흠      0·3·4           0·0·0
+    #   수정 요청           14/17           17/17
+    #   질문                9/10            10/10
+    #   지연 중앙값         1,868ms         242ms
+    #
+    # 트립와이어가 `haiku` 에서 못 잡던 것을 하나 찾았다 — "이거 서버 문제 아니야? 개발팀에
+    # 물어봐야 하나" 를 `offtopic` 으로 끊는다. v6:68-69 가 이름으로 금지한 동작이고
+    # (never send the user to "the dev team") run 68 과 같은 종류다.
+    #
+    # 남은 미지는 **문맥**이다. 이 측정은 문맥 없이 했고 `JevScenarioRouter` 는 아직
+    # `context_hint` 를 안 쓴다. 운영 라우터는 직전 대화를 받으므로 그 조건의 성적은
+    # ARTEL-942 에서 함께 잰다. 되돌릴 일이 생기면 이 한 줄을 `haiku` 로 바꾼다.
+    scenario_router_engine: Literal["haiku", "jev"] = "jev"
+    # 결정 모델 호출의 한도. 실측 p90 이 340ms 라 느슨하게 잡아도 10초면 넉넉하고, 이보다
+    # 길게 두면 입구가 막힌 채로 모든 갈래가 기다린다.
+    scenario_router_timeout_seconds: float = 10.0
+
     openrouter_timeout_seconds: float = 180.0
     openrouter_max_retries: int = 1
 
