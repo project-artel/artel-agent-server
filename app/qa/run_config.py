@@ -38,7 +38,8 @@ from app.llm.models import (
     get_model_spec,
     validate_reasoning,
 )
-from app.prompts import load_prompt, roles_in
+from app.prompts import load_prompt, roles_in, skill_names
+from app.prompts.loader import SKILL_ROLE_PREFIX
 
 # Directories under app/prompts/ holding these agents' prompt versions. The
 # summarizing prompt is versioned apart from the run's own: it is a different call
@@ -218,6 +219,15 @@ def resolve_run_config(
         # with nothing to load; asked of `v18` or older, the pair is refused here
         # instead of failing when the run builds its tools.
         hashes[SKILLS_ROLE] = _conditional_hash(SKILLS_ROLE, prompt.version, "skills=on_demand")
+    # Every run of a version that has skill files reads them: inlined into the
+    # system prompt when `skills=off`, through `load_skill` when `on_demand`. Each
+    # one is recorded under its own role, `skill_<name>`. The hash covers the
+    # description as well as the body (see `loader.content_sha256`), so a run is
+    # filed under the text the model was offered, including the Skills section
+    # built from the descriptions. `skills_directive` alone holds only the template.
+    for skill in skill_names(prompt.version):
+        role = f"{SKILL_ROLE_PREFIX}{skill}"
+        hashes[role] = load_prompt(PROMPT_AGENT, role, prompt.version).body_sha256
 
     settings = get_settings()
     # 설정이 비어 있으면 런의 모델로 압축한다. 그래야 압축이 런과 같은 provider 를

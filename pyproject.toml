@@ -40,7 +40,9 @@ dev = [
 packages = ["app"]
 
 [tool.setuptools.package-data]
-"app.prompts" = ["**/*.md"]
+# `.json` 은 판본 디렉터리의 자료 파일이다(`scenario_router/v7/criteria.json`).
+# 빠뜨리면 런타임 휠에서 **조용히 사라지고** 라우터가 기동 때 터진다.
+"app.prompts" = ["**/*.md", "**/*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
