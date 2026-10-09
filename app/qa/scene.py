@@ -373,10 +373,21 @@ class SceneMemory(BaseModel):
             # 판독만 도착한 경우. GAME_STATE 가 없다고 판독을 감추면 그 채널이 유일한
             # 상태 출처가 되는 날(ARTEL-400) 화면이 통째로 비어 보인다.
             #
-            # 마커로 감싸지 않는다. 접기(`fold_stale_scenes`)가 그 마커를 찾아 자리표로
-            # 바꾸는데, 이 갈래가 내는 것은 **행위의 기록**이라 접히면 안 된다. 씬 페이지가
-            # 다음 도구 결과 하나에 먹히고(`DEFAULT_KEEP_SCENES = 1` 이 목록 전체 기준이다),
-            # 옛 메시지를 고쳐 쓰는 일이라 프롬프트 접두까지 깨진다.
+            # scene view 마커로는 안 감싼다. `pulse` view 는 제 마커(`<<pulse>>` …
+            # `<<end pulse>>`)를 갖고, `fold_stale_scenes` 가 그것을 찾아 `fold` 한다.
+            #
+            # 종전에는 이 view 를 일부러 `fold` 하지 않았다(ARTEL-621). 이유가 둘이었다 —
+            # `keep=1` 로 매 호출 `fold` 하면 씬 페이지가 다음 도구 결과 하나에 먹히고, 옛
+            # 메시지를 매 호출 고쳐 쓰므로 프롬프트 `prefix` 가 깨져 `cache` 가 안 맞는다. 그 대가로
+            # 컨텍스트가 끝없이 자랐다. L1 런 실측(2026-10-08)에서 `pulse` view 가 모델 입력의
+            # 87–90% 였고, sol try 138 은 입력이 13k → 158k → 352k token 으로 늘어 마지막
+            # 호출이 351,671 prompt token 이었다. 압축은 922k context window 의 90% 에서
+            # 걸리므로 한 번도 안 걸렸다.
+            #
+            # 두 이유에 각각 답이 있다. `fold` 를 batch 로 한다(`DEFAULT_MAX_FULL_VIEWS`) — 그
+            # 사이에는 앞을 안 고치므로 `cache` 가 맞는다. 그리고 `fold` 직후 첫 view 가 가진 값을
+            # 전부 다시 그린다(`PulseMemory.redraw_all_values_next`) — 지워진 view 에만 있던
+            # 값이 거기서 돌아온다.
             if pulse is None:
                 return "No scene has been received yet."
             verdict = self.screen_map_block()

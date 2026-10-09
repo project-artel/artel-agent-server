@@ -23,7 +23,7 @@ from app.agents.qa.tools import QaRunState, build_tools
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import MessageType
 from app.llm.models import LLMModel
-from app.qa.pulse import PulseReading
+from app.qa.pulse import PULSE_VIEW_START, PulseReading
 
 SIMPLE = '''def deal_a_card(card: object) -> None:
     require(exists(card), "Draw a card first.")
@@ -572,6 +572,55 @@ def test_run_macro_replays_the_registered_definition() -> None:
     assert len(actions(sent)) == 1
     methods = [one["method"] for one in actions(sent)[0]["payload"]["actions"]]
     assert methods == ["move_mouse", "mouse_down", "move_mouse", "mouse_up"]
+
+
+TWO_PRESSES = (
+    "def two_presses() -> None:\n"
+    '    press_key("A", 0.1)\n'
+    '    press_key("B", 0.1)\n'
+)
+
+
+def test_a_macro_answer_carries_one_pulse_view_however_many_actions_it_sent() -> None:
+    """action 마다 `pulse` view 를 붙이던 때는 action 30 개짜리 macro 의 답 하나에 view 가
+    31 개 실렸다(L1 try 143). view 는 macro 가 끝난 자리에 하나만 붙고, action 줄에는
+    결과만 남는다."""
+    channel, _state, tools, sent = make()
+    with_cards(channel)
+    call(tools["write_macro"], name="two_presses", source=TWO_PRESSES)
+    call(tools["register_macro"], name="two_presses")
+
+    async def drive() -> str:
+        replier = asyncio.create_task(answer_the_game(channel, sent, 2)())
+        answer = await tools["run_macro"].ainvoke(
+            {"step": 1, "thought": "replaying", "name": "two_presses", "arguments": {}}
+        )
+        replier.cancel()
+        return answer
+
+    answer = asyncio.run(drive())
+
+    assert "ran to the end. 2 action(s) reached the game." in answer
+    assert len(actions(sent)) == 2
+    assert answer.count(PULSE_VIEW_START) == 1
+    # view 는 답의 끝, action 줄들 뒤에 있다.
+    assert answer.index("What the game said:") < answer.index(PULSE_VIEW_START)
+
+
+def test_a_hand_sent_action_still_answers_with_the_screen() -> None:
+    """`screen=False` 는 macro host 만 쓴다. 손으로 보낸 action 의 답에는 view 가 붙는다."""
+    channel, _state, tools, sent = make()
+    with_cards(channel)
+
+    async def drive() -> str:
+        replier = asyncio.create_task(answer_the_game(channel, sent, 1)())
+        answer = await tools["press_key"].ainvoke(
+            {"step": 1, "key_code": "A", "duration_seconds": 0.1, "thought": "누른다"}
+        )
+        replier.cancel()
+        return answer
+
+    assert asyncio.run(drive()).count(PULSE_VIEW_START) == 1
 
 
 def test_run_macro_refuses_a_coordinate_as_an_object_argument() -> None:

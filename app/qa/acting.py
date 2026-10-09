@@ -56,7 +56,8 @@ class ActionOutcome:
     """`ToolContext.act` 가 돌려주는 것 전부.
 
     `text` 는 종전 `run` 이 돌려주던 바로 그 문장이고, 화면과 operator 의 말이 이미
-    붙어 있다. 나머지 셋은 그 문장을 만들 때 손에 있던 데이터다.
+    붙어 있다. `act(screen=False)` 로 받으면(macro runner) 화면은 빠지고 operator 의 말만
+    붙는다. 나머지 셋은 그 문장을 만들 때 손에 있던 데이터다.
     """
 
     text: str

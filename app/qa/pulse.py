@@ -841,16 +841,20 @@ class PulseMemory(BaseModel):
     def since_action(self, frame: int | None) -> str | None:
         """행위 하나가 무엇을 남겼나. 씬이 바뀌었으면 전량 한 페이지로.
 
-        도구 결과에 실리는 것이 이것이다. 도구 결과는 대화에 남으므로, 여기 그린 것은
-        지워지지 않는다 — 한 번 말하면 그 자리에 있다.
+        도구 결과에 실리는 것이 이것이다. 도구 결과는 대화에 남지만, 여기 그린 것이 끝까지
+        모델 앞에 남지는 않는다 — 전문 view 가 `DEFAULT_MAX_FULL_VIEWS`(8) 개를 넘으면
+        `fold_stale_scenes`(`app/agents/qa/context.py`)가 가장 새것만 빼고 한 줄짜리
+        `placeholder` 로 바꾼다.
 
         **매 턴 교체되는 꼬리를 대신한다.** 종전에는 `render_now()` 를 모델 호출 맨 뒤에
         붙였는데, 그것이 프롬프트 접두를 매 턴 깨뜨려 캐시가 시스템 프롬프트에서 멈췄다.
         크기나 내용의 문제가 아니었다 — 10 토큰짜리 고정 꼬리도 똑같이 깼다(ARTEL-621).
 
         씬이 바뀐 뒤 첫 호출은 **전량**이다. 새 화면을 한 덩어리로 주지 않으면 독자가 씬
-        경계를 지나 거슬러 읽어야 한다. 그 다음부터는 델타이고, 앞의 페이지가 대화에 남아
-        있으므로 잃는 것이 없다.
+        경계를 지나 거슬러 읽어야 한다. 그 다음부터는 델타다. 델타는 앞의 view 가 모델 앞에
+        남아 있다는 전제 위에 서는데, `fold` 가 그 전제를 깬다. 그래서 `fold` 가 일어나면
+        runner 가 [redraw_all_values_next] 를 부르고, 그 뒤 첫 view 가 가진 값을 전부 다시
+        그린다. 지워진 view 에만 있던 값은 거기서 돌아온다.
 
         `frame` 은 이 행위가 끝난 Unity 프레임이다. 그보다 뒤에 잡힌 판독만이 이 행위의
         결과다 — 0.1초 떴다 사라진 것도 거기 남는다. 모르면(옛 SDK, 또는 그 프레임이 로그
@@ -861,6 +865,26 @@ class PulseMemory(BaseModel):
             return self.render(since=0, news_since=self.drawn)
 
         return self.render(since=self.after_frame(frame))
+
+    def redraw_all_values_next(self) -> None:
+        """다음 `pulse` view 가 가진 값을 전부 다시 그리게 한다. `fold` 직후에 runner 가 부른다.
+
+        `pulse` view 는 한 번 말한 값을 움직이기 전까지 다시 안 말한다(`_HeldObject.shown`,
+        ARTEL-662). 앞의 view 가 모델 앞에 남아 있을 때만 맞는 거래다. `fold_stale_scenes`
+        가 지난 view 를 `placeholder` 로 바꾸면 거기서 한 번 말하고 가만히 있던 값 — 적의 HP, 손에
+        든 카드 — 이 모델 앞 어디에도 없게 된다.
+
+        그래서 말한 기록(`shown`)을 비운다. 다음 `render` 에서 모든 멤버가 다시 "아직 안 말한
+        값" 이 되어 `(changed earlier)` 표를 달고 나온다. 표가 맞는 말이다 — 이 행위가 만든
+        값이 아니라 그 전부터 있던 값이고, 이번 행위가 움직인 값은 종전처럼 표 없이 나온다.
+
+        `page_due` 로 전량 페이지를 내는 길도 있었다. 그러지 않은 것은 전량 페이지가 행위의
+        `window` 를 버리기 때문이다 — "이 행위가 무엇을 바꿨나" 가 스텝 판정의 근거인데, 전량에서는
+        그것이 `(changed)` 표 하나로만 남고 그 표의 기준도 행위가 아니라 마지막으로 그린 자리다.
+        화면의 글자와 statics 는 원래 매번 전부 그리므로 여기서 할 것이 없다.
+        """
+        for held in self.held.values():
+            held.shown = {}
 
     @staticmethod
     def _aim(obj: "_HeldObject") -> str:

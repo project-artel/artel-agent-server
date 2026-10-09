@@ -17,7 +17,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
-from app.agents.qa.context import DEFAULT_KEEP_SCENES
+from app.agents.qa.context import DEFAULT_KEEP_SCENES, DEFAULT_MAX_FULL_VIEWS
 from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState
 from app.qa.schemas import QaCaseRef, QaScenario, QaStep
@@ -105,22 +105,29 @@ def tool_result_contents(messages: list[BaseMessage]) -> list[str]:
     return [m.content for m in messages if isinstance(m, ToolMessage) and isinstance(m.content, str)]
 
 
-def scripted_run(monkeypatch: pytest.MonkeyPatch) -> tuple[ScriptedModel, QaRunChannel, list[dict]]:
-    """Four observations, a verdict and a close, against a model that records
-    every message list it was handed."""
+def scripted_run(
+    monkeypatch: pytest.MonkeyPatch, observations: int = 4
+) -> tuple[ScriptedModel, QaRunChannel, list[dict]]:
+    """`observations` observations, a verdict and a close, against a model that
+    records every message list it was handed."""
 
+    looks = [
+        {
+            "tool_calls": [
+                {"name": "observe_scene", "args": {"step": 1, "thought": f"{index}번째로 본다"}, "id": str(index)}
+            ]
+        }
+        for index in range(1, observations + 1)
+    ]
     model = ScriptedModel(
         turns=[
-            {"tool_calls": [{"name": "observe_scene", "args": {"step": 1, "thought": "본다"}, "id": "1"}]},
-            {"tool_calls": [{"name": "observe_scene", "args": {"step": 1, "thought": "다시 본다"}, "id": "2"}]},
-            {"tool_calls": [{"name": "observe_scene", "args": {"step": 1, "thought": "또 본다"}, "id": "3"}]},
-            {"tool_calls": [{"name": "observe_scene", "args": {"step": 1, "thought": "마지막으로 본다"}, "id": "4"}]},
+            *looks,
             {
                 "tool_calls": [
                     {
                         "name": "report_step",
                         "args": {"step": 1, "passed": True, "message": "화면 확인함", "thought": "판정"},
-                        "id": "5",
+                        "id": "report",
                     }
                 ]
             },
@@ -129,7 +136,7 @@ def scripted_run(monkeypatch: pytest.MonkeyPatch) -> tuple[ScriptedModel, QaRunC
                     {
                         "name": "finish_run",
                         "args": {"passed": True, "summary": "통과", "thought": "종료"},
-                        "id": "6",
+                        "id": "finish",
                     }
                 ]
             },
@@ -149,24 +156,25 @@ def scripted_run(monkeypatch: pytest.MonkeyPatch) -> tuple[ScriptedModel, QaRunC
     asyncio.run(runner.run(channel, scenario(), state))
 
     assert state.finished
-    assert len(model.received) >= 6
+    assert len(model.received) >= observations + 2
     return model, channel, sent
 
 
 def test_the_model_receives_folded_views_but_the_channel_keeps_the_full_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Four observations happen before the run ends; `DEFAULT_KEEP_SCENES` says
-    how many of those tool-result views survive in full — while the channel's own
-    scene memory and the sent LOG/STATUS frames are never touched by the fold."""
+    """`DEFAULT_MAX_FULL_VIEWS` 보다 하나 많은 관측이 끝나면 첫 batch 가 `fold` 되고,
+    `DEFAULT_KEEP_SCENES` 개만 전문으로 남는다 — while the channel's own scene memory
+    and the sent LOG/STATUS frames are never touched by the fold."""
 
-    model, channel, sent = scripted_run(monkeypatch)
+    observations = DEFAULT_MAX_FULL_VIEWS + 1
+    model, channel, sent = scripted_run(monkeypatch, observations)
 
-    # The 5th call is the first one made after all four observations landed.
-    fifth_call_results = tool_result_contents(model.received[4])
-    assert len(fifth_call_results) == 4
-    folded = fifth_call_results[: 4 - DEFAULT_KEEP_SCENES]
-    kept = fifth_call_results[4 - DEFAULT_KEEP_SCENES :]
+    # 관측이 전부 끝난 뒤의 첫 호출.
+    results = tool_result_contents(model.received[observations])
+    assert len(results) == observations
+    folded = results[: observations - DEFAULT_KEEP_SCENES]
+    kept = results[observations - DEFAULT_KEEP_SCENES :]
     assert all("you can act on:" not in content for content in folded)
     assert all("you can act on:" in content for content in kept)
     assert "observe_scene" in folded[0]

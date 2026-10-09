@@ -282,7 +282,39 @@ from app.llm.models import LLMModel, get_model_spec
 # the next step, and a `run_macro` refused in UPDATE_MEMORY or REVIEW_DRAFT says to make it
 # the next step's first action. The action tools' descriptions are unchanged because a run
 # with macros off reads them too. Nothing hashed moves.
-QA_ARCH_LABEL = "v16-macro-first"
+#
+# v17 because stale pulse views are now folded out of what the model reads (asked for on
+# 2026-10-08). Measured from LangSmith traces of complete 24-step L1 runs: the last model call
+# of sol try 138 was 351,671 prompt tokens (1,065,132 chars, 276 messages), and the pulse view
+# text inside tool results was 89.8% of those chars (`run_macro` x15 alone 38%); luna try 131
+# ended at 158,141 tokens with the pulse view at 87.0%. Input grew linearly, 13k -> 158k -> 352k
+# tokens within try 138, and compaction, which triggers at 90% of a 922k window, never fired.
+# The cause: `fold_stale_scenes` matched only the `<<scene view N>>` markers, while a build that
+# sends only `pulse` gets the pulse-only view, which ARTEL-621 had left unfolded on purpose (the
+# runner's `views folded=0 kept=0` on every call). ARTEL-621 had two reasons, and each now has an
+# answer. First, folding the newest-but-one view on every call rewrote the middle of the prompt
+# every call, and with the single cache breakpoint at the end of the prompt nothing cached past
+# the first message. The fold now runs in batches: nothing is folded until more than
+# `DEFAULT_MAX_FULL_VIEWS` (8) full views have piled up, then all but the newest are folded at
+# once, so the cache is rewritten once per 8 calls and the calls between only append. Second,
+# the pulse view is a delta that does not redraw a value it has already shown, so folding the
+# old views loses values that moved once and then stayed put. When a batch is folded, the runner
+# now calls `PulseMemory.redraw_all_values_next`, and the first pulse view after the fold draws
+# every held value again, marked `(changed earlier)`. A folded view becomes one line naming its
+# reading and scene. Scene views follow the same batching. Nothing hashed moves: the middleware
+# list, the tools and the knobs are unchanged.
+#
+# v18 because a `run_macro` or `resume_macro` answer now carries one pulse view instead of one
+# per action (asked for on 2026-10-09). The macro runner sent each action through
+# `ToolContext.act`, which drew a pulse view onto every action's sentence, and `_render` listed
+# those sentences under "What the game said:" before the answer drew one more. In the first v17
+# run, try 143, a 30-action `advance_opening_dialogue` came back with 31 views in one 17k-char
+# answer, so the first macro alone crossed `DEFAULT_MAX_FULL_VIEWS` and the batch fold ran at
+# the 11th call with 32 views folded. Nothing read those views but the runner, which looks at
+# `ActionOutcome`'s data, not its text. The macro host now calls `act(screen=False)`: each
+# action's line keeps its outcome and any operator message, and the one view drawn when the
+# macro stops or ends covers every reading since the last answer. Nothing hashed moves.
+QA_ARCH_LABEL = "v18-macro-one-view"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
