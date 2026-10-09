@@ -297,3 +297,17 @@ def test_inspect_object_는_보이는_static_을_찾지_않는다():
     memory = fold(reading(statics=STATICS))
 
     assert memory.inspect("InteractionLock").startswith("No object matching")
+
+
+def test_fold_뒤_redraw_도_cosmetic_member_를_다시_그리지_않는다():
+    """`redraw_all_values_next`(ARTEL-959)는 `shown` 을 비워 모든 member 를 다시 그리게 한다.
+
+    cosmetic member 까지 다시 그리면 batch fold 가 아낀 자리를 sprite 값이 도로 채운다.
+    """
+    memory = fold(reading(active=[obj()]), relevance={SPRITE: 0.1, HEALTH: 0.9})
+    memory.render(since=0)
+    memory.redraw_all_values_next()
+    view = memory.render(since=memory.clock())
+
+    assert "Slime.health = 7" in view and "(changed earlier)" in view
+    assert "SlimeAnimator.spriteRenderer" not in view
