@@ -116,7 +116,9 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
             self.session = session
 
         async def run(self, actions, summary: str, step: int) -> ActionOutcome:
-            return await ctx.act(actions, summary, step)
+            # 화면은 빼고 받는다. `pulse` view 는 `_drive` 의 `ctx.answer` 가 macro 가
+            # 멈추거나 끝난 자리에서 한 번 붙인다(`ToolContext.act`).
+            return await ctx.act(actions, summary, step, screen=False)
 
         def memories(self) -> MacroMemories:
             return MacroMemories(scene=channel.scene)

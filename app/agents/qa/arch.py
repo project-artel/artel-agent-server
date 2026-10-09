@@ -303,7 +303,18 @@ from app.llm.models import LLMModel, get_model_spec
 # every held value again, marked `(changed earlier)`. A folded view becomes one line naming its
 # reading and scene. Scene views follow the same batching. Nothing hashed moves: the middleware
 # list, the tools and the knobs are unchanged.
-QA_ARCH_LABEL = "v17-pulse-fold"
+#
+# v18 because a `run_macro` or `resume_macro` answer now carries one pulse view instead of one
+# per action (asked for on 2026-10-09). The macro runner sent each action through
+# `ToolContext.act`, which drew a pulse view onto every action's sentence, and `_render` listed
+# those sentences under "What the game said:" before the answer drew one more. In the first v17
+# run, try 143, a 30-action `advance_opening_dialogue` came back with 31 views in one 17k-char
+# answer, so the first macro alone crossed `DEFAULT_MAX_FULL_VIEWS` and the batch fold ran at
+# the 11th call with 32 views folded. Nothing read those views but the runner, which looks at
+# `ActionOutcome`'s data, not its text. The macro host now calls `act(screen=False)`: each
+# action's line keeps its outcome and any operator message, and the one view drawn when the
+# macro stops or ends covers every reading since the last answer. Nothing hashed moves.
+QA_ARCH_LABEL = "v18-macro-one-view"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

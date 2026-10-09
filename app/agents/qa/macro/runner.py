@@ -208,7 +208,8 @@ class MacroRunResult:
     skipped: list[MacroPlace] = field(default_factory=list)
     flags: list[MacroFlagged] = field(default_factory=list)
     verdict_requests: list[MacroVerdictRequest] = field(default_factory=list)
-    # `run` 이 돌려준 문장들. action 하나에 한 줄이다.
+    # `run` 이 돌려준 문장들. action 하나에 하나이고, 화면은 안 붙어 있다 — 화면은
+    # `run_macro` 의 답 끝에 한 번만 붙는다.
     outcomes: list[str] = field(default_factory=list)
     # 멈춘 이유. 끝까지 갔으면 `None`.
     failure: MacroFailure | None = None

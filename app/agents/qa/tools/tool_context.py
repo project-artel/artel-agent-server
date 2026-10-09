@@ -78,19 +78,29 @@ class ToolContext:
         return (await self.act(actions, summary, step)).text
 
     async def act(
-        self, actions: list[JsonRpcAction], summary: str, step: int
+        self,
+        actions: list[JsonRpcAction],
+        summary: str,
+        step: int,
+        screen: bool = True,
     ) -> ActionOutcome:
         """`_act` 를 돌리고 그 결과를 `state.last_outcome` 에 남긴다.
 
         남기는 이유는 action tool 의 기록이다(`action_tools._recorded`). tool 은 문장만
         돌려받으므로, 그 action 이 게임에 닿았는지는 여기 남은 데이터로 본다.
+
+        `screen=False` 는 macro runner 다. macro 는 action 마다 이것을 부르는데, 그때마다
+        `pulse` view 를 붙이면 action 30 개짜리 macro 의 답 하나에 view 가 31 개 실린다
+        (L1 try 143, `run_macro` 한 번에 17k 자). 그 view 들은 runner 말고는 읽는 쪽이
+        없고 runner 는 문장이 아니라 데이터를 본다. view 는 `run_macro` 가 답할 때
+        `answer` 가 한 번 붙인다.
         """
-        outcome = await self._act(actions, summary, step)
+        outcome = await self._act(actions, summary, step, screen)
         self.state.last_outcome = outcome
         return outcome
 
     async def _act(
-        self, actions: list[JsonRpcAction], summary: str, step: int
+        self, actions: list[JsonRpcAction], summary: str, step: int, screen: bool
     ) -> ActionOutcome:
         """`run` 과 같은 일을 하되, 문장과 **그 문장이 되기 전의 데이터**를 함께 낸다.
 
@@ -117,6 +127,7 @@ class ToolContext:
                     "The game reported no result. It may still have run — observe the "
                     "scene to find out what actually happened.",
                     messages,
+                    screen=screen,
                 ),
                 # 무엇이 일어났는지 모른다. `still` 로 적으면 답이 늦는 게임에서
                 # 멈춤의 근거가 "모른다" 위에 선다.
@@ -185,7 +196,7 @@ class ToolContext:
         else:
             change = ScreenChange.moved
         return ActionOutcome(
-            text=_answer(body, messages),
+            text=_answer(body, messages, screen=screen),
             screen=change,
             landings=tuple(landings),
             operator_messages=said,
