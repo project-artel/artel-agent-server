@@ -42,7 +42,8 @@ Decide = Callable[[dict], Awaitable[dict]]
 
 class MemberSample(BaseModel):
     type_key: str
-    object: str
+    # 객체 member 면 selector 나 path, static 이면 None 이다.
+    object: str | None
     component: str
     member: str
     value: str
@@ -57,8 +58,13 @@ def _render_value(value: Any) -> str:
 
 
 def _instructions(sample: MemberSample) -> str:
+    where = (
+        f"In object {sample.object}, is the field"
+        if sample.object is not None
+        else "Is the static field"
+    )
     return (
-        f"In object {sample.object}, is the field {sample.component}.{sample.member} "
+        f"{where} {sample.component}.{sample.member} "
         f"(current value {sample.value}) game state a QA tester must watch to play or judge "
         "the game, rather than animation, visual effect, or decoration?"
     )
@@ -84,11 +90,7 @@ class PulseRelevanceJudge:
             where = held.selector or held.path or ""
             for member in held.members.values():
                 key = member.type_key
-                if (
-                    key in memory.relevance
-                    or key in self._inflight
-                    or self._attempts.get(key, 0) >= MAX_ATTEMPTS
-                ):
+                if not self._askable(memory, key):
                     continue
                 if key in chosen and (chosen[key][0] or not live):
                     continue
@@ -103,7 +105,29 @@ class PulseRelevanceJudge:
                         value=_render_value(member.value),
                     ),
                 )
+        # static 도 같은 type key 공간에 있다(`PulseStatic.key` 가 `Declaring::Member`). 2026-10-08
+        # L1 log 기준 statics 줄이 pulse view member 줄의 81% 였다.
+        for key, entry in memory.statics.items():
+            if key in chosen or not self._askable(memory, key):
+                continue
+            chosen[key] = (
+                True,
+                MemberSample(
+                    type_key=key,
+                    object=None,
+                    component=(entry.declaring or "").rsplit(".", 1)[-1],
+                    member=entry.member or "",
+                    value=_render_value(entry.value),
+                ),
+            )
         return [chosen[key][1] for key in sorted(chosen)]
+
+    def _askable(self, memory: PulseMemory, key: str) -> bool:
+        return (
+            key not in memory.relevance
+            and key not in self._inflight
+            and self._attempts.get(key, 0) < MAX_ATTEMPTS
+        )
 
     # ── 실행 ────────────────────────────────────────────────────────────────
 

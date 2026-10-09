@@ -744,15 +744,26 @@ class PulseMemory(BaseModel):
         # 것을 좌표가 틀린 것으로 읽었다(ARTEL-573).
         #
         # 값이 열한 개다(실측). 창이 아끼는 것과 견줄 크기가 아니다.
-        if self.statics:
+        #
+        # cosmetic 으로 판정된 static 은 뺀다(ARTEL-958). 객체 member 와 달리 이름을 적는다 —
+        # static 은 `inspect_object` 가 받는 주소가 없어서, 이름을 모르면 꺼낼 길이 없다.
+        # `PulseStatic.key` 가 `Declaring::Member` 라 member 의 `type_key` 와 같은 꼴이다.
+        shown_statics = [key for key in sorted(self.statics) if not self.is_cosmetic(key)]
+        hidden_statics = [key for key in sorted(self.statics) if self.is_cosmetic(key)]
+        if shown_statics:
             lines.append("statics:")
-            for key in sorted(self.statics):
+            for key in shown_statics:
                 entry = self.statics[key]
-                name = f"{(entry.declaring or '').split('.')[-1]}.{entry.member}"
+                name = self._static_name(entry)
                 # 마지막으로 본 뒤 바뀐 것만 표시한다. 전부 그리면서 표시까지 없으면 읽는 쪽이
                 # 무엇이 소식인지 스스로 찾아야 하고, 그것이 창이 하라고 있는 일이다.
                 news = "  (changed)" if self.static_at.get(key, 0) > news_since else ""
                 lines.append(f"  {name} = {entry.value!r}{news}{self._moved(key)}")
+        if hidden_statics:
+            names = ", ".join(self._static_name(self.statics[key]) for key in hidden_statics)
+            lines.append(
+                f"statics hidden as cosmetic: {names} (inspect_object with the name shows one)"
+            )
 
         objects = sorted(self.held.items())
         for key, obj in objects:
@@ -859,13 +870,23 @@ class PulseMemory(BaseModel):
             for key, obj in sorted(self.held.items())
             if needle in (obj.selector or "").lower() or needle in (obj.path or "").lower()
         ]
-        if not hits:
+        # view 가 숨긴 static 만 이름으로 찾는다(ARTEL-958). 보이는 static 까지 찾으면 판정이
+        # 없는 run 에서도 이 도구의 답이 바뀐다.
+        statics = [
+            entry
+            for key, entry in sorted(self.statics.items())
+            if self.is_cosmetic(key) and needle in self._static_name(entry).lower()
+        ]
+        if not hits and not statics:
             return (
                 f"No object matching {selector!r}. The scene block lists what is there; "
                 "the address printed beside each one is what this takes."
             )
 
-        lines = []
+        lines = [
+            f"static {self._static_name(entry)} = {entry.value!r}  (judged cosmetic)"
+            for entry in statics
+        ]
         for key, obj in hits[:MAX_INSPECTED]:
             where = obj.selector or obj.path or key
             state = "" if obj.live else "  (switched off)"
@@ -1030,6 +1051,11 @@ class PulseMemory(BaseModel):
         if pointers:
             parts.append("pointer: " + ", ".join(str(p) for p in pointers))
         return "can do — " + " · ".join(parts) if parts else ""
+
+    @staticmethod
+    def _static_name(entry: "PulseStatic") -> str:
+        """`statics:` 절에 적히는 이름. `TurnBattleSystem.Instance` 꼴."""
+        return f"{(entry.declaring or '').split('.')[-1]}.{entry.member}"
 
     @staticmethod
     def _log_line(entry: ReadingLog) -> str:

@@ -255,3 +255,45 @@ def test_inspect_는_cosmetic_도_보이고_표를_단다():
 
 GOLDEN_LOG = ['whole — 0 values reported', 'delta — Battle/A|Combat.Slime::health, Battle/A|Combat.SlimeAnimator::spriteRenderer', 'delta — |offers, Core.InteractionLock::IsLocked']
 GOLDEN_VIEWS = ["<<pulse>>\nreading 3 · frame 100 · scene Battle\n\nreadings since you last looked (last 10 kept):\n  1 (whole — 0 values reported)\n  2 (delta — Battle/A|Combat.Slime::health, Battle/A|Combat.SlimeAnimator::spriteRenderer)\n  3 (delta — |offers, Core.InteractionLock::IsLocked)\n\nswitched off: B\nhere but switched off: B\n\nthe screen reads:\n  'Round 1'   A  [id=1]  (changed)\n\nstatics:\n  InteractionLock.IsLocked = True  (changed)\nA  [id=1]:\n  Slime.health = 5\n  SlimeAnimator.spriteRenderer = 'f9'\n<<end pulse>>", "A  [id=1]:\n  says 'Round 1'\n  Slime.health = 5\n  SlimeAnimator.spriteRenderer = 'f9'", "<<pulse>>\nreading 3 · frame 100 · scene Battle\n\nreadings since you last looked (last 10 kept):\n  1 (whole — 0 values reported)\n  2 (delta — Battle/A|Combat.Slime::health, Battle/A|Combat.SlimeAnimator::spriteRenderer)\n  3 (delta — |offers, Core.InteractionLock::IsLocked)\n\nswitched off: B\nhere but switched off: B\n\nthe screen reads:\n  'Round 1'   A  [id=1]\n\nstatics:\n  InteractionLock.IsLocked = True\nA  [id=1]:\n  Slime.health = 5\n  SlimeAnimator.spriteRenderer = 'f9'\n<<end pulse>>", "<<pulse>>\nreading 3 · frame 100 · scene Battle\n\nreadings since you last looked (last 10 kept):\n  1 (whole — 0 values reported)\n  2 (delta — Battle/A|Combat.Slime::health, Battle/A|Combat.SlimeAnimator::spriteRenderer)\n  3 (delta — |offers, Core.InteractionLock::IsLocked)\n\nswitched off: B\nhere but switched off: B\n\nthe screen reads:\n  'Round 1'   A  [id=1]\n\nstatics:\n  InteractionLock.IsLocked = True\nA  [id=1]:\n  Slime.health = 5\n  SlimeAnimator.spriteRenderer = 'f9'\n<<end pulse>>"]
+
+
+# ── statics ──────────────────────────────────────────────────────────────────
+
+VFX = "Fx.ElementalStatusVfx::frames"
+LOCK = "Ui.InteractionLock::IsLocked"
+STATICS = [
+    {"declaring": "Fx.ElementalStatusVfx", "member": "frames", "value": None},
+    {"declaring": "Ui.InteractionLock", "member": "IsLocked", "value": True},
+]
+
+
+def test_cosmetic_static_은_statics_절에서_빠지고_이름이_남는다():
+    memory = fold(reading(statics=STATICS), relevance={VFX: 0.09, LOCK: 0.65})
+    view = memory.render(since=0)
+
+    assert "  InteractionLock.IsLocked = True" in view
+    assert "  ElementalStatusVfx.frames" not in view
+    assert "statics hidden as cosmetic: ElementalStatusVfx.frames" in view
+
+
+def test_static_이_전부_cosmetic_이면_statics_머리줄을_안_쓴다():
+    memory = fold(reading(statics=STATICS[:1]), relevance={VFX: 0.09})
+    view = memory.render(since=0)
+
+    assert "statics:" not in view
+    assert "statics hidden as cosmetic: ElementalStatusVfx.frames" in view
+
+
+def test_inspect_object_는_숨긴_static_을_이름으로_찾는다():
+    memory = fold(reading(statics=STATICS), relevance={VFX: 0.09})
+
+    assert memory.inspect("ElementalStatusVfx.frames") == (
+        "static ElementalStatusVfx.frames = None  (judged cosmetic)"
+    )
+
+
+def test_inspect_object_는_보이는_static_을_찾지_않는다():
+    """보이는 static 까지 찾으면 판정이 없는 run 에서도 이 도구의 답이 바뀐다."""
+    memory = fold(reading(statics=STATICS))
+
+    assert memory.inspect("InteractionLock").startswith("No object matching")

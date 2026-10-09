@@ -256,3 +256,22 @@ def test_judge_가_없는_channel_은_아무것도_숨기지_않는다():
 
     assert channel.scene.pulse.relevance == {}
     assert "SlimeAnimator.sprite" in channel.scene.pulse.render(since=0)
+
+
+def test_static_도_type_key_로_판정한다():
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate({
+        "schema": 2, "reading": 1, "frame": 1, "whole": True, "scene": "TurnBattleScene",
+        "statics": [{"declaring": "Ui.InteractionLock", "member": "IsLocked", "value": False}],
+    }))
+    fake = _Fake(probability=0.65)
+    judge = PulseRelevanceJudge(decide=fake)
+
+    async def scenario():
+        judge.notice(memory)
+        await judge.drain()
+
+    _run(scenario())
+    (question,) = fake.bodies[0]["questions"].values()
+    assert question["instructions"].startswith("Is the static field InteractionLock.IsLocked")
+    assert memory.relevance == {"Ui.InteractionLock::IsLocked": 0.65}
