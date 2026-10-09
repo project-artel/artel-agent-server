@@ -74,6 +74,12 @@ ALWAYS_ALLOWED = frozenset(
 # 어느 phase 에도 안 묶이는 쪽보다 나쁘다. 빠뜨리는 것은 테스트가 잡는다 —
 # `tests/test_qa_phase_cycle.py` 가 기본 tool 목록의 모든 이름이 이 표나 `ALWAYS_ALLOWED`
 # 중 하나에 있는지 본다.
+#
+# `load_skill` 은 일부러 이 표에도 `ALWAYS_ALLOWED` 에도 없다. skill 은 그 규칙이 필요한
+# 순간에 읽어야 하고 그 순간은 어느 phase 에서든 오므로(`knowledge_base` 는 `UPDATE_MEMORY`,
+# `held_state` 는 `ACT`) 어디에도 묶지 않고 지나가게 둔다. `ALWAYS_ALLOWED` 에 넣지 않는 것은
+# `phase_directive` 가 그 목록을 한 줄도 빠짐없이 적어야 하는데, `skills=off` 런은 그 tool 이
+# 없어서 없는 tool 을 알려 주게 되기 때문이다. `skills=on_demand` 런에만 tool 목록에 든다.
 _TOOL_PHASE: dict[str, RunPhase] = {
     # OBSERVE — 화면과 이미 알려진 것을 읽는 자리.
     "observe_scene": RunPhase.observe,

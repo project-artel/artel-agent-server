@@ -12,32 +12,7 @@
 from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.tools.tool_context import ToolContext
-
-DECIDE_NEXT_ACTION_DESCRIPTION = """State what you are about to do for this step, before you do it.
-
-One call, one step, and it must come before the action tool. Say the step number,
-the single thing you are about to do in `plan`, and in `expected` what you will
-see on screen if it worked — that sentence is what you will judge the step
-against in `report_step`, and writing it after the fact is not the same thing.
-
-This changes nothing in the game and nothing on the screen. It exists so the
-decision is a call somebody can read back, rather than a sentence that was never
-written down anywhere.
-
-Keep it to the one next action. "Open the shop, buy the sword and equip it" is
-three steps' worth of plan and the middle of it cannot be verified."""
-
-SKIP_MEMORY_UPDATE_DESCRIPTION = """Say that this step left nothing worth keeping past the end of the run.
-
-Call this instead of `record_knowledge`, `record_capability_verdict` or
-`record_new_capability` when there is nothing to write. It is a real answer, not
-a way past the step: most steps genuinely leave nothing behind, and a run that
-goes hunting for things to write down has stopped testing.
-
-`reason` is one line saying why there is nothing — "the button did exactly what
-its label says", "this step only repeated step 4 on another row". It is required.
-An empty `reason` is refused, because a skip that costs nothing to write is one
-you write every step without looking."""
+from app.prompts import load_tool_description
 
 
 def build_phase_tools(ctx: ToolContext) -> list[BaseTool]:
@@ -49,9 +24,9 @@ def build_phase_tools(ctx: ToolContext) -> list[BaseTool]:
     if not mode.gates_phases:
         return []
 
-    @tool(description=SKIP_MEMORY_UPDATE_DESCRIPTION)
+    @tool(description=load_tool_description("skip_memory_update").body)
     async def skip_memory_update(step: int, reason: str) -> str:
-        # What the agent reads is SKIP_MEMORY_UPDATE_DESCRIPTION, not this.
+        # What the agent reads is `qa_run/<version>/tool_skip_memory_update.md`.
         #
         # `thought` 를 안 받는 유일한 tool 이다. 다른 tool 에서 `thought` 가 하는 일을
         # `reason` 이 그대로 하고, 둘을 함께 받으면 모델이 같은 문장을 두 칸에 적는다.
@@ -75,9 +50,9 @@ def build_phase_tools(ctx: ToolContext) -> list[BaseTool]:
     if not mode.decides_in_its_own_turn:
         return [skip_memory_update]
 
-    @tool(description=DECIDE_NEXT_ACTION_DESCRIPTION)
+    @tool(description=load_tool_description("decide_next_action").body)
     async def decide_next_action(step: int, plan: str, expected: str, thought: str) -> str:
-        # What the agent reads is DECIDE_NEXT_ACTION_DESCRIPTION, not this.
+        # What the agent reads is `qa_run/<version>/tool_decide_next_action.md`.
         #
         # 인자를 검사하지 않는다. `skip_memory_update` 의 `reason` 과 다른 점은 빈 값이
         # 무엇을 망가뜨리느냐다 — 빈 `reason` 은 "없다" 를 공짜로 만들어 답을 지우지만,
@@ -93,8 +68,4 @@ def build_phase_tools(ctx: ToolContext) -> list[BaseTool]:
     return [decide_next_action, skip_memory_update]
 
 
-__all__ = [
-    "DECIDE_NEXT_ACTION_DESCRIPTION",
-    "SKIP_MEMORY_UPDATE_DESCRIPTION",
-    "build_phase_tools",
-]
+__all__ = ["build_phase_tools"]

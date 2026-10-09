@@ -678,19 +678,18 @@ def test_설명이_언제_부르는지와_과거가_안_갈린다는_것을_말�
     # 언제 부르는가 — 눈에 보이는 차이와 지도의 불일치.
     assert "content map:" in include
     assert "same screen id" in include
-    assert "Do not call it on a hunch" in include
-    assert "difference you can SEE" in include
+    assert "plainly shows a different screen" in include
 
     # 넣어도 과거는 안 갈린다.
-    assert "does not un-merge the screens that already merged" in include
-    assert "next observation" in include.lower() or "NEXT observation" in include
+    assert "does not split screens already merged" in include
+    assert "next observation" in include.lower()
 
     # 정규식이 아니다, 그리고 `scene` 을 넘겨 고치지 못한다 — 둘 다 양쪽 설명에 있다.
     for text in (include, exclude):
         assert "never a regular expression" in text
-        assert "cannot reach another scene's list" in text
-        assert "`reason` is what you saw" in text
-        assert "It is required." in text
+        assert "`reason` is required" in text
+        # The consequences left out of the description live in the content_map skill.
+        assert "content_map skill" in text
 
 
 def test_설명은_json_직렬화_가능한_한_덩어리다() -> None:
@@ -699,4 +698,4 @@ def test_설명은_json_직렬화_가능한_한_덩어리다() -> None:
 
     for name in ("include_screen_selector", "exclude_screen_selector"):
         assert json.dumps(tools[name].description)
-        assert len(tools[name].description) > 500
+        assert len(tools[name].description) <= 500

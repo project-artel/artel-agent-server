@@ -10,14 +10,10 @@
 from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.knowledge import (
-    FORGET_KNOWLEDGE_DESCRIPTION,
     KNOWLEDGE_RELATIONS,
     KNOWLEDGE_TAGS,
-    LINK_KNOWLEDGE_DESCRIPTION,
-    RECORD_KNOWLEDGE_DESCRIPTION,
     UNCONFIRMED_WRITE,
-    UNLINK_KNOWLEDGE_DESCRIPTION,
-    UPDATE_KNOWLEDGE_DESCRIPTION,
+    knowledge_tool_description,
     render_entry_label,
     render_missing_knowledge_warning,
 )
@@ -38,7 +34,8 @@ def build_knowledge_write_tools(ctx: ToolContext) -> list[BaseTool]:
     channel, state, arch = ctx.channel, ctx.state, ctx.arch
 
     @tool(
-        description=RECORD_KNOWLEDGE_DESCRIPTION.format(
+        description=knowledge_tool_description(
+            "record_knowledge",
             limit=arch.max_records_per_run,
             tags=", ".join(KNOWLEDGE_TAGS),
         )
@@ -52,7 +49,7 @@ def build_knowledge_write_tools(ctx: ToolContext) -> list[BaseTool]:
         scene_name: str | None = None,
         screen_id: str | None = None,
     ) -> str:
-        # What the agent reads is RECORD_KNOWLEDGE_DESCRIPTION, not this.
+        # What the agent reads is tool_record_knowledge.md, not this.
         #
         # Not routed through `_run`, for the same reason `search_knowledge` is not:
         # nothing here touches the game, so a scene view on the result would be the
@@ -183,8 +180,10 @@ def build_knowledge_write_tools(ctx: ToolContext) -> list[BaseTool]:
         return with_operator_messages("\n\n".join(lines), messages)
 
     @tool(
-        description=UPDATE_KNOWLEDGE_DESCRIPTION.format(
-            limit=arch.max_records_per_run, tags=", ".join(KNOWLEDGE_TAGS)
+        description=knowledge_tool_description(
+            "update_knowledge",
+            limit=arch.max_records_per_run,
+            tags=", ".join(KNOWLEDGE_TAGS),
         )
     )
     async def update_knowledge(
@@ -195,7 +194,7 @@ def build_knowledge_write_tools(ctx: ToolContext) -> list[BaseTool]:
         summary: str | None = None,
         description: str | None = None,
     ) -> str:
-        # What the agent reads is UPDATE_KNOWLEDGE_DESCRIPTION, not this.
+        # What the agent reads is tool_update_knowledge.md, not this.
         #
         # No scene view, for the reason given on `record_knowledge` (ARTEL-180).
         # The write itself is awaited since ARTEL-332 — briefly, and the wait is
@@ -337,9 +336,13 @@ def build_knowledge_write_tools(ctx: ToolContext) -> list[BaseTool]:
             messages,
         )
 
-    @tool(description=FORGET_KNOWLEDGE_DESCRIPTION.format(limit=arch.max_forgets_per_run))
+    @tool(
+        description=knowledge_tool_description(
+            "forget_knowledge", limit=arch.max_forgets_per_run
+        )
+    )
     async def forget_knowledge(step: int, thought: str, knowledge_id: str) -> str:
-        # What the agent reads is FORGET_KNOWLEDGE_DESCRIPTION, not this.
+        # What the agent reads is tool_forget_knowledge.md, not this.
         #
         # No scene view here either, for the reason given on `record_knowledge`.
         if state.knowledge_forgets_attempted >= arch.max_forgets_per_run:
@@ -418,8 +421,10 @@ def build_knowledge_write_tools(ctx: ToolContext) -> list[BaseTool]:
         )
 
     @tool(
-        description=LINK_KNOWLEDGE_DESCRIPTION.format(
-            limit=arch.max_links_per_run, relations=", ".join(KNOWLEDGE_RELATIONS)
+        description=knowledge_tool_description(
+            "link_knowledge",
+            limit=arch.max_links_per_run,
+            relations=", ".join(KNOWLEDGE_RELATIONS),
         )
     )
     async def link_knowledge(
@@ -430,7 +435,7 @@ def build_knowledge_write_tools(ctx: ToolContext) -> list[BaseTool]:
         relation: str,
         note: str,
     ) -> str:
-        # What the agent reads is LINK_KNOWLEDGE_DESCRIPTION, not this.
+        # What the agent reads is tool_link_knowledge.md, not this.
         #
         # Not routed through `_run`, for the same reason the other knowledge tools
         # are not: nothing here touches the game.
@@ -508,7 +513,11 @@ def build_knowledge_write_tools(ctx: ToolContext) -> list[BaseTool]:
             messages,
         )
 
-    @tool(description=UNLINK_KNOWLEDGE_DESCRIPTION.format(limit=arch.max_unlinks_per_run))
+    @tool(
+        description=knowledge_tool_description(
+            "unlink_knowledge", limit=arch.max_unlinks_per_run
+        )
+    )
     async def unlink_knowledge(
         step: int,
         thought: str,
@@ -516,7 +525,7 @@ def build_knowledge_write_tools(ctx: ToolContext) -> list[BaseTool]:
         to_knowledge_id: str,
         relation: str,
     ) -> str:
-        # What the agent reads is UNLINK_KNOWLEDGE_DESCRIPTION, not this.
+        # What the agent reads is tool_unlink_knowledge.md, not this.
         #
         # Validated locally for the same reason `link_knowledge` is: a round trip
         # saved, on a run that has a clock.

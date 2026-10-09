@@ -8,6 +8,7 @@ a game that never volunteered its state left the run idle forever.
 import asyncio
 import json
 import logging
+import re
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import wrap_model_call
@@ -21,13 +22,14 @@ from app.agents.qa.context import (
     FOLDED_VIEW_PREFIX,
     fold_stale_knowledge,
     fold_stale_scenes,
+    fold_stale_skills,
 )
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.vision import QaCaptureVisionMiddleware
 from app.llm.chat_model import build_chat_model
 from app.llm.models import LLMModel, get_model_spec
-from app.prompts import load_prompt
+from app.prompts import load_prompt, load_skill, skill_descriptions, skill_names
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory
 from app.qa.schemas import QaScenario, QaStep
@@ -59,6 +61,75 @@ _REASONING_KEYS = ("text", "thinking", "reasoning", "reasoning_content")
 # else in an `astream` update is a middleware node reporting its own rewrite of
 # the conversation, which is not new and must not be logged as if it were.
 _TURN_PRODUCING_NODES = frozenset({"model", "tools"})
+
+
+# The first `qa_run` version whose system prompt leaves the skills out.
+_FIRST_SKILL_VERSION = 19
+
+_VERSION_NUMBER = re.compile(r"^v(\d+)$")
+
+
+def system_prompt_with_skills(system_prompt: str, prompt_version: str, skills: str) -> str:
+    """The system prompt the run sends, with or without the skill bodies inlined.
+
+    From v19 the long sections of the system prompt are `skill_<name>.md` files.
+    With `skills="on_demand"` the agent reads them through `load_skill`, so the
+    prompt goes out as written. With `skills="off"` every skill body is appended
+    here, in name order, so the model reads all of it on every call the way it
+    did in v17. That is the comparison arm: one prompt version, two shapes.
+
+    A version before v19 has no skill files and is returned unchanged whatever
+    the axis says.
+
+    Appended after `str.format` has run on the system prompt, so a brace in a
+    skill body is never read as a placeholder. Each skill becomes a
+    `## Skill: <name>` section, the name the tool descriptions use ("the
+    held_state skill"), and the body's own headings move two levels down under it.
+    """
+    match = _VERSION_NUMBER.match(prompt_version)
+    if skills != "off" or match is None or int(match.group(1)) < _FIRST_SKILL_VERSION:
+        return system_prompt
+    sections = [system_prompt.rstrip()]
+    for name in skill_names(prompt_version):
+        sections.append(_as_section(name, load_skill(name, prompt_version).body.strip()))
+    return "\n\n".join(sections) + "\n"
+
+
+_HEADING = re.compile(r"^(#+)(?= )", re.MULTILINE)
+
+
+def _skills_directive(prompt_version: str, skills: str) -> str:
+    """The system prompt's Skills section, present only when the agent can load skills.
+
+    With `skills="off"` every skill body is already inlined, and the tool
+    descriptions say "the X skill" without naming a tool, so a section telling the
+    agent to call `load_skill` would send it looking for a tool it was not given.
+
+    The list of skills is not written in `skills_directive.md`. Each skill file
+    carries its own `description` in frontmatter, and `{skill_list}` is filled
+    with one line per skill, in name order, so the line that advertises a skill
+    cannot drift away from the skill it advertises.
+    """
+    match = _VERSION_NUMBER.match(prompt_version)
+    if skills != "on_demand" or match is None or int(match.group(1)) < _FIRST_SKILL_VERSION:
+        return ""
+    skill_list = "\n".join(
+        f"- `{name}` — {description}"
+        for name, description in skill_descriptions(prompt_version).items()
+    )
+    return load_prompt(PROMPT_AGENT, "skills_directive", prompt_version).body.format(
+        skill_list=skill_list
+    )
+
+
+def _as_section(name: str, body: str) -> str:
+    """One skill body as a `## Skill: <name>` section of the system prompt.
+
+    The tool descriptions refer to a skill by that name ("the held_state skill"),
+    so the inlined section carries it. The body's own headings move below it.
+    """
+    shifted = _HEADING.sub(lambda heading: heading.group(1) + "##", body)
+    return f"## Skill: {name}\n\n{shifted}"
 
 
 def _clip(text: str) -> str:
@@ -158,6 +229,11 @@ def middleware_names_for(arch: ResolvedArch) -> tuple[str, ...]:
     # different tools out of different budgets.
     if arch.fold_stale_knowledge:
         names.append("fold_knowledge_neighbours")
+    # Only when the run loads its skills. With `skills=off` every skill is in the
+    # system prompt, no tool result carries one, and a middleware with nothing to
+    # fold would still move the fingerprint.
+    if arch.skills == "on_demand" and arch.fold_stale_skills:
+        names.append("fold_stale_skills")
     # Only when the run can see. On a text-only run it would have nothing to
     # inject and nothing to trim.
     if arch.vision:
@@ -203,6 +279,7 @@ def build_middleware(
         ),
         "fold_scene_views": lambda: _fold_scene_views,
         "fold_knowledge_neighbours": lambda: _fold_knowledge_neighbours,
+        "fold_stale_skills": lambda: _fold_skills,
         "capture_vision": lambda: QaCaptureVisionMiddleware(state, channel, arch),
         "log_token_usage": lambda: _log_token_usage,
     }
@@ -229,6 +306,16 @@ async def _fold_knowledge_neighbours(request, handler):
     only has six. See `app/agents/qa/context.py`.
     """
     return await handler(request.override(messages=fold_stale_knowledge(request.messages)))
+
+
+@wrap_model_call
+async def _fold_skills(request, handler):
+    """Fold every loaded skill but the newest out of what one model call receives.
+
+    Model-input only, like the two folds above. A folded skill leaves a note naming
+    it, so the agent can call `load_skill` again. See `app/agents/qa/context.py`.
+    """
+    return await handler(request.override(messages=fold_stale_skills(request.messages)))
 
 
 def _context_shape(messages) -> str:
@@ -386,16 +473,21 @@ class QaRunner:
             if arch.phase_cycle.decides_in_its_own_turn
             else ""
         )
-        system_prompt = prompt.body.format(
-            language_directive=LANGUAGE_DIRECTIVES[config.language],
-            vision_directive=vision_directive,
-            memory_directive=memory_directive,
-            phase_directive=phase_directive,
-            decide_directive=decide_directive,
+        system_prompt = system_prompt_with_skills(
+            prompt.body.format(
+                language_directive=LANGUAGE_DIRECTIVES[config.language],
+                vision_directive=vision_directive,
+                memory_directive=memory_directive,
+                phase_directive=phase_directive,
+                decide_directive=decide_directive,
+                skills_directive=_skills_directive(prompt.version, arch.skills),
+            ),
+            prompt.version,
+            arch.skills,
         )
         first_message = _plan(scenario)
         total_steps = len(scenario.steps)
-        tools = build_tools(channel, state, arch)
+        tools = build_tools(channel, state, arch, prompt.version)
 
         # The whole starting context in one place. Reading a run afterwards means
         # knowing what the model was actually given, and the prompt is assembled

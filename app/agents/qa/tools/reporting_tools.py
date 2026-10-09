@@ -9,6 +9,7 @@ from langchain_core.tools import BaseTool, tool
 from app.agents.qa.tools.phase import MAX_CONSECUTIVE_REFUSALS
 from app.agents.qa.tools.state import QaRunState
 from app.agents.qa.tools.tool_context import ToolContext
+from app.prompts import load_tool_description
 from app.qa.channel import bounded_operator_wait
 from app.qa.envelope import (
     IssuePayload,
@@ -19,83 +20,6 @@ from app.qa.envelope import (
     StepStatus,
 )
 from app.qa.schemas import QaStepResult
-
-
-# Interpolated for the same reason as CAPTURE_SCREEN_DESCRIPTION in
-# app/agents/qa/tools/observation_tools.py: the cap is the part the agent has to
-# ration, and a docstring cannot name it.
-REPORT_ISSUE_DESCRIPTION = """File a defect you found in the GAME, with the evidence for it.
-
-This is not the step verdict — `report_step` is. Use this when what you saw is
-wrong regardless of the scenario: a crash, a button that does nothing, a value
-that goes the wrong way, text that overflows its box. A step can fail without
-being a defect (the scenario may describe the game wrongly), and a step can pass
-while you notice one in passing.
-
-`severity` is one of {severities}, worst first:
-- BLOCKER: the game cannot be played past this point.
-- CRITICAL: a core feature is broken and nothing works around it.
-- MAJOR: an important feature is broken but there is a way around it.
-- MINOR: small or local damage.
-- TRIVIAL: cosmetic — wording, alignment, a wrong colour.
-
-`expected` and `actual` are what should have happened and what did. `reproduction`
-is the shortest list of steps that shows it again, oldest first; write it for
-someone who was not here.
-
-You may file {limit} of these in one run. One defect, one call — do not file the
-same broken screen again on the next step."""
-
-
-# `report_step` 의 두 모양이 공유하는 부분. docstring 이 아니라 상수인 이유는 `phase_cycle`
-# 이 `off` 가 아닐 때 여기에 문단 둘이 더 붙기 때문이다 — 같은 설명을 두 번 적으면 언젠가
-# 한쪽만 고쳐진다.
-#
-# 문구를 상수로 옮겼다고 `arch_fingerprint` 가 움직이지 않는다. 그 해시가 tool 에 대해 읽는
-# 것은 이름과 `args` 뿐이고, tool 설명은 둘 중 어느 쪽에도 없다.
-REPORT_STEP_DESCRIPTION = """Record the verdict for one scenario step, with the evidence for it.
-
-Call this once per step, right after you have observed the result of that
-step's action. For a step that verifies an expected result, `passed` is
-whether that result occurred (this is also its test case's verdict); for
-any other step, `passed` is whether you carried the action out. `message`
-should cite what you saw, and `thought` is how you reached the verdict.
-
-`used_knowledge_ids` is for knowledge base entries that actually bore on
-THIS verdict — ones you read and then judged differently because of. Give
-the ids as they were printed to you, whether by a search or as a neighbour
-line. Leave it empty when the step was decided by what you could see;
-that is the ordinary case and nothing is lost by saying so."""
-
-# `phase_cycle` 이 `in_verdict` 이상일 때 위에 붙는 것.
-#
-# 판정을 내는 그 턴에 묻는다. prompt v16 이 이미 그 자리를 지목해 뒀다 — "The moment to do it
-# is when you report the step ... you have already worked out the answer, because deciding what
-# to put in `report_step` required it." v16 은 그것을 문장으로 부탁했고 27 런 1,566 호출에
-# memory write 가 0 회였다. 여기서는 인자다.
-REPORT_STEP_MEMORY_DESCRIPTION = f"""{REPORT_STEP_DESCRIPTION}
-
-`capability_key` is the content map row this step checked, when it checked one.
-It is the value in square brackets at the start of a capability line — in your
-scene context block for the scene you are standing on, or in a
-`list_scene_capabilities` result. Copy it exactly as it was printed. A key this
-run has never been shown is dropped and you are told so: a key you assembled
-yourself still names a real row on the other side, and nothing over there can
-tell the difference. Leave it out when the step checked nothing on the map,
-which is most steps.
-
-`learned` is the one line a later run would otherwise have to work out for
-itself — how an input is actually read, what a control really does, what a rule
-costs. It is required, and the empty string is how you say there is none:
-
-- `learned: ""` means you looked and this step left nothing worth keeping. That
-  is the ordinary answer, it is a real answer, and it costs you nothing.
-- Omitting `learned` is not an answer. The report is refused and you are asked
-  again, because a run that is never asked writes nothing down at all.
-
-Write it for somebody who was not here, with the identifiers in it. "The shop
-opens" is not it. "The shop button does nothing until the tutorial dialog is
-dismissed" is."""
 
 
 def render_closing_asks(state: QaRunState) -> str:
@@ -171,23 +95,10 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
     channel, state, arch = ctx.channel, ctx.state, ctx.arch
     _answer = ctx.answer
 
-    @tool
+    @tool(description=load_tool_description("wait_for_operator").body)
     async def wait_for_operator(
         thought: str, timeout_seconds: float = 60.0, step: int | None = None
     ) -> str:
-        """Stop and wait until the operator says something.
-
-        For when you cannot go on without a person: the step is ambiguous, the
-        game is in a state the scenario does not cover, or you asked them
-        something with `reply_to_operator` and the answer decides what you do
-        next. The run makes no progress while you are here, so ask the question
-        first and only then wait for it.
-
-        Returns what they said, or tells you nobody answered in time — silence is
-        not a failure, and you decide what to do with it. But do not settle in on
-        it: waiting is capped per call, and a couple of full waits is the whole
-        run's clock, spent on nothing.
-        """
         waited = bounded_operator_wait(timeout_seconds)
         messages = await channel.wait_for_operator(timeout_seconds)
         if not messages:
@@ -368,7 +279,7 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
     # — 아무것도 안 켠 런이 다른 구조로 기록되는 것이 이 축이 피해야 할 첫 번째 일이다.
     if arch.phase_cycle.remembers_in_verdict:
 
-        @tool(description=REPORT_STEP_MEMORY_DESCRIPTION)
+        @tool(description=load_tool_description("report_step_memory").body)
         async def report_step(
             step: int,
             passed: bool,
@@ -378,7 +289,7 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             capability_key: str | None = None,
             learned: str | None = None,
         ) -> str:
-            # What the agent reads is REPORT_STEP_MEMORY_DESCRIPTION, not this.
+            # What the agent reads is `qa_run/<version>/tool_report_step_memory.md`.
             return await _record_verdict(
                 step,
                 passed,
@@ -391,7 +302,7 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
 
     else:
 
-        @tool(description=REPORT_STEP_DESCRIPTION)
+        @tool(description=load_tool_description("report_step").body)
         async def report_step(
             step: int,
             passed: bool,
@@ -399,12 +310,12 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             thought: str,
             used_knowledge_ids: list[str] = [],
         ) -> str:
-            # What the agent reads is REPORT_STEP_DESCRIPTION, not this.
+            # What the agent reads is `qa_run/<version>/tool_report_step.md`.
             return await _record_verdict(step, passed, message, used_knowledge_ids)
 
 
     @tool(
-        description=REPORT_ISSUE_DESCRIPTION.format(
+        description=load_tool_description("report_issue").body.format(
             severities="/".join(s.value for s in IssueSeverity),
             limit=arch.max_issues_per_run,
         )
@@ -459,16 +370,8 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             channel.drain_operator_messages(),
         )
 
-    @tool
+    @tool(description=load_tool_description("finish_run").body)
     async def finish_run(passed: bool, summary: str, thought: str) -> str:
-        """End the run. Call this once, after the last step has been reported.
-
-        A step with no verdict yet is worth attempting before you close: the run
-        was opened to find out about all of them. Calling this with steps still
-        unreported sends you back to them once.
-
-        `thought` is how you reached the overall verdict; it goes on the timeline.
-        """
         state.finish_attempts += 1
 
         # A step the agent never attempted is the failure this whole change is
@@ -497,13 +400,8 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         )
         return "The run is closed."
 
-    @tool
+    @tool(description=load_tool_description("reply_to_operator").body)
     async def reply_to_operator(message: str, thought: str, step: int | None = None) -> str:
-        """Answer the operator. Use when they asked something, not for progress.
-
-        `thought` is why you are answering this way; it goes on the timeline so a
-        reviewer can see the reasoning behind what the operator was told.
-        """
         await channel.say(message, step)
         return _answer("Sent.", channel.drain_operator_messages())
 

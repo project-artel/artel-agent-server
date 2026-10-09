@@ -31,6 +31,7 @@ import hashlib
 import json
 from enum import StrEnum
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -161,7 +162,35 @@ from app.llm.models import LLMModel, get_model_spec
 # measurement supports "`lite` does not score worse and writes things down", and
 # that its cost and refusal figures are an upper bound rather than a reading of
 # this table.
-QA_ARCH_LABEL = "v7-phase-cycle-default"
+#
+# v8 because the agent can now read its skills on demand: with `skills=on_demand`
+# a `load_skill` tool joins the tool set, and the long sections of the system
+# prompt (knowledge base, content map, held state) leave it and are read through
+# that tool instead of being resent on every turn. Plan:
+# `.plan/general/2026-10-06-slim-the-qa-prompt-and-load-skills-on-demand.md`.
+# The new `QaArchSpec.skills` axis defaults to `off`, which is the shape every run
+# had before, so the default fingerprint moves only because `arch.model_dump()`
+# gained a key (see the v4 note above); the tool set and the middleware list of
+# the default run did not change. The label moves anyway because the structure now
+# has two shapes and a run must say which side of that axis it was filed on.
+#
+# This shape was written as `v6-skills-on-demand` on a branch that grew alongside
+# the phase cycle, and develop took v6 and v7 for the phase cycle first. No run
+# outside local measurement was filed under that name, so it is renumbered to v8
+# rather than kept, and v6 keeps meaning the phase cycle. The two axes are
+# independent: `skills` and `phase_cycle` can be set in any combination, and the
+# phase gate never refuses `load_skill`, because a skill is needed at the moment it
+# applies, which can be any phase.
+#
+# Folding loaded skills is part of the same `on_demand` shape, not a new one. With
+# `skills=on_demand` and the `fold_stale_skills` knob on, a middleware of the same
+# name keeps the newest loaded skill in full and replaces older ones with a note
+# naming the skill to load again (`app/agents/qa/context.py`). It landed together
+# with the `skills` axis, so no run was filed under this label without it. The
+# default fingerprint moves only because `arch.model_dump()` gained the
+# `skills` and `fold_stale_skills` keys; with `skills=off` the middleware list is
+# unchanged.
+QA_ARCH_LABEL = "v8-skills-on-demand"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
@@ -352,12 +381,20 @@ class QaArchSpec(BaseModel):
     # which carries no `phase_directive` for the gate's refusals to rest on and is
     # refused in `resolve_run_config` rather than gated in silence.
     phase_cycle: PhaseCycleMode = PhaseCycleMode.lite
+    # `off` keeps every skill inlined in the system prompt, as before. `on_demand`
+    # moves the skills behind the `load_skill` tool, which then joins the tool set.
+    skills: Literal["off", "on_demand"] = "off"
     fold_stale_scenes: bool = True
     # Folds the neighbour blocks the search volunteers, and only those (ARTEL-277).
     # Separate from `fold_stale_scenes` because the two are independently useful
     # to turn off: what they fold is recovered by different tools out of
     # different budgets.
     fold_stale_knowledge: bool = True
+    # Folds every loaded skill but the newest, and only when `skills` is
+    # `on_demand`: with `off` the skills are in the system prompt and there is
+    # nothing loaded to fold. Separate from the two folds above because what it
+    # folds is recovered by a third tool, `load_skill`.
+    fold_stale_skills: bool = True
     # Compaction rewrites what the model reads once a run grows past a fraction of
     # its context, so a run with it and a run without it are two agents even with
     # the same tools. `None` defers to the deployment's own setting, which is what
@@ -431,8 +468,10 @@ class ResolvedArch(BaseModel):
     vision: bool
     screen_capture: ScreenCaptureMode
     phase_cycle: PhaseCycleMode
+    skills: Literal["off", "on_demand"]
     fold_stale_scenes: bool
     fold_stale_knowledge: bool
+    fold_stale_skills: bool
     compaction: bool
     compaction_trigger_fraction: float
     compaction_keep_messages: int
@@ -594,6 +633,8 @@ def structure_of(arch: ResolvedArch) -> tuple[tuple[str, ...], tuple[str, ...], 
     # is part of what the agent is.
     if arch.compaction:
         tools = tools + [build_compact_tool(state)]
+    # `load_skill` needs no line here: `build_tools` registers it itself when
+    # `arch.skills` is `on_demand`, so the fingerprint reads its real schema.
     names = tuple(tool.name for tool in tools)
     middleware = middleware_names_for(arch)
     return names, middleware, arch_fingerprint(arch, tools, middleware)

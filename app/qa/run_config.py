@@ -38,7 +38,8 @@ from app.llm.models import (
     get_model_spec,
     validate_reasoning,
 )
-from app.prompts import load_prompt, roles_in
+from app.prompts import load_prompt, roles_in, skill_names
+from app.prompts.loader import SKILL_ROLE_PREFIX
 
 # Directories under app/prompts/ holding these agents' prompt versions. The
 # summarizing prompt is versioned apart from the run's own: it is a different call
@@ -63,6 +64,9 @@ MEMORY_ROLE = "memory_directive"
 # `decide_directive` 는 `decide_next_action` 이 tool 목록에 있는 런에만 닿는다.
 PHASE_ROLE = "phase_directive"
 DECIDE_ROLE = "decide_directive"
+# The Skills section of the system prompt, read only by a run with
+# `skills=on_demand`; with `off` the skill bodies are inlined instead.
+SKILLS_ROLE = "skills_directive"
 COMPACTION_ROLE = "summary"
 
 # This build reports citations. Declared as a constant rather than written inline
@@ -186,6 +190,21 @@ def resolve_run_config(
         # `phase_cycle=off` reads none of this text, and recording its hash would
         # say the run was given something it never saw.
         hashes[MEMORY_ROLE] = _conditional_hash(MEMORY_ROLE, prompt.version, asked_by)
+    if resolved_arch.skills == "on_demand":
+        # The same refusal one axis over. `qa_run/v18` carries the phase directives
+        # but no skill files, so `skills=on_demand` on it would offer `load_skill`
+        # with nothing to load; asked of `v18` or older, the pair is refused here
+        # instead of failing when the run builds its tools.
+        hashes[SKILLS_ROLE] = _conditional_hash(SKILLS_ROLE, prompt.version, "skills=on_demand")
+    # Every run of a version that has skill files reads them: inlined into the
+    # system prompt when `skills=off`, through `load_skill` when `on_demand`. Each
+    # one is recorded under its own role, `skill_<name>`. The hash covers the
+    # description as well as the body (see `loader.content_sha256`), so a run is
+    # filed under the text the model was offered, including the Skills section
+    # built from the descriptions. `skills_directive` alone holds only the template.
+    for skill in skill_names(prompt.version):
+        role = f"{SKILL_ROLE_PREFIX}{skill}"
+        hashes[role] = load_prompt(PROMPT_AGENT, role, prompt.version).body_sha256
 
     settings = get_settings()
     # 설정이 비어 있으면 런의 모델로 압축한다. 그래야 압축이 런과 같은 provider 를

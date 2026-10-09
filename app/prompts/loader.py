@@ -26,6 +26,21 @@ Placeholder extraction follows ``str.format`` / LangChain f-string rules, so a
 body that needs a literal brace doubles it (``{{`` and ``}}``); doubled braces
 are literal text and are not placeholders.
 
+A file whose role starts with ``skill_`` may also carry ``description``: one
+line saying what the skill holds and when to load it. The system prompt's Skills
+section is generated from these lines (``skill_descriptions``), so a skill and
+the line that advertises it live in one file and cannot drift apart. Any other
+role carrying ``description`` is an error. From ``qa_run/v19`` on every skill
+must carry a non-empty one of at most ``SKILL_DESCRIPTION_MAX_CHARS``
+characters; ``validate_prompts`` checks it.
+
+The description is frontmatter, yet the model reads it, so it cannot be left out
+of the hash the way ``note`` is. ``PromptFile.body_sha256`` of a file with a
+description is the sha256 of ``description + "\n\n" + body``; a file without
+one hashes the body alone. Only skills may have a description, so every other
+role's hash, and every entry the lock holds for a released version, is what it
+was before descriptions existed.
+
 Neither invariant says anything about a released version staying put, which is
 the rule the rest of this module is built on. ``app.prompts.lock`` enforces that
 one, against a committed hash rather than against git history.
@@ -56,7 +71,22 @@ SETTINGS_VERSION_KEYS: dict[str, str] = {
 
 _FRONTMATTER_FENCE = "---"
 _FRONTMATTER_KEYS = ("version", "note", "placeholders")
+# Allowed, not required, and only in a file whose role starts with `skill_`.
+_DESCRIPTION_KEY = "description"
+_OPTIONAL_FRONTMATTER_KEYS = (_DESCRIPTION_KEY,)
 _VERSION_PATTERN = re.compile(r"^v(\d+)$")
+
+# Size caps for the QA prompt, enforced by `validate_prompts` from this version on.
+# A description over the cap fails at boot instead of costing tokens on every
+# turn of every run; older versions shipped before the caps and are never edited.
+QA_SLIM_PROMPT_FROM_VERSION = 19
+TOOL_DESCRIPTION_MAX_CHARS = 500
+SYSTEM_PROMPT_MAX_CHARS = 8000
+# A skill's description is one line of the Skills section, sent on every turn.
+SKILL_DESCRIPTION_MAX_CHARS = 300
+
+TOOL_ROLE_PREFIX = "tool_"
+SKILL_ROLE_PREFIX = "skill_"
 
 
 class PromptError(RuntimeError):
@@ -71,13 +101,17 @@ class PromptFile:
     note: str
     placeholders: tuple[str, ...]
     body: str
-    # sha256 of the body, and the reason a version directory is not enough to
-    # compare two runs by. A version is a name someone chose; editing `v3` in
-    # place leaves every run before and after the edit filed under the same name,
-    # and the comparison silently averages two different prompts. The frontmatter
-    # is excluded because `note` is documentation — changing it does not change
-    # what the model read.
+    # sha256 of what the model reads from this file, and the reason a version
+    # directory is not enough to compare two runs by. A version is a name someone
+    # chose; editing `v3` in place leaves every run before and after the edit
+    # filed under the same name, and the comparison silently averages two
+    # different prompts. `note` is excluded because it is documentation. A skill's
+    # `description` is included, because it becomes a line of the Skills section:
+    # with one, this is the sha256 of `description + "\n\n" + body`; without
+    # one, of the body alone, which keeps every non-skill hash where it was.
     body_sha256: str
+    # The skill's one-line description, or None. Only `skill_` roles may set it.
+    description: str | None = None
 
 
 # --- parsing ------------------------------------------------------------------
@@ -111,10 +145,10 @@ def _parse_frontmatter(lines: list[str], source: str) -> dict[str, str | list[st
         if not separator:
             raise PromptError(f"{source}: frontmatter line is not 'key: value': {line!r}")
         key = key.strip()
-        if key not in _FRONTMATTER_KEYS:
+        if key not in _FRONTMATTER_KEYS + _OPTIONAL_FRONTMATTER_KEYS:
             raise PromptError(
                 f"{source}: unknown frontmatter key {key!r}; "
-                f"expected one of {', '.join(_FRONTMATTER_KEYS)}."
+                f"expected one of {', '.join(_FRONTMATTER_KEYS + _OPTIONAL_FRONTMATTER_KEYS)}."
             )
         if key in meta:
             raise PromptError(f"{source}: frontmatter key {key!r} appears twice.")
@@ -129,6 +163,8 @@ def _parse_frontmatter(lines: list[str], source: str) -> dict[str, str | list[st
         )
     if isinstance(meta["version"], list):
         raise PromptError(f"{source}: frontmatter 'version' must be a scalar.")
+    if isinstance(meta.get(_DESCRIPTION_KEY), list):
+        raise PromptError(f"{source}: frontmatter 'description' must be a scalar.")
     return meta
 
 
@@ -306,6 +342,12 @@ def resolve_version(agent: str, version: str | None = None) -> str:
 # --- loading ------------------------------------------------------------------
 
 
+def content_sha256(body: str, description: str | None = None) -> str:
+    """The hash `PromptFile.body_sha256` holds: the body, plus the description if any."""
+    text = body if description is None else f"{description}\n\n{body}"
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
 @lru_cache(maxsize=None)
 def _read_prompt(agent: str, version: str, role: str) -> PromptFile:
     path = PROMPTS_ROOT / agent / version / f"{role}.md"
@@ -331,6 +373,13 @@ def _read_prompt(agent: str, version: str, role: str) -> PromptFile:
             f"Declared but unused: {extra or '-'}."
         )
 
+    description = meta.get(_DESCRIPTION_KEY)
+    if description is not None and not role.startswith(SKILL_ROLE_PREFIX):
+        raise PromptError(
+            f"{source}: frontmatter key {_DESCRIPTION_KEY!r} is only allowed in "
+            f"{SKILL_ROLE_PREFIX}* files; role {role!r} is not a skill."
+        )
+
     return PromptFile(
         agent=agent,
         version=version,
@@ -338,7 +387,8 @@ def _read_prompt(agent: str, version: str, role: str) -> PromptFile:
         note=str(meta["note"]),
         placeholders=actual,
         body=body,
-        body_sha256=hashlib.sha256(body.encode()).hexdigest(),
+        body_sha256=content_sha256(body, description),
+        description=description,
     )
 
 
@@ -347,11 +397,86 @@ def load_prompt(agent: str, role: str, version: str | None = None) -> PromptFile
     return _read_prompt(agent, resolve_version(agent, version), role)
 
 
+def load_tool_description(tool_name: str, version: str | None = None) -> PromptFile:
+    """The description of one QA tool, from ``qa_run/<version>/tool_<tool_name>.md``."""
+    return load_prompt("qa_run", f"{TOOL_ROLE_PREFIX}{tool_name}", version)
+
+
+def load_skill(name: str, version: str | None = None) -> PromptFile:
+    """One QA skill, from ``qa_run/<version>/skill_<name>.md``."""
+    return load_prompt("qa_run", f"{SKILL_ROLE_PREFIX}{name}", version)
+
+
+def skill_names(version: str | None = None) -> tuple[str, ...]:
+    """Names of the skills one ``qa_run`` version defines, sorted, without the prefix."""
+    resolved = resolve_version("qa_run", version)
+    return tuple(
+        role.removeprefix(SKILL_ROLE_PREFIX)
+        for role in roles_in("qa_run", resolved)
+        if role.startswith(SKILL_ROLE_PREFIX)
+    )
+
+
+def skill_descriptions(version: str | None = None) -> dict[str, str]:
+    """Each skill's description, keyed by name without the prefix, in name order.
+
+    The Skills section of the system prompt is built from this, so a skill file
+    added with a description is listed without editing `skills_directive.md`.
+    A skill without a description is an error here; from v19 on
+    `validate_prompts` refuses one at boot, before anything asks.
+    """
+    resolved = resolve_version("qa_run", version)
+    descriptions: dict[str, str] = {}
+    for name in skill_names(resolved):
+        skill = load_skill(name, resolved)
+        if not skill.description:
+            raise PromptError(
+                f"{PROMPTS_ROOT / 'qa_run' / resolved / (SKILL_ROLE_PREFIX + name)}.md: "
+                f"skill has no frontmatter 'description', so the Skills section "
+                f"cannot list it."
+            )
+        descriptions[name] = skill.description
+    return descriptions
+
+
 def clear_prompt_cache() -> None:
     """Drop every cached read. For tests that point the loader elsewhere."""
     known_agents.cache_clear()
     available_versions.cache_clear()
     _read_prompt.cache_clear()
+
+
+def _check_qa_prompt_size(prompt: PromptFile) -> None:
+    """Hold ``qa_run`` tool descriptions, the system prompt and skill descriptions to their caps."""
+    number = int(_VERSION_PATTERN.match(prompt.version).group(1))
+    if number < QA_SLIM_PROMPT_FROM_VERSION:
+        return
+    path = f"{PROMPTS_ROOT / prompt.agent / prompt.version / prompt.role}.md"
+    length = len(prompt.body)
+    if prompt.role.startswith(TOOL_ROLE_PREFIX) and length > TOOL_DESCRIPTION_MAX_CHARS:
+        raise PromptError(
+            f"{path}: tool description is {length} characters; the limit is "
+            f"{TOOL_DESCRIPTION_MAX_CHARS}. Move the detail into a skill."
+        )
+    if prompt.role == "system" and length > SYSTEM_PROMPT_MAX_CHARS:
+        raise PromptError(
+            f"{path}: system prompt is {length} characters; the limit is "
+            f"{SYSTEM_PROMPT_MAX_CHARS}. Move the detail into a skill."
+        )
+    if prompt.role.startswith(SKILL_ROLE_PREFIX):
+        description = (prompt.description or "").strip()
+        if not description:
+            raise PromptError(
+                f"{path}: skill has no frontmatter 'description'; from "
+                f"v{QA_SLIM_PROMPT_FROM_VERSION} every skill needs one line saying what "
+                f"it holds and when to load it, at most {SKILL_DESCRIPTION_MAX_CHARS} "
+                f"characters."
+            )
+        if len(prompt.description) > SKILL_DESCRIPTION_MAX_CHARS:
+            raise PromptError(
+                f"{path}: skill description is {len(prompt.description)} characters; "
+                f"the limit is {SKILL_DESCRIPTION_MAX_CHARS}."
+            )
 
 
 def validate_prompts() -> None:
@@ -364,7 +489,9 @@ def validate_prompts() -> None:
     for agent in known_agents():
         for version in available_versions(agent):
             for role in roles_in(agent, version):
-                _read_prompt(agent, version, role)
+                prompt = _read_prompt(agent, version, role)
+                if agent == "qa_run":
+                    _check_qa_prompt_size(prompt)
 
     for agent in SETTINGS_VERSION_KEYS:
         resolve_version(agent)
