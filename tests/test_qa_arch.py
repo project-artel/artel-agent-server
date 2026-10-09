@@ -96,6 +96,17 @@ def test_turning_folding_off_changes_the_fingerprint() -> None:
     assert structure_of(resolved())[2] != structure_of(resolved(fold_stale_scenes=False))[2]
 
 
+def test_pulse_relevance_is_off_by_default_and_moves_the_fingerprint() -> None:
+    """The two arms of ARTEL-958 have to hash apart.
+
+    The view the model reads is what this knob changes, and `arch_fingerprint`
+    hashes nothing about the view. The knob itself is the only thing in the digest
+    that can separate the arms, so it has to be in `arch.model_dump()`.
+    """
+    assert DEFAULT_ARCH.pulse_relevance is False
+    assert structure_of(resolved())[2] != structure_of(resolved(pulse_relevance=True))[2]
+
+
 def test_the_fingerprint_ignores_the_model_and_the_prompt() -> None:
     """The axes are independent, and a digest that moved with all of them could
     not group "the same structure under two models" — the comparison this exists
@@ -604,7 +615,11 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 #
 # And once more, from `2db1454a7b0f`, when `decline_macro_draft` joined the macro tools.
 # The default is `macros=on`, so the default tool set moved with it.
-_EXPECTED_DEFAULT_FINGERPRINT = "450105a42315"
+#
+# And once more, from `450105a42315`, when `pulse_relevance` (ARTEL-958) joined
+# `QaArchSpec` at `False`. At `False` the default run's tools, middleware and view
+# are where they were, so the label stays.
+_EXPECTED_DEFAULT_FINGERPRINT = "6f4035a1242e"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
