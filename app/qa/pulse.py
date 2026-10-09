@@ -21,6 +21,7 @@ for whoever writes the spec, not for this module: interpreting it here would
 put a second opinion between the game and the step that judges it.
 """
 
+import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -67,6 +68,30 @@ MAX_SCREEN_TEXT = 30
 # 꺼지는데, 그때 필요한 것은 명단이 아니라 "많이 꺼졌다" 는 사실이다.
 MAX_NAMED_OFF = 12
 
+# 게임 상태일 확률이 이 값보다 낮다고 판정된 member type 은 view 에서 숨긴다.
+#
+# 0.5 가 아닌 이유: ARTEL-944 가 같은 입력을 네 번 물었을 때 판정 모델의 확률이 최대 0.100
+# 움직이는 것을 쟀다. 그래서 가운데 근처의 값은 보이는 쪽에 둔다. cosmetic 값을 보이면 한 줄이
+# 늘 뿐이지만, 게임 상태 값을 숨기면 verdict 가 틀린다.
+COSMETIC_BELOW = 0.3
+
+# `LiveState` 가 member key 앞에 붙이는 `among` 접두사. ordinal 0 은 없고 그 외에는 `2#` 꼴이다.
+_AMONG_PREFIX = re.compile(r"^\d+#")
+
+
+def changed_type_key(changed: str) -> str | None:
+    """`PulseReading.changed` 의 키를 `PulseMember.type_key` 와 같은 꼴로 바꾼다.
+
+    SDK 는 member 키를 `<scene>/<selector>|<among#><Declaring>::<Member>` 로 쓴다.
+    `text`, `world`, `offers`, `active`, `tag` 같은 객체 수준 키는 member 가 아니므로 None 이다.
+    `|` 가 없는 키는 static (`Declaring::Member`) 이라 그대로 돌려준다.
+    """
+    tail = changed.rsplit("|", 1)[-1]
+    if "::" not in tail:
+        return None
+    return _AMONG_PREFIX.sub("", tail, count=1)
+
+
 PULSE_VIEW_START = "<<pulse>>"
 PULSE_VIEW_END = "<<end pulse>>"
 
@@ -101,6 +126,11 @@ class PulseMember(BaseModel):
     @property
     def key(self) -> str:
         return f"{self.on or ''}::{self.member or ''}#{self.among or 0}"
+
+    @property
+    def type_key(self) -> str:
+        """어느 객체의 몇 번째 component 인지와 무관한 member 의 정체. 판정의 cache key 다."""
+        return f"{self.on or ''}::{self.member or ''}"
 
 
 class PulseStatic(BaseModel):
@@ -228,6 +258,8 @@ class ReadingLog(BaseModel):
     changed: list[str] = Field(default_factory=list)
     # 이 판독이 움직였다고 말한 키의 총 개수. `changed` 가 잘렸는지는 이 값과 길이로 안다.
     moved: int = 0
+    # `moved` 중 cosmetic 으로 판정된 키의 개수. `changed` 에서는 빠져 있다.
+    cosmetic: int = 0
 
 
 def _key_line(offered: Any) -> str:
@@ -344,6 +376,16 @@ class PulseMemory(BaseModel):
     # 한 덩어리로 받는다 — 델타만 이어 붙이면 씬이 바뀐 자리를 지나 거슬러 읽어야 한다.
     # 판독이 이미 그 경계를 말해 주므로 여기서 새 규칙을 만들지 않는다.
     page_due: bool = False
+    # member type key (`PulseMember.type_key`) -> 게임 상태일 확률. 판정하는 쪽이 쓴다.
+    # 키가 없으면 아직 판정하지 않은 것이다.
+    relevance: dict[str, float] = Field(default_factory=dict)
+
+    def is_cosmetic(self, type_key: str | None) -> bool:
+        """판정이 있고 그 확률이 `COSMETIC_BELOW` 미만일 때만 True. 판정이 없으면 보인다."""
+        if type_key is None:
+            return False
+        probability = self.relevance.get(type_key)
+        return probability is not None and probability < COSMETIC_BELOW
 
     @property
     def seen(self) -> bool:
@@ -431,13 +473,16 @@ class PulseMemory(BaseModel):
             for key in sorted(self.moves, key=self.moves.get)[: len(self.moves) - MAX_TRACKED_KEYS]:
                 del self.moves[key]
 
+        hidden_flags = [self.is_cosmetic(changed_type_key(key)) for key in reading.changed]
+        kept = [key for key, hidden in zip(reading.changed, hidden_flags) if not hidden]
         self.log.append(
             ReadingLog(
                 reading=reading.reading,
                 frame=reading.frame,
                 whole=reading.whole,
-                changed=list(reading.changed[:MAX_CHANGED_NAMED]),
+                changed=kept[:MAX_CHANGED_NAMED],
                 moved=len(reading.changed),
+                cosmetic=len(reading.changed) - len(kept),
             )
         )
         if len(self.log) > MAX_READING_LOG:
@@ -553,6 +598,9 @@ class PulseMemory(BaseModel):
         if advance:
             self.drawn = self.clock()
 
+        hidden_values = 0
+        hidden_objects = 0
+
         lines = [PULSE_VIEW_START]
         head = f"reading {self.reading}"
         if self.frame is not None:
@@ -580,13 +628,19 @@ class PulseMemory(BaseModel):
             # 객체가 아니라 **멤버**로 접는다. 같은 애니메이션이 적 다섯에서 돌면 판독마다
             # 대상이 달라 객체로는 안 접히는데, 말하는 내용은 하나다.
             members = {k.rsplit("|", 1)[-1] for e in window for k in e.changed}
+            # cosmetic 은 이름을 안 대므로 접는 판단에 안 들고, 개수만 끝에 붙인다.
+            cosmetic = sum(e.cosmetic for e in window)
             if len(window) > 2 and 0 < len(members) <= 2:
                 said = ", ".join(sorted(members))
                 where = {k.rsplit("|", 1)[0].rsplit("/", 1)[-1] for e in window for k in e.changed}
                 lines.append(
                     f"  {len(window)} readings, only {said} moved"
                     + (f" (on {len(where)} objects)" if len(where) > 1 else "")
+                    + (f", +{cosmetic} cosmetic" if cosmetic else "")
                 )
+            elif len(window) > 2 and not members and cosmetic and not any(e.whole for e in window):
+                # 전부 cosmetic 이면 같은 줄이 창 길이만큼 반복된다. 그것도 한 줄로 접는다.
+                lines.append(f"  {len(window)} readings, only cosmetic values moved ({cosmetic})")
             else:
                 for entry in window:
                     lines.append(f"  {entry.reading} ({self._log_line(entry)})")
@@ -721,14 +775,25 @@ class PulseMemory(BaseModel):
             if not obj.members and not obj.offers and obj.id is None:
                 continue
 
-            fresh = [k for k in sorted(obj.members) if obj.at.get(k, 0) > since]
+            # cosmetic 으로 판정된 member 는 fresh/owed 에서 뺀다. 그리지 않았으므로 `shown` 도
+            # 옮기지 않는다.
+            cosmetic_keys = {
+                k for k, m in obj.members.items() if self.is_cosmetic(m.type_key)
+            }
+            fresh_all = [k for k in sorted(obj.members) if obj.at.get(k, 0) > since]
+            fresh = [k for k in fresh_all if k not in cosmetic_keys]
             # 창 밖에서 움직였는데 아직 한 번도 안 말한 값. 창의 경계는 마지막 **행위**이고
             # 이것은 **내가 무엇을 말했나** 라, 둘은 다른 질문이다(ARTEL-662).
-            owed = [
+            owed_all = [
                 k
                 for k in sorted(obj.members)
-                if k not in fresh and obj.at.get(k, 0) > obj.shown.get(k, 0)
+                if k not in fresh_all and obj.at.get(k, 0) > obj.shown.get(k, 0)
             ]
+            owed = [k for k in owed_all if k not in cosmetic_keys]
+            hidden_here = len(fresh_all) - len(fresh) + len(owed_all) - len(owed)
+            if hidden_here:
+                hidden_values += hidden_here
+                hidden_objects += 1
             # 조작할 수 있다는 것은 **무엇을 할지 아는 것**이다. id 는 거의 모든 객체에
             # 실리므로 그것으로 가르면 아무것도 안 걸러진다 — offers 가 그 선이다.
             actionable = bool(obj.offers)
@@ -767,6 +832,11 @@ class PulseMemory(BaseModel):
                 if advance:
                     obj.shown[member_key] = self.clock()
 
+        if hidden_values:
+            lines.append(
+                f"hidden as cosmetic: {hidden_values} values on {hidden_objects} objects "
+                "(judged not gameplay state; inspect_object shows them)"
+            )
         lines.append(PULSE_VIEW_END)
         return "\n".join(lines)
 
@@ -813,7 +883,8 @@ class PulseMemory(BaseModel):
                 member = obj.members[member_key]
                 name = f"{(member.on or '').split('.')[-1]}.{member.member}"
                 asked = "" if member.asked is not False else " (unasked)"
-                lines.append(f"  {name} = {member.value!r}{asked}")
+                judged = "  (judged cosmetic)" if self.is_cosmetic(member.type_key) else ""
+                lines.append(f"  {name} = {member.value!r}{asked}{judged}")
         if len(hits) > MAX_INSPECTED:
             # 잘랐다는 것을 말한다. 조용히 자르면 독자가 이것을 전부로 읽는다.
             lines.append(f"({len(hits) - MAX_INSPECTED} more objects match; name one more exactly)")
@@ -972,9 +1043,16 @@ class PulseMemory(BaseModel):
             return f"whole — {entry.moved} values reported"
         if not entry.moved:
             return "delta — nothing moved"
+        if entry.cosmetic and not entry.changed and entry.moved <= entry.cosmetic:
+            return f"delta — only cosmetic values moved ({entry.cosmetic})"
         named = ", ".join(entry.changed)
-        rest = entry.moved - len(entry.changed)
-        return f"delta — {named}" + (f", +{rest} more" if rest > 0 else "")
+        # cosmetic 은 이름을 안 대므로 "더 있다" 에도 세지 않는다. 따로 센다.
+        rest = entry.moved - len(entry.changed) - entry.cosmetic
+        return (
+            f"delta — {named}"
+            + (f", +{rest} more" if rest > 0 else "")
+            + (f", +{entry.cosmetic} cosmetic" if entry.cosmetic else "")
+        )
 
     def _roll(self, keys: list[str]) -> str:
         """이름 몇 개, 그리고 몇 개가 더 있는지. 명단이 아니라 사실을 준다.
