@@ -19,6 +19,7 @@ from app.agents.qa.arch import ResolvedArch, default_resolved_arch
 from app.agents.qa.tools.action_tools import build_action_tools
 from app.agents.qa.tools.capability_tools import build_capability_tools
 from app.agents.qa.tools.knowledge_tools import build_knowledge_tools
+from app.agents.qa.tools.macro_tools import build_macro_tools
 from app.agents.qa.tools.observation_tools import build_capture_tool, build_observation_tools
 from app.agents.qa.tools.phase import PhaseCycle, build_phase_cycle
 from app.agents.qa.tools.phase_tools import build_phase_tools
@@ -48,6 +49,10 @@ def build_tools(
         *build_screen_selector_tools(ctx),
         *build_capability_tools(ctx),
         *build_action_tools(ctx),
+        # action tool 바로 뒤다. macro 가 하는 일이 그 열넷을 이어서 다시 보내는 것이므로,
+        # 모델이 받는 목록에서도 그 옆에 선다. `macros=off` 면 통째로 빠지고, 그 런의
+        # 목록은 macro 가 생기기 전과 같다.
+        *(build_macro_tools(ctx) if ctx.arch.macros == "on" else []),
         *build_reporting_tools(ctx),
     ]
 
@@ -78,7 +83,7 @@ def build_tools(
     # `off` 와 `in_verdict` 에서는 `cycle` 이 `None` 이라 tool 이 감싸이지 않는다. 감싸는 것이
     # tool 의 이름도 `args` 도 안 바꾸므로 fingerprint 에는 안 잡히지만, 안 감싸면 실행 경로도
     # 종전 그대로라는 것이 읽는 사람에게 보인다.
-    cycle = build_phase_cycle(ctx.arch.phase_cycle)
+    cycle = build_phase_cycle(ctx.arch.phase_cycle, frozenset(one.name for one in tools))
     state.phase_cycle = cycle
     if cycle is None:
         return tools

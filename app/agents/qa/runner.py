@@ -15,7 +15,7 @@ from langchain.agents.middleware import wrap_model_call
 from langchain_core.messages import ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
-from app.agents.qa.arch import ResolvedArch
+from app.agents.qa.arch import ResolvedArch, withheld_skills
 from app.agents.qa.compaction import QaCompactionMiddleware
 from app.qa.scene import SCENE_VIEW_START_PREFIX
 from app.agents.qa.context import (
@@ -37,6 +37,7 @@ from app.qa.run_config import (
     COMPACTION_PROMPT_AGENT,
     COMPACTION_ROLE,
     DECIDE_ROLE,
+    MACRO_MEMORY_ROLE,
     MEMORY_ROLE,
     PHASE_ROLE,
     PROMPT_AGENT,
@@ -44,6 +45,7 @@ from app.qa.run_config import (
     VISION_ROLE,
     RunConfig,
     resolve_run_config,
+    macro_memory_directive_applies,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,7 +71,12 @@ _FIRST_SKILL_VERSION = 19
 _VERSION_NUMBER = re.compile(r"^v(\d+)$")
 
 
-def system_prompt_with_skills(system_prompt: str, prompt_version: str, skills: str) -> str:
+def system_prompt_with_skills(
+    system_prompt: str,
+    prompt_version: str,
+    skills: str,
+    withheld: frozenset[str] = frozenset(),
+) -> str:
     """The system prompt the run sends, with or without the skill bodies inlined.
 
     From v19 the long sections of the system prompt are `skill_<name>.md` files.
@@ -91,6 +98,8 @@ def system_prompt_with_skills(system_prompt: str, prompt_version: str, skills: s
         return system_prompt
     sections = [system_prompt.rstrip()]
     for name in skill_names(prompt_version):
+        if name in withheld:
+            continue
         sections.append(_as_section(name, load_skill(name, prompt_version).body.strip()))
     return "\n\n".join(sections) + "\n"
 
@@ -98,7 +107,29 @@ def system_prompt_with_skills(system_prompt: str, prompt_version: str, skills: s
 _HEADING = re.compile(r"^(#+)(?= )", re.MULTILINE)
 
 
-def _skills_directive(prompt_version: str, skills: str) -> str:
+def phase_directive_for(arch: ResolvedArch, prompt_version: str) -> str:
+    """system prompt 의 `{phase_directive}` 자리에 들어가는 글.
+
+    phase 를 강제하는 런에만 실린다. macro 가 켜진 런이면 그 뒤에 지식화 단계에서 macro 를
+    만들게 하는 문단(`macro_memory_directive`)이 붙어 그 순서의 일부로 읽힌다. 조립을 여기
+    하나에 두는 이유는 `tests/test_qa_phase_cycle.py` 가 이 글과 phase 표를 맞대기 때문이다
+    — 테스트가 따로 조립하면 런이 읽는 글이 아닌 것을 잰다.
+    """
+    if not arch.phase_cycle.gates_phases:
+        return ""
+    directive = load_prompt(PROMPT_AGENT, PHASE_ROLE, prompt_version).body
+    if macro_memory_directive_applies(arch, prompt_version):
+        directive = (
+            directive.rstrip()
+            + "\n\n"
+            + load_prompt(PROMPT_AGENT, MACRO_MEMORY_ROLE, prompt_version).body
+        )
+    return directive
+
+
+def _skills_directive(
+    prompt_version: str, skills: str, withheld: frozenset[str] = frozenset()
+) -> str:
     """The system prompt's Skills section, present only when the agent can load skills.
 
     With `skills="off"` every skill body is already inlined, and the tool
@@ -116,6 +147,7 @@ def _skills_directive(prompt_version: str, skills: str) -> str:
     skill_list = "\n".join(
         f"- `{name}` — {description}"
         for name, description in skill_descriptions(prompt_version).items()
+        if name not in withheld
     )
     return load_prompt(PROMPT_AGENT, "skills_directive", prompt_version).body.format(
         skill_list=skill_list
@@ -147,6 +179,24 @@ def _action_line(step: QaStep) -> str:
     if step.input:
         extras.append(f"via: {step.input.strip()}")
     return f"{line}  ({'; '.join(extras)})" if extras else line
+
+
+def _macro_discovery(arch: ResolvedArch, channel: QaRunChannel) -> str:
+    """시나리오 첫 메시지에 붙는, 지난 런이 이 빌드에 등록한 macro 목록 (ARTEL-935).
+
+    macro 를 켠 런에만, 그리고 목록이 있을 때만 글이 나온다. `macros=off` 인 런은 종전과
+    같은 글을 읽는다 — A/B 가 갈라 보는 것이 그 차이 하나여야 한다.
+
+    **첫 메시지인 이유.** 매 호출 끝에 붙였다 떼면 프롬프트 접두가 턴마다 깨진다
+    (`tool_context.py` 의 `answer` 와 ARTEL-621). 씬 문맥 블록에 얹으면 목록이 씬마다
+    다시 실려 같은 글이 여러 번 쌓인다. 첫 메시지는 런이 시작할 때 한 번 정해지고 접두의
+    일부로 남는다. `channel.scene.scene_context` 는 `QaExecutionService` 가 시나리오를
+    시작하기 전에 한 번 받아 얹으므로(`service.py`) 이 시점에 이미 있다.
+    """
+    if arch.macros != "on":
+        return ""
+    context = channel.scene.scene_context
+    return context.macro_section() if context is not None else ""
 
 
 def _step_plan(scenario: QaScenario) -> list[tuple[int | None, bool]]:
@@ -463,11 +513,7 @@ class QaRunner:
         )
         # phase 를 강제하는 런에만, 그리고 `DECIDE` 가 자기 turn 을 갖는 런에만. 안 실리면
         # 빈 문자열이라 렌더 결과가 그만큼 그대로다.
-        phase_directive = (
-            load_prompt(PROMPT_AGENT, PHASE_ROLE, config.prompt_version).body
-            if arch.phase_cycle.gates_phases
-            else ""
-        )
+        phase_directive = phase_directive_for(arch, config.prompt_version)
         decide_directive = (
             load_prompt(PROMPT_AGENT, DECIDE_ROLE, config.prompt_version).body
             if arch.phase_cycle.decides_in_its_own_turn
@@ -480,12 +526,15 @@ class QaRunner:
                 memory_directive=memory_directive,
                 phase_directive=phase_directive,
                 decide_directive=decide_directive,
-                skills_directive=_skills_directive(prompt.version, arch.skills),
+                skills_directive=_skills_directive(
+                    prompt.version, arch.skills, withheld_skills(arch)
+                ),
             ),
             prompt.version,
             arch.skills,
+            withheld_skills(arch),
         )
-        first_message = _plan(scenario)
+        first_message = _plan(scenario) + _macro_discovery(arch, channel)
         total_steps = len(scenario.steps)
         tools = build_tools(channel, state, arch, prompt.version)
 
@@ -718,7 +767,11 @@ class QaRunner:
         deadline still carries the verdicts it managed to record.
         """
         step_meta = _step_plan(scenario)
-        state = QaRunState(total_steps=len(scenario.steps), step_meta=step_meta)
+        state = QaRunState(
+            total_steps=len(scenario.steps),
+            step_meta=step_meta,
+            step_texts=[step.action for step in scenario.steps],
+        )
         deadline = self._config.arch.deadline_seconds
         try:
             await asyncio.wait_for(self.run(channel, scenario, state), timeout=deadline)
@@ -728,6 +781,12 @@ class QaRunner:
             return state, None
         except Exception as error:  # noqa: BLE001 - the reason has to reach the timeline
             return state, f"The run stopped on an error: {error}"
+        finally:
+            # `checkpoint` 에서 멈춘 채 남은 macro 를 끊는다. 눌러 둔 것은 없다 — parser 가
+            # 누름과 뗌 사이의 `checkpoint` 를 거절한다(`app/agents/qa/macro/session.py`).
+            if state.paused_macro is not None:
+                state.paused_macro.cancel()
+                state.paused_macro = None
         if not state.finished:
             return state, "The agent stopped without closing the run."
         return state, None

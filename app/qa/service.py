@@ -326,6 +326,10 @@ class QaExecutionService:
                 channel.on_screen_selector_result(raw)
             elif message_type == MessageType.CAPABILITY_WRITE_RESULT:
                 channel.on_capability_write_result(raw)
+            elif message_type == MessageType.MACRO_WRITE_RESULT:
+                channel.on_macro_write_result(raw)
+            elif message_type == MessageType.MACRO_READ_RESULT:
+                channel.on_macro_read_result(raw)
             elif message_type == MessageType.ERROR:
                 # Always accepted, answered or not. ERROR is a legitimate frame in
                 # both directions, so answering it with "unsupported inbound frame"

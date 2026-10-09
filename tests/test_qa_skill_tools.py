@@ -215,7 +215,8 @@ def test_on_demand_lists_every_skill_with_its_description_in_name_order() -> Non
     assert lines == [
         f"- `{name}` — {load_skill(name, 'v19').description}" for name in skill_names("v19")
     ]
-    assert len(lines) == len(skill_names("v19")) == 3
+    # content_map · held_state · knowledge_base · macro. macro 는 macro PR(#204)이 더한다.
+    assert len(lines) == len(skill_names("v19")) == 4
 
 
 def test_a_new_skill_file_is_listed_without_editing_the_directive(

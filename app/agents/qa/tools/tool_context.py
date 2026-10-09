@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from app.agents.qa.arch import ResolvedArch
 from app.agents.qa.tools.state import QaRunState
+from app.qa.acting import ActionOutcome, PressLanding, ScreenChange
 from app.qa.channel import QaRunChannel, with_operator_messages
 from app.qa.envelope import JsonRpcAction
 
@@ -70,6 +71,34 @@ class ToolContext:
         Takes a list because a drag is only a drag when its actions ride in one
         batch — the SDK runs a batch strictly in order, so nothing can slip
         between the press and the release.
+
+        모델이 읽는 문장만 돌려준다. action tool 열여섯이 전부 이 문장을 그대로
+        반환하기 때문이다. 그 문장을 만든 데이터까지 필요하면 `act` 를 부른다.
+        """
+        return (await self.act(actions, summary, step)).text
+
+    async def act(
+        self, actions: list[JsonRpcAction], summary: str, step: int
+    ) -> ActionOutcome:
+        """`_act` 를 돌리고 그 결과를 `state.last_outcome` 에 남긴다.
+
+        남기는 이유는 action tool 의 기록이다(`action_tools._recorded`). tool 은 문장만
+        돌려받으므로, 그 action 이 게임에 닿았는지는 여기 남은 데이터로 본다.
+        """
+        outcome = await self._act(actions, summary, step)
+        self.state.last_outcome = outcome
+        return outcome
+
+    async def _act(
+        self, actions: list[JsonRpcAction], summary: str, step: int
+    ) -> ActionOutcome:
+        """`run` 과 같은 일을 하되, 문장과 **그 문장이 되기 전의 데이터**를 함께 낸다.
+
+        부르는 쪽이 macro runner 다. 그쪽은 batch 사이에 모델 턴을 안 쓰는 것이 존재
+        이유라 문장을 읽어 줄 사람이 없고, 그렇다고 문장을 정규식으로 긁으면 문구 한
+        줄을 고칠 때마다 runner 가 조용히 안 멈춘다(ARTEL-777 과 같은 이유).
+
+        문장과 데이터가 같은 관측에서 나오므로 둘이 어긋날 수 없다.
         """
         channel, state = self.channel, self.state
         _answer = self.answer
@@ -78,29 +107,44 @@ class ToolContext:
         state.remember_dispatch(actions)
         result, looked = await channel.act_and_look(actions, summary, step)
         messages = channel.drain_operator_messages()
+        # 같은 말이 둘로 간다. `messages` 는 `_answer` 가 문장 끝에 붙이는 데 쓰고,
+        # `said` 는 부르는 쪽이 문장을 안 읽고도 "말이 왔다" 를 알게 하는 데 쓴다.
+        said = tuple(messages)
 
         if result is None:
-            return _answer(
-                "The game reported no result. It may still have run — observe the "
-                "scene to find out what actually happened.",
-                messages,
+            return ActionOutcome(
+                text=_answer(
+                    "The game reported no result. It may still have run — observe the "
+                    "scene to find out what actually happened.",
+                    messages,
+                ),
+                # 무엇이 일어났는지 모른다. `still` 로 적으면 답이 늦는 게임에서
+                # 멈춤의 근거가 "모른다" 위에 선다.
+                screen=ScreenChange.unknown,
+                operator_messages=said,
             )
 
         methods = {action.id: action.method for action in actions}
         lines = []
+        landings: list[PressLanding] = []
         for item in result.results:
             # 에이전트가 부르지 않은 것은 거른다. 지금은 배치에 우리가 끼우는 것이
             # 없으므로(ARTEL-516 이 꼬리 `scan_scene` 을 뺐다) 걸릴 것이 없지만, 게임이
             # 배치에 없던 id 로 답하면 그것을 액션 결과인 척 옮기지 않는다.
             if item.id not in methods:
                 continue
-            outcome = (
-                _press_outcome(item.returnValue)
-                if item.success and _is_press(item.returnValue)
-                else "ok"
-                if item.success
-                else f"FAILED — {item.error or 'no reason given'}"
-            )
+            if item.success and _is_press(item.returnValue):
+                landing = _press_landing(item.returnValue)
+                landings.append(landing)
+                outcome = _press_sentence(landing, item.returnValue)
+            elif item.success:
+                outcome = "ok"
+            else:
+                # **실패한 결과는 `landings` 에 안 든다.** 지금은 그래서 macro runner 가
+                # 이것을 못 본다 — 알면서 비워 둔 자리다. 어떤 method 는 실패해도 해롭지
+                # 않고(안 눌린 키의 `release_key`), 어떤 것은 그 자리에서 멈춰야 한다.
+                # 그 판단을 여기서 하나로 정할 수 없어 따로 다룬다.
+                outcome = f"FAILED — {item.error or 'no reason given'}"
             # Named, because a drag comes back as four lines and an unlabelled
             # failure would not say which part of it went wrong.
             lines.append(f"  {methods[item.id]}: {outcome}")
@@ -120,17 +164,32 @@ class ToolContext:
             # 않았다는 것을 판정하려는 스텝이 볼 것을 잃는다 — 그것이야말로 보여 줘야 하는
             # 결과다. 이 줄은 그 화면을 어떻게 읽을지를 말한다.
             body = f"{body}\n\nNothing on the screen moved."
+            change = ScreenChange.still
         elif not looked:
             # 판독을 한 번도 못 봤다 = 그릴 화면이 아예 없다. 화면을 `_answer` 에 맡기면
             # GAME_STATE 프레임이 남아 있는 빌드에서 "화면을 안 준다"고 말한 바로 밑에 옛
             # 화면을 붙이게 된다.
-            return _answer(
-                f"{body}\n\nThe game is not reporting the screen at all. "
-                "Observe again, or judge the step from the outcome above.",
-                messages,
-                screen=False,
+            return ActionOutcome(
+                text=_answer(
+                    f"{body}\n\nThe game is not reporting the screen at all. "
+                    "Observe again, or judge the step from the outcome above.",
+                    messages,
+                    screen=False,
+                ),
+                # 화면이 멈춘 것이 아니라 볼 화면이 없는 것이다. `still` 로 적으면
+                # 화면을 안 보내는 빌드에서 멀쩡한 macro 가 전부 멈춘다.
+                screen=ScreenChange.unknown,
+                landings=tuple(landings),
+                operator_messages=said,
             )
-        return _answer(body, messages)
+        else:
+            change = ScreenChange.moved
+        return ActionOutcome(
+            text=_answer(body, messages),
+            screen=change,
+            landings=tuple(landings),
+            operator_messages=said,
+        )
 
 
 def _is_press(value: object) -> bool:
@@ -138,8 +197,22 @@ def _is_press(value: object) -> bool:
     return isinstance(value, dict) and "reached" in value
 
 
-def _press_outcome(value: object) -> str:
-    """누름이 무엇에 닿았는지를 한 줄로.
+def _press_landing(value: dict) -> PressLanding:
+    """SDK 가 보낸 두 값을 셋 중 하나로. **문장을 만들기 전의 데이터가 여기다.**
+
+    가르는 자리와 말하는 자리를 떼어 놓은 이유는 `act` 를 부르는 쪽이 문장이 아니라
+    이 값을 읽기 때문이다. 한 자리에 붙여 두면 읽는 쪽이 문장을 다시 파싱하게 되고,
+    그러면 표현이 곧 프로토콜이 된다(ARTEL-777).
+    """
+    if value.get("pointerHeldByPerson"):
+        return PressLanding.held_by_person
+    if not value.get("reached"):
+        return PressLanding.reached_nothing
+    return PressLanding.sent
+
+
+def _press_sentence(landing: PressLanding, value: dict) -> str:
+    """가른 결과를 모델이 읽는 한 줄로.
 
     SDK 는 데이터만 보낸다(`reached`, `pointerHeldByPerson`). 문장은 여기서 만든다 —
     표현을 프로토콜에 실으면 그 말을 바꿀 때마다 게임 쪽 패키지를 다시 배포해야 하고,
@@ -148,12 +221,9 @@ def _press_outcome(value: object) -> str:
     **`ok` 는 "상태를 밀었다"는 뜻이지 "무언가 받았다"가 아니었다.** 그 하나로 세 가지가
     구분되지 않아 에이전트가 헛손질을 하고도 몰랐다.
     """
-    if not isinstance(value, dict):
-        return "ok"
-    if value.get("pointerHeldByPerson"):
+    if landing is PressLanding.held_by_person:
         return "전해지지 않음 — 포인터를 사람이 쥐고 있다"
-    reached = value.get("reached")
-    if not reached:
+    if landing is PressLanding.reached_nothing:
         return "닿은 것 없음 — 그 자리에 누를 것이 없다"
     # **결과가 아니라 보낸 일이다.** SDK 는 `SendMessage` 를 `DontRequireReceiver` 로
     # 부르므로 받는 핸들러가 없어도 통과하고, 있어도 그것이 무엇을 했는지는 돌려주지
@@ -162,4 +232,5 @@ def _press_outcome(value: object) -> str:
     # 그래서 이름만 적으면 안 된다. 구체적인 이름이 붙은 한 줄은 `ok` 보다 더 확실한
     # 성공처럼 읽혀서, 화면을 확인하지 않고 넘어가게 만든다 — 고치려던 것보다 나쁜
     # 자리에 데려다 놓는 셈이다.
-    return f"{reached} 에 보냄 — 반응했는지는 화면으로 확인할 것"
+    return f"{value.get('reached')} 에 보냄 — 반응했는지는 화면으로 확인할 것"
+

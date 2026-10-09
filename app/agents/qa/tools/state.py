@@ -8,6 +8,9 @@
 from dataclasses import dataclass
 from typing import Any
 
+from app.agents.qa.macro.book import MacroBook
+from app.agents.qa.macro.lift import DispatchRecord
+from app.agents.qa.macro.session import MacroSession
 from app.qa.envelope import ActionResultItem, JsonRpcAction
 from app.qa.schemas import QaStepResult
 
@@ -74,8 +77,12 @@ class QaRunState:
         self,
         total_steps: int,
         step_meta: list[tuple[int | None, bool]] | None = None,
+        step_texts: list[str] | None = None,
     ) -> None:
         self.total_steps = total_steps
+        # 시나리오가 각 스텝에 적은 행위 문장, 1번 스텝이 0번 자리. macro 초안의 첫 주석이
+        # 이것을 싣는다(`draft_for_step`). 비면 문장을 모르는 것이고 초안은 번호만 적는다.
+        self.step_texts: list[str] = step_texts or []
         # 스텝별 (case_id, is_verification). report_step이 각 판정에 이를 붙이고, TC 판정(파생)은
         # `case_units`가 이 표로 구간을 잘라 그 구간 검증 스텝의 판정으로 정한다. 비면 단일-계층
         # 폴백(case_id/is_verification 미상) — 구식 호출자·테스트 호환용.
@@ -174,6 +181,31 @@ class QaRunState:
         # 받아 적으면 안 된다 — JSON-RPC 인자는 모델이 지어내기 쉬운 모양이고 저쪽은 그것을
         # 읽지 않고 그대로 저장한다. 모델은 "무엇으로 눌렀나" 만 말하고 인자는 이 표가 낸다.
         self.dispatched_action_params: dict[str, list[Any]] = {}
+        # 이 런의 macro 초안과 등록된 정의, 그리고 무엇을 읽었나 (ARTEL-925).
+        #
+        # 사전 셋을 여기 흩뿌리지 않는 이유는 초안의 수명주기 — 쓰고·읽고·고치고·
+        # 등록한다 — 가 규칙을 들고 있기 때문이다. 그 규칙이 `MacroBook` 에 있으면 tool
+        # 없이 단위 테스트가 되고, 여기 흩어 놓으면 tool 을 통해서만 재어진다.
+        self.macros = MacroBook()
+        # `checkpoint` 에서 멈춰 선 macro 호출. `resume_macro` 가 이것을 잇거나 버린다.
+        # 하나뿐이다 — 게임을 모는 쪽이 둘이 되면 안 되므로, 멈춘 것이 있는 동안
+        # `run_macro` 는 새 macro 를 안 부른다.
+        self.paused_macro: MacroSession | None = None
+        # agent 가 손으로 부른 action tool, 부른 순서대로(ARTEL-915). `dispatched_action_params`
+        # 는 method 마다 마지막 한 벌만 남겨 순서도 tool 도 없다 — 그쪽은 capability 의 재현
+        # 칸이 쓰는 것이라 뜻을 안 바꾸고, 이 기록을 옆에 둔다. macro 초안이 여기서 나온다.
+        self.dispatches: list[DispatchRecord] = []
+        # macro 초안을 이미 내민 step. 같은 step 을 다시 판정해도 초안을 또 만들지 않는다.
+        self.drafted_steps: set[int] = set()
+        # step 마다 내민 초안의 이름. 통과한 판정에만 초안이 붙으므로 `drafted_steps` 의
+        # 부분집합이다. `decline_macro_draft` 가 받은 `name` 이 그 step 에 내민 `draft` 인지
+        # 여기서 본다.
+        self.offered_drafts: dict[int, str] = {}
+        # `decline_macro_draft` 로 거절한 `draft` 이름 → 그 `reason`. 등록한 것은 `macros` 에
+        # 남고, 거절한 것은 여기 남는다 — 둘 다 없는 `draft` 가 답을 못 받은 것이다.
+        self.declined_drafts: dict[str, str] = {}
+        # 마지막 action 의 결과 데이터. 기록하는 쪽이 그 action 이 게임에 닿았는지 본다.
+        self.last_outcome = None
         # Handed to the vision middleware on the next model call. The tool cannot
         # return the image itself — an image block on a tool result is rejected by
         # the chat/completions API every model here is reached through.

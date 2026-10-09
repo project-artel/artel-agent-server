@@ -30,6 +30,9 @@ def build_phase_tools(ctx: ToolContext) -> list[BaseTool]:
         #
         # `thought` 를 안 받는 유일한 tool 이다. 다른 tool 에서 `thought` 가 하는 일을
         # `reason` 이 그대로 하고, 둘을 함께 받으면 모델이 같은 문장을 두 칸에 적는다.
+        #
+        # 지식 질문 하나에만 답한다. macro `draft` 를 어떻게 할지는 그 앞의 `REVIEW_DRAFT`
+        # 에서 따로 묻는다(`phase.py` 의 `RunPhase.review_draft`).
         why = (reason or "").strip()
         if not why:
             # 이 호출로 `UPDATE_MEMORY` 가 끝났다고 치면 안 된다. 빈 `reason` 하나로 질문을

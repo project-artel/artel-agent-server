@@ -28,6 +28,10 @@ from app.qa.envelope import (
     KnowledgeWriteResultPayload,
     LogCategory,
     LogPayload,
+    MacroReadPayload,
+    MacroReadResultPayload,
+    MacroRegisterPayload,
+    MacroWriteResultPayload,
     MessageType,
     ScreenNamePayload,
     ScreenSelectorProposalPayload,
@@ -563,6 +567,46 @@ class QaRunChannel:
         """
         return await self._request(message_type, payload, self._write_timeout)
 
+    async def register_macro(
+        self, payload: MacroRegisterPayload
+    ) -> MacroWriteResultPayload | KnowledgeRequestFailed | None:
+        """등록된 macro 정의 하나를 지도에 적는다 (ARTEL-921). 결과 셋이다.
+
+        - payload — 저쪽이 적었다. 런을 넘어 산다
+        - `KnowledgeRequestFailed` — 거절당했다. **안 적혔다**
+        - `None` — 답이 안 왔다. 적혔는지 아닌지 이쪽에서 알 수 없다
+
+        `None` 을 실패로 옮겨 적으면 안 된다. 이 프레임을 모르는 orchestration 은
+        라우터에서 프레임을 통째로 떨어뜨리고 그 거절이 이 소켓으로 안 돌아오는데, 그때
+        모델에게 "안 됐다" 고 하면 같은 정의를 계속 다시 보낸다 —
+        `write_capability` 와 같은 자리이고 같은 이유다.
+
+        타임아웃이 반드시 이쪽에 있어야 한다. 저쪽 라우터 앞의 검사 둘 — `messageId` 가
+        UUID 가 아니다, `qaTryId` 가 모르는 try 다 — 은 아무 답도 없이 프레임을 버린다.
+        """
+        return await self._request(
+            MessageType.MACRO_REGISTER, payload, self._write_timeout
+        )
+
+    async def read_macro(
+        self, payload: MacroReadPayload
+    ) -> MacroReadResultPayload | KnowledgeRequestFailed | None:
+        """저장된 macro 정의 하나를 이름으로 읽는다 (ARTEL-921). 결과 셋이다.
+
+        - payload — 이 build 의 `content_map` 에 그 이름의 정의가 있다
+        - `KnowledgeRequestFailed` — 없거나, 조회 자체가 못 돌았다. 저쪽은 모르는 이름을
+          `MACRO_READ references an unknown macro: <name>` 로 답한다
+        - `None` — 답이 안 왔다
+
+        쓰기와 달리 `None` 과 거절이 부르는 쪽에 같은 일을 시킨다. 둘 다 "이 이름으로
+        부를 수 있는 것이 없다" 로 끝나고, 읽기는 다시 물어도 아무것도 두 번 적히지
+        않기 때문이다. 그래도 둘을 가르는 이유는 모델에게 읽어 줄 문장이 다르기
+        때문이다 — 없는 것과 못 물어본 것은 다음에 할 일이 다르다.
+        """
+        return await self._request(
+            MessageType.MACRO_READ, payload, self._write_timeout
+        )
+
     async def answer_screen_selector_proposal(
         self, payload: ScreenSelectorVerdictPayload, correlation_id: str
     ) -> None:
@@ -699,15 +743,7 @@ class QaRunChannel:
         The tool times out into "cannot confirm", which is what the situation is.
         """
         payload = KnowledgeWriteResultPayload.model_validate(raw.get("payload") or {})
-        correlation = raw.get("correlationId")
-        pending = self._pending.get(correlation) if isinstance(correlation, str) else None
-        if pending is not None and payload.type and payload.type != pending.request_type:
-            logger.warning(
-                "[QA] a %s answer arrived for a %s request (correlation %s); dropped",
-                payload.type,
-                pending.request_type,
-                correlation,
-            )
+        if self._answers_another_request(raw, payload.type):
             return
         self._resolve(raw, payload)
 
@@ -755,15 +791,7 @@ class QaRunChannel:
         거절 사유를 모델에게 읽어 준다.
         """
         payload = ScreenSelectorResultPayload.model_validate(raw.get("payload") or {})
-        correlation = raw.get("correlationId")
-        pending = self._pending.get(correlation) if isinstance(correlation, str) else None
-        if pending is not None and payload.type and payload.type != pending.request_type:
-            logger.warning(
-                "[QA] a %s answer arrived for a %s request (correlation %s); dropped",
-                payload.type,
-                pending.request_type,
-                correlation,
-            )
+        if self._answers_another_request(raw, payload.type):
             return
         if self._resolve(raw, payload):
             return
@@ -796,17 +824,56 @@ class QaRunChannel:
         타임아웃으로 "확인할 수 없다" 에 도달하는데, 그것이 실제 상황이다.
         """
         payload = CapabilityWriteResultPayload.model_validate(raw.get("payload") or {})
-        correlation = raw.get("correlationId")
-        pending = self._pending.get(correlation) if isinstance(correlation, str) else None
-        if pending is not None and payload.type and payload.type != pending.request_type:
-            logger.warning(
-                "[QA] a %s answer arrived for a %s request (correlation %s); dropped",
-                payload.type,
-                pending.request_type,
-                correlation,
-            )
+        if self._answers_another_request(raw, payload.type):
             return
         self._resolve(raw, payload)
+
+    def on_macro_write_result(self, raw: dict) -> None:
+        """macro 등록의 답을, 무엇을 물었는지와 맞대 보고 넘긴다 (ARTEL-921)."""
+        payload = MacroWriteResultPayload.model_validate(raw.get("payload") or {})
+        if self._answers_another_request(raw, payload.type):
+            return
+        self._resolve(raw, payload)
+
+    def on_macro_read_result(self, raw: dict) -> None:
+        """저장된 macro 정의를, 무엇을 물었는지와 맞대 보고 넘긴다 (ARTEL-921)."""
+        payload = MacroReadResultPayload.model_validate(raw.get("payload") or {})
+        if self._answers_another_request(raw, payload.type):
+            return
+        self._resolve(raw, payload)
+
+    def _answers_another_request(self, raw: dict, answered_type: str) -> bool:
+        """이 답이 실은 **다른** 요청의 답인가. 맞으면 부르는 쪽이 버린다.
+
+        저쪽은 응답마다 무엇의 답인지를 payload 의 `type` 에 echo 한다. correlation
+        하나로는 못 잡는 것을 이 비교가 잡는다 — 둘이 어긋나면 믿는 대신 버린다.
+        한 응답 타입이 요청 여러 개에 답하는 자리마다 필요하고
+        (`KNOWLEDGE_WRITE_RESULT` 가 쓰기 다섯에, `SCREEN_SELECTOR_RESULT` 가
+        `SCREEN_SELECTOR_RULE` 과 `SCREEN_SELECTOR_VERDICT` 둘에,
+        `CAPABILITY_WRITE_RESULT` 가 쓰기 둘에), macro 는 쓰기와 읽기의 응답 타입이
+        갈려 있어 지금은 어긋날 길이 없지만 저쪽이 macro 쓰기 타입을 하나 더하면 그때
+        조용히 틀리는 자리가 여기다.
+
+        **어긋난 답은 실패로 옮기지 않고 버린다.** 저쪽의 프로토콜 오류이지 런이 할 수
+        있는 일이 아니고, 실패로 옮기면 모델이 이미 적혔을지도 모르는 것을 다시 쓴다.
+        tool 은 타임아웃으로 "확인할 수 없다" 에 도달하는데, 그것이 실제 상황이다.
+
+        `type` 이 비어 있으면 안 가른다. 그 칸을 안 싣는 구버전 orchestration 의 답을
+        전부 버리게 된다.
+        """
+        correlation = raw.get("correlationId")
+        pending = self._pending.get(correlation) if isinstance(correlation, str) else None
+        if pending is None or not answered_type:
+            return False
+        if answered_type == pending.request_type:
+            return False
+        logger.warning(
+            "[QA] a %s answer arrived for a %s request (correlation %s); dropped",
+            answered_type,
+            pending.request_type,
+            correlation,
+        )
+        return True
 
     def on_error(self, raw: dict) -> bool:
         """An inbound ERROR. True when it was the answer to something we asked.

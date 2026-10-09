@@ -4,12 +4,15 @@
 이후에 쌓인 `pulse` 만이 결과로 돌아온다.
 """
 
+import inspect
 import re
 from typing import Any
 
 from langchain_core.tools import BaseTool, tool
 
+from app.agents.qa.macro.lift import DispatchRecord, lift_call
 from app.agents.qa.tools.tool_context import ToolContext
+from app.qa.acting import PressLanding
 from app.prompts import load_tool_description
 from app.qa.envelope import JsonRpcAction
 
@@ -232,7 +235,7 @@ def build_action_tools(ctx: ToolContext) -> list[BaseTool]:
             step,
         )
 
-    return [
+    return [_recorded(one, ctx) for one in (
         click_button,
         enter_text,
         press_key,
@@ -249,4 +252,67 @@ def build_action_tools(ctx: ToolContext) -> list[BaseTool]:
         pause_game_time,
         resume_game_time,
         reset_game,
-    ]
+    )]
+
+
+def _recorded(tool: BaseTool, ctx: ToolContext) -> BaseTool:
+    """agent 가 손으로 부른 호출을 `QaRunState.dispatches` 에 순서대로 남기는 같은 tool.
+
+    target 은 **보내기 전에** 바꿔 올린다. action 이 돈 뒤에는 대상이 사라질 수 있다 —
+    카드는 조합하면 없어진다. 게임에 닿았는지는 돈 뒤에 `state.last_outcome` 에서 본다.
+
+    이름도 설명도 `args` 도 그대로다 — `tools/__init__.py` 의 `_phase_gated` 와 같은
+    방식이라 모델이 받는 tool 선언이 안 움직인다. macro 가 보내는 action 은 이 tool 을
+    거치지 않으므로(`macro_tools._Host` 가 `ctx.act` 를 직접 부른다) macro 에서 또 macro
+    초안이 나오지 않는다.
+    """
+    inner = tool.coroutine
+    if inner is None:  # pragma: no cover - QA tool 은 전부 `async def` 다
+        return tool
+    signature = inspect.signature(inner)
+    name = tool.name
+
+    async def recorded(*args, **kwargs):
+        try:
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            arguments = dict(bound.arguments)
+        except TypeError:
+            arguments = dict(kwargs)
+        pulse = ctx.channel.scene.pulse
+        targets, unliftable = lift_call(name, arguments, pulse)
+        scene = (ctx.channel.scene.scene or pulse.scene or "").strip()
+        ctx.state.last_outcome = None
+        result = await inner(*args, **kwargs)
+        outcome = ctx.state.last_outcome
+        # 돌아온 뒤의 scene. 키 연타가 scene 을 바꿨는지는 이 값으로 안다(`lift._fold`).
+        scene_after = (ctx.channel.scene.scene or ctx.channel.scene.pulse.scene or "").strip()
+        if outcome is not None:
+            ctx.state.dispatches.append(
+                DispatchRecord(
+                    tool=name,
+                    step=arguments.get("step"),
+                    scene=scene,
+                    arguments={
+                        key: value
+                        for key, value in arguments.items()
+                        if key not in ("step", "thought")
+                    },
+                    targets=targets,
+                    unliftable=unliftable,
+                    landed=_landed(outcome),
+                    scene_after=scene_after,
+                )
+            )
+        return result
+
+    return tool.model_copy(update={"coroutine": recorded})
+
+
+def _landed(outcome) -> bool:
+    """게임에 닿았나. 누름이 하나도 안 닿았거나 사람이 마우스를 쥐었으면 아니다."""
+    if PressLanding.held_by_person in outcome.landings:
+        return False
+    return not outcome.landings or not all(
+        landing is PressLanding.reached_nothing for landing in outcome.landings
+    )

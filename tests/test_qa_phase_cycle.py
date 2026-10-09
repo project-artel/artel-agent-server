@@ -76,11 +76,16 @@ def test_every_tool_the_default_run_offers_has_a_phase_or_is_always_allowed() ->
     instead: a tool added to `build_tools` and to neither `_TOOL_PHASE` nor
     `ALWAYS_ALLOWED` fails this test rather than quietly opting itself out.
     """
-    names, _middleware, _print = structure_of(arch_for(PhaseCycleMode.full))
-    unplaced = [
-        name for name in names if name not in _TOOL_PHASE and name not in ALWAYS_ALLOWED
-    ]
-    assert unplaced == []
+    for macros in ("off", "on"):
+        arch = resolve_arch(
+            QaArchSpec(vision=VisionMode.on, phase_cycle=PhaseCycleMode.full, macros=macros),
+            LLMModel.gpt_6_luna,
+        )
+        names, _middleware, _print = structure_of(arch)
+        unplaced = [
+            name for name in names if name not in _TOOL_PHASE and name not in ALWAYS_ALLOWED
+        ]
+        assert unplaced == [], f"macros={macros}"
 
 
 def test_the_directive_names_the_same_tools_the_table_does() -> None:
@@ -98,16 +103,34 @@ def test_the_directive_names_the_same_tools_the_table_does() -> None:
     set may be named at all: a name the model cannot call is worse than no
     advice.
     """
-    body = load_prompt("qa_run", "phase_directive", "v18").body
-    tools, _middleware, _print = structure_of(arch_for(PhaseCycleMode.full))
-    tools = set(tools)
+    for version, macros in (("v18", "off"), ("v19", "off"), ("v19", "on")):
+        _the_directive_names_what_this_structure_offers(version, macros)
 
-    for name in ALWAYS_ALLOWED:
-        assert f"`{name}`" in body, f"{name} is exempt from the order and unsaid"
+
+def _the_directive_names_what_this_structure_offers(version: str, macros: str) -> None:
+    """한 구조가 읽는 지시문과 그 구조가 가진 tool 을 맞댄다.
+
+    표는 모든 구조에 하나지만 tool 목록은 구조마다 다르다. `macros=on` 이면 macro tool 넷이
+    표에 들어 있고 지시문에 macro 문단이 붙는다. `macros=off` 에서는 둘 다 없다 — 그래서 이
+    구조가 실제로 가진 이름만 요구한다. 지시문은 runner 가 조립하는 그대로 받는다.
+    """
+    from app.agents.qa.runner import phase_directive_for
+
+    arch = resolve_arch(
+        QaArchSpec(vision=VisionMode.on, phase_cycle=PhaseCycleMode.full, macros=macros),
+        LLMModel.gpt_6_luna,
+    )
+    body = phase_directive_for(arch, version)
+    tools, _middleware, _print = structure_of(arch)
+    tools = set(tools)
+    where = f"{version}, macros={macros}"
+
+    for name in ALWAYS_ALLOWED & tools:
+        assert f"`{name}`" in body, f"{name} is exempt from the order and unsaid ({where})"
 
     for name, at in _TOOL_PHASE.items():
-        if at is RunPhase.update_memory:
-            assert f"`{name}`" in body, f"{name} answers UPDATE_MEMORY and is unsaid"
+        if at is RunPhase.update_memory and name in tools:
+            assert f"`{name}`" in body, f"{name} answers UPDATE_MEMORY and is unsaid ({where})"
 
     # Backticks in this file mark tool names and argument names alike, and the
     # only argument it has reason to mention is the one it refuses when empty.
@@ -556,3 +579,350 @@ def test_the_new_tools_appear_only_at_the_rung_that_pays_for_them() -> None:
     assert off == in_verdict
     assert set(lite) - set(off) == {"skip_memory_update"}
     assert set(full) - set(off) == {"skip_memory_update", "decide_next_action"}
+
+
+# --- macro 와 지식화 단계 -----------------------------------------------------------
+
+
+def _lite(offered=None):
+    from app.agents.qa.tools.phase import build_phase_cycle
+
+    return build_phase_cycle(PhaseCycleMode.lite, offered)
+
+
+def _into_update_memory(cycle) -> None:
+    """한 step 을 손으로 하고 판정해서 `UPDATE_MEMORY` 에 앉힌다."""
+    for name in ("observe_scene", "click", "report_step"):
+        assert cycle.refusal_for(name) is None, name
+        cycle.advance(name)
+    assert cycle.phase is RunPhase.update_memory
+
+
+def test_registering_a_macro_answers_update_memory() -> None:
+    """등록한 macro 는 다음 런이 쓴다. knowledge 항목과 같은 "런을 넘어 남는 기록" 이다."""
+    cycle = _lite()
+    _into_update_memory(cycle)
+
+    for name in ("read_macro", "write_macro", "edit_macro"):
+        assert cycle.refusal_for(name) is None, name
+        cycle.advance(name)
+    # 초안은 지식이 아니다. 아직 이 step 의 지식화를 마치지 않았다.
+    assert cycle.refusal_for("observe_scene") is None
+    assert cycle.refusal_for("click") is not None
+
+    assert cycle.refusal_for("register_macro") is None
+    cycle.advance("register_macro")
+    # 등록으로 이 step 의 지식화가 끝났다. 다음 step 의 ACT 로 갈 수 있다.
+    assert cycle.refusal_for("run_macro") is None
+
+
+def test_a_macro_registered_now_runs_from_the_next_step() -> None:
+    cycle = _lite()
+    _into_update_memory(cycle)
+    cycle.advance("write_macro")
+    cycle.advance("register_macro")
+
+    assert cycle.refusal_for("run_macro") is None
+    cycle.advance("run_macro")
+    assert cycle.phase is RunPhase.act
+
+
+def test_a_macro_can_be_registered_mid_act_without_leaving_act() -> None:
+    """try 62 가 ACT 에서 쓴 macro 를 바로 등록하려다 거절당했고, 초안은 런과 함께 사라졌다."""
+    cycle = _lite()
+    for name in ("observe_scene", "press_key", "write_macro"):
+        cycle.advance(name)
+    assert cycle.phase is RunPhase.act
+
+    assert cycle.refusal_for("register_macro") is None
+    cycle.advance("register_macro")
+
+    # 등록이 ACT 를 끝내지 않는다. 조작을 이어 가고 판정으로 넘어간다.
+    assert cycle.phase is RunPhase.act
+    assert cycle.refusal_for("press_key") is None
+    assert cycle.refusal_for("report_step") is None
+
+
+def test_a_registration_outside_update_memory_does_not_answer_it() -> None:
+    """ACT 에서 등록했다고 이 step 의 지식화가 끝난 것은 아니다. UPDATE_MEMORY 는 따로 답해야 한다."""
+    cycle = _lite()
+    for name in ("observe_scene", "press_key", "register_macro", "report_step"):
+        assert cycle.refusal_for(name) is None, name
+        cycle.advance(name)
+    assert cycle.phase is RunPhase.update_memory
+
+    assert cycle.refusal_for("observe_scene") is None
+    assert cycle.refusal_for("click") is not None
+
+
+def test_registering_outside_update_memory_does_not_reset_the_refusal_streak() -> None:
+    """`ALWAYS_ALLOWED` 처럼, ACT 에서 사이에 낀 등록은 모델이 자리를 고쳤다는 뜻이 아니다."""
+    cycle = _lite()
+    for name in ("observe_scene", "press_key"):
+        cycle.advance(name)
+    assert cycle.refusal_for("record_knowledge") is not None
+    assert cycle.refusal_for("register_macro") is None
+    assert cycle.refusal_for("record_knowledge") is not None
+    # 셋째 연속 거절 자리에서 통과한다. 등록이 끼었어도 연속은 이어진다.
+    assert cycle.refusal_for("record_knowledge") is None
+    assert cycle.forced_passes == 1
+
+
+def test_registering_in_update_memory_clears_the_refusal_streak() -> None:
+    """자기 phase 에서 부른 등록은 다른 맞는 호출과 같다."""
+    cycle = _lite()
+    _into_update_memory(cycle)
+    assert cycle.refusal_for("click") is not None
+    assert cycle.refusal_for("register_macro") is None
+    assert cycle.refusal_for("click") is not None
+    assert cycle.refusal_for("click") is not None
+    assert cycle.forced_passes == 0
+
+
+def test_macro_drafts_can_be_written_and_read_in_any_phase() -> None:
+    """초안은 런 밖에 아무것도 안 바꾼다. ACT 에서 실패한 macro 를 읽고 고칠 수 있어야 한다."""
+    cycle = _lite()
+    for name in ("observe_scene", "run_macro"):
+        cycle.advance(name)
+    assert cycle.phase is RunPhase.act
+
+    for name in ("read_macro", "edit_macro", "write_macro"):
+        assert cycle.refusal_for(name) is None, name
+        cycle.advance(name)
+    assert cycle.phase is RunPhase.act
+
+
+def test_the_refusal_names_only_the_tools_this_run_has() -> None:
+    """`macros=off` 런에 "`register_macro` 로 끝내라" 고 하면 없는 tool 을 찾는다."""
+    offered = frozenset({"observe_scene", "click", "report_step", "record_knowledge", "skip_memory_update"})
+    cycle = _lite(offered)
+    _into_update_memory(cycle)
+
+    refusal = cycle.refusal_for("click")
+
+    assert refusal is not None
+    assert "`record_knowledge`" in refusal
+    assert "register_macro" not in refusal
+
+
+@pytest.mark.parametrize(
+    "version, macros, phase_cycle, applies",
+    [
+        ("v19", "on", PhaseCycleMode.lite, True),
+        ("v19", "off", PhaseCycleMode.lite, False),
+        ("v19", "on", PhaseCycleMode.off, False),
+        ("v18", "on", PhaseCycleMode.lite, False),
+    ],
+)
+def test_the_macro_paragraph_reaches_only_a_phased_run_with_macros_on_a_version_that_has_it(
+    version: str, macros: str, phase_cycle: PhaseCycleMode, applies: bool
+) -> None:
+    """runner 가 싣는 것과 `run_config` 가 hash 하는 것이 같은 조건 하나에서 나온다."""
+    from app.agents.qa.runner import phase_directive_for
+    from app.qa.run_config import macro_memory_directive_applies
+
+    arch = resolve_arch(
+        QaArchSpec(vision=VisionMode.on, phase_cycle=phase_cycle, macros=macros),
+        LLMModel.gpt_6_luna,
+    )
+
+    assert macro_memory_directive_applies(arch, version) is applies
+    assert ("`register_macro` answers UPDATE_MEMORY" in phase_directive_for(arch, version)) is applies
+
+
+# --- REVIEW_DRAFT -------------------------------------------------------------
+
+
+def _into_review_draft(cycle) -> None:
+    """한 step 을 손으로 하고, `draft` 를 내민 판정으로 `REVIEW_DRAFT` 에 앉힌다.
+
+    `refusal_for` → tool 본문 → `advance` 순서는 `tools/__init__.py` 의 gate 와 같다.
+    `expect_draft_review` 는 `report_step` 본문 안의 `_macro_draft` 가 부르는 자리다.
+    """
+    for name in ("observe_scene", "click"):
+        assert cycle.refusal_for(name) is None, name
+        cycle.advance(name)
+    assert cycle.refusal_for("report_step") is None
+    cycle.expect_draft_review()
+    cycle.advance("report_step")
+    assert cycle.phase is RunPhase.review_draft
+
+
+def test_a_verdict_that_offered_a_draft_goes_to_review_draft() -> None:
+    """`draft` 를 내민 step 만 `VERIFY` 와 `UPDATE_MEMORY` 사이에 `REVIEW_DRAFT` 를 둔다."""
+    cycle = _lite()
+    _into_review_draft(cycle)
+    assert cycle.refusals == 0
+
+
+def test_a_verdict_without_a_draft_goes_straight_to_update_memory() -> None:
+    """`draft` 가 없는 step 은 종전과 같은 고리를 돈다. 앞 step 의 `draft` 도 남지 않는다."""
+    cycle = _lite()
+    _into_update_memory(cycle)
+
+    cycle = _lite()
+    _into_review_draft(cycle)
+    cycle.advance("register_macro")
+    cycle.advance("skip_memory_update")
+    # 다음 step 의 판정. 이번에는 `draft` 가 없다.
+    for name in ("observe_scene", "click", "report_step"):
+        assert cycle.refusal_for(name) is None, name
+        cycle.advance(name)
+    assert cycle.phase is RunPhase.update_memory
+
+
+def test_macro_draft_tools_pass_in_review_draft_without_ending_it() -> None:
+    """"`edit_macro` 로 고친 뒤 `register_macro`" 가 되려면 고치는 호출이 이 phase 를 끝내면 안 된다."""
+    cycle = _lite()
+    _into_review_draft(cycle)
+
+    for name in ("read_macro", "edit_macro", "write_macro", "observe_scene", "load_skill"):
+        assert cycle.refusal_for(name) is None, name
+        cycle.advance(name)
+        assert cycle.phase is RunPhase.review_draft, name
+    assert cycle.refusals == 0
+
+
+@pytest.mark.parametrize("answer", ["register_macro", "decline_macro_draft"])
+def test_one_answer_ends_review_draft_into_update_memory(answer: str) -> None:
+    cycle = _lite()
+    _into_review_draft(cycle)
+
+    assert cycle.refusal_for(answer) is None
+    cycle.advance(answer)
+
+    assert cycle.phase is RunPhase.update_memory
+    assert cycle.refusals == 0
+
+
+def test_update_memory_still_needs_its_own_answer_after_review_draft() -> None:
+    """`draft` 에 답한 것은 지식 질문의 답이 아니다. 두 질문을 가른 이유가 그것이다."""
+    cycle = _lite()
+    _into_review_draft(cycle)
+    cycle.advance("register_macro")
+    assert cycle.phase is RunPhase.update_memory
+
+    assert "UPDATE_MEMORY" in cycle.refusal_for("click")
+
+    assert cycle.refusal_for("skip_memory_update") is None
+    cycle.advance("skip_memory_update")
+    assert cycle.refusal_for("click") is None
+
+
+@pytest.mark.parametrize("name", ["skip_memory_update", "record_knowledge", "click", "report_step"])
+def test_other_tools_are_refused_in_review_draft_with_the_two_answers_named(name: str) -> None:
+    """`skip_memory_update` 한 번이 두 질문에 답하던 길을 막는다. 거절문은 답할 tool 을 댄다."""
+    cycle = _lite()
+    _into_review_draft(cycle)
+
+    refusal = cycle.refusal_for(name)
+
+    assert refusal is not None
+    assert "REVIEW_DRAFT ends when you call one of: `decline_macro_draft`, `register_macro`" in refusal
+    assert "`edit_macro` works here" in refusal
+    assert cycle.phase is RunPhase.review_draft
+
+
+def test_review_draft_lets_the_run_through_after_two_refusals() -> None:
+    """이 phase 도 런을 가두지 않는다. 셋째 호출은 통과하고 그 tool 의 phase 로 옮긴다."""
+    cycle = _lite()
+    _into_review_draft(cycle)
+
+    for _ in range(MAX_CONSECUTIVE_REFUSALS):
+        assert cycle.refusal_for("skip_memory_update") is not None
+    assert cycle.refusal_for("skip_memory_update") is None
+    cycle.advance("skip_memory_update")
+
+    assert cycle.forced_passes == 1
+    assert cycle.phase is RunPhase.update_memory
+    assert cycle.refusal_for("click") is None
+
+
+def test_review_draft_names_only_the_answers_this_run_has() -> None:
+    offered = frozenset(
+        {"observe_scene", "click", "report_step", "skip_memory_update", "register_macro"}
+    )
+    cycle = _lite(offered)
+    _into_review_draft(cycle)
+
+    refusal = cycle.refusal_for("skip_memory_update")
+
+    assert "REVIEW_DRAFT ends when you call one of: `register_macro`." in refusal
+    assert "decline_macro_draft" not in refusal
+    assert "edit_macro" not in refusal
+
+
+def test_full_puts_review_draft_between_verify_and_update_memory() -> None:
+    cycle = build_phase_cycle(PhaseCycleMode.full)
+    for name in ("observe_scene", "decide_next_action", "click"):
+        assert cycle.refusal_for(name) is None, name
+        cycle.advance(name)
+    cycle.expect_draft_review()
+    cycle.advance("report_step")
+    assert cycle.phase is RunPhase.review_draft
+
+    assert "REVIEW_DRAFT" in cycle.refusal_for("record_knowledge")
+    cycle.advance("decline_macro_draft")
+    assert cycle.phase is RunPhase.update_memory
+    cycle.advance("record_knowledge")
+    # 다음 step 은 다시 `DECIDE` 를 거친다.
+    cycle.advance("observe_scene")
+    assert cycle.phase is RunPhase.observe
+    assert "DECIDE" in cycle.refusal_for("click")
+
+
+def test_a_verdict_reported_from_update_memory_can_offer_a_draft() -> None:
+    """`UPDATE_MEMORY` 에 앉은 채 다음 step 을 판정해도 `draft` 를 내밀었으면 `REVIEW_DRAFT` 다."""
+    cycle = _lite()
+    _into_update_memory(cycle)
+    cycle.advance("skip_memory_update")
+
+    assert cycle.refusal_for("report_step") is None
+    cycle.expect_draft_review()
+    cycle.advance("report_step")
+
+    assert cycle.phase is RunPhase.review_draft
+
+
+def test_a_held_verdict_leaves_no_draft_expectation_behind() -> None:
+    """받아들여지지 않은 판정의 표시가 다음 판정으로 넘어가면 `draft` 없는 step 이 갇힌다."""
+    cycle = _lite()
+    cycle.advance("click")
+    assert cycle.refusal_for("report_step") is None
+    cycle.expect_draft_review()
+    cycle.hold()
+    cycle.advance("report_step")
+    assert cycle.phase is RunPhase.act
+
+    assert cycle.refusal_for("report_step") is None
+    cycle.advance("report_step")
+    assert cycle.phase is RunPhase.update_memory
+
+
+def test_a_call_that_raised_leaves_no_draft_expectation_behind() -> None:
+    """예외로 끝난 호출은 `advance` 를 안 탄다. 그 표시는 다음 호출의 `refusal_for` 가 지운다."""
+    cycle = _lite()
+    cycle.advance("click")
+    assert cycle.refusal_for("report_step") is None
+    cycle.expect_draft_review()
+    # 본문이 예외로 끝나 `advance("report_step")` 이 없었다.
+
+    assert cycle.refusal_for("report_step") is None
+    cycle.advance("report_step")
+    assert cycle.phase is RunPhase.update_memory
+
+
+def test_declining_with_no_draft_waiting_is_refused_and_never_enters_review_draft() -> None:
+    """`draft` 없이 `REVIEW_DRAFT` 에 앉히면 답할 것이 없는 질문에 갇힌다. 통과만 시킨다."""
+    cycle = _lite()
+    cycle.advance("click")
+
+    refusal = cycle.refusal_for("decline_macro_draft")
+    assert "no macro draft is waiting for an answer" in refusal
+    assert cycle.refusal_for("decline_macro_draft") is not None
+
+    assert cycle.refusal_for("decline_macro_draft") is None
+    cycle.advance("decline_macro_draft")
+    assert cycle.forced_passes == 1
+    assert cycle.phase is RunPhase.act
+    assert cycle.refusal_for("report_step") is None

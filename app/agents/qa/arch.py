@@ -190,7 +190,99 @@ from app.llm.models import LLMModel, get_model_spec
 # default fingerprint moves only because `arch.model_dump()` gained the
 # `skills` and `fold_stale_skills` keys; with `skills=off` the middleware list is
 # unchanged.
-QA_ARCH_LABEL = "v8-skills-on-demand"
+#
+# v9 because the model now has six macro tools — `write_macro`, `edit_macro`,
+# `read_macro`, `register_macro`, `run_macro` and `resume_macro` — and can send a
+# whole sequence of actions in one call instead of one action per turn (ARTEL-914).
+# Six tool schemas appeared, so `arch_fingerprint` moves on its own here. A macro
+# may loop (`for`, `while`, ARTEL-948) and may hand the turn back at a `checkpoint`
+# and carry on through `resume_macro` (ARTEL-949); those landed before any run was
+# filed under this label.
+#
+# The macro grammar does NOT ride on those five descriptions. Each is under the
+# 500-character cap `validate_prompts` enforces, and the grammar and the two
+# worked examples sit in `qa_run/v19/skill_macro.md`, read through `load_skill`
+# when the skills axis is `on_demand` and inlined into the system prompt when it
+# is `off`. So the macro text costs a turn only when the model asks for it, which
+# is the whole point of the axis above.
+#
+# This was `v8-macros` until the branch underneath renumbered itself to
+# `v8-skills-on-demand` (above). No run was filed under `v8-macros`.
+#
+# v10 because a phased run with macros on now makes macros part of UPDATE_MEMORY
+# (ARTEL-914). `register_macro` moved from ACT to UPDATE_MEMORY in the phase table, so
+# registering a macro answers that step the way a knowledge entry does; the three draft
+# tools became always-allowed; and the phase directive of such a run gains a paragraph
+# (`qa_run/v19/macro_memory_directive.md`) asking, at that step, whether the step had a
+# sequence worth saving. None of this moves `arch_fingerprint` — the phase table is not
+# hashed and neither is the directive's text — while runs were already filed under
+# `v9-macros` (the `macro-ab-l1b` and `macro-ab-l1-nudge` measurements, 2026-10-07). The
+# label is the only thing that can tell them apart from runs after this, which is the
+# case the module docstring says the hand-bumped label exists for.
+#
+# v11 because a run with macros on is now handed a macro draft instead of being asked to
+# write one (ARTEL-915, ARTEL-916). Every action tool the agent calls by hand is recorded
+# in order, with its target lifted to a `selector(...)` or a `find(...)` against the pulse
+# memory of that moment, and when a step's verdict is accepted, `report_step`'s answer
+# carries a draft of that step's actions that one `register_macro` call keeps. This came
+# after `v10-macro-memory` (`macro-ab-l1-memory`, 2026-10-08) left B with zero macros in
+# six runs, as `v9-macros` had in twelve. Nothing hashed moves: the tool schemas are
+# unchanged and the draft lives in a tool's answer.
+#
+# v12 because a run with macros on now reads a list of the macros earlier runs registered on
+# this build, once, at the end of the scenario's opening message (ARTEL-934, ARTEL-935).
+# Until then a run could call a registered macro only if it already knew the name, and
+# nothing told it one existed, so what run 1 registered was unreachable by run 2. The list
+# is one line per macro, at most 12 (`MAX_MACROS_IN_FIRST_MESSAGE`), with a note saying how
+# many were cut. It is drawn there rather than under the scene view or at the tail of every
+# call because the opening message is fixed when the run starts, so the prompt prefix does
+# not change on later turns (ARTEL-621). A draft's first comment now names the step it was
+# drafted for, since that comment is the line the next run reads. A run with `macros=off`
+# or a build with no macros reads exactly what it did under v11. Nothing hashed moves: the
+# tool schemas are unchanged and the list is part of a message, not of a tool.
+#
+# v13 because `register_macro` is no longer refused outside UPDATE_MEMORY (`ANY_PHASE` in
+# `tools/phase.py`). Called during UPDATE_MEMORY it still answers that phase; called in any
+# other phase it runs and moves no phase. Under v12, try 62 of `macro-continuity-l1`
+# (2026-10-08) wrote a macro during ACT, had its registration refused, never retried it in
+# UPDATE_MEMORY, and the draft was dropped with the run. The macro paragraph of the phase
+# directive says so in one more sentence. Nothing hashed moves: the phase table is not
+# hashed and neither is the directive's text.
+#
+# v14 because the macro draft and what the agent is asked about it changed (`macro-continuity-l1`,
+# 2026-10-08: 34 drafts offered, 1 registered). A run of key presses that ended in a scene
+# change is drafted as `while scene() == "<scene>":` instead of the exact count, since the
+# action recording now keeps the scene after each call (`DispatchRecord.scene_after`). Drafts
+# are offered only for passed verdicts. The offer states that the scenario runs again and the
+# next run is shown this build's registered macros, and gives three answers — register, fix
+# with `edit_macro` then register, or decline by name — and an offered draft counts as read so
+# `edit_macro` accepts it. `skip_memory_update` refuses once a reason that does not name a
+# pending draft. The macro paragraph says the scenario runs again. Nothing hashed moves: the
+# tool schemas are unchanged.
+#
+# v15 because the macro draft gets a phase of its own, and with it a tool. Under v14 one
+# `skip_memory_update` still answered both "what did this step teach about the game" and "keep
+# this draft", and in v14 try 80 the agent read the draft and the fact that the next run sees
+# registered macros and still declined. A step whose passing verdict offers a draft now goes
+# VERIFY -> REVIEW_DRAFT -> UPDATE_MEMORY; REVIEW_DRAFT is answered by `register_macro` or the
+# new `decline_macro_draft` (name and what replaying it would do wrong), and a refused
+# registration keeps it open. Steps without a draft go VERIFY -> UPDATE_MEMORY as before, and
+# `skip_memory_update` is back to meaning only "no knowledge to write" (v14's one-time
+# refusal is gone). The offer makes registering the default for a passed step and states the
+# cost of not registering in tool calls. `decline_macro_draft` joins the default tool set, so
+# `arch_fingerprint` moves.
+#
+# v16 because a run with macros on is now told that macros are how it operates and the
+# action tools fill in (ARTEL-917, asked for on 2026-10-08). In `macro-continuity-l1-v14`
+# five of six first runs carried macros to their second run, but 6 of the 14 `run_macro`
+# calls in the second runs were refused for coming outside ACT and one second run carried
+# two macros and ran none. The macro paragraph now opens with the order for each step — a
+# registered macro first, then a macro written for any sequence, then hand actions only for
+# single presses, looks and recovery — `report_step`'s answer names the registered macro for
+# the next step, and a `run_macro` refused in UPDATE_MEMORY or REVIEW_DRAFT says to make it
+# the next step's first action. The action tools' descriptions are unchanged because a run
+# with macros off reads them too. Nothing hashed moves.
+QA_ARCH_LABEL = "v16-macro-first"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
@@ -384,6 +476,13 @@ class QaArchSpec(BaseModel):
     # `off` keeps every skill inlined in the system prompt, as before. `on_demand`
     # moves the skills behind the `load_skill` tool, which then joins the tool set.
     skills: Literal["off", "on_demand"] = "off"
+    # The six macro tools and the `macro` skill. `off` is the shape every run had
+    # before macros (ARTEL-926): no macro tool in the list and no `macro` skill in
+    # the prompt or behind `load_skill`, so an A/B on this axis differs by exactly
+    # the macros. Withholding the skill matters as much as withholding the tools —
+    # left in, the Skills section would tell the `off` arm to load something
+    # "before your first `write_macro`", a tool it does not have.
+    macros: Literal["off", "on"] = "on"
     fold_stale_scenes: bool = True
     # Folds the neighbour blocks the search volunteers, and only those (ARTEL-277).
     # Separate from `fold_stale_scenes` because the two are independently useful
@@ -445,6 +544,21 @@ class QaArchSpec(BaseModel):
         return self
 
 
+# The skill that exists only for the macro tools. Named here, beside the axis that
+# decides whether the run has them.
+MACRO_SKILL = "macro"
+
+
+def withheld_skills(arch: "QaArchSpec | ResolvedArch") -> frozenset[str]:
+    """Skill names this structure must not see, though the prompt version has them.
+
+    One place, because three readers list skills — the inlined sections, the Skills
+    section and `load_skill` — and one of them forgetting would leave a line about
+    a tool the run does not have.
+    """
+    return frozenset() if arch.macros == "on" else frozenset({MACRO_SKILL})
+
+
 DEFAULT_ARCH = QaArchSpec()
 
 
@@ -469,6 +583,7 @@ class ResolvedArch(BaseModel):
     screen_capture: ScreenCaptureMode
     phase_cycle: PhaseCycleMode
     skills: Literal["off", "on_demand"]
+    macros: Literal["off", "on"]
     fold_stale_scenes: bool
     fold_stale_knowledge: bool
     fold_stale_skills: bool
