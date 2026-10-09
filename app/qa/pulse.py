@@ -762,7 +762,8 @@ class PulseMemory(BaseModel):
         if hidden_statics:
             names = ", ".join(self._static_name(self.statics[key]) for key in hidden_statics)
             lines.append(
-                f"statics hidden as cosmetic: {names} (inspect_object with the name shows one)"
+                f"statics hidden as cosmetic or singleton: {names} "
+                "(inspect_object with the name shows one)"
             )
 
         objects = sorted(self.held.items())

@@ -70,6 +70,30 @@ def _instructions(sample: MemberSample) -> str:
     )
 
 
+# singleton static 에 매기는 확률. Jev 에 묻지 않고 규칙으로 정하므로 판정의 흔들림이 없다.
+SINGLETON_RELEVANCE = 0.0
+
+
+def settle_singletons(memory: PulseMemory) -> None:
+    """자기 class 타입의 static(`Player._instance : Player`)을 묻지 않고 숨김으로 정한다.
+
+    singleton 참조는 view 의 다른 곳에 이미 있는 것을 다시 말한다. 가리키는 객체와 그 field 는
+    객체 블록에 나오고, `None` 인지 아닌지가 알려 주는 지금 어느 scene 인가는 view 첫 줄에 있다.
+    2026-10-08 L1 log 에서 statics 줄 27,943개 중 17,451개(62%)가 이런 참조 7개였다.
+
+    `TurnBattleSystem.EnemyTurn` 처럼 다른 타입의 상태 객체를 가리키는 static 은 이 규칙에
+    안 걸린다. 그것은 Jev 가 묻는다.
+
+    Jev 에 맡기지 않는 이유: 질문 문장만 바꿔도 `Player._instance` 가 0.79 에서 0.14 로 움직였고,
+    singleton 을 내리는 문장으로 물으면 `InteractionLock.IsLocked` 까지 0.49 로 내려왔다. 반면
+    singleton 인지는 SDK 가 보내는 `type`(field 타입의 `FullName`)과 `declaring` 이 같은지로
+    정확히 안다. `type` 을 안 보내는 SDK 에서는 이 규칙이 아무것도 하지 않고 Jev 가 묻는다.
+    """
+    for key, entry in memory.statics.items():
+        if key not in memory.relevance and entry.type and entry.type == entry.declaring:
+            memory.relevance[key] = SINGLETON_RELEVANCE
+
+
 class PulseRelevanceJudge:
     """`decide` 는 요청 본문을 받아 응답 JSON 을 돌려준다. 검사가 갈아 끼운다."""
 
@@ -135,6 +159,7 @@ class PulseRelevanceJudge:
         """판독이 적용된 직후 부른다. 새 type 이 있고 진행 중인 task 가 없으면 하나 시작한다."""
         try:
             self._memory = memory
+            settle_singletons(memory)
             if self._task is not None and not self._task.done():
                 return
             if not self.samples(memory):

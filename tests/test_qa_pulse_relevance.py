@@ -275,3 +275,55 @@ def test_static_도_type_key_로_판정한다():
     (question,) = fake.bodies[0]["questions"].values()
     assert question["instructions"].startswith("Is the static field InteractionLock.IsLocked")
     assert memory.relevance == {"Ui.InteractionLock::IsLocked": 0.65}
+
+
+def _static_memory(*statics: dict) -> PulseMemory:
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate({
+        "schema": 2, "reading": 1, "frame": 1, "whole": True, "scene": "TurnBattleScene",
+        "statics": list(statics),
+    }))
+    return memory
+
+
+def test_자기_class_타입의_static_은_묻지_않고_singleton_으로_숨긴다():
+    memory = _static_memory(
+        {"declaring": "Game.Player", "member": "_instance", "type": "Game.Player", "value": None},
+        {"declaring": "Ui.InteractionLock", "member": "IsLocked", "type": "System.Boolean",
+         "value": False},
+    )
+    fake = _Fake(probability=0.65)
+    judge = PulseRelevanceJudge(decide=fake)
+
+    async def scenario():
+        judge.notice(memory)
+        await judge.drain()
+
+    _run(scenario())
+    asked = [q["instructions"] for body in fake.bodies for q in body["questions"].values()]
+    assert len(asked) == 1 and "InteractionLock.IsLocked" in asked[0]
+    assert memory.relevance["Game.Player::_instance"] == rel.SINGLETON_RELEVANCE
+    view = memory.render(since=0)
+    assert "statics hidden as cosmetic or singleton: Player._instance" in view
+    assert "  InteractionLock.IsLocked = False" in view
+
+
+def test_다른_타입을_가리키는_static_과_type_이_없는_static_은_Jev_가_묻는다():
+    memory = _static_memory(
+        {"declaring": "Battle.TurnBattleSystem", "member": "EnemyTurn",
+         "type": "Battle.Turns.EnemyTurn", "value": None},
+        {"declaring": "Game.Player", "member": "_instance", "value": None},
+    )
+    fake = _Fake(probability=0.9)
+    judge = PulseRelevanceJudge(decide=fake)
+
+    async def scenario():
+        judge.notice(memory)
+        await judge.drain()
+
+    _run(scenario())
+    assert len(fake.bodies[0]["questions"]) == 2
+    assert memory.relevance == {
+        "Battle.TurnBattleSystem::EnemyTurn": 0.9,
+        "Game.Player::_instance": 0.9,
+    }

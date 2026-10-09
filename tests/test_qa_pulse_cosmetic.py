@@ -273,7 +273,7 @@ def test_cosmetic_static_은_statics_절에서_빠지고_이름이_남는다():
 
     assert "  InteractionLock.IsLocked = True" in view
     assert "  ElementalStatusVfx.frames" not in view
-    assert "statics hidden as cosmetic: ElementalStatusVfx.frames" in view
+    assert "statics hidden as cosmetic or singleton: ElementalStatusVfx.frames" in view
 
 
 def test_static_이_전부_cosmetic_이면_statics_머리줄을_안_쓴다():
@@ -281,7 +281,7 @@ def test_static_이_전부_cosmetic_이면_statics_머리줄을_안_쓴다():
     view = memory.render(since=0)
 
     assert "statics:" not in view
-    assert "statics hidden as cosmetic: ElementalStatusVfx.frames" in view
+    assert "statics hidden as cosmetic or singleton: ElementalStatusVfx.frames" in view
 
 
 def test_inspect_object_는_숨긴_static_을_이름으로_찾는다():
