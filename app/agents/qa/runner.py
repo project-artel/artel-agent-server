@@ -33,6 +33,7 @@ from app.llm.models import LLMModel, get_model_spec
 from app.prompts import load_prompt, load_skill, skill_descriptions, skill_names
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory
+from app.qa.relevance import PulseRelevanceJudge
 from app.qa.schemas import QaScenario, QaStep
 from app.qa.run_config import (
     COMPACTION_PROMPT_AGENT,
@@ -793,6 +794,12 @@ class QaRunner:
             step_texts=[step.action for step in scenario.steps],
         )
         deadline = self._config.arch.deadline_seconds
+        # `pulse_relevance` 가 켜진 run 만 판정기를 단다(ARTEL-958). 이미 도착한 reading 이
+        # 있을 수 있어서 한 번 바로 부른다 — 다음 reading 까지 기다리면 첫 화면이 판정 없이
+        # 지나간다. 여기서 다는 것은 아래 `finally` 가 run 이 어떻게 끝나든 닫게 하려는 것이다.
+        if self._config.arch.pulse_relevance:
+            channel.pulse_relevance = PulseRelevanceJudge()
+            channel.pulse_relevance.notice(channel.scene.pulse)
         try:
             await asyncio.wait_for(self.run(channel, scenario, state), timeout=deadline)
         except asyncio.TimeoutError:
@@ -807,6 +814,10 @@ class QaRunner:
             if state.paused_macro is not None:
                 state.paused_macro.cancel()
                 state.paused_macro = None
+            judge = channel.pulse_relevance
+            if judge is not None:
+                channel.pulse_relevance = None
+                await judge.aclose()
         if not state.finished:
             return state, "The agent stopped without closing the run."
         return state, None

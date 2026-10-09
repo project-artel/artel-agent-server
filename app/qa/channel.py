@@ -10,7 +10,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.qa.envelope import (
     ActionPayload,
@@ -44,6 +44,9 @@ from app.qa.envelope import (
 )
 from app.qa.pulse import PulseReading
 from app.qa.scene import SceneMemory
+
+if TYPE_CHECKING:
+    from app.qa.relevance import PulseRelevanceJudge
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +200,9 @@ class QaRunChannel:
         # 타임아웃과 취소 규칙이 붙지만, 이쪽은 기억해 두었다가 꺼내 쓰는 것이 전부다.
         self._tool_frames: dict[str, str] = {}
         self.scene = SceneMemory()
+        # `pulse_relevance` 가 켜진 run 에서만 runner 가 채운다(ARTEL-958). 비어 있으면
+        # `PulseMemory.relevance` 도 비고, `pulse` view 는 아무것도 숨기지 않는다.
+        self.pulse_relevance: "PulseRelevanceJudge | None" = None
         self.cancelled = False
         # Operator messages that arrived since the agent last looked. Delivered
         # by appending to the next tool result rather than interrupting the graph:
@@ -696,6 +702,10 @@ class QaRunChannel:
         아니라 게임이 도는 동안 계속 도착하는 관측이고, 도구가 그것을 기다리지 않는다.
         """
         self.scene.pulse.apply(PulseReading.model_validate(raw.get("payload") or {}))
+        # 새 member 타입이 왔으면 판정을 띄운다. 기다리지 않는다 — 판정이 도착하기 전의 view 는
+        # 아무것도 숨기지 않으므로, 늦어도 잃는 것은 줄 몇 개다.
+        if self.pulse_relevance is not None:
+            self.pulse_relevance.notice(self.scene.pulse)
         # 액션 뒤에 다음 배치를 기다리는 쪽을 깨운다(ARTEL-516).
         self._reading_arrived.set()
 

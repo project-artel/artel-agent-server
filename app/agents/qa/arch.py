@@ -314,6 +314,14 @@ from app.llm.models import LLMModel, get_model_spec
 # `ActionOutcome`'s data, not its text. The macro host now calls `act(screen=False)`: each
 # action's line keeps its outcome and any operator message, and the one view drawn when the
 # macro stops or ends covers every reading since the last answer. Nothing hashed moves.
+#
+# `pulse_relevance` (ARTEL-958) opened as an axis without moving this label, on
+# the `screen_capture` argument above. At its default `False` the tool set, the
+# tool schemas, the middleware list and every other knob are where they were, and
+# the view is byte-identical because `PulseMemory.relevance` stays empty — a test
+# in `tests/test_qa_pulse_cosmetic.py` holds that. At `True` the view moves, which
+# the fingerprint cannot see, so each arm carries its own label in
+# `benchmarks/wordventure/arch/pulse-relevance-*.json`.
 QA_ARCH_LABEL = "v18-macro-one-view"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
@@ -526,6 +534,15 @@ class QaArchSpec(BaseModel):
     # nothing loaded to fold. Separate from the two folds above because what it
     # folds is recovered by a third tool, `load_skill`.
     fold_stale_skills: bool = True
+    # `pulse` view 에서 cosmetic member 를 숨긴다(ARTEL-958). 켜면 run 이 member 타입마다
+    # Jev decision model 에 gameplay state 인지 묻고(`app/qa/relevance.py`), 확실히 아니라고
+    # 답한 member 를 `PulseMemory.render` 가 빼고 개수만 적는다.
+    #
+    # 기본값이 `False` 인 이유: 끄면 `PulseMemory.relevance` 가 비고, 그때 뷰는 이 axis 가
+    # 생기기 전과 byte 단위로 같다. 그래서 기본 run 의 모양이 안 움직이고 `QA_ARCH_LABEL` 도
+    # 그대로다 — `screen_capture` 와 같은 경우다. 두 arm 의 label 은 workspace 의
+    # `benchmarks/wordventure/arch/pulse-relevance-*.json` 이 붙인다.
+    pulse_relevance: bool = False
     # Compaction rewrites what the model reads once a run grows past a fraction of
     # its context, so a run with it and a run without it are two agents even with
     # the same tools. `None` defers to the deployment's own setting, which is what
@@ -619,6 +636,7 @@ class ResolvedArch(BaseModel):
     fold_stale_scenes: bool
     fold_stale_knowledge: bool
     fold_stale_skills: bool
+    pulse_relevance: bool
     compaction: bool
     compaction_trigger_fraction: float
     compaction_keep_messages: int
