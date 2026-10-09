@@ -107,6 +107,12 @@ def test_pulse_relevance_is_off_by_default_and_moves_the_fingerprint() -> None:
     assert structure_of(resolved())[2] != structure_of(resolved(pulse_relevance=True))[2]
 
 
+def test_report_step_view_is_on_by_default_and_moves_the_fingerprint() -> None:
+    """The two arms of ARTEL-960 have to hash apart, for the same reason as `pulse_relevance`."""
+    assert DEFAULT_ARCH.report_step_view is True
+    assert structure_of(resolved())[2] != structure_of(resolved(report_step_view=False))[2]
+
+
 def test_the_fingerprint_ignores_the_model_and_the_prompt() -> None:
     """The axes are independent, and a digest that moved with all of them could
     not group "the same structure under two models" — the comparison this exists
@@ -619,7 +625,10 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 # And once more, from `450105a42315`, when `pulse_relevance` (ARTEL-958) joined
 # `QaArchSpec` at `False`. At `False` the default run's tools, middleware and view
 # are where they were, so the label stays.
-_EXPECTED_DEFAULT_FINGERPRINT = "6f4035a1242e"
+#
+# And from `6f4035a1242e`, when `report_step_view` (ARTEL-960) joined at `True`.
+# At `True` every tool answer is what it was, so the label stays.
+_EXPECTED_DEFAULT_FINGERPRINT = "24e30f3191d9"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
