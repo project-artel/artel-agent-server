@@ -336,10 +336,15 @@ from app.llm.models import LLMModel, get_model_spec
 # 72-90% of the input that was not read from cache, and the skill fold, outside the pulse
 # batch, cost on average about 28,000 tokens each of the 6 times it ran. `fold_context` now
 # scores every stale block by its length (a picture as 4,000 chars), and once the blocks not yet
-# folded add up to `DEFAULT_FOLD_THRESHOLD_CHARS` (56,000, about the 8 views the old batch
-# waited for) it folds all of them at once; the run keeps the keys it folded so later calls
-# send the same prefix. The middleware list changes, so the fingerprint moves. The threshold is
-# `QaArchSpec.fold_threshold_chars`, so a run can ask for another one without a new label.
+# folded add up to a threshold it folds all of them at once; the run keeps the keys it folded
+# so later calls send the same prefix. The middleware list changes, so the fingerprint moves.
+# Merging alone did not change the bill: at a 56,000-char threshold (about the 8 views the old
+# batch waited for) an L1 A/B came out even on Luna (tries 197-202) and on Sol (tries 203-208),
+# because the batch still fired as often as the old pulse batch plus the skill folds. How often
+# it fires is what costs, so the threshold is `QaArchSpec.fold_threshold_chars`, and its default
+# `DEFAULT_FOLD_THRESHOLD_CHARS` is 112,000, picked by a Sol sweep (tries 209-220): 18% cheaper
+# runs than 56,000 at the same accuracy, and 98k-224k all within 3% per call. The numbers are
+# above that constant.
 QA_ARCH_LABEL = "v19-fold-in-one-batch"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
@@ -349,11 +354,20 @@ _FINGERPRINT_SCHEME = 1
 # `fold` 하지 않은 후보의 점수 합계가 이 값에 이르면 그 호출에서 전부 `fold` 한다. 점수는 후보가
 # 차지하는 글자 수다. 기본값이고, 런마다 `QaArchSpec.fold_threshold_chars` 로 바꿀 수 있다.
 #
-# 56,000 은 종전 batch 의 크기에 맞춘 값이다. 종전에는 전문 view 가 8개를 넘을 때 `fold` 했고, L1
-# 런 실측으로 view 한 개가 평균 약 7,000자이므로 오래된 view 약 8개, 56,000자가 쌓일 때마다
-# `cache` 를 한 번 다시 썼다. 같은 값으로 두어야 이 변경을 측정한 결과에서 "네 종류를 한 번에
-# 모았다" 는 효과만 따로 읽힌다.
-DEFAULT_FOLD_THRESHOLD_CHARS = 56_000
+# 112,000 은 L1 실측으로 고른 값이다. Sol 로 기준값마다 3번 돌린 결과(try 209–217, 2026-10-10):
+#
+#   기준값   다시 쓴 횟수   호출당 입력 token   run 비용   호출당 비용   일치 /24
+#   56k      12            약 37,000          $1.759     $0.01302     21
+#   112k     5             약 44,600          $1.436     $0.01094     21.3
+#   224k     2             약 56,800          $1.400     $0.01128     21
+#
+# 이어서 1번씩 돌린 점(try 218–220)은 98k $0.01129, 140k $0.01109, 182k $0.01129 였다.
+#
+# 기준값을 올리면 prompt 를 다시 쓰는 횟수는 줄지만, 오래된 block 이 남아 호출마다 `cache` 에서 읽는
+# 양이 는다. 56k 는 분명히 비싸다. 98k–224k 의 다섯 점은 호출당 비용이 3% 안에 모여 있고, 112k 의
+# 3번 사이 편차(7%)보다 작아 서로 구분되지 않는다. 그 안에서 3번 확인된 점이 112k 이고, 호출당 입력이
+# 224k 보다 27% 작아 오래된 block 을 덜 오래 모델 앞에 둔다.
+DEFAULT_FOLD_THRESHOLD_CHARS = 112_000
 
 # The fixed part of the tool-call budget: the opening observation, `finish_run`,
 # and the headroom between them. The per-run allowances are added on top of it
