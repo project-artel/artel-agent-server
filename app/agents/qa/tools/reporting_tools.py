@@ -312,11 +312,10 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             # 무엇을 남길지 묻는 자리이자 이유는 `render_closing_asks` 가 들고 있다. 여기서
             # 말하는 것은 그 자리가 여기라는 것뿐이다 — 매 스텝마다 붙이면 표가 뜻을 잃고,
             # `finish_run` 은 이미 닫는 쪽으로 기운 뒤다.
-            return _answer(
+            return _verdict_answer(
                 "Recorded. This step report does not close the run. That was the "
                 "last step — when you are done with the follow-up work below, "
-                f"call `finish_run` yourself:{render_closing_asks(state)}{note}",
-                channel.drain_operator_messages(),
+                f"call `finish_run` yourself:{render_closing_asks(state)}{note}"
             )
         # The verdict is recorded either way; what differs is the pull to keep
         # going. A failure is where the loop is most tempted to call it a day, so
@@ -324,7 +323,21 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         body = f"Recorded. {remaining} step(s) left — continue with step {step + 1}."
         if not passed:
             body = f"{body} A failed step is not a reason to stop."
-        return _answer(f"{body}{note}{_next_step_macro(step + 1)}", channel.drain_operator_messages())
+        return _verdict_answer(f"{body}{note}{_next_step_macro(step + 1)}")
+
+    def _verdict_answer(body: str) -> str:
+        """`report_step` 의 답. `report_step_view` 가 꺼져 있으면 view 대신 한 줄을 붙인다(ARTEL-960).
+
+        `report_step` 은 게임을 조작하지 않고 답은 판정 뒤에 온다. 여기 실리는 view 는 그
+        판정에 쓰일 수 없고, 그 사이 움직인 것은 다음 action 결과가 이어서 싣는다.
+        """
+        messages = channel.drain_operator_messages()
+        if arch.report_step_view:
+            return _answer(body, messages)
+        deferred = channel.scene.pulse.defer_view()
+        if deferred:
+            body = f"{body}\n\n{deferred}"
+        return _answer(body, messages, screen=False)
 
     # 두 모양을 `if` 로 가른다. 인자 하나를 `None` 기본값으로 늘 달아 두는 길도 있지만, 그러면
     # `off` 런의 tool schema 가 움직이고 `arch_fingerprint` 가 그것을 tool 의 `args` 로 잡는다

@@ -322,6 +322,10 @@ from app.llm.models import LLMModel, get_model_spec
 # in `tests/test_qa_pulse_cosmetic.py` holds that. At `True` the view moves, which
 # the fingerprint cannot see, so each arm carries its own label in
 # `benchmarks/wordventure/arch/pulse-relevance-*.json`.
+#
+# `report_step_view` (ARTEL-960) opened the same way. At its default `True` every
+# tool answer is what it was; at `False` only `report_step`'s answer loses its view,
+# which the fingerprint cannot see, so its arms carry their own labels too.
 QA_ARCH_LABEL = "v18-macro-one-view"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
@@ -543,6 +547,18 @@ class QaArchSpec(BaseModel):
     # 그대로다 — `screen_capture` 와 같은 경우다. 두 arm 의 label 은 workspace 의
     # `benchmarks/wordventure/arch/pulse-relevance-*.json` 이 붙인다.
     pulse_relevance: bool = False
+    # `report_step` 결과에 `pulse` view 를 붙일지(ARTEL-960). 끄면 view 대신 "값이 몇 개
+    # 움직였다" 한 줄만 붙는다.
+    #
+    # `report_step` 은 게임을 조작하지 않고, 결과는 판정이 끝난 뒤에 돌아온다. 그래서 거기
+    # 실린 view 는 그 판정에 쓰일 수 없고, 담기는 것은 agent 가 생각하는 동안 일어난 변화다.
+    # 2026-10-09 L1 run 에서 전체 `pulse` view 의 37–42% 가 이 자리에 실렸다. 그 사이 움직인
+    # member 값은 다음 action 결과가 `(changed earlier)` 로 싣고(ARTEL-662), 사라지거나 꺼진
+    # 객체는 `PulseMemory.defer_view` 가 다음 view 로 넘긴다.
+    #
+    # 기본값이 `True` 인 이유는 `pulse_relevance` 와 같다. 기본 run 의 view 가 그대로라
+    # `QA_ARCH_LABEL` 이 안 움직인다.
+    report_step_view: bool = True
     # Compaction rewrites what the model reads once a run grows past a fraction of
     # its context, so a run with it and a run without it are two agents even with
     # the same tools. `None` defers to the deployment's own setting, which is what
@@ -637,6 +653,7 @@ class ResolvedArch(BaseModel):
     fold_stale_knowledge: bool
     fold_stale_skills: bool
     pulse_relevance: bool
+    report_step_view: bool
     compaction: bool
     compaction_trigger_fraction: float
     compaction_keep_messages: int

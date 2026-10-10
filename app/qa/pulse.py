@@ -379,6 +379,13 @@ class PulseMemory(BaseModel):
     # member type key (`PulseMember.type_key`) -> 게임 상태일 확률. 판정하는 쪽이 쓴다.
     # 키가 없으면 아직 판정하지 않은 것이다.
     relevance: dict[str, float] = Field(default_factory=dict)
+    # view 를 그리지 않고 넘긴 tool 결과가 있었을 때, 그 직전에 마지막으로 그린 `reading`
+    # 번호(ARTEL-960). 다음 view 의 `gone`·`switched off` 줄은 action window 가 아니라 이
+    # 자리부터 말한다. 그 줄들은 window 를 타서 한 번 말하고 마는데, 넘긴 자리의 소식은
+    # 아무 window 에도 안 들어가 영영 말해지지 않기 때문이다.
+    #
+    # `None` 이면 넘긴 적이 없다. 기본 run 은 늘 `None` 이라 view 가 그대로다.
+    deferred_since: int | None = None
 
     def is_cosmetic(self, type_key: str | None) -> bool:
         """판정이 있고 그 확률이 `COSMETIC_BELOW` 미만일 때만 True. 판정이 없으면 보인다."""
@@ -595,8 +602,11 @@ class PulseMemory(BaseModel):
         marking = news_since is not None and news_since != since
         if news_since is None:
             news_since = since
+        # 넘긴 view 가 있었으면 사라짐과 꺼짐은 그 자리부터 말한다(ARTEL-960).
+        news_floor = since if self.deferred_since is None else min(since, self.deferred_since)
         if advance:
             self.drawn = self.clock()
+            self.deferred_since = None
 
         hidden_values = 0
         hidden_objects = 0
@@ -651,7 +661,7 @@ class PulseMemory(BaseModel):
         # 자리는 판독 로그 다음, 화면 앞이다 — 무엇이 없어졌는지가 지금 화면을 읽는 전제다.
         # 문구는 GAME_STATE 갈래(`scene.py` 의 `missing`)와 같은 것을 쓴다. 두 채널이 같은
         # 것을 다르게 말하면 읽는 쪽이 둘을 다른 사실로 읽는다.
-        gone = [key for key, at in self.gone_at.items() if at > since]
+        gone = [key for key, at in self.gone_at.items() if at > news_floor]
         if gone:
             lines.append(f"gone from the scene: {self._roll(gone)}")
 
@@ -661,7 +671,7 @@ class PulseMemory(BaseModel):
         #
         # `gone` 과 다른 말이다. 꺼진 것은 다시 켜지면 `pulse` 가 `active` 통에 넣어 보내므로
         # 저절로 돌아온다 — 그래서 "없어졌다" 가 아니라 "지금은 꺼져 있다" 다.
-        off = [key for key, at in self.off_at.items() if at > since]
+        off = [key for key, at in self.off_at.items() if at > news_floor]
         if off:
             lines.append(f"switched off: {self._roll(off)}")
 
@@ -958,6 +968,40 @@ class PulseMemory(BaseModel):
             return self.render(since=0, news_since=self.drawn)
 
         return self.render(since=self.after_frame(frame))
+
+    def defer_view(self) -> str | None:
+        """view 대신 붙일 한 줄. view 를 그리지 않는 tool 결과가 부른다(ARTEL-960).
+
+        `drawn` 을 옮기지 않는다. 그래서 그 사이 움직인 member 값은 다음 view 에서 아직 말하지
+        않은 값(`owed`)으로 `(changed earlier)` 표를 달고 나온다. `gone`·`switched off` 는
+        `owed` 같은 장부가 없어서 `deferred_since` 로 다음 view 에 넘긴다.
+
+        `None` 은 reading 이 아직 없다는 뜻이다. 그때 붙일 말이 없다.
+        """
+        if not self.seen:
+            return None
+        if self.deferred_since is None:
+            self.deferred_since = self.drawn
+        since = self.deferred_since
+        # 전량 reading 은 감시 중인 전부를 `changed` 에 담으므로 움직임으로 세지 않는다.
+        moved = sum(
+            entry.moved - entry.cosmetic
+            for entry in self.log
+            if (entry.reading or 0) > since and not entry.whole
+        )
+        gone = sum(1 for at in self.gone_at.values() if at > since)
+        off = sum(1 for at in self.off_at.values() if at > since)
+        news = [f"{moved} values moved"]
+        if gone:
+            news.append(f"{gone} objects gone")
+        if off:
+            news.append(f"{off} switched off")
+        if self.page_due:
+            news.append("the scene changed")
+        return (
+            f"pulse: {', '.join(news)} since the last view. Not drawn here; your next "
+            "action's result carries them, and observe_scene shows them now."
+        )
 
     def redraw_all_values_next(self) -> None:
         """다음 `pulse` view 가 가진 값을 전부 다시 그리게 한다. `fold` 직후에 runner 가 부른다.
