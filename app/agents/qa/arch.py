@@ -326,7 +326,20 @@ from app.llm.models import LLMModel, get_model_spec
 # `report_step_view` (ARTEL-960) opened the same way. At its default `True` every
 # tool answer is what it was; at `False` only `report_step`'s answer loses its view,
 # which the fingerprint cannot see, so its arms carry their own labels too.
-QA_ARCH_LABEL = "v18-macro-one-view"
+#
+# v19 because the four folds now run as one middleware and fold in one batch (asked for on
+# 2026-10-09). The scene view, knowledge neighbour and skill folds were three middleware, and
+# `capture_vision` trimmed old `on_demand` screenshots on its own; each rewrote the middle of
+# the prompt at its own moment, so each paid for its own cache miss. Measured from the
+# LangSmith traces of L1 tries 178-183 (v18 and the uncommitted 16-view variant): with no fold
+# the next call read all but about 300 tokens of the previous prompt from cache, folds caused
+# 72-90% of the input that was not read from cache, and the skill fold, outside the pulse
+# batch, cost on average about 28,000 tokens each of the 6 times it ran. `fold_context` now
+# scores every stale block by its length (a picture as 4,000 chars), and once the blocks not yet
+# folded add up to `DEFAULT_FOLD_THRESHOLD_CHARS` (56,000, about the 8 views the old batch
+# waited for) it folds all of them at once; the run keeps the keys it folded so later calls
+# send the same prefix. The middleware list changes, so the fingerprint moves.
+QA_ARCH_LABEL = "v19-fold-in-one-batch"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

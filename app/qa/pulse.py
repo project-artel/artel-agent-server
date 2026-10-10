@@ -945,8 +945,8 @@ class PulseMemory(BaseModel):
         """행위 하나가 무엇을 남겼나. 씬이 바뀌었으면 전량 한 페이지로.
 
         도구 결과에 실리는 것이 이것이다. 도구 결과는 대화에 남지만, 여기 그린 것이 끝까지
-        모델 앞에 남지는 않는다 — 전문 view 가 `DEFAULT_MAX_FULL_VIEWS`(8) 개를 넘으면
-        `fold_stale_scenes`(`app/agents/qa/context.py`)가 가장 새것만 빼고 한 줄짜리
+        모델 앞에 남지는 않는다 — 오래된 block 이 `DEFAULT_FOLD_THRESHOLD_CHARS` 만큼 쌓이면
+        `fold_context`(`app/agents/qa/context.py`)가 가장 새것만 빼고 한 줄짜리
         `placeholder` 로 바꾼다.
 
         **매 턴 교체되는 꼬리를 대신한다.** 종전에는 `render_now()` 를 모델 호출 맨 뒤에
@@ -1007,7 +1007,7 @@ class PulseMemory(BaseModel):
         """다음 `pulse` view 가 가진 값을 전부 다시 그리게 한다. `fold` 직후에 runner 가 부른다.
 
         `pulse` view 는 한 번 말한 값을 움직이기 전까지 다시 안 말한다(`_HeldObject.shown`,
-        ARTEL-662). 앞의 view 가 모델 앞에 남아 있을 때만 맞는 거래다. `fold_stale_scenes`
+        ARTEL-662). 앞의 view 가 모델 앞에 남아 있을 때만 맞는 거래다. `fold_context`
         가 지난 view 를 `placeholder` 로 바꾸면 거기서 한 번 말하고 가만히 있던 값 — 적의 HP, 손에
         든 카드 — 이 모델 앞 어디에도 없게 된다.
 

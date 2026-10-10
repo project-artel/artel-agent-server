@@ -233,7 +233,7 @@ def test_the_size_trigger_fires_on_the_run_model_s_budget() -> None:
 
 
 def test_the_threshold_is_measured_on_the_folded_conversation() -> None:
-    """`fold_stale_scenes` rewrites the request, not the graph's own messages, so
+    """`fold_context` rewrites the request, not the graph's own messages, so
     counting what is stored would measure a conversation that is never sent — and
     keep measuring it as bigger every turn while the real size stays flat."""
     # Long enough that folding all but the newest view is the difference between

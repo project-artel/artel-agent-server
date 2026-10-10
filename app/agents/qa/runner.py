@@ -20,10 +20,9 @@ from app.agents.qa.compaction import QaCompactionMiddleware
 from app.agents.qa.context import (
     FOLDED_PULSE_VIEW_PREFIX,
     FOLDED_VIEW_PREFIX,
+    FoldKind,
     count_full_views,
-    fold_scenes,
-    fold_stale_knowledge,
-    fold_stale_skills,
+    fold_context,
 )
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.agents.qa.tools import QaRunState, build_tools
@@ -257,6 +256,27 @@ def _plan(scenario: QaScenario) -> str:
         f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
         "Begin. Observe the screen first."
     )
+def fold_kinds_for(arch: ResolvedArch) -> frozenset[FoldKind]:
+    """Which kinds of stale block this structure folds out of what the model reads.
+
+    Scene views pile up whether or not the model can see. Skills only when the run
+    loads them: with `skills=off` every skill is in the system prompt and no tool
+    result carries one. Images only when the run can see; only an `on_demand`
+    capture stays in the conversation, so in the automatic modes there is never one
+    to fold.
+    """
+    kinds = set()
+    if arch.fold_stale_scenes:
+        kinds.add(FoldKind.scene_view)
+    if arch.fold_stale_knowledge:
+        kinds.add(FoldKind.knowledge_neighbours)
+    if arch.skills == "on_demand" and arch.fold_stale_skills:
+        kinds.add(FoldKind.skill)
+    if arch.vision:
+        kinds.add(FoldKind.image)
+    return frozenset(kinds)
+
+
 def middleware_names_for(arch: ResolvedArch) -> tuple[str, ...]:
     """Which middleware this structure wraps its model calls in, in order.
 
@@ -271,23 +291,16 @@ def middleware_names_for(arch: ResolvedArch) -> tuple[str, ...]:
     Order only sequences middleware sharing a hook.
     """
     names = ["compaction"] if arch.compaction else []
-    # Folding runs on every request; the scene views pile up whether or not the
-    # model can see.
-    if arch.fold_stale_scenes:
-        names.append("fold_scene_views")
-    # A separate middleware rather than one more job inside the fold above. The
-    # two have to be switchable independently — they are experiment axes, and the
-    # fingerprint hashes this list's order — and what they fold is recovered by
-    # different tools out of different budgets.
-    if arch.fold_stale_knowledge:
-        names.append("fold_knowledge_neighbours")
-    # Only when the run loads its skills. With `skills=off` every skill is in the
-    # system prompt, no tool result carries one, and a middleware with nothing to
-    # fold would still move the fingerprint.
-    if arch.skills == "on_demand" and arch.fold_stale_skills:
-        names.append("fold_stale_skills")
+    # 네 종류의 `fold` 를 middleware 하나가 한 번에 한다(`fold_context`). 따로 두면 각자 제 시점에
+    # 프롬프트 중간을 고쳐 써서 `cache` 손실을 종류 수만큼 따로 낸다. 종류마다 켜고 끄는 것은
+    # 여전히 실험 축이라 `fold_kinds_for` 가 `arch` 에서 읽는다.
+    #
+    # `capture_vision` 보다 앞(바깥)이어야 한다. 그래야 대화에 저장된 `on_demand` 그림은 보고,
+    # 자동 모드가 이 호출에만 붙이는 그림은 보지 않는다.
+    if fold_kinds_for(arch):
+        names.append("fold_context")
     # Only when the run can see. On a text-only run it would have nothing to
-    # inject and nothing to trim.
+    # inject.
     if arch.vision:
         names.append("capture_vision")
     # 여기에 라이브 씬을 붙이던 자리다. 뺐다 — 매 모델 호출 맨 뒤에 붙었다 사라지는 메시지가
@@ -329,63 +342,38 @@ def build_middleware(
             trim_tokens=arch.compaction_trim_tokens,
             on_compacted=on_compacted,
         ),
-        "fold_scene_views": lambda: _fold_scene_views_for(state, channel),
-        "fold_knowledge_neighbours": lambda: _fold_knowledge_neighbours,
-        "fold_stale_skills": lambda: _fold_skills,
+        "fold_context": lambda: _fold_context_for(fold_kinds_for(arch), state, channel),
         "capture_vision": lambda: QaCaptureVisionMiddleware(state, channel, arch),
         "log_token_usage": lambda: _log_token_usage,
     }
     return [builders[name]() for name in middleware_names_for(arch)]
 
 
-def _fold_scene_views_for(state: QaRunState, channel: QaRunChannel):
-    """Fold stale scene and `pulse` views out of what one model call actually receives.
+def _fold_context_for(kinds: frozenset[FoldKind], state: QaRunState, channel: QaRunChannel):
+    """Fold stale blocks out of what one model call actually receives, in batches.
 
     `request.override` replaces only this call's messages, not the graph's own
     state, so the timeline and the console logging below keep the full text —
     see `app/agents/qa/context.py` for the fold itself.
 
-    런마다 만든다. `fold` 가 새 batch 를 지웠는지 알려면 지난 호출에서 몇 개를 `fold` 했는지
-    (`state.views_folded`)와 비교해야 하고, 알았으면 그 런의 `PulseMemory` 에 말해야 한다.
+    런마다 만든다. 지난 호출까지 `fold` 한 block 을 `state.folded_blocks` 에 두었다가 이번 호출에
+    다시 `fold` 해야 프롬프트 앞이 그대로이고, 새 batch 에 view 가 들었으면 그 런의
+    `PulseMemory` 에 말해야 한다.
     """
 
-    @wrap_model_call(name="_fold_scene_views")
-    async def fold_scene_views(request, handler):
-        fold = fold_scenes(request.messages)
-        # 새 batch 가 `fold` 됐다. 지금 모델이 받는 것은 가장 새 view 하나와 `placeholder` 뿐이고, 그
-        # view 는 델타라 지워진 view 에서 한 번 말하고 가만히 있던 값이 어디에도 없다. 그래서
+    @wrap_model_call(name="_fold_context")
+    async def fold_context_middleware(request, handler):
+        fold = fold_context(request.messages, kinds, state.folded_blocks)
+        # 새 batch 에 view 가 들었다. 지금 모델이 받는 것은 가장 새 view 하나와 `placeholder` 뿐이고,
+        # 그 view 는 델타라 지워진 view 에서 한 번 말하고 가만히 있던 값이 어디에도 없다. 그래서
         # 다음 도구 결과의 `pulse` view 가 가진 값을 전부 다시 그리게 한다. 이 호출 한 번은 그
         # 값 없이 판단하고, 그 다음 도구 결과부터 돌아온다.
-        #
-        # 같아질 때도 기록한다. 압축이 옛 메시지를 요약으로 바꾸면 이 수가 줄고, 다음 batch 가
-        # 다시 커질 때 그것도 새 `fold` 로 세야 한다.
-        if fold.views_folded > state.views_folded:
+        if FoldKind.scene_view in fold.newly_folded_kinds:
             channel.scene.pulse.redraw_all_values_next()
-        state.views_folded = fold.views_folded
+        state.folded_blocks = fold.folded_keys
         return await handler(request.override(messages=fold.messages))
 
-    return fold_scene_views
-
-
-@wrap_model_call
-async def _fold_knowledge_neighbours(request, handler):
-    """Fold volunteered neighbour blocks out of what one model call receives.
-
-    Model-input only, like the scene fold above. Only the neighbour lines go —
-    the hits themselves stay, because re-reading one costs a search and the run
-    only has six. See `app/agents/qa/context.py`.
-    """
-    return await handler(request.override(messages=fold_stale_knowledge(request.messages)))
-
-
-@wrap_model_call
-async def _fold_skills(request, handler):
-    """Fold every loaded skill but the newest out of what one model call receives.
-
-    Model-input only, like the two folds above. A folded skill leaves a note naming
-    it, so the agent can call `load_skill` again. See `app/agents/qa/context.py`.
-    """
-    return await handler(request.override(messages=fold_stale_skills(request.messages)))
+    return fold_context_middleware
 
 
 def _context_shape(messages) -> str:
@@ -418,7 +406,7 @@ def _context_shape(messages) -> str:
         text = content if isinstance(content, str) else ""
 
         if isinstance(message, ToolMessage):
-            # 접힌 자리와 전문으로 남은 자리를 가른다. `fold_stale_scenes` 가 실제로
+            # 접힌 자리와 전문으로 남은 자리를 가른다. `fold_context` 가 실제로
             # 얼마나 누르는지는 이 둘의 비에서만 나온다.
             #
             # 메시지가 아니라 view 를 센다. `pulse` view 도 센다 — scene view 만 세던 때는

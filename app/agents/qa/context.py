@@ -1,4 +1,4 @@
-"""Folding stale scene views out of what the model reads.
+"""Folding stale blocks out of what the model reads.
 
 Every QA tool result carries a full scene view (`SceneMemory.render` in
 `app/qa/scene.py`), and every tool message stays in the conversation forever —
@@ -8,34 +8,47 @@ even a handful of
 steps ends up with dozens of near-identical dumps in context by the time it
 matters most: late in the run, with the least room left to reason.
 
-`fold_stale_scenes` is the fix. Called right before a message list goes to the
-model, it collapses the scene view and the pulse view inside every tool message
-except the newest `keep`, leaving a short, honest placeholder in its place — in
-batches, once more than `DEFAULT_MAX_FULL_VIEWS` full views have piled up, so the
-prompt prefix stays the same between batches (see that constant). It is model-input-only
-by construction: it takes a list and returns a new one, so a caller can apply it
-to what a model call is about to see without touching anything else that reads
-the same messages — the WebSocket timeline, qa_log, and the console logger in
-`app/agents/qa/runner.py` all read the channel or the logger directly, never
-this function's output, so they keep the full text regardless.
+The scene view is not the only block that goes stale. A `search_knowledge` result
+carries a neighbour block nobody asked for, a `load_skill` result carries about
+10,000 characters of rules, and an `on_demand` screenshot is resent on every turn
+after it arrives. `fold_context` is the one place all four are folded.
+
+`fold` 는 네 종류를 따로따로 하지 않고 한 번에 한다. 오래된 block 하나를 `placeholder` 로 바꾸는
+것은 이미 보낸 프롬프트의 중간을 고쳐 쓰는 일이라, 그 자리부터 끝까지 `cache` 가 안 맞는다.
+종류마다 제 시점에 `fold` 하면 그 손실을 종류 수만큼 따로 낸다. L1 런 6개(try 178–183)의
+LangSmith trace 에서 `cache` 를 못 읽은 입력의 72–90% 가 `fold` 때문이었고, `pulse` view 의 batch
+`fold` 와 별개로 실행된 skill `fold` 가 한 번에 평균 약 28,000 token 을 다시 쓰게 했다. 그래서
+후보마다 점수를 매기고, `fold` 하지 않은 후보의 점수 합계가 기준을 넘는 호출 한 번에 전부
+`fold` 한다. 그 사이의 호출은 앞을 안 고치고 끝에 덧붙기만 하므로 `cache` 가 맞는다.
+
+It is model-input-only by construction: it takes a list and returns a new one,
+so a caller can apply it to what a model call is about to see without touching
+anything else that reads the same messages — the WebSocket timeline, qa_log, and
+the console logger in `app/agents/qa/runner.py` all read the channel or the
+logger directly, never this function's output, so they keep the full text
+regardless.
 
 Wiring: `QaRunner.run` builds its agent with `langchain.agents.create_agent`
 and drives it with `agent.astream(...)`, so there is no per-turn message list
 the caller re-passes — LangGraph owns it internally for the run. The hook point
 is `create_agent(..., middleware=[...])`: a `wrap_model_call` middleware
 receives a `ModelRequest` (its `.messages` excludes the system message) and a
-`handler`, and can call `request.override(messages=fold_stale_scenes(request.messages))`
-before invoking `handler(request)`. That changes only what the one model call
-receives, not the graph's own state, so nothing has to survive a checkpoint or
-be un-done afterwards. `runner.py` wires this in.
+`handler`, and can call `request.override(messages=...)` before invoking
+`handler(request)`. That changes only what the one model call receives, not the
+graph's own state. What does have to survive between calls is which blocks were
+already folded, and the runner keeps that on `QaRunState.folded_blocks`.
+`runner.py` wires this in.
 """
 
 from __future__ import annotations
 
+import itertools
 import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from enum import StrEnum
 
-from langchain_core.messages import BaseMessage, ToolMessage
+from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
 
 from app.agents.qa.knowledge import (
     NEIGHBOUR_BLOCK_END,
@@ -48,12 +61,22 @@ from app.agents.qa.tools.skill_tools import (
     SKILL_BLOCK_START_PREFIX,
     SKILL_BLOCK_START_SUFFIX,
 )
+from app.agents.qa.vision import CAPTURE_MESSAGE_KEY, is_capture_message, without_image
 from app.qa.pulse import PULSE_VIEW_END, PULSE_VIEW_START
 from app.qa.scene import SCENE_VIEW_END, SCENE_VIEW_START_PREFIX, SCENE_VIEW_START_SUFFIX
 
+
+class FoldKind(StrEnum):
+    """`fold` 의 후보가 되는 block 의 종류."""
+
+    scene_view = "scene_view"
+    knowledge_neighbours = "knowledge_neighbours"
+    skill = "skill"
+    image = "image"
+
+
 # How many of the newest scene views survive folding, in full — counted across
-# the whole message list, not per tool or per step. One tunable, so raising it
-# back up if a scenario turns out to need more lookback is a one-line change.
+# the whole message list, not per tool or per step.
 #
 # One, not two, since the live view: `SceneMemory.render_now` is appended to
 # every model call, so the current scene is always in front of the model without
@@ -62,18 +85,41 @@ from app.qa.scene import SCENE_VIEW_END, SCENE_VIEW_START_PREFIX, SCENE_VIEW_STA
 # worth one. A second would be two stale snapshots under a fresh one.
 DEFAULT_KEEP_SCENES = 1
 
-# 지난 view 를 한 번에 몇 개까지 그대로 두었다가 `fold` 하나.
+# How many of the newest neighbour blocks survive folding — one search produces
+# one message, so this is "the newest search keeps its neighbours".
+DEFAULT_KEEP_NEIGHBOUR_BLOCKS = 1
+
+# How many of the newest loaded skills survive folding. One, because a skill is
+# read right before the work it covers, and the work the agent is doing now is
+# the one the newest load was for.
+DEFAULT_KEEP_SKILLS = 1
+
+# How many of the newest `on_demand` screenshots keep their picture. The agent
+# judges against what it is looking at now; older screenshots have already been
+# reasoned about, and their conclusions are in the transcript. Without a cap the
+# transcript resends every screenshot on every turn, so the cost of a run grows with
+# the square of the number of captures.
+DEFAULT_KEEP_IMAGES = 2
+
+_KEEP_BY_KIND = {
+    FoldKind.scene_view: DEFAULT_KEEP_SCENES,
+    FoldKind.knowledge_neighbours: DEFAULT_KEEP_NEIGHBOUR_BLOCKS,
+    FoldKind.skill: DEFAULT_KEEP_SKILLS,
+    FoldKind.image: DEFAULT_KEEP_IMAGES,
+}
+
+# `fold` 하지 않은 후보의 점수 합계가 이 값에 이르면 그 호출에서 전부 `fold` 한다. 점수는 후보가
+# 차지하는 글자 수다.
 #
-# `fold` 는 매 모델 호출마다 graph 가 가진 원본 목록에서 처음부터 다시 계산된다. 그래서 새 view 가
-# 올 때마다 바로 앞 view 를 `fold` 하면(종전의 `keep=1`) 매 호출이 직전 호출의 프롬프트 중간을
-# 고쳐 쓴다. `cache` 경계는 프롬프트 끝에 하나뿐이라(`app/llm/chat_model.py`) 그동안 써 둔 `cache` 가
-# 전부 안 맞고, 대화 전체가 매 호출 정가로 다시 읽힌다 — ARTEL-621 이 없앤 것과 같은 실패다.
-#
-# 그래서 batch 로 `fold` 한다. 전문으로 남은 view 가 이 수를 넘는 순간에만, 가장 새것 `keep` 개를
-# 빼고 전부 `fold` 한다. 그 사이의 호출은 앞을 안 고치고 끝에 덧붙기만 하므로 `cache` 가 맞는다.
-# 8 이면 `cache` 를 다시 쓰는 것이 8 호출에 한 번이고, 그 사이 끝에 쌓이는 view 는 많아야 8 개다
-# (L1 런 실측으로 view 한 개가 평균 약 7k 자, `run_macro` 는 약 27k 자).
-DEFAULT_MAX_FULL_VIEWS = 8
+# 56,000 은 종전 batch 의 크기에 맞춘 값이다. 종전에는 전문 view 가 8개를 넘을 때 `fold` 했고, L1
+# 런 실측으로 view 한 개가 평균 약 7,000자이므로 오래된 view 약 8개, 56,000자가 쌓일 때마다
+# `cache` 를 한 번 다시 썼다. 같은 값으로 두어야 이 변경을 측정한 결과에서 "네 종류를 한 번에
+# 모았다" 는 효과만 따로 읽힌다.
+DEFAULT_FOLD_THRESHOLD_CHARS = 56_000
+
+# 그림 한 장의 점수. 그림은 글자 수가 없으므로 token 으로 어림해 글자로 바꾼다: 화면 한 장이
+# 약 1,000 token 이고, 글자는 token 당 약 4자다.
+IMAGE_SCORE_CHARS = 4_000
 
 # 자리표를 알아보는 접두. 계측(`app/agents/qa/runner.py`)이 "접힌 것" 과 "전문으로 남은 것" 을
 # 세려면 둘을 가릴 단서가 필요한데, 자리표는 일부러 마커 문법을 안 쓰므로(아래 `_placeholder`
@@ -106,6 +152,28 @@ _VIEW_PATTERN = re.compile(
     + r"\n(?P<head>[^\n]*)"
     + r".*?"
     + re.escape(PULSE_VIEW_END),
+    re.DOTALL,
+)
+
+_NEIGHBOUR_PATTERN = re.compile(
+    re.escape(NEIGHBOUR_BLOCK_START_PREFIX)
+    + r"(?P<of>[^>]*)"
+    + re.escape(NEIGHBOUR_BLOCK_START_SUFFIX)
+    + r".*?"
+    + re.escape(NEIGHBOUR_BLOCK_END),
+    re.DOTALL,
+)
+
+# The end marker names the skill again, and `(?P=name)` requires it to be the same
+# name, so a span always runs from one skill's start to that same skill's end.
+_SKILL_PATTERN = re.compile(
+    re.escape(SKILL_BLOCK_START_PREFIX)
+    + r"(?P<name>[^>\s]+)"
+    + re.escape(SKILL_BLOCK_START_SUFFIX)
+    + r".*?"
+    + re.escape(SKILL_BLOCK_END_PREFIX)
+    + r"(?P=name)"
+    + re.escape(SKILL_BLOCK_END_SUFFIX),
     re.DOTALL,
 )
 
@@ -142,264 +210,195 @@ def _view_placeholder(match: re.Match[str]) -> str:
     return _pulse_placeholder(match.group("head"))
 
 
-def count_full_views(content: str) -> int:
-    """`content` 안에 전문으로 남은 scene view 와 `pulse` view 의 수."""
-    return sum(1 for _ in _VIEW_PATTERN.finditer(content))
-
-
-def _fold_content(content: str, count: int) -> str:
-    """`content` 안의 view 를 앞에서부터 `count` 개 `placeholder` 로 바꾼다.
-
-    지금의 도구는 메시지 하나에 view 를 많아야 하나 싣지만, 둘 이상이어도 오래된 것(앞)부터
-    바꾸므로 "가장 새것만 남긴다" 가 메시지 경계와 무관하게 성립한다.
-    """
-    return _VIEW_PATTERN.sub(_view_placeholder, content, count=count)
-
-
-def _views_to_fold(total: int, keep: int, max_full_views: int) -> int:
-    """원본 목록에 view 가 `total` 개 있을 때, 오래된 것부터 몇 개를 `fold` 하나.
-
-    `fold` 는 매 호출 원본에서 다시 계산되므로, "넘으면 `keep` 개만 남긴다" 를 그대로 옮기면
-    넘은 뒤로 매 호출 `fold` 하게 된다. 그래서 경계를 `total` 만의 함수로 둔다: `fold` 하는 수가
-    `max_full_views + 1 - keep` 단위로만 늘고, 그 사이에는 같은 값이라 앞이 안 바뀐다. 남는 전문
-    view 는 언제나 `keep` 개 이상 `max_full_views` 개 이하다.
-    """
-    if total <= max_full_views:
-        return 0
-    batch = max_full_views + 1 - keep
-    return batch * ((total - keep) // batch)
-
-
-@dataclass(frozen=True)
-class SceneFold:
-    """`fold_scenes` 의 결과. 모델에 보낼 목록과, 그 안에서 `fold` 된 view 의 수."""
-
-    messages: list[BaseMessage]
-    # 오래된 것부터 `fold` 된 view 의 수. 이 값이 지난 호출보다 커졌다는 것이 "방금 새 batch 를
-    # `fold` 했다" 이고, runner 가 그것을 보고 다음 `pulse` view 가 값을 전부 다시 그리게 한다.
-    views_folded: int
-
-
-def fold_scenes(
-    messages: list[BaseMessage],
-    keep: int = DEFAULT_KEEP_SCENES,
-    max_full_views: int = DEFAULT_MAX_FULL_VIEWS,
-) -> SceneFold:
-    """`fold_stale_scenes` 와 같되, 몇 개를 `fold` 했는지도 함께 돌려준다.
-
-    전문 view 가 `max_full_views` 개를 넘을 때만 `fold` 하고, 그때는 가장 새것 `keep` 개만
-    남긴다(`_views_to_fold`). `max_full_views == keep` 이면 종전처럼 매 호출 `keep` 개만 남긴다.
-    """
-    max_full_views = max(max_full_views, keep)
-    view_counts = [_full_views_in(message) for message in messages]
-    views_folded = _views_to_fold(sum(view_counts), keep, max_full_views)
-
-    result: list[BaseMessage] = list(messages)
-    remaining = views_folded
-    # 오래된 것부터 센다. 반환하는 목록은 같은 자리의 값만 바꾸므로 순서가 그대로다.
-    for index, count in enumerate(view_counts):
-        if remaining <= 0:
-            break
-        if count == 0:
-            continue
-        folding_here = min(count, remaining)
-        message = result[index]
-        result[index] = message.model_copy(
-            update={"content": _fold_content(message.content, folding_here)}
-        )
-        remaining -= folding_here
-    return SceneFold(messages=result, views_folded=views_folded)
-
-
-def _full_views_in(message: BaseMessage) -> int:
-    if not isinstance(message, ToolMessage) or not isinstance(message.content, str):
-        return 0
-    return count_full_views(message.content)
-
-
-def fold_stale_scenes(
-    messages: list[BaseMessage],
-    keep: int = DEFAULT_KEEP_SCENES,
-    max_full_views: int = DEFAULT_MAX_FULL_VIEWS,
-) -> list[BaseMessage]:
-    """Return `messages` with stale scene views and `pulse` views folded.
-
-    Expects the message list a LangChain tool-calling agent hands to a model
-    call: a mix of `HumanMessage`, `AIMessage`, and `ToolMessage`, in
-    chronological order. Only `ToolMessage.content` is ever inspected — a
-    view can only appear there, since it comes from `SceneMemory.render`
-    by way of `observe_scene` (`app/agents/qa/tools/observation_tools.py`) and
-    `ToolContext.answer` (`app/agents/qa/tools/tool_context.py`). Every other
-    message, and every `ToolMessage` that carries no view (a failed action, an
-    unanswered look), is returned unchanged.
-
-    A "view" is the exact span between the markers its renderer puts around its
-    own output — `<<scene view N>>` … `<<end scene view>>` or `<<pulse>>` …
-    `<<end pulse>>` — never a guess at where the text starts or ends. That
-    guarantees a fold either removes a whole view or none of it, and it means
-    the action-outcome lines written above the view, and the `<<scene context>>`
-    block and operator block (see `app/qa/channel.py`) appended below it, are
-    untouched: the fold only ever replaces the marked span.
-
-    `keep` 과 `max_full_views` 는 목록 **전체**에서 view 를 센다 — 도구나 스텝마다가 아니다.
-    전문 view 가 `max_full_views` 개를 넘을 때만 새것 `keep` 개를 빼고 전부 `fold` 한다
-    (`DEFAULT_MAX_FULL_VIEWS` 에 이유가 있다).
-
-    Pure: never mutates `messages` or any message inside it. Returns a new
-    list; messages that need no change are the very same objects, and folded
-    ones are shallow copies (`model_copy`) with new `content`. Idempotent for
-    a fixed `keep` and `max_full_views`: a folded view carries no markers, so the
-    result holds at most `max_full_views` full views and folding it again changes
-    nothing further.
-    """
-    return fold_scenes(messages, keep, max_full_views).messages
-
-
-# How many of the newest neighbour blocks survive folding, counted per message
-# — one search produces one message, so this is "the newest N searches keep
-# their neighbours".
-DEFAULT_KEEP_NEIGHBOUR_BLOCKS = 1
-
-_NEIGHBOUR_PATTERN = re.compile(
-    re.escape(NEIGHBOUR_BLOCK_START_PREFIX)
-    + r"(?P<of>[^>]*)"
-    + re.escape(NEIGHBOUR_BLOCK_START_SUFFIX)
-    + r".*?"
-    + re.escape(NEIGHBOUR_BLOCK_END),
-    re.DOTALL,
-)
-
-
-def _neighbour_placeholder(of: str) -> str:
+def _neighbour_placeholder(match: re.Match[str]) -> str:
     # Plain text rather than the marker syntax, for the reason `_placeholder`
     # gives. Names the entry so the instruction is actionable: unlike a folded
     # scene, which `observe_scene` gets back with no argument, this one needs an id.
+    #
+    # Only the neighbour block is ever folded, never a hit's own summary and
+    # description. A knowledge description is not stale — the documentation did
+    # not change while the run was going — and getting it back costs a search out
+    # of a budget of six. The neighbour block was never asked for, and
+    # `expand_knowledge`, which has its own allowance, gets it back exactly.
+    of = match.group("of")
     return (
         f"[neighbours of {of} folded. Call expand_knowledge on {of} to see them "
         "again — they were volunteered by the search, not asked for.]"
     )
 
 
-def _fold_neighbours(content: str) -> str:
-    return _NEIGHBOUR_PATTERN.sub(
-        lambda match: _neighbour_placeholder(match.group("of")), content
-    )
-
-
-def fold_stale_knowledge(
-    messages: list[BaseMessage], keep: int = DEFAULT_KEEP_NEIGHBOUR_BLOCKS
-) -> list[BaseMessage]:
-    """Return `messages` with all but the newest `keep` neighbour blocks folded.
-
-    Same contract as `fold_stale_scenes`: pure, model-input only, idempotent,
-    `ToolMessage.content` only, unchanged messages returned as the same objects.
-
-    **Only the neighbour block is folded. A hit's own summary and description are
-    never touched**, and that line is the whole design.
-
-    `fold_stale_scenes` folds a scene because the game moved on and
-    `observe_scene` gets it back for nothing. A knowledge description is not
-    stale — the documentation did not change while the run was going — and
-    getting it back costs a search out of a budget of six. Folding it would tell
-    the agent to spend a scarce resource undoing the fold, which is a materially
-    worse bargain than the scene case.
-
-    The neighbour block is the opposite on both counts. It was never asked for —
-    the search volunteered it — and it is exactly recoverable by
-    `expand_knowledge`, which has its own separate allowance. So this bounds the
-    growth the graph feature introduced, and leaves the older debt that
-    `app/agents/qa/knowledge.py` records about unfolded search results exactly
-    where it is rather than quietly settling it inside an unrelated change.
-
-    Interaction with compaction: `SummarizationMiddleware` replaces old messages
-    wholesale, so a folded block may be summarised away entirely. Not a conflict —
-    this fold is model-input only and never touches what is stored.
-    """
-    result: list[BaseMessage] = list(messages)
-    kept = 0
-    for index in range(len(result) - 1, -1, -1):
-        message = result[index]
-        if not isinstance(message, ToolMessage) or not isinstance(message.content, str):
-            continue
-        if not _NEIGHBOUR_PATTERN.search(message.content):
-            continue
-        kept += 1
-        if kept <= keep:
-            continue
-        result[index] = message.model_copy(
-            update={"content": _fold_neighbours(message.content)}
-        )
-    return result
-
-
-# How many of the newest loaded skills survive folding, counted per message — one
-# `load_skill` call produces one message, so this is "the newest N loads keep
-# their text". One, because a skill is read right before the work it covers, and
-# the work the agent is doing now is the one the newest load was for.
-DEFAULT_KEEP_SKILLS = 1
-
-# The end marker names the skill again, and `(?P=name)` requires it to be the same
-# name, so a span always runs from one skill's start to that same skill's end.
-_SKILL_PATTERN = re.compile(
-    re.escape(SKILL_BLOCK_START_PREFIX)
-    + r"(?P<name>[^>\s]+)"
-    + re.escape(SKILL_BLOCK_START_SUFFIX)
-    + r".*?"
-    + re.escape(SKILL_BLOCK_END_PREFIX)
-    + r"(?P=name)"
-    + re.escape(SKILL_BLOCK_END_SUFFIX),
-    re.DOTALL,
-)
-
-
-def _skill_placeholder(name: str) -> str:
+def _skill_placeholder(match: re.Match[str]) -> str:
     # Plain text rather than the marker syntax, for the reason `_placeholder`
     # gives. It says outright that the rules are gone, because an agent that
     # remembers loading a skill would otherwise act as if it still had the text.
+    name = match.group("name")
     return (
         f'[skill {name} folded to save context. Its rules are no longer in front '
         f'of you. Call load_skill("{name}") to read it again.]'
     )
 
 
-def _fold_skills(content: str) -> str:
-    return _SKILL_PATTERN.sub(lambda match: _skill_placeholder(match.group("name")), content)
+# 도구 결과 안의 block 을 찾는 패턴과, 찾은 block 을 바꿀 `placeholder`. 그림은 도구 결과가
+# 아니라 따로 실린 메시지라 여기 없다.
+_TEXT_BLOCKS = {
+    FoldKind.scene_view: (_VIEW_PATTERN, _view_placeholder),
+    FoldKind.knowledge_neighbours: (_NEIGHBOUR_PATTERN, _neighbour_placeholder),
+    FoldKind.skill: (_SKILL_PATTERN, _skill_placeholder),
+}
 
 
-def fold_stale_skills(
-    messages: list[BaseMessage], keep: int = DEFAULT_KEEP_SKILLS
-) -> list[BaseMessage]:
-    """Return `messages` with all but the newest `keep` loaded skills folded.
+def count_full_views(content: str) -> int:
+    """`content` 안에 전문으로 남은 scene view 와 `pulse` view 의 수."""
+    return sum(1 for _ in _VIEW_PATTERN.finditer(content))
 
-    Same contract as `fold_stale_scenes`: pure, model-input only, idempotent,
-    `ToolMessage.content` only, unchanged messages returned as the same objects.
 
-    A skill is the span `load_skill` (`app/agents/qa/tools/skill_tools.py`) wraps
-    between `<<skill NAME>>` and `<<end skill NAME>>`. Only that span is replaced:
-    the "already loaded" note a reload puts above it stays, and so does anything
-    else in the message.
+@dataclass(frozen=True)
+class FoldCandidate:
+    """`fold` 할 수 있는 block 하나.
 
-    A skill body runs to about 10,000 characters. Left alone, every skill the run
-    ever loaded would be resent on every turn until compaction, which is the cost
-    moving the skills out of the system prompt was meant to remove. The trade is
-    the one `fold_stale_knowledge` makes for neighbour blocks: the text is exactly
-    recoverable, here by `load_skill` with the name the placeholder gives, and
-    reading it again costs one tool call out of no allowance.
-
-    Interaction with compaction: `SummarizationMiddleware` replaces old messages
-    wholesale, so a folded skill may be summarised away entirely. Not a conflict —
-    this fold is model-input only and never touches what is stored.
+    `key` 는 호출이 바뀌어도 같은 block 을 가리켜야 한다. 목록의 자리는 압축이 옛 메시지를
+    요약으로 바꾸면 움직이므로 쓰지 않고, 도구 결과는 `tool_call_id` 와 그 안에서 몇 번째
+    block 인지로, 그림은 `capture_id` 로 만든다.
     """
-    result: list[BaseMessage] = list(messages)
-    kept = 0
-    for index in range(len(result) - 1, -1, -1):
-        message = result[index]
-        if not isinstance(message, ToolMessage) or not isinstance(message.content, str):
+
+    kind: FoldKind
+    key: str
+    score: int
+
+
+@dataclass(frozen=True)
+class ContextFold:
+    """`fold_context` 의 결과."""
+
+    messages: list[BaseMessage]
+    # 이 호출까지 `fold` 된 block 의 `key`. runner 가 다음 호출에 `already_folded` 로 돌려준다.
+    folded_keys: frozenset[str]
+    # 이 호출에서 새로 `fold` 한 block 의 종류. 비어 있으면 앞이 하나도 안 바뀌었다는 뜻이다.
+    newly_folded_kinds: frozenset[FoldKind]
+
+
+def fold_context(
+    messages: list[BaseMessage],
+    kinds: Iterable[FoldKind],
+    already_folded: frozenset[str] = frozenset(),
+    threshold_chars: int = DEFAULT_FOLD_THRESHOLD_CHARS,
+) -> ContextFold:
+    """Return `messages` with stale blocks of `kinds` folded, in batches.
+
+    A block is stale once it is not among the newest few of its kind
+    (`DEFAULT_KEEP_*`, counted across the whole list). A stale block in
+    `already_folded` is always folded again, so the prompt a previous call sent
+    stays byte-identical. The other stale blocks are folded only when their
+    scores add up to `threshold_chars`, and then all of them at once, whatever
+    their kind. `threshold_chars=0` folds every stale block on every call.
+
+    A "block" is the exact span between the markers its renderer puts around its
+    own output, never a guess at where the text starts or ends: `<<scene view N>>`
+    … `<<end scene view>>` or `<<pulse>>` … `<<end pulse>>`, a neighbour block, or
+    `<<skill NAME>>` … `<<end skill NAME>>`. A fold either replaces a whole block
+    or none of it, so the action-outcome lines above a view, the `<<scene context>>`
+    and operator blocks below it, a hit's own text, and the "already loaded" note
+    above a reloaded skill are never touched. An image is the picture on an
+    `on_demand` capture turn, and folding it leaves the caption.
+
+    Pure: never mutates `messages` or any message inside it. Messages that need
+    no change are the very same objects, and folded ones are copies with new
+    content.
+    """
+    enabled = frozenset(kinds)
+    candidates = [
+        candidate for message in messages for candidate in _candidates_in(message, enabled)
+    ]
+    stale = _stale(candidates)
+
+    pending = [candidate for candidate in stale if candidate.key not in already_folded]
+    folded_keys = {candidate.key for candidate in stale if candidate.key in already_folded}
+    newly_folded_kinds: frozenset[FoldKind] = frozenset()
+    if pending and sum(candidate.score for candidate in pending) >= threshold_chars:
+        folded_keys |= {candidate.key for candidate in pending}
+        newly_folded_kinds = frozenset(candidate.kind for candidate in pending)
+
+    return ContextFold(
+        messages=[_fold_message(message, enabled, folded_keys) for message in messages],
+        folded_keys=frozenset(folded_keys),
+        newly_folded_kinds=newly_folded_kinds,
+    )
+
+
+def fold_every_stale_block(
+    messages: list[BaseMessage], kinds: Iterable[FoldKind]
+) -> list[BaseMessage]:
+    """`messages` with every stale block of `kinds` folded, ignoring batches."""
+    return fold_context(messages, kinds, threshold_chars=0).messages
+
+
+def _candidates_in(message: BaseMessage, kinds: frozenset[FoldKind]) -> list[FoldCandidate]:
+    if FoldKind.image in kinds and is_capture_message(message) and _has_image(message):
+        capture_id = message.additional_kwargs[CAPTURE_MESSAGE_KEY]
+        return [FoldCandidate(FoldKind.image, f"image:{capture_id}", IMAGE_SCORE_CHARS)]
+    if not isinstance(message, ToolMessage) or not isinstance(message.content, str):
+        return []
+    candidates = []
+    for kind, (pattern, _) in _TEXT_BLOCKS.items():
+        if kind not in kinds:
             continue
-        if not _SKILL_PATTERN.search(message.content):
-            continue
-        kept += 1
-        if kept <= keep:
-            continue
-        result[index] = message.model_copy(update={"content": _fold_skills(message.content)})
-    return result
+        for ordinal, match in enumerate(pattern.finditer(message.content)):
+            key = f"{kind}:{message.tool_call_id}:{ordinal}"
+            candidates.append(FoldCandidate(kind, key, len(match.group(0))))
+    return candidates
+
+
+def _has_image(message: BaseMessage) -> bool:
+    return isinstance(message.content, list) and any(
+        isinstance(block, dict) and block.get("type") == "image_url"
+        for block in message.content
+    )
+
+
+def _stale(candidates: list[FoldCandidate]) -> list[FoldCandidate]:
+    """`candidates` 중 종류마다 가장 새것 몇 개를 뺀 나머지. 순서는 그대로 둔다."""
+    newest_kept: set[str] = set()
+    for kind, keep in _KEEP_BY_KIND.items():
+        of_kind = [candidate.key for candidate in candidates if candidate.kind is kind]
+        newest_kept.update(of_kind[-keep:] if keep > 0 else [])
+    return [candidate for candidate in candidates if candidate.key not in newest_kept]
+
+
+def _fold_message(
+    message: BaseMessage, kinds: frozenset[FoldKind], folded_keys: set[str]
+) -> BaseMessage:
+    if FoldKind.image in kinds and is_capture_message(message):
+        capture_id = message.additional_kwargs[CAPTURE_MESSAGE_KEY]
+        if f"image:{capture_id}" in folded_keys and _has_image(message):
+            return without_image(message)
+        return message
+    if not isinstance(message, ToolMessage) or not isinstance(message.content, str):
+        return message
+
+    content = message.content
+    for kind, (pattern, placeholder) in _TEXT_BLOCKS.items():
+        if kind in kinds:
+            key_prefix = f"{kind}:{message.tool_call_id}:"
+            content = _fold_matches(content, pattern, placeholder, key_prefix, folded_keys)
+    if content == message.content:
+        return message
+    return message.model_copy(update={"content": content})
+
+
+def _fold_matches(
+    content: str,
+    pattern: re.Pattern[str],
+    placeholder: Callable[[re.Match[str]], str],
+    key_prefix: str,
+    folded_keys: set[str],
+) -> str:
+    # 앞의 종류를 바꾼 뒤에도 이 종류의 순번은 그대로다. `placeholder` 는 어느 종류의 마커도
+    # 쓰지 않으므로, 한 종류를 바꾸어도 다른 종류의 block 이 생기거나 없어지지 않는다.
+    ordinals = itertools.count()
+
+    def replace(match: re.Match[str]) -> str:
+        if f"{key_prefix}{next(ordinals)}" in folded_keys:
+            return placeholder(match)
+        return match.group(0)
+
+    return pattern.sub(replace, content)

@@ -1,10 +1,10 @@
-"""`fold_stale_scenes` 가 지난 `pulse` view 를 batch 로 `fold` 하고, 그 뒤 첫 view 가 값을 전부 다시 그린다.
+"""`fold_context` 가 지난 `pulse` view 를 batch 로 `fold` 하고, 그 뒤 첫 view 가 값을 전부 다시 그린다.
 
 실제 런은 GAME_STATE 없이 `pulse` 만 받으므로 모델이 읽는 view 는 전부 `pulse` view 다. 그것이
 `fold` 되지 않아 L1 런 마지막 호출의 입력 87–90% 를 차지했다(`QA_ARCH_LABEL` v17 의 설명).
 
 여기서 보는 것:
-- 전문 view 가 `DEFAULT_MAX_FULL_VIEWS` 개일 때는 아무것도 안 고치고, 하나 더 오면 가장 새것만 남긴다
+- 오래된 view 의 글자 수 합이 기준에 못 미치면 아무것도 안 고치고, 기준에 이르는 호출에서 가장 새것만 남긴다
 - `placeholder` 가 어느 `reading` 의 어느 `scene` 이었는지 한 줄로 말한다
 - view 앞의 도구 몸통과 뒤의 `<<scene context>>` 블록은 그대로다
 - `fold` 가 새 batch 를 지우면 다음 `pulse` view 가 델타가 빠뜨렸을 값까지 다시 그린다
@@ -16,13 +16,14 @@ from types import SimpleNamespace
 from langchain_core.messages import ToolMessage
 
 from app.agents.qa.context import (
-    DEFAULT_MAX_FULL_VIEWS,
+    DEFAULT_FOLD_THRESHOLD_CHARS,
     FOLDED_PULSE_VIEW_PREFIX,
     FOLDED_VIEW_PREFIX,
-    fold_scenes,
-    fold_stale_scenes,
+    FoldKind,
+    fold_context,
+    fold_every_stale_block,
 )
-from app.agents.qa.runner import _context_shape, _fold_scene_views_for
+from app.agents.qa.runner import _context_shape, _fold_context_for
 from app.agents.qa.tools import QaRunState
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import GameState, Interactable
@@ -30,6 +31,7 @@ from app.qa.pulse import PULSE_VIEW_END, PULSE_VIEW_START, PulseMemory, PulseRea
 from app.qa.scene import SceneMemory
 from app.qa.scene_context import SCENE_CONTEXT_END, SCENE_CONTEXT_START
 
+SCENE_VIEW_ONLY = frozenset({FoldKind.scene_view})
 TOOL_BODY = "replay_step_3 ran to the end. 12 action(s) reached the game."
 SCENE_CONTEXT = f"{SCENE_CONTEXT_START}\nTurnBattleScene: 전투 화면\n{SCENE_CONTEXT_END}"
 
@@ -70,6 +72,19 @@ def tool_message(number: int) -> ToolMessage:
     return ToolMessage(content=content, tool_call_id=str(number))
 
 
+def stale_chars(messages) -> int:
+    """가장 새 메시지를 뺀 나머지 `pulse` view 의 글자 수 합."""
+    return sum(len(pulse_view(index)) for index in range(1, len(messages)))
+
+
+def messages_reaching_the_default_threshold() -> list[ToolMessage]:
+    """오래된 view 의 합이 처음으로 `DEFAULT_FOLD_THRESHOLD_CHARS` 에 이르는 가장 짧은 목록."""
+    messages = [tool_message(1)]
+    while stale_chars(messages) < DEFAULT_FOLD_THRESHOLD_CHARS:
+        messages.append(tool_message(len(messages) + 1))
+    return messages
+
+
 def full_readings(messages) -> list[int]:
     return [
         index + 1
@@ -86,29 +101,30 @@ def test_the_rendered_view_has_both_markers() -> None:
     assert view.endswith(PULSE_VIEW_END)
 
 
-def test_nothing_is_folded_at_the_batch_size() -> None:
-    messages = [tool_message(i) for i in range(1, DEFAULT_MAX_FULL_VIEWS + 1)]
+def test_nothing_is_folded_while_the_stale_total_is_under_the_threshold() -> None:
+    messages = [tool_message(i) for i in range(1, 6)]
 
-    fold = fold_scenes(messages)
+    fold = fold_context(messages, SCENE_VIEW_ONLY, threshold_chars=stale_chars(messages) + 1)
 
-    assert fold.views_folded == 0
+    assert fold.folded_keys == frozenset()
+    assert fold.newly_folded_kinds == frozenset()
     assert all(after is before for after, before in zip(fold.messages, messages))
 
 
-def test_one_past_the_batch_size_leaves_only_the_newest_in_full() -> None:
-    count = DEFAULT_MAX_FULL_VIEWS + 1
-    messages = [tool_message(i) for i in range(1, count + 1)]
+def test_the_call_that_reaches_the_threshold_leaves_only_the_newest_in_full() -> None:
+    messages = [tool_message(i) for i in range(1, 6)]
 
-    fold = fold_scenes(messages)
+    fold = fold_context(messages, SCENE_VIEW_ONLY, threshold_chars=stale_chars(messages))
 
-    assert full_readings(fold.messages) == [count]
-    assert fold.views_folded == count - 1
+    assert full_readings(fold.messages) == [5]
+    assert len(fold.folded_keys) == 4
+    assert fold.newly_folded_kinds == frozenset({FoldKind.scene_view})
 
 
 def test_the_placeholder_names_the_reading_and_the_scene_in_one_line() -> None:
-    messages = [tool_message(i) for i in range(1, DEFAULT_MAX_FULL_VIEWS + 2)]
+    messages = [tool_message(i) for i in range(1, 4)]
 
-    folded = fold_stale_scenes(messages)[0].content
+    folded = fold_every_stale_block(messages, SCENE_VIEW_ONLY)[0].content
 
     placeholder = folded.split("\n\n")[1]
     assert placeholder.startswith(
@@ -120,28 +136,28 @@ def test_the_placeholder_names_the_reading_and_the_scene_in_one_line() -> None:
 
 
 def test_the_tool_body_and_the_scene_context_block_survive() -> None:
-    messages = [tool_message(i) for i in range(1, DEFAULT_MAX_FULL_VIEWS + 2)]
+    messages = [tool_message(i) for i in range(1, 4)]
 
-    folded = fold_stale_scenes(messages)[0].content
+    folded = fold_every_stale_block(messages, SCENE_VIEW_ONLY)[0].content
 
     assert folded.startswith(f"{TOOL_BODY}\n\n{FOLDED_PULSE_VIEW_PREFIX}")
     assert folded.endswith(f"\n\n{SCENE_CONTEXT}")
 
 
 def test_folding_twice_changes_nothing_further() -> None:
-    messages = [tool_message(i) for i in range(1, DEFAULT_MAX_FULL_VIEWS + 4)]
+    messages = [tool_message(i) for i in range(1, 6)]
 
-    once = fold_stale_scenes(messages)
-    twice = fold_stale_scenes(once)
+    once = fold_every_stale_block(messages, SCENE_VIEW_ONLY)
+    twice = fold_every_stale_block(once, SCENE_VIEW_ONLY)
 
     assert [m.content for m in once] == [m.content for m in twice]
 
 
 def test_a_tool_result_without_a_view_is_the_same_object() -> None:
     plain = ToolMessage(content="The game did not answer.", tool_call_id="plain")
-    messages = [plain, *(tool_message(i) for i in range(1, DEFAULT_MAX_FULL_VIEWS + 2))]
+    messages = [plain, *(tool_message(i) for i in range(1, 4))]
 
-    folded = fold_stale_scenes(messages)
+    folded = fold_every_stale_block(messages, SCENE_VIEW_ONLY)
 
     assert folded[0] is plain
 
@@ -161,21 +177,22 @@ def test_a_pulse_view_inside_a_scene_view_counts_once() -> None:
     assert PULSE_VIEW_START in nested
 
     messages = [ToolMessage(content=nested, tool_call_id="nested")]
-    messages += [tool_message(i) for i in range(2, DEFAULT_MAX_FULL_VIEWS + 2)]
+    messages += [tool_message(i) for i in range(2, 4)]
 
-    fold = fold_scenes(messages)
+    fold = fold_context(messages, SCENE_VIEW_ONLY, threshold_chars=0)
 
-    assert fold.views_folded == DEFAULT_MAX_FULL_VIEWS
+    # 안의 `pulse` view 를 따로 세면 세 개 중 새것 하나를 뺀 둘이 아니라 셋이 된다.
+    assert len(fold.folded_keys) == 2
     assert fold.messages[0].content.startswith(FOLDED_VIEW_PREFIX)
     assert FOLDED_PULSE_VIEW_PREFIX not in fold.messages[0].content
 
 
 def test_context_shape_counts_pulse_views_and_their_placeholders() -> None:
-    messages = [tool_message(i) for i in range(1, DEFAULT_MAX_FULL_VIEWS + 2)]
+    messages = [tool_message(i) for i in range(1, 5)]
 
-    shape = _context_shape(fold_stale_scenes(messages))
+    shape = _context_shape(fold_every_stale_block(messages, SCENE_VIEW_ONLY))
 
-    assert f"views folded={DEFAULT_MAX_FULL_VIEWS} kept=1" in shape
+    assert "views folded=3 kept=1" in shape
 
 
 def test_a_redraw_brings_back_a_value_a_delta_would_leave_out() -> None:
@@ -224,30 +241,31 @@ def held_channel() -> QaRunChannel:
 def test_a_new_batch_makes_the_next_pulse_view_redraw_everything() -> None:
     channel = held_channel()
     state = QaRunState(total_steps=1)
-    middleware = _fold_scene_views_for(state, channel)
-    messages = [tool_message(i) for i in range(1, DEFAULT_MAX_FULL_VIEWS + 2)]
+    middleware = _fold_context_for(SCENE_VIEW_ONLY, state, channel)
+    messages = messages_reaching_the_default_threshold()
 
     sent = run_fold_middleware(middleware, messages)
 
-    assert full_readings(sent) == [DEFAULT_MAX_FULL_VIEWS + 1]
-    assert state.views_folded == DEFAULT_MAX_FULL_VIEWS
+    assert full_readings(sent) == [len(messages)]
+    assert len(state.folded_blocks) == len(messages) - 1
     assert "Enemy.Hp = 100" in channel.scene.pulse.since_action(None)
 
 
 def test_no_redraw_without_a_new_batch() -> None:
     channel = held_channel()
     state = QaRunState(total_steps=1)
-    middleware = _fold_scene_views_for(state, channel)
+    middleware = _fold_context_for(SCENE_VIEW_ONLY, state, channel)
+    batch = messages_reaching_the_default_threshold()
 
-    # batch 크기까지는 `fold` 가 없다.
-    run_fold_middleware(middleware, [tool_message(i) for i in range(1, DEFAULT_MAX_FULL_VIEWS + 1)])
+    # 기준에 못 미치는 동안은 `fold` 가 없다.
+    run_fold_middleware(middleware, batch[:-1])
+    assert state.folded_blocks == frozenset()
     assert "Enemy.Hp = 100" not in channel.scene.pulse.since_action(None)
 
     # 첫 batch 가 `fold` 되고 그 다음 view 가 값을 다시 그렸다.
-    batch = [tool_message(i) for i in range(1, DEFAULT_MAX_FULL_VIEWS + 2)]
     run_fold_middleware(middleware, batch)
     assert "Enemy.Hp = 100" in channel.scene.pulse.since_action(None)
 
     # 같은 batch 를 다시 보는 호출은 새 `fold` 가 아니다.
-    run_fold_middleware(middleware, [*batch, tool_message(DEFAULT_MAX_FULL_VIEWS + 2)])
+    run_fold_middleware(middleware, [*batch, tool_message(len(batch) + 1)])
     assert "Enemy.Hp = 100" not in channel.scene.pulse.since_action(None)

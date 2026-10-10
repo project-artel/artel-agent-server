@@ -95,10 +95,10 @@ class QaRunState:
         # 행위가 경계다(ARTEL-621). `None` 은 아직 아무 행위도 없었거나, 그 필드를 모르는
         # 옛 SDK 다.
         self.last_action_frame: int | None = None
-        # 지난 모델 호출에서 `fold_stale_scenes` 가 오래된 것부터 `fold` 한 view 의 수. 이번
-        # 호출의 수가 이보다 크면 새 batch 가 `fold` 된 것이고, runner 가 그때 다음 `pulse` view
-        # 가 값을 전부 다시 그리게 한다(`app/agents/qa/runner.py` 의 `_fold_scene_views_for`).
-        self.views_folded = 0
+        # 지난 모델 호출까지 `fold_context` 가 `fold` 한 block 의 `key`. 다음 호출이 같은 block 을
+        # 다시 `fold` 해야 프롬프트 앞이 그대로라 `cache` 가 맞는다
+        # (`app/agents/qa/runner.py` 의 `_fold_context_for`).
+        self.folded_blocks: frozenset[str] = frozenset()
         # How many times `finish_run` was reached. The first attempt made with
         # steps still unreported is pushed back on; a second one closes the run
         # regardless, so a game that genuinely cannot go on is never trapped.

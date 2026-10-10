@@ -102,9 +102,9 @@ from app.agents.qa.arch import (  # noqa: E402 - re-export, kept below the prose
 #
 # Orchestration clamps this to its own ceiling, so the number here is not a
 # guarantee — it is this side stating the context it is willing to spend. Search
-# results are NOT folded the way scene views are (`fold_stale_scenes` only folds
-# what carries a scene marker), so every hit stays in the transcript until the
-# run ends.
+# results are NOT folded the way scene views are (`fold_context` folds only a
+# result's neighbour block, never the hit itself), so every hit stays in the
+# transcript until the run ends.
 RESULT_LIMIT = 100
 
 # Per hit. A knowledge entry's description is written for a human reading the
@@ -342,7 +342,7 @@ def render_hit(index: int, hit: KnowledgeSearchHit) -> str:
     if anchor_line:
         lines.append(anchor_line)
     if hit.neighbors:
-        # Wrapped so `fold_stale_knowledge` can replace exactly this span and
+        # Wrapped so `fold_context` can replace exactly this span and
         # nothing else — the hit's own summary and description must survive, and
         # a fold that guessed at where the neighbours start would eventually eat
         # one of them.

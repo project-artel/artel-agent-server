@@ -1,4 +1,4 @@
-"""`fold_stale_scenes` collapses old scene views out of what the model reads.
+"""`fold_context` collapses old scene views out of what the model reads.
 
 Every acting tool and `observe_scene` append a full `SceneMemory.render` view to
 their tool result, and every tool message stays in the conversation forever — a
@@ -7,20 +7,29 @@ time it matters most. These pin that only the newest views survive in full, that
 everything besides the view (action outcomes, the operator block) rides through
 untouched, and that the fold does not grow the input linearly with run length.
 
-대부분의 테스트가 `max_full_views=keep` 을 준다. 그것이 매 호출 `keep` 개만 남기는 종전의
-`fold` 이고, view 하나의 모양을 보는 데는 batch 가 필요 없다. batch 자체는 맨 아래 테스트들이 본다.
+대부분의 테스트가 `fold_every_stale_block` 을 쓴다. 그것은 `threshold_chars=0` 이라 오래된 view 를
+매 호출 전부 `fold` 하고, view 하나의 모양을 보는 데는 batch 가 필요 없다. batch 자체는 맨 아래
+테스트들이 본다.
 """
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.agents.qa.context import (
     DEFAULT_KEEP_SCENES,
-    DEFAULT_MAX_FULL_VIEWS,
-    fold_scenes,
-    fold_stale_scenes,
+    FoldKind,
+    count_full_views,
+    fold_context,
+    fold_every_stale_block,
 )
 from app.qa.envelope import GameState, Interactable
 from app.qa.scene import SceneMemory
+
+SCENE_VIEW_ONLY = frozenset({FoldKind.scene_view})
+
+
+def fold_scene_views(messages):
+    """오래된 scene view 를 매 호출 전부 `fold` 한 메시지 목록."""
+    return fold_every_stale_block(messages, SCENE_VIEW_ONLY)
 
 
 def render_at(observation: int, scene: str = "Lobby") -> str:
@@ -51,21 +60,19 @@ def tool_message(observation: int, *, tool_call_id: str | None = None) -> ToolMe
     return ToolMessage(content=render_at(observation), tool_call_id=tool_call_id or str(observation))
 
 
-def test_only_the_newest_keep_views_survive_in_full() -> None:
+def test_only_the_newest_view_survives_in_full() -> None:
     messages = [tool_message(1), tool_message(2), tool_message(3), tool_message(4)]
 
-    folded = fold_stale_scenes(messages, keep=2, max_full_views=2)
+    folded = fold_scene_views(messages)
 
     assert "scene: Lobby  (observation 1)" not in folded[0].content
     assert "scene: Lobby  (observation 2)" not in folded[1].content
-    assert "scene: Lobby  (observation 3)" in folded[2].content
+    assert "scene: Lobby  (observation 3)" not in folded[2].content
     assert "scene: Lobby  (observation 4)" in folded[3].content
 
 
 def test_older_views_become_an_actionable_placeholder() -> None:
-    folded = fold_stale_scenes(
-        [tool_message(1), tool_message(2), tool_message(3)], keep=1, max_full_views=1
-    )
+    folded = fold_scene_views([tool_message(1), tool_message(2), tool_message(3)])
 
     placeholder = folded[0].content
     assert "observation 1" in placeholder
@@ -76,13 +83,13 @@ def test_older_views_become_an_actionable_placeholder() -> None:
     assert "[1] Start (button)" not in placeholder
 
 
-def test_default_keep_matches_the_module_constant() -> None:
-    messages = [tool_message(1), tool_message(2), tool_message(3)]
+def test_the_newest_default_keep_scenes_views_survive() -> None:
+    messages = [tool_message(i) for i in range(1, DEFAULT_KEEP_SCENES + 4)]
 
-    folded_default = fold_stale_scenes(messages)
-    folded_explicit = fold_stale_scenes(messages, keep=DEFAULT_KEEP_SCENES)
+    folded = fold_scene_views(messages)
 
-    assert [m.content for m in folded_default] == [m.content for m in folded_explicit]
+    assert sum(count_full_views(m.content) for m in folded) == DEFAULT_KEEP_SCENES
+    assert all(count_full_views(m.content) == 1 for m in folded[-DEFAULT_KEEP_SCENES:])
 
 
 def test_action_outcome_lines_survive_folding() -> None:
@@ -90,7 +97,7 @@ def test_action_outcome_lines_survive_folding() -> None:
     content = "  button_click: ok\n\n" + render_at(1)
     messages = [ToolMessage(content=content, tool_call_id="1"), tool_message(2)]
 
-    folded = fold_stale_scenes(messages, keep=1, max_full_views=1)
+    folded = fold_scene_views(messages)
 
     assert folded[0].content.startswith("  button_click: ok\n\n")
     assert "you can act on:" not in folded[0].content
@@ -104,7 +111,7 @@ def test_operator_block_survives_folding() -> None:
     )
     messages = [ToolMessage(content=content, tool_call_id="1"), tool_message(2)]
 
-    folded = fold_stale_scenes(messages, keep=1, max_full_views=1)
+    folded = fold_scene_views(messages)
 
     assert folded[0].content.endswith(
         "The operator said, and it applies from now on:\n  - 체력바부터 확인해줘"
@@ -115,7 +122,7 @@ def test_operator_block_survives_folding() -> None:
 def test_a_message_with_no_scene_view_is_returned_unchanged() -> None:
     plain = ToolMessage(content="The game did not answer.", tool_call_id="1")
 
-    folded = fold_stale_scenes([plain, tool_message(1)], keep=1, max_full_views=1)
+    folded = fold_scene_views([plain, tool_message(1)])
 
     # Same object, not just equal content: nothing needed to change.
     assert folded[0] is plain
@@ -126,7 +133,7 @@ def test_non_tool_messages_pass_through_untouched() -> None:
     ai = AIMessage(content="Looking at the scene now.")
     messages = [human, ai, tool_message(1), tool_message(2), tool_message(3)]
 
-    folded = fold_stale_scenes(messages, keep=1, max_full_views=1)
+    folded = fold_scene_views(messages)
 
     assert folded[0] is human
     assert folded[1] is ai
@@ -135,23 +142,24 @@ def test_non_tool_messages_pass_through_untouched() -> None:
 def test_folding_is_idempotent() -> None:
     messages = [tool_message(1), tool_message(2), tool_message(3), tool_message(4)]
 
-    once = fold_stale_scenes(messages, keep=2, max_full_views=2)
-    twice = fold_stale_scenes(once, keep=2, max_full_views=2)
+    once = fold_scene_views(messages)
+    twice = fold_scene_views(once)
 
     assert [m.content for m in once] == [m.content for m in twice]
 
 
 def test_folded_placeholder_does_not_look_like_a_fresh_view() -> None:
     """A folded message must not be mistaken for a new view on a second pass —
-    otherwise raising `keep` later, or folding twice, could uncover text that
-    reads as live when the scene has already moved on."""
-    folded = fold_stale_scenes([tool_message(1), tool_message(2)], keep=2, max_full_views=2)
-    refolded = fold_stale_scenes(folded, keep=0, max_full_views=0)
+    otherwise folding twice could uncover text that reads as live when the scene
+    has already moved on."""
+    folded = fold_scene_views([tool_message(1), tool_message(2), tool_message(3)])
 
-    # Nothing in the first fold's output should be foldable again — it already
-    # got the treatment. keep=0 exposes anything the pattern would still catch.
-    stale_only = fold_stale_scenes([tool_message(1), tool_message(2)], keep=0, max_full_views=0)
-    assert [m.content for m in refolded] == [m.content for m in stale_only]
+    # The placeholders are not views, so a later pass has nothing to count or fold.
+    assert count_full_views(folded[0].content) == 0
+    assert count_full_views(folded[1].content) == 0
+    refolded = fold_context(folded, SCENE_VIEW_ONLY, threshold_chars=0)
+    assert refolded.newly_folded_kinds == frozenset()
+    assert [m.content for m in refolded.messages] == [m.content for m in folded]
 
 
 def test_accumulated_length_stops_growing_linearly_with_more_tool_messages() -> None:
@@ -159,7 +167,7 @@ def test_accumulated_length_stops_growing_linearly_with_more_tool_messages() -> 
 
     Unfolded, each extra tool message adds another whole view's worth of text —
     total length grows linearly with the number of tool calls in the run.
-    Folded, every message past `keep` is replaced by a fixed-size placeholder,
+    Folded, every message past the newest is replaced by a fixed-size placeholder,
     so the growth per extra message drops to a small constant regardless of how
     large the view itself is.
     """
@@ -167,7 +175,7 @@ def test_accumulated_length_stops_growing_linearly_with_more_tool_messages() -> 
     def total_length(n: int, *, fold: bool) -> int:
         messages = [tool_message(i) for i in range(1, n + 1)]
         if fold:
-            messages = fold_stale_scenes(messages, keep=DEFAULT_KEEP_SCENES)
+            messages = fold_scene_views(messages)
         return sum(len(m.content) for m in messages)
 
     unfolded_growth = (total_length(200, fold=False) - total_length(5, fold=False)) / (200 - 5)
@@ -185,44 +193,73 @@ def full_scene_views(messages) -> list[int]:
     ]
 
 
-def test_scene_views_are_not_folded_until_the_count_passes_the_batch_size() -> None:
-    """`DEFAULT_MAX_FULL_VIEWS` 개까지는 아무것도 안 고친다. 고치면 `cache` 가 안 맞는다."""
-    messages = [tool_message(i) for i in range(1, DEFAULT_MAX_FULL_VIEWS + 1)]
-
-    folded = fold_stale_scenes(messages)
-
-    assert all(after is before for after, before in zip(folded, messages))
+def stale_chars(messages) -> int:
+    """가장 새 메시지를 뺀 나머지 view 의 글자 수 합. 메시지 하나가 view 하나다."""
+    return sum(len(message.content) for message in messages[:-1])
 
 
-def test_one_view_past_the_batch_size_folds_all_but_the_newest() -> None:
-    count = DEFAULT_MAX_FULL_VIEWS + 1
-    messages = [tool_message(i) for i in range(1, count + 1)]
+def test_scene_views_are_not_folded_while_the_stale_total_is_under_the_threshold() -> None:
+    """기준에 못 미치면 아무것도 안 고친다. 고치면 `cache` 가 안 맞는다."""
+    messages = [tool_message(i) for i in range(1, 6)]
 
-    fold = fold_scenes(messages)
+    fold = fold_context(messages, SCENE_VIEW_ONLY, threshold_chars=stale_chars(messages) + 1)
 
-    assert full_scene_views(fold.messages) == [count]
-    assert fold.views_folded == count - 1
+    assert fold.newly_folded_kinds == frozenset()
+    assert fold.folded_keys == frozenset()
+    assert all(after is before for after, before in zip(fold.messages, messages))
+
+
+def test_the_call_that_reaches_the_threshold_folds_every_stale_view_at_once() -> None:
+    messages = [tool_message(i) for i in range(1, 6)]
+
+    fold = fold_context(messages, SCENE_VIEW_ONLY, threshold_chars=stale_chars(messages))
+
+    assert full_scene_views(fold.messages) == [5]
+    assert len(fold.folded_keys) == 4
+    assert fold.newly_folded_kinds == frozenset({FoldKind.scene_view})
 
 
 def test_between_batches_earlier_messages_stay_byte_identical() -> None:
     """batch 사이의 호출은 끝에 덧붙기만 한다. 앞이 같아야 프롬프트 끝의 `cache` 경계가 맞는다."""
-    batch_point = DEFAULT_MAX_FULL_VIEWS + 1
-    messages = [tool_message(i) for i in range(1, 2 * DEFAULT_MAX_FULL_VIEWS + 1)]
+    messages = [tool_message(i) for i in range(1, 11)]
+    batch_point = 4
+    threshold = stale_chars(messages[:batch_point])
 
-    at_batch = fold_stale_scenes(messages[:batch_point])
-    for length in range(batch_point + 1, len(messages) + 1):
-        later = fold_stale_scenes(messages[:length])
-        assert [m.content for m in later[:batch_point]] == [m.content for m in at_batch]
+    at_batch = fold_context(messages[:batch_point], SCENE_VIEW_ONLY, threshold_chars=threshold)
+    assert at_batch.newly_folded_kinds == frozenset({FoldKind.scene_view})
 
-    # 다음 batch 는 그 다음 하나에서 온다.
-    next_batch = fold_scenes(messages + [tool_message(len(messages) + 1)])
-    assert full_scene_views(next_batch.messages) == [len(messages) + 1]
+    # 새로 쌓인 오래된 view 두 개는 기준 세 개 분량에 못 미친다.
+    for length in (batch_point + 1, batch_point + 2):
+        later = fold_context(
+            messages[:length],
+            SCENE_VIEW_ONLY,
+            already_folded=at_batch.folded_keys,
+            threshold_chars=threshold,
+        )
+        assert later.newly_folded_kinds == frozenset()
+        assert [m.content for m in later.messages[:batch_point]] == [
+            m.content for m in at_batch.messages
+        ]
+
+    # 다음 batch 는 기준이 다시 차는 호출에서 온다.
+    next_batch = fold_context(
+        messages,
+        SCENE_VIEW_ONLY,
+        already_folded=at_batch.folded_keys,
+        threshold_chars=threshold,
+    )
+    assert next_batch.newly_folded_kinds == frozenset({FoldKind.scene_view})
+    assert full_scene_views(next_batch.messages) == [len(messages)]
 
 
 def test_batched_folding_is_idempotent() -> None:
-    messages = [tool_message(i) for i in range(1, DEFAULT_MAX_FULL_VIEWS + 4)]
+    messages = [tool_message(i) for i in range(1, 8)]
+    threshold = stale_chars(messages)
 
-    once = fold_stale_scenes(messages)
-    twice = fold_stale_scenes(once)
+    once = fold_context(messages, SCENE_VIEW_ONLY, threshold_chars=threshold)
+    twice = fold_context(
+        once.messages, SCENE_VIEW_ONLY, already_folded=once.folded_keys, threshold_chars=threshold
+    )
 
-    assert [m.content for m in once] == [m.content for m in twice]
+    assert [m.content for m in once.messages] == [m.content for m in twice.messages]
+    assert twice.newly_folded_kinds == frozenset()

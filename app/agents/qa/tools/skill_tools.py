@@ -7,15 +7,15 @@ run state, so the result carries no scene view and no operator messages, the sam
 as the knowledge read tools (`knowledge_read_tools.py`).
 
 The body comes back wrapped in `<<skill NAME>>` and `<<end skill NAME>>`, so
-`fold_stale_skills` in `app/agents/qa/context.py` can find exactly that span and
-replace it with a short note once a newer skill has been loaded. A skill body runs
-to about 10,000 characters, and without the fold every one the run ever loaded
-would be resent on every turn until compaction. The scene and knowledge folds do
-not touch it: they replace only the spans `SceneMemory.render` and the knowledge
-search mark, and a skill body carries neither. `tests/test_qa_skill_tools.py`
-pins both directions. Compaction can still summarise a loaded skill away, which
-is one more reason the description says to load a skill again when its rules are
-no longer in front of the agent.
+`fold_context` in `app/agents/qa/context.py` can find exactly that span and
+replace it with a short note in the next batch after a newer skill has been
+loaded. A skill body runs to about 10,000 characters, and without the fold every
+one the run ever loaded would be resent on every turn until compaction. The scene
+and knowledge folds do not touch it: they replace only the spans
+`SceneMemory.render` and the knowledge search mark, and a skill body carries
+neither. `tests/test_qa_skill_tools.py` pins both directions. Compaction can still
+summarise a loaded skill away, which is one more reason the description says to
+load a skill again when its rules are no longer in front of the agent.
 
 The tool is offered only when `arch.skills == "on_demand"`. With `off`,
 `runner.system_prompt_with_skills` puts every skill body in the system prompt

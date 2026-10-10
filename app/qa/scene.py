@@ -37,7 +37,7 @@ MAX_ACTIONS_IN_LIVE_VIEW = 10
 # remains of every screen it has ever shown.
 MISSING_LIFETIME = 5
 
-# `render`'s output is wrapped in these so a later pass — `fold_stale_scenes` in
+# `render`'s output is wrapped in these so a later pass — `fold_context` in
 # `app/agents/qa/context.py` — can find exactly where the view starts and ends
 # inside a tool message that may also carry action-outcome lines above it and an
 # operator block below it. A marker beats guessing at `scene: ` text: nothing
@@ -374,7 +374,7 @@ class SceneMemory(BaseModel):
             # 상태 출처가 되는 날(ARTEL-400) 화면이 통째로 비어 보인다.
             #
             # scene view 마커로는 안 감싼다. `pulse` view 는 제 마커(`<<pulse>>` …
-            # `<<end pulse>>`)를 갖고, `fold_stale_scenes` 가 그것을 찾아 `fold` 한다.
+            # `<<end pulse>>`)를 갖고, `fold_context` 가 그것을 찾아 `fold` 한다.
             #
             # 종전에는 이 view 를 일부러 `fold` 하지 않았다(ARTEL-621). 이유가 둘이었다 —
             # `keep=1` 로 매 호출 `fold` 하면 씬 페이지가 다음 도구 결과 하나에 먹히고, 옛
@@ -384,7 +384,7 @@ class SceneMemory(BaseModel):
             # 호출이 351,671 prompt token 이었다. 압축은 922k context window 의 90% 에서
             # 걸리므로 한 번도 안 걸렸다.
             #
-            # 두 이유에 각각 답이 있다. `fold` 를 batch 로 한다(`DEFAULT_MAX_FULL_VIEWS`) — 그
+            # 두 이유에 각각 답이 있다. `fold` 를 batch 로 한다(`DEFAULT_FOLD_THRESHOLD_CHARS`) — 그
             # 사이에는 앞을 안 고치므로 `cache` 가 맞는다. 그리고 `fold` 직후 첫 view 가 가진 값을
             # 전부 다시 그린다(`PulseMemory.redraw_all_values_next`) — 지워진 view 에만 있던
             # 값이 거기서 돌아온다.
@@ -461,7 +461,7 @@ class SceneMemory(BaseModel):
 
         body = "\n".join(lines)
         start = f"{SCENE_VIEW_START_PREFIX}{self.updates}{SCENE_VIEW_START_SUFFIX}"
-        # 맥락 블록은 마커 **밖**이다. `fold_stale_scenes` 가 이 마커 쌍을 통째로 자리표로
+        # 맥락 블록은 마커 **밖**이다. `fold_context` 가 이 마커 쌍을 통째로 자리표로
         # 바꾸는데, 그 안에 넣으면 씬 뷰 하나만 남기는 `fold` 에 블록도 함께 사라진다.
         # `fold` 되는 것은 화면이고, 블록은 그 화면이 무엇인지에 대한 설명이라 같이 갈
         # 이유가 없다.
