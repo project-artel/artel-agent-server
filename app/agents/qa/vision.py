@@ -7,7 +7,8 @@ Three separate problems, kept apart because they fail differently:
    and republished over SSE.
 2. Placement. Images cannot ride on a tool result, so they arrive as their own turn.
 3. Cost. Every image already in the transcript would otherwise be resent on every
-   later request.
+   later request. Folding the old ones is `fold_context`'s job
+   (`app/agents/qa/context.py`), batched with the other stale blocks.
 """
 
 import base64
@@ -23,11 +24,6 @@ from app.agents.qa.tools.state import PendingCapture, capture_from_action_result
 from app.qa.envelope import JsonRpcAction
 
 logger = logging.getLogger(__name__)
-
-# Images older than this are replaced with a line of text saying one was there.
-# Without a cap the transcript resends every screenshot on every turn, so the cost
-# of a run grows with the square of the number of captures.
-MAX_IMAGES_IN_REQUEST = 2
 
 # A run that keeps capturing instead of deciding is a run that will hit the
 # deadline with nothing reported. The number lives in `app/agents/qa/arch.py`
@@ -145,11 +141,11 @@ def build_capture_message(capture_id: str, encoded: str, mime_type: str, caption
     )
 
 
-def _is_capture_message(message) -> bool:
+def is_capture_message(message) -> bool:
     return bool((getattr(message, "additional_kwargs", None) or {}).get(CAPTURE_MESSAGE_KEY))
 
 
-def _without_image(message):
+def without_image(message):
     """The same turn with the picture replaced by a note that there was one."""
     caption = next(
         (
@@ -163,23 +159,6 @@ def _without_image(message):
         content=f"{caption} (image dropped from this request to save cost — capture it again if you need another look)",
         additional_kwargs=dict(getattr(message, "additional_kwargs", None) or {}),
     )
-
-
-def trim_images(messages: list, keep: int = MAX_IMAGES_IN_REQUEST) -> list:
-    """Keep the pictures on the last `keep` capture turns; text-only for the rest.
-
-    The agent judges against what it is looking at now. Older screenshots have
-    already been reasoned about, and their conclusions are in the transcript.
-    """
-    capture_positions = [index for index, message in enumerate(messages) if _is_capture_message(message)]
-    if len(capture_positions) <= keep:
-        return messages
-
-    stale = set(capture_positions[:-keep]) if keep > 0 else set(capture_positions)
-    return [
-        _without_image(message) if index in stale else message
-        for index, message in enumerate(messages)
-    ]
 
 
 @dataclass(frozen=True)
@@ -226,14 +205,12 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
         state,
         channel=None,
         arch=None,
-        max_images: int = MAX_IMAGES_IN_REQUEST,
         auto_capture_timeout: float = AUTO_CAPTURE_TIMEOUT_SECONDS,
     ) -> None:
         super().__init__()
         self._state = state
         self._channel = channel
         self._arch = arch
-        self._max_images = max_images
         # Injectable for the same reason `QaRunChannel.action_timeout` is: a test
         # that waited out the real one would pay ten seconds to prove a timeout.
         self._auto_capture_timeout = auto_capture_timeout
@@ -265,8 +242,7 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
 
         Returns `None` for every failure the game can produce — it is busy, its SDK
         does not know the action, the answer is late — and the turn then goes on
-        with no new picture. `trim_images` still holds the last two, so the model
-        is looking at a screen one turn old rather than at nothing.
+        with no new picture.
 
         `QaCancelled` from `dispatch_actions` is deliberately NOT caught. The
         operator ending the run has to stop the run, and every tool re-raises it
@@ -344,7 +320,11 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
         return {"messages": messages} if messages else None
 
     async def awrap_model_call(self, request, handler):
-        """Trim images for `on_demand`; hand the automatic modes their own, only here.
+        """Pass `on_demand` through; hand the automatic modes their own, only here.
+
+        An `on_demand` picture is stored in the conversation, and `fold_context`
+        (`app/agents/qa/context.py`) folds the old ones in the same batch as every
+        other stale block, so this hook leaves them alone.
 
         ## Why the picture does not go into the conversation
 
@@ -353,7 +333,7 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
         this whole prompt back — but only while every byte of it is the same again.
 
         Storing a picture per turn cannot keep that promise, whichever way the old
-        ones are disposed of. `trim_images` rewrites them into text and a deletion
+        ones are disposed of. `fold_context` rewrites them into text and a deletion
         would remove them outright; both edit a message that has already been sent,
         so the prefix diverges and the read is lost. Measured on a real run: the
         `on_demand` arm read 97.3% of its input from cache and the `every_call` arm
@@ -366,13 +346,11 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
         `pre_action` — and a stored transcript would have to be rewritten to follow
         them. Nothing is stored, so nothing is rewritten.
 
-        `MAX_IMAGES_IN_REQUEST` does not apply to either automatic mode. It bounds
+        `DEFAULT_KEEP_IMAGES` does not apply to either automatic mode. It bounds
         how many pictures a *stored* transcript resends, and these store none.
         """
         if not self._captures_every_call():
-            return await handler(
-                request.override(messages=trim_images(request.messages, self._max_images))
-            )
+            return await handler(request)
 
         messages = await self._screen_messages()
         return await handler(

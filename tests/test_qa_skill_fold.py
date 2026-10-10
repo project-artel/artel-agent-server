@@ -12,8 +12,8 @@ why the assertions below name what has to survive.
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.agents.qa.arch import default_resolved_arch
-from app.agents.qa.context import DEFAULT_KEEP_SKILLS, fold_stale_skills
-from app.agents.qa.runner import middleware_names_for
+from app.agents.qa.context import DEFAULT_KEEP_SKILLS, FoldKind, fold_every_stale_block
+from app.agents.qa.runner import fold_kinds_for, middleware_names_for
 from app.agents.qa.tools.skill_tools import wrap_skill
 
 
@@ -40,7 +40,7 @@ def test_the_default_keeps_one() -> None:
 def test_only_the_newest_of_three_skills_survives() -> None:
     messages = three_skills()
 
-    folded = fold_stale_skills(messages)
+    folded = fold_every_stale_block(messages, [FoldKind.skill])
 
     assert "Rules of knowledge_base." not in folded[0].content
     assert "Rules of content_map." not in folded[1].content
@@ -48,7 +48,7 @@ def test_only_the_newest_of_three_skills_survives() -> None:
 
 
 def test_the_note_says_the_rules_are_gone_and_how_to_get_them_back() -> None:
-    folded = fold_stale_skills(three_skills())
+    folded = fold_every_stale_block(three_skills(), [FoldKind.skill])
 
     assert folded[0].content == (
         "[skill knowledge_base folded to save context. Its rules are no longer in "
@@ -61,7 +61,7 @@ def test_the_reload_note_outside_the_markers_survives_the_fold() -> None:
     note = "(You already loaded 'content_map' earlier in this run. Here it is again.)\n\n"
     messages = [skill_message("content_map", "a", prefix=note), skill_message("held_state", "b")]
 
-    folded = fold_stale_skills(messages)
+    folded = fold_every_stale_block(messages, [FoldKind.skill])
 
     assert folded[0].content.startswith(note)
     assert "Rules of content_map." not in folded[0].content
@@ -76,7 +76,7 @@ def test_folding_is_pure_and_leaves_untouched_messages_identical() -> None:
     messages = [human, ai, first, plain, second]
     before = [message.content for message in messages]
 
-    folded = fold_stale_skills(messages)
+    folded = fold_every_stale_block(messages, [FoldKind.skill])
 
     # The input list and its messages are untouched.
     assert [message.content for message in messages] == before
@@ -90,21 +90,12 @@ def test_folding_is_pure_and_leaves_untouched_messages_identical() -> None:
 
 def test_folding_twice_changes_nothing_further() -> None:
     """The note is plain text, so it cannot be mistaken for a live block."""
-    once = fold_stale_skills(three_skills())
-    twice = fold_stale_skills(once)
+    once = fold_every_stale_block(three_skills(), [FoldKind.skill])
+    twice = fold_every_stale_block(once, [FoldKind.skill])
 
     assert [message.content for message in once] == [message.content for message in twice]
     # A folded note is not counted as a skill, so the newest is still the one kept.
     assert twice[2] is once[2]
-
-
-def test_a_folded_note_is_not_folded_again_at_keep_zero() -> None:
-    once = fold_stale_skills(three_skills())
-    again = fold_stale_skills(once, keep=0)
-
-    assert again[0] is once[0]
-    assert again[1] is once[1]
-    assert "Rules of held_state." not in again[2].content
 
 
 def test_messages_without_a_skill_are_left_alone() -> None:
@@ -113,7 +104,9 @@ def test_messages_without_a_skill_are_left_alone() -> None:
         content="'held_stat' is not a skill, so nothing was loaded.", tool_call_id="b"
     )
 
-    folded = fold_stale_skills([plain, unknown, skill_message("held_state", "c")], keep=0)
+    folded = fold_every_stale_block(
+        [plain, unknown, skill_message("held_state", "c")], [FoldKind.skill]
+    )
 
     assert folded[0] is plain
     assert folded[1] is unknown
@@ -128,25 +121,28 @@ def test_an_end_marker_for_another_skill_does_not_close_the_span() -> None:
         skill_message("held_state", "b"),
     ]
 
-    folded = fold_stale_skills(messages)
+    folded = fold_every_stale_block(messages, [FoldKind.skill])
 
     assert "More text of content_map." not in folded[0].content
 
 
-def test_the_skill_fold_comes_right_after_the_knowledge_fold() -> None:
-    """Independently switchable, and the fingerprint hashes this list's order."""
-    arch = default_resolved_arch().model_copy(update={"skills": "on_demand"})
-    names = middleware_names_for(arch)
+def test_the_skill_kind_is_folded_only_when_skills_load_on_demand() -> None:
+    """The kinds set is what switches, and the fingerprint hashes the middleware list."""
+    on_demand = default_resolved_arch().model_copy(update={"skills": "on_demand"})
+    off = default_resolved_arch().model_copy(update={"skills": "off"})
 
-    assert names.index("fold_stale_skills") == names.index("fold_knowledge_neighbours") + 1
+    assert FoldKind.skill in fold_kinds_for(on_demand)
+    assert FoldKind.skill not in fold_kinds_for(off)
+    assert middleware_names_for(on_demand).count("fold_context") == 1
 
 
 def test_turning_the_other_folds_off_leaves_the_skill_fold_alone() -> None:
     arch = default_resolved_arch().model_copy(
         update={"skills": "on_demand", "fold_stale_scenes": False, "fold_stale_knowledge": False}
     )
-    names = middleware_names_for(arch)
+    kinds = fold_kinds_for(arch)
 
-    assert "fold_stale_skills" in names
-    assert "fold_scene_views" not in names
-    assert "fold_knowledge_neighbours" not in names
+    assert FoldKind.skill in kinds
+    assert FoldKind.scene_view not in kinds
+    assert FoldKind.knowledge_neighbours not in kinds
+    assert "fold_context" in middleware_names_for(arch)

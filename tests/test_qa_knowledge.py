@@ -521,7 +521,7 @@ def test_a_reply_to_a_foreign_request_does_not_resolve_this_search(
 def test_a_search_neither_touches_the_game_nor_returns_a_scene() -> None:
     """The regression this tool was most likely to cause.
 
-    Every acting tool answers with the scene it produced, and `fold_stale_scenes`
+    Every acting tool answers with the scene it produced, and `fold_context`
     exists because those views pile up. A search changes no screen, so returning
     one would re-spend the context that fold was written to save — and it would
     also cost a game round trip for a picture the agent already has.
@@ -1591,7 +1591,7 @@ def test_a_successful_record_closes_the_outstanding_deletion() -> None:
 
 def test_a_write_neither_touches_the_game_nor_returns_a_scene() -> None:
     """The same regression `search_knowledge` had to avoid. Neither write changes
-    a screen, so returning one would re-spend the context `fold_stale_scenes` was
+    a screen, so returning one would re-spend the context `fold_context` was
     written to save, and cost a game round trip for a picture already in hand."""
 
     async def run() -> None:

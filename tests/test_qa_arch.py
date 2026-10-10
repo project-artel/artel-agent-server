@@ -515,7 +515,7 @@ def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v18-macro-one-view"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v19-fold-in-one-batch"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -628,7 +628,15 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 #
 # And from `6f4035a1242e`, when `report_step_view` (ARTEL-960) joined at `True`.
 # At `True` every tool answer is what it was, so the label stays.
-_EXPECTED_DEFAULT_FINGERPRINT = "24e30f3191d9"
+#
+# And once more, from `24e30f3191d9`, when the scene view, knowledge neighbour and skill
+# folds became the one `fold_context` middleware (v19). The tool set did not move.
+#
+# And once more, from `055e7ce108a3`, when `QaArchSpec.fold_threshold_chars` joined in v19:
+# the dump the digest hashes gained a key. Its default is the threshold v19 already used.
+#
+# And once more, from `83792f9f8d54`, when that default went from 56,000 to 112,000.
+_EXPECTED_DEFAULT_FINGERPRINT = "e7d85ceb94cd"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:

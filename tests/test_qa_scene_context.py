@@ -24,7 +24,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from app.agents.qa.compaction import render_progress_ledger
-from app.agents.qa.context import DEFAULT_MAX_FULL_VIEWS, FOLDED_VIEW_PREFIX
+from app.agents.qa.context import DEFAULT_KEEP_SCENES, FOLDED_VIEW_PREFIX, fold_context
 from app.api.qa_sessions import OpenQaSessionRequest
 from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState
@@ -543,7 +543,18 @@ def drive(
     scenes: list[str],
     scene_context: SceneContext | None,
     looks: int = 2,
+    fold_threshold_chars: int | None = None,
 ) -> tuple[ScriptedModel, QaRunChannel]:
+    # 기준은 `fold_context` 의 기본 인자라 module 상수를 고쳐서는 닿지 않는다. runner 가 부르는
+    # 함수를 감싸서 넘긴다. 주지 않으면 실제 기본값 그대로다.
+    if fold_threshold_chars is not None:
+
+        def fold_with_threshold(messages, kinds, already_folded=frozenset(), **_):
+            return fold_context(
+                messages, kinds, already_folded, threshold_chars=fold_threshold_chars
+            )
+
+        monkeypatch.setattr("app.agents.qa.runner.fold_context", fold_with_threshold)
     observations = [
         {
             "tool_calls": [
@@ -602,7 +613,7 @@ def drive(
 def scene_views(messages: list[BaseMessage]) -> list[str]:
     """화면이 모델에게 닿는 유일한 자리 — 도구 결과. 라이브 꼬리는 ARTEL-621 이 없앴다.
 
-    `fold` 된 것도 센다. `fold_stale_scenes` 는 씬 뷰 마커 사이를 자리표로 바꾸므로,
+    `fold` 된 것도 센다. `fold_context` 는 씬 뷰 마커 사이를 자리표로 바꾸므로,
     그런 메시지에는 시작 마커가 남지 않는다 — 그런데 블록은 그 마커 밖에 있어 그대로
     남고, 남는다는 것이 여기서 확인하려는 것 중 하나다.
     """
@@ -623,7 +634,7 @@ def test_the_block_rides_under_the_scene_view_the_model_reads(
     """씬 뷰 아래, 그리고 그 마커 **밖**이다.
 
     위가 게임이 지금 하고 있는 것이고 이것은 그것을 어디서 하고 있는지에 대한 문서다.
-    마커 밖인 것은 `fold_stale_scenes` 가 그 마커 쌍 사이를 통째로 자리표로 바꾸기
+    마커 밖인 것은 `fold_context` 가 그 마커 쌍 사이를 통째로 자리표로 바꾸기
     때문이다 — 안에 넣으면 씬 뷰 하나만 남기는 `fold` 에 블록도 함께 사라진다.
     """
     model, _channel = drive(monkeypatch, ["BattleScene"], context())
@@ -662,12 +673,15 @@ def test_the_block_survives_the_fold_that_swallows_the_view_it_sits_under(
 ) -> None:
     """`fold` 되는 것은 화면이고, 블록은 그 화면이 무엇인지에 대한 설명이다.
 
-    `fold_stale_scenes` 는 전문 view 가 `DEFAULT_MAX_FULL_VIEWS` 개를 넘으면 가장 새 씬 뷰
-    하나만 남긴다. 블록을 실은 것은 그 씬에 처음 들어선 도구 결과이므로, 마커 안에
+    `fold_context` 는 오래된 view 의 글자 수가 기준에 이르면 가장 새 씬 뷰 하나만 남긴다. 블록을 실은 것은 그 씬에 처음 들어선 도구 결과이므로, 마커 안에
     있었다면 그 `fold` 에서 사라졌을 것이다.
     """
     model, _channel = drive(
-        monkeypatch, ["BattleScene"], context(), looks=DEFAULT_MAX_FULL_VIEWS + 1
+        monkeypatch,
+        ["BattleScene"],
+        context(),
+        looks=DEFAULT_KEEP_SCENES + 3,
+        fold_threshold_chars=1,
     )
 
     sent = model.received[-1]
@@ -690,7 +704,9 @@ def test_the_block_follows_the_scene_when_the_scene_changes(
     두 도구 결과를 씬 이름이 아니라 **블록 내용**으로 가른다. 앞의 것은 `fold` 돼 있고,
     씬 이름은 `fold` 되는 마커 안에 있어 남지 않는다 — 블록은 마커 밖이라 남는다.
     """
-    model, _channel = drive(monkeypatch, ["BattleScene", "GhostScene"], context())
+    model, _channel = drive(
+        monkeypatch, ["BattleScene", "GhostScene"], context(), fold_threshold_chars=1
+    )
 
     views = scene_views(model.received[-1])
     assert len(views) >= 2

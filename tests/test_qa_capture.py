@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 import app.agents.qa.vision as vision_module
 from app.agents.qa.arch import ScreenCaptureMode, default_resolved_arch
+from app.agents.qa.context import FoldKind, fold_every_stale_block
 from app.agents.qa.tools import PendingCapture, QaRunState, build_tools
 from app.agents.qa.vision import (
     FAILURE_CAPTURE_TURNS,
@@ -23,7 +24,6 @@ from app.agents.qa.vision import (
     QaCaptureVisionMiddleware,
     build_capture_message,
     fetch_capture,
-    trim_images,
 )
 from app.llm.models import LLMModel, get_model_spec
 from app.qa.channel import QaRunChannel
@@ -512,7 +512,7 @@ def test_the_picture_never_enters_the_conversation() -> None:
 
 
 def test_only_one_picture_rides_on_a_request() -> None:
-    """`MAX_IMAGES_IN_REQUEST` does not apply — nothing older is ever resent."""
+    """`DEFAULT_KEEP_IMAGES` does not apply — nothing older is ever resent."""
 
     async def run() -> None:
         channel, state, _tools, sent = make()
@@ -619,6 +619,22 @@ def test_on_demand_never_takes_a_picture_by_itself() -> None:
 
         assert await middleware.abefore_model({}, None) is None
         assert actions(sent) == []
+
+    asyncio.run(run())
+
+
+def test_on_demand_hands_the_request_through_without_trimming() -> None:
+    """Old pictures are folded by `fold_context`, not by this middleware."""
+
+    async def run() -> None:
+        channel, state, _tools, _sent = make()
+        middleware = QaCaptureVisionMiddleware(state, channel, default_resolved_arch())
+
+        history = [image_message(f"cap-{index}") for index in range(5)]
+        messages = await one_call(middleware, history)
+
+        assert messages is history
+        assert all(_has_image(m) for m in messages)
 
     asyncio.run(run())
 
@@ -844,7 +860,7 @@ def test_only_the_most_recent_images_keep_their_pictures() -> None:
         image_message("c"),
     ]
 
-    trimmed = trim_images(messages, keep=2)
+    trimmed = fold_every_stale_block(messages, [FoldKind.image])
 
     # The oldest keeps its place in the transcript but loses the payload, so the
     # request stops growing with every screenshot ever taken.
@@ -857,7 +873,7 @@ def test_only_the_most_recent_images_keep_their_pictures() -> None:
 def test_trimming_leaves_a_transcript_under_the_cap_alone() -> None:
     messages = [HumanMessage(content="start"), image_message("a")]
 
-    assert trim_images(messages, keep=2) == messages
+    assert fold_every_stale_block(messages, [FoldKind.image]) == messages
 
 
 def test_trimming_does_not_touch_ordinary_messages() -> None:
@@ -869,8 +885,11 @@ def test_trimming_does_not_touch_ordinary_messages() -> None:
         image_message("c"),
     ]
 
-    trimmed = trim_images(messages, keep=1)
+    trimmed = fold_every_stale_block(messages, [FoldKind.image])
 
     assert trimmed[0] is messages[0]
     assert trimmed[1] is messages[1]
+    # The default keeps the newest two, so only the oldest picture is folded.
+    assert isinstance(trimmed[2].content, str)
+    assert trimmed[3].content[1]["type"] == "image_url"
     assert trimmed[4].content[1]["type"] == "image_url"

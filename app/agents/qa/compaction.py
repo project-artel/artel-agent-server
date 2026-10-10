@@ -1,6 +1,6 @@
 """Compacting the QA run's conversation when it outgrows the model.
 
-`fold_stale_scenes` (`app/agents/qa/context.py`) holds down the biggest source of
+`fold_context` (`app/agents/qa/context.py`) holds down the biggest source of
 growth, but not the rest of it: folded placeholders, action outcome lines, step
 verdicts, knowledge search results and the model's own reasoning all stay in the
 conversation for the whole run. A long scenario still reaches the provider's
@@ -43,7 +43,7 @@ from langchain_core.messages import AnyMessage, BaseMessage, HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.tools import BaseTool, tool
 
-from app.agents.qa.context import fold_stale_scenes
+from app.agents.qa.context import FoldKind, fold_every_stale_block
 from app.agents.qa.tools import QaRunState
 from app.prompts import load_tool_description
 from app.qa.channel import QaRunChannel
@@ -233,13 +233,20 @@ def _insert_after_summary(
 def _folded_token_counter(messages) -> int:
     """Count what the model is actually sent, not what the graph is holding.
 
-    `fold_stale_scenes` runs as a `wrap_model_call`, so it rewrites one request
+    `fold_context` runs as a `wrap_model_call`, so it rewrites one request
     and leaves the graph's own messages alone. Counting those unfolded messages
     would measure a conversation that is never sent, and compaction would fire
     while there was still plenty of room — repeatedly, since folding keeps the
     real size flat while the stored size climbs.
+
+    This folds every stale scene view rather than following `fold_context`'s
+    batches, which need the run's state. So it can read short by up to one batch,
+    `DEFAULT_FOLD_THRESHOLD_CHARS`, which is noise against a trigger set at 90%
+    of the model's window.
     """
-    return count_tokens_approximately(fold_stale_scenes(list(messages)))
+    return count_tokens_approximately(
+        fold_every_stale_block(list(messages), [FoldKind.scene_view])
+    )
 
 
 class QaCompactionMiddleware(SummarizationMiddleware):
@@ -348,7 +355,7 @@ class QaCompactionMiddleware(SummarizationMiddleware):
         # 오퍼레이터에게 보고되지 않고 그 자체로 터지게 하려는 것이다. 다만 이 한 번의
         # 폴딩만 밖에 있다. `_folded_token_counter`가 base class 안에서 다시 폴딩하고,
         # 그 호출은 아래 핸들러 아래에 있다.
-        folded = fold_stale_scenes(state["messages"])
+        folded = fold_every_stale_block(state["messages"], [FoldKind.scene_view])
 
         try:
             update = await super().abefore_model({**state, "messages": folded}, runtime)

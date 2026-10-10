@@ -113,7 +113,7 @@ class Settings(BaseSettings):
     # compaction has to be recoverable without a deploy.
     #
     # The trigger is a fraction of the model's `max_input_tokens`, measured over
-    # the messages as `fold_stale_scenes` leaves them — what is actually sent.
+    # the messages as `fold_context` leaves them — what is actually sent.
     #
     # `keep_messages` bounds how many messages survive verbatim, NOT how large
     # they are. If runs ever show compaction firing on consecutive turns, the fix

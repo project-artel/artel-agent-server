@@ -97,7 +97,7 @@ MAX_MACROS_IN_FIRST_MESSAGE = 12
 MAX_TEXT_CHARS = 160
 
 # The markers the rendered block is wrapped in. Its own pair, distinct from
-# `SCENE_VIEW_START_PREFIX`, and drawn OUTSIDE it: `fold_stale_scenes` replaces
+# `SCENE_VIEW_START_PREFIX`, and drawn OUTSIDE it: `fold_context` replaces
 # everything between that other pair with a placeholder, and a block inside it
 # would be folded away with the screen it describes. Nothing folds this one —
 # folding rewrites a message the model has already been sent, which is what broke

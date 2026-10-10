@@ -14,10 +14,15 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.agents.qa import runner as runner_module
 from app.agents.qa.arch import default_resolved_arch
-from app.agents.qa.context import fold_stale_knowledge, fold_stale_scenes, fold_stale_skills
-from app.agents.qa.knowledge import NEIGHBOUR_BLOCK_START_PREFIX
+from app.agents.qa.context import FoldKind, fold_every_stale_block
+from app.agents.qa.knowledge import (
+    NEIGHBOUR_BLOCK_END,
+    NEIGHBOUR_BLOCK_START_PREFIX,
+    NEIGHBOUR_BLOCK_START_SUFFIX,
+)
 from app.agents.qa.runner import (
     _skills_directive,
+    fold_kinds_for,
     middleware_names_for,
     system_prompt_with_skills,
 )
@@ -342,13 +347,38 @@ def conversation(skill_result: str, later_skill: str | None = None) -> list:
     return messages
 
 
-@pytest.mark.parametrize("fold", [fold_stale_scenes, fold_stale_knowledge])
-def test_neither_other_fold_touches_a_loaded_skill(fold) -> None:
+def fold_other_kinds(messages: list) -> list:
+    """`messages` folded by the scene and knowledge folds alone, with nothing kept back.
+
+    A newer scene view and a newer neighbour block go on the end first, so any span
+    of either kind inside an earlier message is stale and would be folded. Only the
+    original messages are returned.
+    """
+    newest = ToolMessage(
+        content=(
+            f"{scene_view(99)}\n"
+            f"{NEIGHBOUR_BLOCK_START_PREFIX}k-1{NEIGHBOUR_BLOCK_START_SUFFIX}\n"
+            f"- k-2\n{NEIGHBOUR_BLOCK_END}"
+        ),
+        tool_call_id="newest",
+        name="search_knowledge",
+    )
+    folded = fold_every_stale_block(
+        [*messages, newest], [FoldKind.scene_view, FoldKind.knowledge_neighbours]
+    )
+    return folded[: len(messages)]
+
+
+def fold_skills(messages: list) -> list:
+    return fold_every_stale_block(messages, [FoldKind.skill])
+
+
+def test_neither_other_fold_touches_a_loaded_skill() -> None:
     messages = conversation(
         loaded("knowledge_base", SKILLS["knowledge_base"]),
         loaded("content_map", SKILLS["content_map"]),
     )
-    folded = fold(messages, keep=0)
+    folded = fold_other_kinds(messages)
     assert folded[2] is messages[2]
     assert folded[8] is messages[8]
 
@@ -358,7 +388,7 @@ def test_the_skill_fold_touches_no_scene_view() -> None:
         loaded("knowledge_base", SKILLS["knowledge_base"]),
         loaded("content_map", SKILLS["content_map"]),
     )
-    folded = fold_stale_skills(messages, keep=0)
+    folded = fold_skills(messages)
     assert folded[4] is messages[4]
     assert folded[6] is messages[6]
 
@@ -368,7 +398,7 @@ def test_an_older_skill_folds_once_a_newer_one_is_loaded() -> None:
         loaded("knowledge_base", SKILLS["knowledge_base"]),
         loaded("content_map", SKILLS["content_map"]),
     )
-    folded = fold_stale_skills(messages)
+    folded = fold_skills(messages)
     assert SKILLS["knowledge_base"] not in folded[2].content
     assert 'load_skill("knowledge_base")' in folded[2].content
     assert folded[8] is messages[8]
@@ -376,7 +406,7 @@ def test_an_older_skill_folds_once_a_newer_one_is_loaded() -> None:
 
 def test_a_single_loaded_skill_survives_any_number_of_turns() -> None:
     messages = conversation(loaded("knowledge_base", SKILLS["knowledge_base"]))
-    assert fold_stale_skills(messages)[2] is messages[2]
+    assert fold_skills(messages)[2] is messages[2]
 
 
 def test_no_v19_skill_carries_a_marker_another_fold_looks_for() -> None:
@@ -386,16 +416,15 @@ def test_no_v19_skill_carries_a_marker_another_fold_looks_for() -> None:
     as `<<scene view N>>` does, is not a span and is left alone."""
     for name in skill_names("v19"):
         messages = conversation(loaded(name, load_skill(name, "v19").body))
-        folded = fold_stale_knowledge(fold_stale_scenes(messages, keep=0), keep=0)
-        assert folded[2] is messages[2], name
+        assert fold_other_kinds(messages)[2] is messages[2], name
 
 
 def test_every_real_v19_skill_folds_whole() -> None:
     """A real body must not end its own span early, or part of it would survive the fold."""
     for name in skill_names("v19"):
         body = load_skill(name, "v19").body
-        messages = conversation(loaded(name, body))
-        folded = fold_stale_skills(messages, keep=0)[2].content
+        messages = conversation(loaded(name, body), later_skill=loaded("held_state", "Later."))
+        folded = fold_skills(messages)[2].content
         assert folded.startswith(f"[skill {name} folded"), name
         assert body.strip().splitlines()[-1] not in folded, name
 
@@ -406,7 +435,7 @@ def test_naming_a_marker_in_prose_is_not_folded() -> None:
         f"neighbours `{NEIGHBOUR_BLOCK_START_PREFIX}id>>`."
     )
     messages = conversation(loaded("knowledge_base", body))
-    assert fold_stale_knowledge(fold_stale_scenes(messages, keep=0), keep=0)[2] is messages[2]
+    assert fold_other_kinds(messages)[2] is messages[2]
 
 
 # --- folding, through the middleware list ------------------------------------
@@ -416,17 +445,19 @@ def arch_with(**update):
     return default_resolved_arch().model_copy(update=update)
 
 
-def test_the_skill_fold_is_wired_only_when_skills_load_on_demand() -> None:
-    assert "fold_stale_skills" in middleware_names_for(arch_with(skills="on_demand"))
-    assert "fold_stale_skills" not in middleware_names_for(arch_with(skills="off"))
+def test_the_skill_fold_is_on_only_when_skills_load_on_demand() -> None:
+    assert FoldKind.skill in fold_kinds_for(arch_with(skills="on_demand"))
+    assert FoldKind.skill not in fold_kinds_for(arch_with(skills="off"))
 
 
 def test_the_knob_off_leaves_skills_unfolded() -> None:
+    kinds = fold_kinds_for(arch_with(skills="on_demand", fold_stale_skills=False))
+    assert FoldKind.skill not in kinds
+    # The other folds do not depend on it, and they still run as the one middleware.
+    assert FoldKind.scene_view in kinds
+    assert FoldKind.knowledge_neighbours in kinds
     names = middleware_names_for(arch_with(skills="on_demand", fold_stale_skills=False))
-    assert "fold_stale_skills" not in names
-    # The other two folds do not depend on it.
-    assert "fold_scene_views" in names
-    assert "fold_knowledge_neighbours" in names
+    assert "fold_context" in names
 
 
 def test_with_skills_off_the_knob_changes_nothing() -> None:
@@ -434,6 +465,9 @@ def test_with_skills_off_the_knob_changes_nothing() -> None:
     on = middleware_names_for(arch_with(skills="off", fold_stale_skills=True))
     off = middleware_names_for(arch_with(skills="off", fold_stale_skills=False))
     assert on == off
+    assert fold_kinds_for(arch_with(skills="off", fold_stale_skills=True)) == fold_kinds_for(
+        arch_with(skills="off", fold_stale_skills=False)
+    )
 
 
 # --- the phase gate -----------------------------------------------------------
