@@ -338,12 +338,22 @@ from app.llm.models import LLMModel, get_model_spec
 # scores every stale block by its length (a picture as 4,000 chars), and once the blocks not yet
 # folded add up to `DEFAULT_FOLD_THRESHOLD_CHARS` (56,000, about the 8 views the old batch
 # waited for) it folds all of them at once; the run keeps the keys it folded so later calls
-# send the same prefix. The middleware list changes, so the fingerprint moves.
+# send the same prefix. The middleware list changes, so the fingerprint moves. The threshold is
+# `QaArchSpec.fold_threshold_chars`, so a run can ask for another one without a new label.
 QA_ARCH_LABEL = "v19-fold-in-one-batch"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
 _FINGERPRINT_SCHEME = 1
+
+# `fold` 하지 않은 후보의 점수 합계가 이 값에 이르면 그 호출에서 전부 `fold` 한다. 점수는 후보가
+# 차지하는 글자 수다. 기본값이고, 런마다 `QaArchSpec.fold_threshold_chars` 로 바꿀 수 있다.
+#
+# 56,000 은 종전 batch 의 크기에 맞춘 값이다. 종전에는 전문 view 가 8개를 넘을 때 `fold` 했고, L1
+# 런 실측으로 view 한 개가 평균 약 7,000자이므로 오래된 view 약 8개, 56,000자가 쌓일 때마다
+# `cache` 를 한 번 다시 썼다. 같은 값으로 두어야 이 변경을 측정한 결과에서 "네 종류를 한 번에
+# 모았다" 는 효과만 따로 읽힌다.
+DEFAULT_FOLD_THRESHOLD_CHARS = 56_000
 
 # The fixed part of the tool-call budget: the opening observation, `finish_run`,
 # and the headroom between them. The per-run allowances are added on top of it
@@ -572,6 +582,10 @@ class QaArchSpec(BaseModel):
     # 기본값이 `True` 인 이유는 `pulse_relevance` 와 같다. 기본 run 의 view 가 그대로라
     # `QA_ARCH_LABEL` 이 안 움직인다.
     report_step_view: bool = True
+    # `fold_context` 가 오래된 block 을 한 번에 `fold` 하는 기준. 낮추면 prompt 를 자주 다시 써서
+    # `cache` 를 덜 읽고, 높이면 오래된 block 이 오래 남아 `cache` 에서 읽는 양이 는다. 어느 쪽이
+    # 싼지는 재 봐야 해서 실험 축으로 둔다. `0` 은 오래된 block 을 매 호출 `fold` 한다.
+    fold_threshold_chars: int = Field(default=DEFAULT_FOLD_THRESHOLD_CHARS, ge=0, le=10_000_000)
     # Compaction rewrites what the model reads once a run grows past a fraction of
     # its context, so a run with it and a run without it are two agents even with
     # the same tools. `None` defers to the deployment's own setting, which is what
@@ -667,6 +681,7 @@ class ResolvedArch(BaseModel):
     fold_stale_skills: bool
     pulse_relevance: bool
     report_step_view: bool
+    fold_threshold_chars: int
     compaction: bool
     compaction_trigger_fraction: float
     compaction_keep_messages: int

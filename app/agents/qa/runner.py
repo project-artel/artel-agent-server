@@ -342,14 +342,18 @@ def build_middleware(
             trim_tokens=arch.compaction_trim_tokens,
             on_compacted=on_compacted,
         ),
-        "fold_context": lambda: _fold_context_for(fold_kinds_for(arch), state, channel),
+        "fold_context": lambda: _fold_context_for(
+            fold_kinds_for(arch), arch.fold_threshold_chars, state, channel
+        ),
         "capture_vision": lambda: QaCaptureVisionMiddleware(state, channel, arch),
         "log_token_usage": lambda: _log_token_usage,
     }
     return [builders[name]() for name in middleware_names_for(arch)]
 
 
-def _fold_context_for(kinds: frozenset[FoldKind], state: QaRunState, channel: QaRunChannel):
+def _fold_context_for(
+    kinds: frozenset[FoldKind], threshold_chars: int, state: QaRunState, channel: QaRunChannel
+):
     """Fold stale blocks out of what one model call actually receives, in batches.
 
     `request.override` replaces only this call's messages, not the graph's own
@@ -363,7 +367,9 @@ def _fold_context_for(kinds: frozenset[FoldKind], state: QaRunState, channel: Qa
 
     @wrap_model_call(name="_fold_context")
     async def fold_context_middleware(request, handler):
-        fold = fold_context(request.messages, kinds, state.folded_blocks)
+        fold = fold_context(
+            request.messages, kinds, state.folded_blocks, threshold_chars=threshold_chars
+        )
         # 새 batch 에 view 가 들었다. 지금 모델이 받는 것은 가장 새 view 하나와 `placeholder` 뿐이고,
         # 그 view 는 델타라 지워진 view 에서 한 번 말하고 가만히 있던 값이 어디에도 없다. 그래서
         # 다음 도구 결과의 `pulse` view 가 가진 값을 전부 다시 그리게 한다. 이 호출 한 번은 그

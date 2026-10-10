@@ -13,7 +13,11 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
 from langchain_core.messages import ToolMessage
+from pydantic import ValidationError
+
+from app.agents.qa.arch import QaArchSpec, default_resolved_arch
 
 from app.agents.qa.context import (
     DEFAULT_FOLD_THRESHOLD_CHARS,
@@ -23,9 +27,10 @@ from app.agents.qa.context import (
     fold_context,
     fold_every_stale_block,
 )
-from app.agents.qa.runner import _context_shape, _fold_context_for
+from app.agents.qa.runner import _context_shape, _fold_context_for, build_middleware
 from app.agents.qa.tools import QaRunState
 from app.qa.channel import QaRunChannel
+from app.qa.run_config import resolve_run_config
 from app.qa.envelope import GameState, Interactable
 from app.qa.pulse import PULSE_VIEW_END, PULSE_VIEW_START, PulseMemory, PulseReading
 from app.qa.scene import SceneMemory
@@ -241,7 +246,7 @@ def held_channel() -> QaRunChannel:
 def test_a_new_batch_makes_the_next_pulse_view_redraw_everything() -> None:
     channel = held_channel()
     state = QaRunState(total_steps=1)
-    middleware = _fold_context_for(SCENE_VIEW_ONLY, state, channel)
+    middleware = _fold_context_for(SCENE_VIEW_ONLY, DEFAULT_FOLD_THRESHOLD_CHARS, state, channel)
     messages = messages_reaching_the_default_threshold()
 
     sent = run_fold_middleware(middleware, messages)
@@ -254,7 +259,7 @@ def test_a_new_batch_makes_the_next_pulse_view_redraw_everything() -> None:
 def test_no_redraw_without_a_new_batch() -> None:
     channel = held_channel()
     state = QaRunState(total_steps=1)
-    middleware = _fold_context_for(SCENE_VIEW_ONLY, state, channel)
+    middleware = _fold_context_for(SCENE_VIEW_ONLY, DEFAULT_FOLD_THRESHOLD_CHARS, state, channel)
     batch = messages_reaching_the_default_threshold()
 
     # 기준에 못 미치는 동안은 `fold` 가 없다.
@@ -269,3 +274,28 @@ def test_no_redraw_without_a_new_batch() -> None:
     # 같은 batch 를 다시 보는 호출은 새 `fold` 가 아니다.
     run_fold_middleware(middleware, [*batch, tool_message(len(batch) + 1)])
     assert "Enemy.Hp = 100" not in channel.scene.pulse.since_action(None)
+
+
+def test_the_run_threshold_comes_from_the_arch() -> None:
+    """`QaArchSpec.fold_threshold_chars` 가 middleware 까지 간다. 기본값은 module 상수다."""
+    assert default_resolved_arch().fold_threshold_chars == DEFAULT_FOLD_THRESHOLD_CHARS
+
+    arch = default_resolved_arch().model_copy(update={"fold_threshold_chars": 0})
+    channel = held_channel()
+    state = QaRunState(total_steps=1)
+    middleware = next(
+        item
+        for item in build_middleware(arch, state, channel, resolve_run_config())
+        if getattr(item, "name", "") == "_fold_context"
+    )
+    messages = messages_reaching_the_default_threshold()[:3]
+
+    sent = run_fold_middleware(middleware, messages)
+
+    assert full_readings(sent) == [len(messages)]
+    assert len(state.folded_blocks) == len(messages) - 1
+
+
+def test_a_negative_threshold_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        QaArchSpec(fold_threshold_chars=-1)

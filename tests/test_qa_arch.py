@@ -631,7 +631,10 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 #
 # And once more, from `24e30f3191d9`, when the scene view, knowledge neighbour and skill
 # folds became the one `fold_context` middleware (v19). The tool set did not move.
-_EXPECTED_DEFAULT_FINGERPRINT = "055e7ce108a3"
+#
+# And once more, from `055e7ce108a3`, when `QaArchSpec.fold_threshold_chars` joined in v19:
+# the dump the digest hashes gained a key. Its default is the threshold v19 already used.
+_EXPECTED_DEFAULT_FINGERPRINT = "83792f9f8d54"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:

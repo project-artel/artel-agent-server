@@ -50,6 +50,7 @@ from enum import StrEnum
 
 from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
 
+from app.agents.qa.arch import DEFAULT_FOLD_THRESHOLD_CHARS
 from app.agents.qa.knowledge import (
     NEIGHBOUR_BLOCK_END,
     NEIGHBOUR_BLOCK_START_PREFIX,
@@ -108,14 +109,6 @@ _KEEP_BY_KIND = {
     FoldKind.image: DEFAULT_KEEP_IMAGES,
 }
 
-# `fold` 하지 않은 후보의 점수 합계가 이 값에 이르면 그 호출에서 전부 `fold` 한다. 점수는 후보가
-# 차지하는 글자 수다.
-#
-# 56,000 은 종전 batch 의 크기에 맞춘 값이다. 종전에는 전문 view 가 8개를 넘을 때 `fold` 했고, L1
-# 런 실측으로 view 한 개가 평균 약 7,000자이므로 오래된 view 약 8개, 56,000자가 쌓일 때마다
-# `cache` 를 한 번 다시 썼다. 같은 값으로 두어야 이 변경을 측정한 결과에서 "네 종류를 한 번에
-# 모았다" 는 효과만 따로 읽힌다.
-DEFAULT_FOLD_THRESHOLD_CHARS = 56_000
 
 # 그림 한 장의 점수. 그림은 글자 수가 없으므로 token 으로 어림해 글자로 바꾼다: 화면 한 장이
 # 약 1,000 token 이고, 글자는 token 당 약 4자다.
