@@ -81,6 +81,21 @@ def test_a_definition_survives_a_round_trip_unchanged(name: str, source: str) ->
     assert round_trip(definition) == definition
 
 
+def test_a_docstring_survives_the_round_trip_and_old_json_without_it_still_reads() -> None:
+    """`docstring` 은 기본값이 `None` 이다. 이 field 가 생기기 전에 저장된 JSON 도
+    `extra="forbid"` 아래에서 그대로 읽힌다 (ARTEL-984)."""
+    with_docstring = macro_definition_from_source(
+        "m", 'def m(card: object) -> None:\n    """Deal one card."""\n    click(card)\n'
+    )
+    assert round_trip(with_docstring) == with_docstring
+    assert json.loads(with_docstring.model_dump_json())["entry"]["docstring"] == "Deal one card."
+
+    without = macro_definition_from_source("m", "def m(card: object) -> None:\n    click(card)\n")
+    written = json.loads(without.model_dump_json())
+    del written["entry"]["docstring"]
+    assert MacroDefinition.model_validate(written) == without
+
+
 def test_the_source_text_rides_along_verbatim() -> None:
     """`ast.parse` 가 주석과 공백을 버리므로, JSON 에서 텍스트를 다시 찍어낼 수 없다.
 

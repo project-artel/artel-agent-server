@@ -21,6 +21,7 @@
 """
 
 import ast
+import inspect
 from dataclasses import dataclass
 
 from app.agents.qa.macro.errors import MacroRejection
@@ -228,10 +229,12 @@ def macro_definition_from_source(name: str, source: str) -> MacroDefinition:
     helpers: list[MacroFunction] = []
     for node in functions:
         reader = _FunctionReader(signatures, node.name, lines)
+        docstring, body_nodes = _split_docstring(node)
         built = MacroFunction(
             name=node.name,
             parameters=signatures[node.name].parameters,
-            statements=reader.body(node.body, node),
+            docstring=docstring,
+            statements=reader.body(body_nodes, node),
         )
         if node.name == name:
             entry = built
@@ -294,6 +297,28 @@ def _syntax_hint(message: str) -> str:
     return ""
 
 
+def _split_docstring(node: ast.FunctionDef) -> tuple[str | None, list[ast.stmt]]:
+    """`def` 몸통의 첫 statement 가 문자열 하나면 그것을 docstring 으로 떼어 낸다.
+
+    docstring 은 statement 가 아니다. `statements` 에 들어가지 않으므로 statement 한도에
+    세지 않고 runner 도 보지 않는다. entry `def` 의 docstring 이 이 macro 의 summary 로
+    다음 런의 첫 메시지와 `search_macros` 결과에 실린다.
+
+    공백뿐인 docstring 은 `None` 이다. summary 자리에 빈 줄을 그리면 summary 가 없는
+    macro 와 구별되지 않는다. 몸통이 docstring 하나뿐이면 남은 몸통이 비어서
+    `_FunctionReader.body` 가 빈 몸통으로 거절한다.
+    """
+    first = node.body[0] if node.body else None
+    if not (
+        isinstance(first, ast.Expr)
+        and isinstance(first.value, ast.Constant)
+        and isinstance(first.value.value, str)
+    ):
+        return None, list(node.body)
+    cleaned = inspect.cleandoc(first.value.value).strip()
+    return (cleaned or None), list(node.body[1:])
+
+
 def _top_level_functions(module: ast.Module) -> list[ast.FunctionDef]:
     functions: list[ast.FunctionDef] = []
     for node in module.body:
@@ -314,9 +339,9 @@ def _top_level_functions(module: ast.Module) -> list[ast.FunctionDef]:
             )
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
             raise MacroRejection(
-                "a bare string at the top of a macro reads as a docstring and is not "
-                "allowed. Put the explanation in a `#` comment — the stored source "
-                "keeps comments, so nothing is lost.",
+                "a bare string is not allowed at the top of a macro source. A docstring "
+                "goes as the first statement of a `def`, indented under its `def` line; "
+                "anywhere else, use a `#` comment.",
                 node.lineno,
             )
         raise MacroRejection(
@@ -705,8 +730,9 @@ class _FunctionReader:
             raise MacroRejection("`import` is not allowed anywhere in a macro.", line)
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
             raise MacroRejection(
-                "a bare string is read as a docstring and is not allowed. Put the "
-                "explanation in a `#` comment — the stored source keeps comments.",
+                "a bare string is allowed only as a docstring, which is the first "
+                "statement of a `def`. Anywhere else — later in a body, or inside an "
+                "`if` or a loop — write the explanation as a `#` comment.",
                 line,
             )
         if isinstance(node, ast.AnnAssign):  # pragma: no cover - 위에서 이미 다룬다

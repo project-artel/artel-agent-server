@@ -237,6 +237,22 @@ def test_a_trailing_comment_survives_into_the_summary() -> None:
     assert host.summaries() == ["click(card)  # 카드를 낸다"]
 
 
+def test_a_docstring_is_never_run() -> None:
+    """docstring 은 statement 가 아니므로 batch 도, 번호도 받지 않는다 (ARTEL-984)."""
+    host = FakeHost(battle())
+    source = (
+        "def m(card: object) -> None:\n"
+        '    """Deal one card."""\n'
+        "    click(card)\n"
+    )
+    result = drive(host, source, "m", {"card": two_cards(host)["card_a"]})
+
+    assert result.passed, result.failure
+    assert host.summaries() == ["click(card)"]
+    assert [place.number for place in result.applied] == [1]
+    assert all(place.total == 1 for place in result.applied)
+
+
 def test_the_step_the_macro_was_called_on_rides_on_every_batch() -> None:
     """macro 안의 statement 가 시나리오 step 을 따로 가질 길이 없다.
 
