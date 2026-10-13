@@ -142,6 +142,47 @@ class MacroPulseWait:
     operator_messages: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class MacroDecideOption:
+    """`decide` 의 선택지 하나. `description` 은 그 macro 의 docstring 이다."""
+
+    name: str
+    description: str
+
+
+@dataclass(frozen=True)
+class MacroDecideRequest:
+    """`match decide(...)` 한 번이 Jev 에 묻는 것.
+
+    `state` 는 agent 가 keyword 로 적은 context 를 runner 가 값으로 푼 것이다. 게임이 보낸
+    값이 그대로 실리므로 모양을 정할 수 없어 JSON 사전으로 둔다 — Jev 요청 본문으로 그대로
+    나가는 passthrough 다. `options` 의 마지막은 언제나 `NONE_FITS` 다.
+    """
+
+    question: str
+    options: tuple[MacroDecideOption, ...]
+    state: dict[str, Any]
+    # `MAX_DECIDE_STATE_CHARS` 를 넘어 뺀 object 수. 결정 줄에 적는다.
+    clipped: int = 0
+
+
+@dataclass(frozen=True)
+class MacroAskRequest:
+    """`ask(...)` 한 번이 Jev 에 묻는 것. `state` 는 `MacroDecideRequest.state` 와 같다."""
+
+    question: str
+    state: dict[str, Any]
+    clipped: int = 0
+
+
+class MacroJevUnavailable(Exception):
+    """host 가 Jev 답을 못 받았을 때 낸다. runner 가 `JEV_FAILED` 로 바꾼다.
+
+    host 가 `MacroFailure` 를 직접 만들지 않는 이유는 멈춘 자리와 호출 사슬을 runner 만
+    알기 때문이다.
+    """
+
+
 class MacroHost(Protocol):
     """`runner` 가 바깥에 대고 하는 `action`, `pulse` 대기, `checkpoint`.
 
@@ -169,7 +210,18 @@ class MacroHost(Protocol):
 
         `result` 는 거기까지의 장부이고 `paused_at` 이 찬 채로 온다. 이으면 `True`, 그만두면
         `False` 다. 그만두면 runner 는 아무것도 더 안 보낸다.
+
+        `decide` 가 `NONE_FITS` 를 받은 자리에서도 이것으로 멈춘다. 그때는
+        `result.paused_decision` 이 찬다.
         """
+        ...
+
+    async def decide(self, request: MacroDecideRequest) -> str:
+        """Jev 가 고른 선택지 이름. 못 받으면 `MacroJevUnavailable` 을 낸다."""
+        ...
+
+    async def ask(self, request: MacroAskRequest) -> float:
+        """Jev 가 질문을 참이라고 볼 확률. 못 받으면 `MacroJevUnavailable` 을 낸다."""
         ...
 
 
@@ -248,8 +300,13 @@ class MacroRunResult:
     # `checkpoint` 에서 턴을 돌려준 자리와 그 이유. 이어 돌면 다시 비운다.
     paused_at: MacroPlace | None = None
     paused_reason: str = ""
+    # `decide` 가 `NONE_FITS` 를 받아 멈췄을 때 Jev 에 물은 것. `checkpoint` 로 멈췄으면
+    # `None` 이다. agent 는 이것으로 어떤 macro 가 빠졌는지 본다.
+    paused_decision: MacroDecideRequest | None = None
     # agent 가 `checkpoint` 에서 그만두기로 한 자리. 실패가 아니다.
     abandoned_at: MacroPlace | None = None
+    # `decide` 와 `ask` 가 낸 답, 한 번에 한 줄. `step 4 (pass 3): decide picked end_turn`.
+    decisions: list[str] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
