@@ -515,7 +515,7 @@ def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v21-search-knowledge-any-phase"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v23-macro-docstring-search"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -573,6 +573,7 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
     "run_macro",
     "resume_macro",
     "decline_macro_draft",
+    "search_macros",
     "wait_for_operator",
     "report_step",
     "report_issue",
@@ -636,7 +637,10 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 # the dump the digest hashes gained a key. Its default is the threshold v19 already used.
 #
 # And once more, from `83792f9f8d54`, when that default went from 56,000 to 112,000.
-_EXPECTED_DEFAULT_FINGERPRINT = "e7d85ceb94cd"
+#
+# And from `e7d85ceb94cd`, when `search_macros` joined the macro tools (ARTEL-984, v20).
+# The default is `macros=on`, so the default tool set moved with it.
+_EXPECTED_DEFAULT_FINGERPRINT = "1024ec5d29c8"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
@@ -734,6 +738,7 @@ MACRO_TOOLS = (
     "run_macro",
     "resume_macro",
     "decline_macro_draft",
+    "search_macros",
 )
 
 

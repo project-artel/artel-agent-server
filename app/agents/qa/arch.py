@@ -355,7 +355,25 @@ from app.llm.models import LLMModel, get_model_spec
 # phase directive is unchanged: `qa_run/v19` is locked and the next prompt version is being
 # written on ARTEL-984. Nothing hashed moves: the phase table is not hashed. v20 is skipped
 # because the ARTEL-984 branch already uses `v20-macro-docstring-search`.
-QA_ARCH_LABEL = "v21-search-knowledge-any-phase"
+#
+# v20 because macros now describe themselves with a docstring and can be searched (ARTEL-984,
+# plan `.plan/general/2026-10-13-macro-docstring-and-search.md`). Three things move. The tool
+# set gains `search_macros`, which sends `MACRO_SEARCH` and lists the registered macros of this
+# build that match by name and docstring; the first-message list stops at 12, and before this a
+# run could not reach the rest without knowing a name. A macro's summary moves from the first
+# `#` line of its entry `def` to that `def`'s docstring: the parser accepts one string as the
+# first statement of any `def`, `MACRO_REGISTER` carries the entry's, `lift.py` drafts write
+# `"""Step N: ..."""`, and `register_macro` refuses an entry `def` without one, so every macro
+# registered from now on has a summary. And what the model reads changes: the first-message
+# list, the `report_step` hint and the search answer draw each macro as a `def` line with its
+# docstring indented under it, instead of `name(...) — summary  [scenes]`. Macros an earlier run
+# registered without a docstring still load and run. The new tool moves `arch_fingerprint`; the
+# rendering change does not, which is why it is named here.
+#
+# v23 because the v20 change above landed on develop after v21 did, so the merged structure is
+# both: `search_macros` on top of `search_knowledge` in any phase. v22 is skipped because the
+# ARTEL-988 branch already uses `v22-macro-wait-until`.
+QA_ARCH_LABEL = "v23-macro-docstring-search"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

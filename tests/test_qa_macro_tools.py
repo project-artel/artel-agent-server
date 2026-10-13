@@ -26,6 +26,7 @@ from app.llm.models import LLMModel
 from app.qa.pulse import PULSE_VIEW_START, PulseReading
 
 SIMPLE = '''def deal_a_card(card: object) -> None:
+    """Deal one card into the fourth slot."""
     require(exists(card), "Draw a card first.")
     slot: object = selector("Root[0]/Canvas[1]/Slot[4]")
     drag(card, slot)
@@ -300,6 +301,7 @@ def test_edit_macro_refuses_old_text_that_appears_more_than_once() -> None:
     _, state, tools, _ = make()
     twice = (
         "def twice(card: object) -> None:\n"
+        '    """Click a card twice."""\n'
         "    click(card)\n"
         "    click(card)\n"
     )
@@ -576,6 +578,7 @@ def test_run_macro_replays_the_registered_definition() -> None:
 
 TWO_PRESSES = (
     "def two_presses() -> None:\n"
+    '    """Press A, then B."""\n'
     '    press_key("A", 0.1)\n'
     '    press_key("B", 0.1)\n'
 )
@@ -678,6 +681,7 @@ def test_an_argument_is_checked_against_its_declared_type(
     with_cards(channel)
     source = (
         f"def tuned(value: {declared}) -> None:\n"
+        '    """Take one typed value."""\n'
         '    require(scene() == "Nowhere", "go somewhere else")\n'
     )
     call(tools["write_macro"], name="tuned", source=source)
@@ -774,6 +778,7 @@ def test_a_step_a_macro_asked_about_still_has_to_be_reported() -> None:
     with_cards(channel)
     source = (
         "def look() -> None:\n"
+        '    """Look at the hand."""\n'
         '    if exists(selector("Root[0]/Hand[2]/Card(Clone)[3]")):\n'
         '        ask_verdict("a dealt card should be pressable")\n'
     )
@@ -806,6 +811,7 @@ def test_a_flag_only_macro_does_not_add_a_step_to_report() -> None:
     with_cards(channel)
     source = (
         "def look() -> None:\n"
+        '    """Look at the hand."""\n'
         '    if exists(selector("Root[0]/Hand[2]/Card(Clone)[3]")):\n'
         '        flag("a card is on the table")\n'
     )
@@ -839,6 +845,7 @@ def test_the_macro_tools_sit_beside_the_action_tools_in_the_offered_list() -> No
         "run_macro",
         "resume_macro",
         "decline_macro_draft",
+        "search_macros",
     ]
 
 
@@ -855,6 +862,7 @@ def test_the_macro_tools_sit_beside_the_action_tools_in_the_offered_list() -> No
 # 실제로 수가 도착하는 런타임에 `COMPARISON_REJECTED` 가 난다 — 비교 없는 조건은 bool
 # 로 도착해야 한다.
 COMPARED = '''def judge_the_card(card: object) -> None:
+    """Require the card to carry a number."""
     require(member(card, "Enemy.Hp"), "Draw a card with a bigger number.")
 '''
 
@@ -994,6 +1002,7 @@ def test_every_macro_tool_body_is_guarded_against_a_leaking_exception() -> None:
 
 CHECKED = (
     "def go() -> None:\n"
+    '    """Press A, look, press B."""\n'
     '    press_key("A", 0.1)\n'
     '    checkpoint("look at the board")\n'
     '    press_key("B", 0.1)\n'
@@ -1117,3 +1126,57 @@ def test_cancelling_the_call_that_waits_on_a_macro_stops_the_macro_too() -> None
 
     assert cancelled
     assert sent_after == []
+
+
+# --- docstring 이 등록의 조건이다 (ARTEL-984) -------------------------------------
+
+UNDOCUMENTED = '''def press_twice() -> None:
+    press_key("A", 0.1)
+    press_key("A", 0.1)
+'''
+
+
+def test_a_draft_without_a_docstring_is_written_and_told_registering_needs_one() -> None:
+    _, state, tools, _ = make()
+
+    answer = call(tools["write_macro"], name="press_twice", source=UNDOCUMENTED)
+
+    assert "is a draft and parses" in answer
+    assert "`def press_twice` has no docstring yet" in answer
+    assert "`register_macro` will refuse it" in answer
+    assert state.macros.draft("press_twice") == UNDOCUMENTED
+
+
+def test_register_macro_refuses_an_entry_without_a_docstring_and_registers_once_added() -> None:
+    _, state, tools, sent = make()
+    call(tools["write_macro"], name="press_twice", source=UNDOCUMENTED)
+
+    refused = call(tools["register_macro"], name="press_twice")
+
+    assert refused.startswith("press_twice was not registered")
+    assert "first statement of that `def`" in refused
+    assert "what the macro does and when to use it" in refused
+    assert "`edit_macro`" in refused
+    assert state.macros.registered("press_twice") is None
+    assert macro_frames(sent, MessageType.MACRO_REGISTER) == []
+
+    edited = call(
+        tools["edit_macro"],
+        name="press_twice",
+        old_text="def press_twice() -> None:\n",
+        new_text='def press_twice() -> None:\n    """Press A twice."""\n',
+    )
+    assert "no docstring" not in edited
+    call(tools["register_macro"], name="press_twice")
+    assert state.macros.registered("press_twice").definition.entry.docstring == "Press A twice."
+
+
+def test_a_blank_docstring_counts_as_none_when_registering() -> None:
+    _, state, tools, _ = make()
+    source = 'def blank() -> None:\n    """   """\n    press_key("A", 0.1)\n'
+    call(tools["write_macro"], name="blank", source=source)
+
+    refused = call(tools["register_macro"], name="blank")
+
+    assert "has no docstring" in refused
+    assert state.macros.registered("blank") is None

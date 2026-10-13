@@ -72,11 +72,14 @@ class RunPhase(StrEnum):
 #   실패한 macro 를 읽고 고친다. 초안은 지식이 아니므로 `UPDATE_MEMORY` 를 끝내지 않는다.
 #   `REVIEW_DRAFT` 도 끝내지 않는다 — 내민 `draft` 를 `edit_macro` 로 고친 뒤 `register_macro`
 #   로 답하는 길이 거기서 열려 있어야 한다.
+# - `search_macros` — `read_macro` 와 같은 읽기다. 아무것도 안 바꾸므로 어느 phase 도 끝내지
+#   않고, macro 를 새로 쓰기 전에 찾는 일은 어느 phase 에서든 생긴다.
 ALWAYS_ALLOWED = frozenset(
     {
         "write_macro",
         "edit_macro",
         "read_macro",
+        "search_macros",
         "observe_scene",
         "reply_to_operator",
         "wait_for_operator",

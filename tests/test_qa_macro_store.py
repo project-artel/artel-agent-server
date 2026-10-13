@@ -56,6 +56,8 @@ LOADED = {
     "definition": {"name": "deal_a_card"},
     "parameters": ["card"],
     "screen_ids": ["12"],
+    # 저쪽은 이 칸을 늘 싣고, docstring 이 없으면 JSON null 이다 (ARTEL-986).
+    "docstring": None,
 }
 
 
@@ -99,6 +101,8 @@ def test_register_macro_sends_the_definition_to_the_content_map() -> None:
     assert payload["parameters"] == ["card"]
     # 서 있는 `screen` 이 먼저, agent 가 지목한 것이 뒤.
     assert payload["screens"] == ["12", "40"]
+    # 진입점 docstring 이 따로 실린다. 저쪽은 Python 을 파싱하지 않는다 (ARTEL-984).
+    assert payload["docstring"] == "Deal one card into the fourth slot."
 
 
 def test_the_definition_tree_carries_the_two_keys_the_far_side_reads() -> None:
@@ -293,6 +297,30 @@ def test_read_macro_asks_the_content_map_for_a_name_this_run_does_not_know() -> 
     assert registered is not None
     assert registered.screens == ("12",)
     assert state.macros.was_read("deal_a_card")
+
+
+def test_a_macro_an_earlier_run_stored_without_a_docstring_still_loads() -> None:
+    """docstring 은 등록할 때만 요구한다. 그 전에 저장된 macro 는 그대로 읽고 부른다 (ARTEL-984)."""
+    channel, state, tools, sent = make()
+    undocumented = SIMPLE.replace('    """Deal one card into the fourth slot."""\n', "")
+    assert '"""' not in undocumented
+
+    answer = with_reply(
+        tools["read_macro"],
+        lambda: answer_macro(
+            channel,
+            sent,
+            MessageType.MACRO_READ,
+            MessageType.MACRO_READ_RESULT,
+            {**LOADED, "source": undocumented},
+        ),
+        name="deal_a_card",
+    )
+
+    assert undocumented in answer
+    registered = state.macros.registered("deal_a_card")
+    assert registered is not None
+    assert registered.definition.entry.docstring is None
 
 
 def test_read_macro_does_not_ask_twice_for_a_name_it_already_has() -> None:

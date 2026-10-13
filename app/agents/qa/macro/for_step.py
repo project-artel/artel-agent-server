@@ -6,7 +6,8 @@ macro 목록은 첫 메시지에 한 번 실리고 뒤로 멀어진다. 두세 s
 그 번호의 macro 이름을 같이 적는다.
 
 모델을 부르지 않는다. 이름과 summary 의 모양만 보는 순수 함수라 같은 입력이면 같은 문장이다.
-초안 이름이 `replay_step_N` 이고 첫 주석이 `# Step N: ...` 인 것은 `lift.py` 가 정한 모양이다.
+summary 는 진입점 `def` 의 docstring 이다 (ARTEL-984). 초안 이름이 `replay_step_N` 이고
+docstring 이 `Step N: ...` 으로 시작하는 것은 `lift.py` 가 정한 모양이다.
 """
 
 import re
@@ -14,35 +15,22 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from app.agents.qa.macro.book import RegisteredMacro
-from app.qa.scene_context import SceneMacro
+from app.qa.scene_context import SceneMacro, render_macro, scene_labels
 
 # 한 답에 이름을 대는 macro 수. 셋 이상이면 어느 것을 먼저 돌릴지 고르는 일이 agent 에게 남는다.
 MAX_NAMED_MACROS = 2
-# summary 를 괄호 안에 옮길 때의 길이. 한 문장에 둘이 들어가도 답이 길어지지 않게 자른다.
+# hint 에 옮기는 docstring 의 길이. macro 둘이 실려도 답이 길어지지 않게 자른다.
 MAX_SUMMARY_CHARS = 100
 
 
 @dataclass(frozen=True)
 class StepMacro:
     name: str
+    # 진입점 `def` 의 docstring. 이 런의 등록은 `MacroFunction.docstring`, 지난 런의 것은
+    # orchestration 이 docstring 으로 채운 `SceneMacro.summary` 다.
     summary: str | None
-
-
-def first_body_comment(source: str, entry_name: str) -> str | None:
-    """`entry_name` 의 `def` 본문 안 첫 `#` 줄에서 `#` 과 공백을 뗀 글. 없으면 `None`.
-
-    orchestration 이 `summary` 를 만드는 `firstBodyComment` 와 같은 규칙이다. `def` 줄보다
-    앞의 주석은 본문이 아니므로 보지 않는다.
-    """
-    in_body = False
-    for line in source.splitlines():
-        stripped = line.strip()
-        if not in_body:
-            in_body = stripped.startswith(f"def {entry_name}(")
-            continue
-        if stripped.startswith("#"):
-            return stripped.lstrip("# ").strip() or None
-    return None
+    parameters: tuple[tuple[str, str], ...] = ()
+    scenes: tuple[str, ...] = ()
 
 
 def _mentions_step(step: int, name: str, summary: str | None) -> bool:
@@ -65,38 +53,59 @@ def macros_for_step(
     """
     found: list[StepMacro] = []
     for name, registered in registrations.items():
-        summary = first_body_comment(registered.definition.source, registered.definition.entry.name)
-        if _mentions_step(step, name, summary):
-            found.append(StepMacro(name, summary))
+        entry = registered.definition.entry
+        if _mentions_step(step, name, entry.docstring):
+            found.append(
+                StepMacro(
+                    name,
+                    entry.docstring,
+                    tuple(
+                        (parameter.name, parameter.declared_type.value)
+                        for parameter in entry.parameters
+                    ),
+                    # 이 런의 등록은 `screen.id` 만 안다. scene 이름은 orchestration 이
+                    # scene context 에 실어 줄 때 붙는다.
+                    tuple(f"screen {screen_id}" for screen_id in registered.screens),
+                )
+            )
     for macro in scene_macros:
         if any(one.name == macro.name for one in found):
             continue
         if _mentions_step(step, macro.name, macro.summary):
-            found.append(StepMacro(macro.name, macro.summary))
+            found.append(
+                StepMacro(
+                    macro.name,
+                    macro.summary,
+                    tuple((parameter.name, parameter.type) for parameter in macro.parameters),
+                    tuple(scene_labels(macro.screens)),
+                )
+            )
     return found[:MAX_NAMED_MACROS]
 
 
-def _described(macro: StepMacro) -> str:
-    if not macro.summary:
-        return f"`{macro.name}`"
-    text = " ".join(macro.summary.split())
-    if len(text) > MAX_SUMMARY_CHARS:
-        text = text[:MAX_SUMMARY_CHARS].rstrip() + "…"
-    return f"`{macro.name}` ({text})"
+def _described(macro: StepMacro) -> list[str]:
+    return render_macro(
+        macro.name,
+        macro.parameters,
+        macro.summary,
+        macro.scenes,
+        indent="  ",
+        docstring_chars=MAX_SUMMARY_CHARS,
+    )
 
 
 def render_step_macro_hint(step: int, macros: Sequence[StepMacro]) -> str:
     """답 끝에 붙이는 문장. 맞는 macro 가 없으면 빈 문자열."""
     if not macros:
         return ""
-    listed = ", ".join(_described(macro) for macro in macros)
+    listed = [line for macro in macros for line in _described(macro)]
     if len(macros) == 1:
-        lead = f"Step {step} has a registered macro: {listed}."
+        lead = f"Step {step} has a registered macro:"
         run = "Run it"
     else:
-        lead = f"Step {step} has registered macros: {listed}."
+        lead = f"Step {step} has registered macros:"
         run = "Run one of them"
     return (
-        f"\n\n{lead} {run} with `run_macro` as the first action of step {step}; "
-        "act by hand only if it fails or does not cover the step."
+        f"\n\n{lead}\n" + "\n".join(listed) + f"\n{run} with `run_macro` as the first "
+        f"action of step {step}; act by hand only if it fails or does not cover the step."
     )

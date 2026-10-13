@@ -30,6 +30,8 @@ from app.qa.envelope import (
     LogPayload,
     MacroReadPayload,
     MacroReadResultPayload,
+    MacroSearchPayload,
+    MacroSearchResultPayload,
     MacroRegisterPayload,
     MacroWriteResultPayload,
     MessageType,
@@ -613,6 +615,23 @@ class QaRunChannel:
             MessageType.MACRO_READ, payload, self._write_timeout
         )
 
+    async def search_macros(
+        self, payload: MacroSearchPayload
+    ) -> MacroSearchResultPayload | KnowledgeRequestFailed | None:
+        """이 build 의 등록된 macro 를 글로 찾는다 (ARTEL-984). 결과 셋이다.
+
+        - payload — 찾은 것. 빈 `items` 도 정상 답이다
+        - `KnowledgeRequestFailed` — 저쪽이 거절했다. 범위 밖의 요청, `content_map` 이
+          없는 런, 이 frame 을 모르는 구버전 orchestration 이 여기로 온다
+        - `None` — 답이 안 왔다
+
+        타임아웃은 `search_knowledge` 의 20초다. 저쪽 일이 같은 모양이다 — keyword 조회
+        하나와 embedding 하나, 벡터 조회 하나.
+        """
+        return await self._request(
+            MessageType.MACRO_SEARCH, payload, KNOWLEDGE_SEARCH_TIMEOUT_SECONDS
+        )
+
     async def answer_screen_selector_proposal(
         self, payload: ScreenSelectorVerdictPayload, correlation_id: str
     ) -> None:
@@ -851,6 +870,10 @@ class QaRunChannel:
         if self._answers_another_request(raw, payload.type):
             return
         self._resolve(raw, payload)
+
+    def on_macro_search_result(self, raw: dict) -> None:
+        """macro 검색의 답. 응답 타입이 요청 하나에만 답하므로 `type` 을 맞대지 않는다."""
+        self._resolve(raw, MacroSearchResultPayload.model_validate(raw.get("payload") or {}))
 
     def _answers_another_request(self, raw: dict, answered_type: str) -> bool:
         """이 답이 실은 **다른** 요청의 답인가. 맞으면 부르는 쪽이 버린다.

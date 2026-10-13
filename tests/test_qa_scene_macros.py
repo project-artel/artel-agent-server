@@ -4,7 +4,8 @@
 
 - **payload 를 읽는가** — orchestration 의 `macros` · `macrosTotal` 이 `SceneContext` 에
   들어오고, 칸이 빠져도 다른 칸을 잃지 않는다.
-- **글이 계약대로인가** — 한 줄의 모양, scene 이름 중복 접기, `[no screen yet]`, 자른 수.
+- **글이 계약대로인가** — `def` 줄과 그 밑의 docstring 줄, scene 이름은 한 번씩, `[no screen yet]`,
+  자른 수.
 - **누구에게 가는가** — `macros=on` 인 런의 첫 메시지에만 붙고, `off` 인 런은 목록이 있어도
   종전과 같은 글을 읽는다. 목록이 비면 아무것도 안 붙는다.
 - **접두가 안 깨지는가** — 같은 런의 두 번째 턴에도 첫 메시지가 그대로다(ARTEL-621).
@@ -89,13 +90,44 @@ def test_an_unknown_field_is_ignored() -> None:
 # --- 글 -----------------------------------------------------------------------
 
 
-def test_one_line_per_macro_in_the_agreed_shape() -> None:
+def test_each_macro_is_a_def_line_with_its_docstring_under_it() -> None:
+    """ARTEL-984 의 모양. 모델이 둘째 줄을 그 macro 의 설명으로 읽게 Python 모양으로 그린다."""
     section = context(macro("replay_step_3")).macro_section()
 
-    assert (
-        "  replay_step_3(times: int) — Step 3: 대화를 끝까지 넘긴다 — 13 actions, "
-        "drafted from a hand-driven run.  [StoryScene]"
-    ) in section.splitlines()
+    lines = section.splitlines()
+    index = lines.index("  def replay_step_3(times: int)  [StoryScene]")
+    assert lines[index + 1] == (
+        '      """Step 3: 대화를 끝까지 넘긴다 — 13 actions, drafted from a hand-driven run."""'
+    )
+
+
+def test_only_the_first_paragraph_of_a_docstring_is_drawn() -> None:
+    docstring = "Deal one card.\n\nUse it on the battle screen, never in the shop."
+
+    section = context(macro("deal", summary=docstring)).macro_section()
+
+    assert '      """Deal one card."""' in section.splitlines()
+    assert "never in the shop" not in section
+
+
+def test_the_whole_first_message_list_reads_as_documented() -> None:
+    section = context(
+        macro("replay_step_3"),
+        macro("floating", screens=[], parameters=[], summary=None),
+    ).macro_section()
+
+    assert section == (
+        "\n\nMacros registered by earlier runs of this build:\n"
+        "  def replay_step_3(times: int)  [StoryScene]\n"
+        '      """Step 3: 대화를 끝까지 넘긴다 — 13 actions, drafted from a hand-driven run."""\n'
+        "  def floating()  [no screen yet]\n"
+        "These were registered by earlier runs of this build; the docstring under each "
+        "says what it does. When a step has one, run it with `run_macro` as that "
+        "step's first action and act by hand only if it fails; `read_macro` shows its "
+        "source. Check the scene first — a macro tagged with a scene was written "
+        "there. If nothing here fits, `search_macros` finds registered macros by name "
+        "and docstring before you write a new one."
+    )
 
 
 def test_the_section_says_where_the_macros_came_from_and_what_to_do_once() -> None:
@@ -106,12 +138,16 @@ def test_the_section_says_where_the_macros_came_from_and_what_to_do_once() -> No
     assert "run it with `run_macro` as that step's first action" in instruction[0]
     assert "`read_macro` shows its source" in instruction[0]
     assert "Check the scene first" in instruction[0]
+    assert "the docstring under each" in instruction[0]
+    assert "`search_macros`" in instruction[0]
 
 
-def test_a_macro_without_a_screen_says_so() -> None:
+def test_a_macro_without_a_screen_or_docstring_says_so_in_one_line() -> None:
     section = context(macro("floating", screens=[], parameters=[], summary=None)).macro_section()
 
-    assert "  floating()  [no screen yet]" in section.splitlines()
+    lines = section.splitlines()
+    index = lines.index("  def floating()  [no screen yet]")
+    assert not lines[index + 1].lstrip().startswith('"""')
 
 
 def test_scene_names_are_listed_once_in_the_order_they_came() -> None:
@@ -130,9 +166,10 @@ def test_scene_names_are_listed_once_in_the_order_they_came() -> None:
 def test_a_long_summary_is_clipped_to_one_line() -> None:
     section = context(macro("wordy", summary="길다 " * 200)).macro_section()
 
-    line = next(line for line in section.splitlines() if line.startswith("  wordy("))
-    assert len(line) < 260
-    assert line.count("\n") == 0 and "…" in line
+    lines = section.splitlines()
+    line = lines[lines.index("  def wordy(times: int)  [StoryScene]") + 1]
+    assert len(line) < 200
+    assert line.startswith('      """') and line.endswith('…"""')
 
 
 def test_the_list_is_bounded_and_the_cut_is_said() -> None:

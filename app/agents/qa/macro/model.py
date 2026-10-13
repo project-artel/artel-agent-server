@@ -402,6 +402,10 @@ class MacroParameter(_Frozen):
 class MacroFunction(_Frozen):
     name: str
     parameters: tuple[MacroParameter, ...] = ()
+    # 몸통 첫 statement 의 문자열, `inspect.cleandoc` 로 정리한 것. statement 가 아니어서
+    # `statements` 에 없고 runner 가 보지 않는다. 기본값 `None` 은 이 field 가 생기기 전에
+    # 저장된 JSON 이 `extra="forbid"` 아래에서도 그대로 읽히게 한다.
+    docstring: str | None = None
     statements: tuple[MacroStatement, ...] = ()
 
 

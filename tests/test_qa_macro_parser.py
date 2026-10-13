@@ -256,8 +256,8 @@ def test_an_assignment_cannot_hide_a_parameter() -> None:
         ),
         ("def m(card: object) -> None:\n    return\n", "return"),
         (
-            'def m(card: object) -> None:\n    "what this does"\n    click(card)\n',
-            "comment",
+            'def m(card: object) -> None:\n    click(card)\n    "what this does"\n',
+            "first statement of a `def`",
         ),
         (
             'def m(card: object) -> None:\n    label: string = f"{card}"\n',
@@ -1031,3 +1031,70 @@ def test_a_loop_body_counts_once_toward_the_written_length() -> None:
 
     body = "".join('        press_key("A", 0.1)\n' for _ in range(MAX_STATEMENTS - 1))
     parse(f"def m() -> None:\n    for _ in range(50):\n{body}")
+
+
+# --- docstring (ARTEL-984) ------------------------------------------------------
+
+
+def test_the_entry_docstring_is_kept_and_cleaned() -> None:
+    """`inspect.cleandoc` 로 첫 줄 뒤의 공통 들여쓰기와 앞뒤 빈 줄을 걷는다."""
+    definition = macro_definition_from_source(
+        "m",
+        "def m(card: object) -> None:\n"
+        '    """Deal one card.\n\n    Use it on the battle screen.\n    """\n'
+        "    click(card)\n",
+    )
+
+    assert definition.entry.docstring == "Deal one card.\n\nUse it on the battle screen."
+    assert [statement.source for statement in definition.entry.statements] == ["click(card)"]
+
+
+def test_a_helper_may_carry_a_docstring_too() -> None:
+    definition = macro_definition_from_source(
+        "m",
+        'def m() -> None:\n    """Entry."""\n    helper()\n\n\n'
+        'def helper() -> None:\n    """Press Space once."""\n    press_key("Space", 0.1)\n',
+    )
+
+    assert definition.entry.docstring == "Entry."
+    assert definition.helpers[0].docstring == "Press Space once."
+    assert len(definition.helpers[0].statements) == 1
+
+
+def test_a_def_without_a_docstring_has_none_and_a_blank_one_is_none() -> None:
+    plain = macro_definition_from_source("m", "def m(card: object) -> None:\n    click(card)\n")
+    blank = macro_definition_from_source(
+        "m", 'def m(card: object) -> None:\n    """   \n    """\n    click(card)\n'
+    )
+
+    assert plain.entry.docstring is None
+    assert blank.entry.docstring is None
+    assert len(blank.entry.statements) == 1
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        '"""Module docstring."""\ndef m(card: object) -> None:\n    click(card)\n',
+        'def m(card: object) -> None:\n    """One."""\n    """Two."""\n    click(card)\n',
+        'def m(card: object) -> None:\n    if exists(card):\n        """Inside."""\n'
+        "        click(card)\n",
+    ],
+    ids=["top-level", "second-string", "inside-if"],
+)
+def test_a_string_anywhere_but_the_first_statement_of_a_def_is_refused(source: str) -> None:
+    assert "first statement of a `def`" in rejection(source)
+
+
+def test_a_body_that_is_only_a_docstring_is_empty() -> None:
+    assert "empty body" in rejection('def m() -> None:\n    """Nothing else."""\n')
+
+
+def test_a_docstring_does_not_count_toward_the_statement_limit() -> None:
+    """docstring 은 statement 가 아니다. 한도 꼭 맞는 몸통에 docstring 을 더해도 통과한다."""
+    body = "".join('    press_key("Space", 0.1)\n' for _ in range(MAX_STATEMENTS))
+    source = f'def m() -> None:\n    """At the limit."""\n{body}'
+
+    definition = macro_definition_from_source("m", source)
+
+    assert len(definition.entry.statements) == MAX_STATEMENTS

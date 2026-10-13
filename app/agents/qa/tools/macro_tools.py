@@ -1,6 +1,6 @@
-"""성공한 action 순서를 macro 로 적어 두고 다시 부르는 tool 다섯.
+"""성공한 action 순서를 macro 로 적어 두고 다시 부르고 찾는 tool.
 
-문구는 `app/prompts/qa_run/v19/tool_<name>.md` 다섯 파일에 있고, 문법과 예시와 수명주기
+문구는 `app/prompts/qa_run/v20/tool_<name>.md` 파일에 있고, 문법과 예시와 수명주기
 전체는 `skill_macro.md` 에 있다. 다섯 설명이 각각 500자 상한 아래라 매 호출마다 나가는
 글은 2.5KB 가 안 되고, 13KB 짜리 본문은 모델이 `load_skill("macro")` 를 부를 때만 간다.
 `app/agents/qa/macro/reference.py` 는 그 파일이 `grammar.py` 와 맞는지 재는 기준이다.
@@ -8,6 +8,15 @@
 수명주기가 네 걸음이다. `write_macro` 로 초안을 쓰고, `read_macro` 로 읽고,
 `edit_macro` 로 고치고, `register_macro` 로 부를 수 있게 한다. `run_macro` 는 등록된
 것만 부른다. 초안은 런의 상태(`QaRunState.macros`)에 살고 `content_map` 에 안 쓰인다.
+
+`search_macros` 도 수명주기 밖이다. 이 build 에 등록된 macro 를 이름과 docstring 으로
+찾는다(`MACRO_SEARCH`, ARTEL-984). 첫 메시지 목록은 12개에서 잘리므로, 거기 없는 것을
+새로 쓰기 전에 찾게 한다.
+
+**등록하려면 진입점 `def` 에 docstring 이 있어야 한다** (ARTEL-984). 그 docstring 이 다음
+런의 목록과 검색 결과에 실리는 summary 이고, 없으면 다음 런은 이름만 보고 고른다. 초안은
+docstring 없이도 쓰고 고칠 수 있다 — 거절은 `register_macro` 에서만 한다. 지난 런이 docstring
+없이 등록한 macro 도 그대로 읽고 부른다.
 
 `decline_macro_draft` 는 수명주기 밖이다. 통과한 step 에 시스템이 내민 초안을 등록하지
 않겠다고 이유와 함께 답하는 tool 이고, 초안 글은 지우지 않는다.
@@ -54,7 +63,19 @@ from app.agents.qa.tools.tool_context import ToolContext
 from app.prompts import load_tool_description
 from app.qa.acting import ActionOutcome
 from app.qa.channel import KnowledgeRequestFailed, QaCancelled, with_operator_messages
-from app.qa.envelope import MacroReadPayload, MacroRegisterPayload
+from app.qa.envelope import (
+    MacroReadPayload,
+    MacroRegisterPayload,
+    MacroSearchPayload,
+    MacroSearchResultPayload,
+)
+from app.qa.scene_context import render_macro, scene_labels
+
+# `search_macros` 의 `limit` 범위와 `query` 길이. `MACRO_SEARCH` 계약이 정한 값이고,
+# 벗어난 요청은 저쪽도 `ERROR` 로 거절하므로 보내기 전에 여기서 문장으로 돌려준다.
+DEFAULT_MACRO_SEARCH_LIMIT = 5
+MAX_MACRO_SEARCH_LIMIT = 10
+MAX_MACRO_SEARCH_QUERY_CHARS = 500
 
 
 def _answers_instead_of_raising(
@@ -200,6 +221,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
             definition=definition.model_dump(mode="json"),
             parameters=[one.name for one in definition.entry.parameters],
             screens=list(screens),
+            docstring=definition.entry.docstring,
         )
         try:
             answer = await channel.register_macro(payload)
@@ -450,6 +472,12 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
                 f"{macro_name} was not registered: {problem}\n\nThe draft is unchanged, "
                 "so `edit_macro` can fix it."
             )
+        if definition.entry.docstring is None:
+            # docstring 이 다음 런의 목록과 `search_macros` 결과에 실리는 summary 다.
+            # 없이 등록하면 다음 런은 이름만 보고 고른다. 공백뿐인 docstring 은 파서가
+            # `None` 으로 만드므로 여기서 같이 걸린다.
+            _review_stays_open()
+            return _missing_docstring(macro_name)
 
         named = [one.strip() for one in (screens or []) if one and one.strip()]
         problem = _named_screens_problem(named)
@@ -608,6 +636,45 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
             "Nothing was registered."
         )
 
+    @tool(description=load_tool_description("search_macros").body)
+    @_answers_instead_of_raising
+    async def search_macros(
+        step: int, thought: str, query: str, limit: int = DEFAULT_MACRO_SEARCH_LIMIT
+    ) -> str:
+        # What the agent reads is `qa_run/<version>/tool_search_macros.md`, not this.
+        #
+        # 게임을 안 건드리므로 화면을 안 싣는다. 기다리는 동안 온 operator 의 말만 붙인다.
+        asked = (query or "").strip()
+        if not asked:
+            return (
+                "`query` is empty, so nothing was searched. Say what the macro should "
+                "do, in a few words."
+            )
+        if len(asked) > MAX_MACRO_SEARCH_QUERY_CHARS:
+            return (
+                f"`query` is {len(asked)} characters and the limit is "
+                f"{MAX_MACRO_SEARCH_QUERY_CHARS}, so nothing was searched. Say what the "
+                "macro should do, in a few words."
+            )
+        if not 1 <= limit <= MAX_MACRO_SEARCH_LIMIT:
+            return (
+                f"`limit` must be between 1 and {MAX_MACRO_SEARCH_LIMIT}, and {limit} is "
+                "not, so nothing was searched."
+            )
+
+        try:
+            answer = await channel.search_macros(
+                MacroSearchPayload(query=asked, limit=limit, step=step)
+            )
+        except QaCancelled:
+            raise
+        except Exception:  # noqa: BLE001 - 검색 하나로 런이 끝나면 안 된다
+            answer = None
+        messages = channel.drain_operator_messages()
+        if answer is None or isinstance(answer, KnowledgeRequestFailed):
+            return with_operator_messages(_search_unavailable(), messages)
+        return with_operator_messages(_render_search(asked, answer), messages)
+
     return [
         write_macro,
         edit_macro,
@@ -616,6 +683,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         run_macro,
         resume_macro,
         decline_macro_draft,
+        search_macros,
     ]
 
 
@@ -639,7 +707,11 @@ def _parameter(parameter: MacroParameter) -> str:
 
 
 def _draft_report(name: str, definition: MacroDefinition) -> str:
-    """초안이 무엇을 하겠다는 것인지. 등록하지 않았다는 것을 분명히 말한다."""
+    """초안이 무엇을 하겠다는 것인지. 등록하지 않았다는 것을 분명히 말한다.
+
+    docstring 이 없으면 그것을 여기서 미리 말한다. 초안은 docstring 없이도 받지만
+    `register_macro` 는 거절하므로, 등록하려는 순간에 처음 알게 하면 왕복이 하나 는다.
+    """
     statements = len(definition.entry.statements)
     helpers = ", ".join(helper.name for helper in definition.helpers)
     lines = [
@@ -649,6 +721,59 @@ def _draft_report(name: str, definition: MacroDefinition) -> str:
         "Nothing is registered and nothing has run. `register_macro` is what makes it "
         "callable.",
     ]
+    if definition.entry.docstring is None:
+        lines.append(
+            f"`def {definition.entry.name}` has no docstring yet, and `register_macro` "
+            "will refuse it until it has one: a docstring as the first statement of the "
+            "entry `def`, saying what the macro does and when to use it."
+        )
+    return "\n".join(lines)
+
+
+def _missing_docstring(name: str) -> str:
+    return (
+        f"{name} was not registered, because its entry `def {name}` has no docstring. "
+        "Add one as the first statement of that `def`, saying what the macro does and "
+        "when to use it — it is the summary later runs see in their macro list and in "
+        "`search_macros`. The draft is unchanged: fix it with `edit_macro`, then call "
+        "`register_macro` again."
+    )
+
+
+# --- 검색 ---------------------------------------------------------------------
+
+
+def _search_unavailable() -> str:
+    """`ERROR` 와 답 없음이 같은 문장이다. 둘 다 agent 가 할 일이 같다."""
+    return (
+        "Macro search is unavailable right now, so nothing was found. `read_macro` "
+        "with a macro's name and the macro list in your first message still work."
+    )
+
+
+def _render_search(query: str, answer: MacroSearchResultPayload) -> str:
+    """찾은 macro 를 첫 메시지 목록과 같은 모양으로. `score` 는 순서만 뜻이 있어 안 그린다."""
+    if not answer.items:
+        return (
+            f"No registered macro matches {query!r}. If this step is worth repeating, "
+            "write one with `write_macro` once it has passed by hand."
+        )
+    lines = [f"Registered macros matching {query!r}, best first:"]
+    for item in answer.items:
+        lines.extend(
+            render_macro(
+                item.name,
+                [(parameter.name, parameter.type) for parameter in item.parameters],
+                item.docstring,
+                scene_labels(item.screens),
+            )
+        )
+    if not answer.vector_available:
+        lines.append("(keyword matches only; similarity search was unavailable)")
+    lines.append(
+        "`run_macro` calls one by name; `read_macro` shows its source first. Check the "
+        "scene — a macro tagged with a scene was written there."
+    )
     return "\n".join(lines)
 
 
