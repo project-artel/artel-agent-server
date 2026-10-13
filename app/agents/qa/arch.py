@@ -359,7 +359,21 @@ from app.llm.models import LLMModel, get_model_spec
 # docstring indented under it, instead of `name(...) — summary  [scenes]`. Macros an earlier run
 # registered without a docstring still load and run. The new tool moves `arch_fingerprint`; the
 # rendering change does not, which is why it is named here.
-QA_ARCH_LABEL = "v20-macro-docstring-search"
+#
+# v22 because a macro can now wait for the game (ARTEL-988, plan
+# `.plan/general/2026-10-13-macro-wait-until-and-predicate.md`). `wait_until(<condition>,
+# <seconds>, <remedy>)` re-reads its condition on every new `pulse` for at most 30 seconds, 60 per
+# `run_macro` or `resume_macro` call, and stops with `WAIT_TIMEOUT` when time runs out. Before
+# this a macro could only judge the screen as it stood right after its last action, so a loading
+# screen or an animation failed a `require` although the game was fine, and the agent had to cut
+# the macro there and wait by hand. A `def` declared `-> bool` is a predicate that a condition
+# calls, which is how a macro writes `or`. The tool set and every argument schema are unchanged,
+# so `arch_fingerprint` does not move; the label moves because runs where a macro can wait and
+# runs where it cannot are different agents, and one bucket would mix them. The number skips v21:
+# the ARTEL-991 branch already files its runs under `v21-search-knowledge-any-phase`, and two
+# shapes sharing a number would read as one in a report. The prompt version is v21 regardless —
+# prompt versions and this label are numbered separately.
+QA_ARCH_LABEL = "v22-macro-wait-until"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

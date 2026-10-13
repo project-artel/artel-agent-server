@@ -267,7 +267,7 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v20() -> None:
+def test_the_default_qa_version_is_v21() -> None:
     """A run that names no version has to get the newest prompt.
 
     This is also the trap in adding a version: `resolve_version` returns the
@@ -302,8 +302,12 @@ def test_the_default_qa_version_is_v20() -> None:
     skill teaches the entry docstring as the summary `register_macro` requires,
     `tool_search_macros.md` describes the new tool, and the macro memory directive
     asks for a search before a new macro is written.
+
+    v21 ships with `wait_until` and the `-> bool` predicate (ARTEL-988): the macro
+    skill's grammar gains the Waiting and Predicates sections, and its third example
+    writes an `or` as a predicate and waits for the victory banner.
     """
-    assert resolve_version("qa_run") == "v20"
+    assert resolve_version("qa_run") == "v21"
 
 
 # v20 이 고쳐 쓴 v19 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
@@ -963,3 +967,39 @@ def test_v10_adds_the_citation_section_and_keeps_v9_intact() -> None:
     # Everything v9 said, v10 still says: the addition is an insertion, not a rewrite.
     for paragraph in v9.split("\n\n"):
         assert paragraph in v10
+
+
+# v21 이 고쳐 쓴 v20 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
+V21_REWRITES_FROM_V20 = {
+    "skill_macro": (
+        "**The shape.**",
+        "**The statements.**",
+        "**Conditions.**",
+        "**Refused outright:**",
+        "**What you hold, you release.**",
+        "**The limits.**",
+        "- the entry `def` opens with a docstring",
+        "A macro that walks every matching card",
+        "```python\ndef clear_the_wave",
+        "    Use on the Battle scene to finish a wave.",
+        "    # `range(n)` counts passes.",
+        '    flag("played every matching card',
+    ),
+}
+
+
+def test_v21_teaches_wait_until_and_predicates_and_keeps_the_rest_of_v20() -> None:
+    """v21 은 macro skill 의 문단 몇 개만 고친다 (ARTEL-988). 고친 문단은 이름으로 대고, 나머지는 v20 그대로다."""
+    skill = load_prompt("qa_run", "skill_macro", "v21").body
+    assert "**Waiting.** `require` judges the screen" in skill
+    assert "**Predicates.** A `def` declared `-> bool` is a predicate." in skill
+    assert "`return` outside a predicate" in skill
+    assert "def wave_is_over() -> bool:" in skill
+
+    for role, rewrites in V21_REWRITES_FROM_V20.items():
+        v20 = load_prompt("qa_run", role, "v20").body
+        v21 = load_prompt("qa_run", role, "v21").body
+        for paragraph in v20.split("\n\n"):
+            if paragraph.lstrip("\n").startswith(rewrites):
+                continue
+            assert paragraph in v21, (role, paragraph[:80])

@@ -175,7 +175,7 @@
   - `tests/test_qa_prompt_version.py`: 기본 version 을 v21 로, "v21 이 v20 의 나머지를 그대로 든다"
     테스트를 v20 것을 본떠 더한다. `tests/test_qa_phase_cycle.py:108` 의 version 목록에
     `("v21", "on")` 을 더한다. `resolve_version` 이 가장 새 version 을 고르므로 설정은 안 바꾼다.
-  - `QA_ARCH_LABEL = "v21-macro-wait-until"` 과 그 위 문단. `arch_fingerprint` 는 안 움직인다(tool
+  - `QA_ARCH_LABEL = "v22-macro-wait-until"` 과 그 위 문단. `arch_fingerprint` 는 안 움직인다(tool
     목록과 인자 schema 가 그대로다). 그래서 `tests/test_qa_arch.py` 는 label pin 만 바뀐다. bump 하는
     이유: 같은 tool 이지만 macro 가 할 수 있는 일이 바뀌어, 두 런을 한 bucket 에 두면 기다릴 수 있는
     agent 와 없는 agent 가 섞인다.
