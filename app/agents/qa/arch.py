@@ -346,6 +346,16 @@ from app.llm.models import LLMModel, get_model_spec
 # runs than 56,000 at the same accuracy, and 98k-224k all within 3% per call. The numbers are
 # above that constant.
 #
+# v21 because `search_knowledge` is no longer refused outside OBSERVE (`ANY_PHASE` in
+# `tools/phase.py`), the same way `register_macro` stopped being refused outside UPDATE_MEMORY
+# in v13. Under v19 a search during UPDATE_MEMORY moved the run to the next step's OBSERVE and
+# the `record_knowledge` after it was refused, so the agent could not check for an existing
+# entry right before writing one, and the server files a repeated write twice. Called in OBSERVE
+# it still counts as an OBSERVE call; called in any other phase it runs and moves no phase. The
+# phase directive is unchanged: `qa_run/v19` is locked and the next prompt version is being
+# written on ARTEL-984. Nothing hashed moves: the phase table is not hashed. v20 is skipped
+# because the ARTEL-984 branch already uses `v20-macro-docstring-search`.
+#
 # v20 because macros now describe themselves with a docstring and can be searched (ARTEL-984,
 # plan `.plan/general/2026-10-13-macro-docstring-and-search.md`). Three things move. The tool
 # set gains `search_macros`, which sends `MACRO_SEARCH` and lists the registered macros of this
@@ -360,6 +370,10 @@ from app.llm.models import LLMModel, get_model_spec
 # registered without a docstring still load and run. The new tool moves `arch_fingerprint`; the
 # rendering change does not, which is why it is named here.
 #
+# v23 because the v20 change above landed on develop after v21 did, so the merged structure is
+# both: `search_macros` on top of `search_knowledge` in any phase. v22 is skipped because the
+# ARTEL-988 branch already uses `v22-macro-wait-until`.
+#
 # v22 because a macro can now wait for the game (ARTEL-988, plan
 # `.plan/general/2026-10-13-macro-wait-until-and-predicate.md`). `wait_until(<condition>,
 # <seconds>, <remedy>)` re-reads its condition on every new `pulse` for at most 30 seconds, 60 per
@@ -373,7 +387,10 @@ from app.llm.models import LLMModel, get_model_spec
 # the ARTEL-991 branch already files its runs under `v21-search-knowledge-any-phase`, and two
 # shapes sharing a number would read as one in a report. The prompt version is v21 regardless —
 # prompt versions and this label are numbered separately.
-QA_ARCH_LABEL = "v22-macro-wait-until"
+#
+# v24 because the v22 change above landed on develop after v23 did, so the merged structure is
+# both: macros that can wait on top of `search_macros` and docstrings.
+QA_ARCH_LABEL = "v24-macro-wait-until"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
