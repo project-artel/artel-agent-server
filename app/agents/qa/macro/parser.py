@@ -39,6 +39,7 @@ from app.agents.qa.macro.grammar import (
     MAX_CALL_DEPTH,
     MAX_LOOP_PASSES,
     MAX_STATEMENTS,
+    MAX_WAIT_PER_STATEMENT_SECONDS,
     PAIRED_TOOLS,
     PairedTools,
     READER_NAME_LIST,
@@ -47,6 +48,7 @@ from app.agents.qa.macro.grammar import (
     REPORTING_NAMES,
     RANGE,
     REQUIRE,
+    WAIT_UNTIL,
     SELECTOR,
     TOOL_NAME_LIST,
     TOOLS_BY_NAME,
@@ -88,10 +90,12 @@ from app.agents.qa.macro.model import (
     MacroNameTarget,
     MacroOperand,
     MacroParameter,
+    MacroPredicateCondition,
     MacroReaderCall,
     MacroReaderCondition,
     MacroReaderOperand,
     MacroRequireStatement,
+    MacroReturnStatement,
     MacroSelectorOperand,
     MacroSelectorTarget,
     MacroSelectorValue,
@@ -102,6 +106,7 @@ from app.agents.qa.macro.model import (
     MacroTarget,
     MacroTargetArgument,
     MacroWhileStatement,
+    MacroWaitUntilStatement,
 )
 
 # `def` 줄과 대입에 적을 수 있는 타입 이름 → enum.
@@ -151,7 +156,8 @@ _NO_DOT = (
 
 _STATEMENT_KINDS = (
     "an action call (one of the game tools, or a helper `def` in this same source), "
-    "`require(<condition>, <remedy>)`, a typed assignment (`name: object = find(...)`), "
+    "`require(<condition>, <remedy>)`, `wait_until(<condition>, <seconds>, <remedy>)`, "
+    "a typed assignment (`name: object = find(...)`), "
     "`if`, `for`, `while`, `flag(<message>)`, `ask_verdict(<expected>)`, or "
     "`checkpoint(<reason>)`"
 )
@@ -189,6 +195,18 @@ class _Binding:
 class _Signature:
     name: str
     parameters: tuple[MacroParameter, ...]
+    returns: str
+
+
+def _ends_in_return(statements: tuple[MacroStatement, ...]) -> bool:
+    if not statements:
+        return False
+    last = statements[-1]
+    if isinstance(last, MacroReturnStatement):
+        return True
+    if isinstance(last, MacroIfStatement):
+        return _ends_in_return(last.body) and _ends_in_return(last.orelse)
+    return False
 
 
 def _written(node: ast.AST, lines: list[str], header_only: bool = False) -> str:
@@ -224,6 +242,12 @@ def macro_definition_from_source(name: str, source: str) -> MacroDefinition:
     lines = source.splitlines()
     functions = _top_level_functions(module)
     signatures = _signatures(name, functions)
+    if signatures[name].returns == "bool":
+        raise MacroRejection(
+            "the entry point acts; a `-> bool` def is a predicate that a condition "
+            "calls. Declare the entry point `-> None`.",
+            next(node.lineno for node in functions if node.name == name),
+        )
 
     entry: MacroFunction | None = None
     helpers: list[MacroFunction] = []
@@ -234,6 +258,7 @@ def macro_definition_from_source(name: str, source: str) -> MacroDefinition:
             name=node.name,
             parameters=signatures[node.name].parameters,
             docstring=docstring,
+            returns=signatures[node.name].returns,
             statements=reader.body(body_nodes, node),
         )
         if node.name == name:
@@ -270,7 +295,7 @@ def _module(source: str) -> ast.Module:
         raise MacroRejection(
             "A macro source cannot be empty. Write one `def` named after the macro, "
             f"whose parameters and return are typed: {DECLARABLE_TYPE_NAMES} for a "
-            "parameter, and `None` for the return."
+            "parameter, `-> None` for the entry point, and `-> bool` for a predicate."
         )
     try:
         return ast.parse(source)
@@ -334,7 +359,7 @@ def _top_level_functions(module: ast.Module) -> list[ast.FunctionDef]:
                 "`import` is not allowed anywhere in a macro. Everything a macro can "
                 f"call is already named for it: the game tools ({TOOL_NAME_LIST}), the "
                 f"readers ({READER_NAME_LIST}), `find()`, `selector()`, `require()`, "
-                "`flag()` and `ask_verdict()`.",
+                "`wait_until()`, `flag()`, `ask_verdict()`, and `checkpoint()`.",
                 node.lineno,
             )
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
@@ -369,7 +394,8 @@ def _signatures(name: str, functions: list[ast.FunctionDef]) -> dict[str, _Signa
             raise MacroRejection(
                 "a decorator is not allowed on a macro `def`.", node.lineno
             )
-        signatures[node.name] = _Signature(node.name, _parameters(node))
+        parameters, returns = _parameters(node)
+        signatures[node.name] = _Signature(node.name, parameters, returns)
 
     if name not in signatures:
         written = ", ".join(sorted(signatures))
@@ -380,7 +406,7 @@ def _signatures(name: str, functions: list[ast.FunctionDef]) -> dict[str, _Signa
     return signatures
 
 
-def _parameters(node: ast.FunctionDef) -> tuple[MacroParameter, ...]:
+def _parameters(node: ast.FunctionDef) -> tuple[tuple[MacroParameter, ...], str]:
     arguments = node.args
     if arguments.posonlyargs:
         raise MacroRejection(
@@ -400,14 +426,18 @@ def _parameters(node: ast.FunctionDef) -> tuple[MacroParameter, ...]:
 
     if node.returns is None:
         raise MacroRejection(
-            f"`def {node.name}` has no return type. A macro returns no value, so write "
-            "`-> None`.",
+            f"`def {node.name}` has no return type. Write `-> None` for an action "
+            "def or `-> bool` for a predicate called in a condition.",
             node.lineno,
         )
-    if not (isinstance(node.returns, ast.Constant) and node.returns.value is None):
+    if isinstance(node.returns, ast.Constant) and node.returns.value is None:
+        returns = "none"
+    elif isinstance(node.returns, ast.Name) and node.returns.id == "bool":
+        returns = "bool"
+    else:
         raise MacroRejection(
-            f"`def {node.name}` must be declared `-> None`. A macro returns no value — "
-            "`return` is refused inside it — so `None` is the only return type there is.",
+            f"`def {node.name}` must be declared `-> None` for an action def or "
+            "`-> bool` for a predicate called in a condition.",
             node.lineno,
         )
 
@@ -444,7 +474,7 @@ def _parameters(node: ast.FunctionDef) -> tuple[MacroParameter, ...]:
         parameters.append(
             MacroParameter(name=argument.arg, declared_type=declared, default=literal)
         )
-    return tuple(parameters)
+    return tuple(parameters), returns
 
 
 def _declared_type(
@@ -665,13 +695,43 @@ class _FunctionReader:
                 # `for` 의 이름은 그 몸통 안에서만 산다. 대입과 같은 규칙으로 bind 하므로
                 # parameter 나 바깥 이름을 가리는 것도 같은 거절을 받는다.
                 self._bind(loop_name[0], loop_name[1], _LOOP, owner)
-            return tuple(self._statement(node) for node in nodes)
+            statements: list[MacroStatement] = []
+            for node in nodes:
+                if self.signatures[self.name].returns == "bool" and _ends_in_return(
+                    tuple(statements)
+                ):
+                    raise MacroRejection(
+                        "a statement after `return` cannot run. End this predicate "
+                        "body at the `return`.",
+                        node.lineno,
+                    )
+                statements.append(self._statement(node))
+            built = tuple(statements)
+            if (
+                isinstance(owner, ast.FunctionDef)
+                and self.signatures[self.name].returns == "bool"
+            ):
+                if not _ends_in_return(built):
+                    raise MacroRejection(
+                        "every path through a `-> bool` predicate must end in `return`.",
+                        owner.lineno,
+                    )
+            return built
         finally:
             # 몸통이 끝나면 그 안에서 bind 한 이름도 끝난다. 밖에서 쓰면 bind 되지 않은
             # 이름이 되므로, 버리는 것 자체가 그 거절이다.
             self.scopes.pop()
 
     def _statement(self, node: ast.stmt) -> MacroStatement:
+        if self.signatures[self.name].returns == "bool":
+            if isinstance(node, ast.Return):
+                return self._return(node)
+            if not isinstance(node, (ast.AnnAssign, ast.If)):
+                raise MacroRejection(
+                    "a `-> bool` predicate allows only a typed assignment, `if`, "
+                    "and `return`.",
+                    node.lineno,
+                )
         if isinstance(node, ast.AnnAssign):
             return self._assignment(node)
         if isinstance(node, ast.If):
@@ -683,6 +743,18 @@ class _FunctionReader:
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
             return self._call_statement(node.value)
         self._reject_statement(node)
+
+    def _return(self, node: ast.Return) -> MacroReturnStatement:
+        if node.value is None:
+            raise MacroRejection(
+                "a `-> bool` predicate must return `True`, `False`, or a condition; "
+                "bare `return` is not allowed.",
+                node.lineno,
+            )
+        source = _written(node, self.lines)
+        if isinstance(node.value, ast.Constant) and type(node.value.value) is bool:
+            return MacroReturnStatement(source=source, value=node.value.value)
+        return MacroReturnStatement(source=source, condition=self._condition(node.value))
 
     def _reject_statement(self, node: ast.stmt) -> None:
         line = node.lineno
@@ -721,9 +793,8 @@ class _FunctionReader:
             )
         if isinstance(node, ast.Return):
             raise MacroRejection(
-                "`return` is not allowed: a macro and its helpers return no value, which "
-                "is why every `def` is declared `-> None`. A helper acts; it does not "
-                "hand a value back.",
+                "`return` is allowed only inside a `-> bool` predicate. A `-> None` "
+                "def acts and returns no value.",
                 line,
             )
         if isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -1083,8 +1154,9 @@ class _FunctionReader:
             joiner = "and" if isinstance(node.op, ast.And) else "or"
             raise MacroRejection(
                 f"`{joiner}` is not allowed in a condition. One condition is one "
-                "comparison or one reader call. Write two `require` calls instead — "
-                "each one then says on its own what to do when it fails.",
+                "comparison, one reader call, or one predicate call. Write a `-> bool` "
+                "predicate with `if` and `return`, or use two `require` calls so each "
+                "failure has its own remedy.",
                 node.lineno,
             )
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
@@ -1107,6 +1179,20 @@ class _FunctionReader:
                 node.lineno,
             )
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in self.signatures:
+                signature = self.signatures[node.func.id]
+                if signature.returns != "bool":
+                    raise MacroRejection(
+                        f"`{signature.name}` is declared `-> None` and cannot be a "
+                        "condition. Call a `-> bool` predicate here.",
+                        node.lineno,
+                    )
+                return MacroPredicateCondition(
+                    callee=signature.name,
+                    arguments=self._arguments(
+                        signature.name, _helper_parameters(signature), node
+                    ),
+                )
             if node.func.id in READERS_BY_NAME:
                 spec = READERS_BY_NAME[node.func.id]
                 # 비교 없는 조건은 참거짓으로 도착해야 한다. 그 밖의 모양을 진리값으로
@@ -1125,12 +1211,12 @@ class _FunctionReader:
                 return MacroReaderCondition(call=self._reader(node))
             raise MacroRejection(
                 f"`{node.func.id}` cannot be a condition. The calls a condition reads "
-                f"with are: {READER_NAME_LIST}.",
+                f"with are: {READER_NAME_LIST}, or a `-> bool` predicate call.",
                 node.lineno,
             )
         raise MacroRejection(
             "a condition is one comparison (`==`, `!=`, `>`, `<`, `>=`, `<=`) or one "
-            f"reader call ({READER_NAME_LIST}).",
+            f"reader call ({READER_NAME_LIST}) or a `-> bool` predicate call.",
             getattr(node, "lineno", None),
         )
 
@@ -1371,6 +1457,8 @@ class _FunctionReader:
 
         if name == REQUIRE:
             return self._require(node, written)
+        if name == WAIT_UNTIL:
+            return self._wait_until(node, written)
         if name == FLAG:
             return self._flag(node, written)
         if name == ASK_VERDICT:
@@ -1394,6 +1482,12 @@ class _FunctionReader:
 
         if name in self.signatures:
             helper = self.signatures[name]
+            if helper.returns == "bool":
+                raise MacroRejection(
+                    f"`{name}` is a predicate and returns a value; call it in a "
+                    "condition.",
+                    node.lineno,
+                )
             return MacroHelperCallStatement(
                 source=written,
                 callee=name,
@@ -1425,7 +1519,9 @@ class _FunctionReader:
         helpers = ", ".join(sorted(self.signatures)) or "none"
         raise MacroRejection(
             f"`{name}` is not something a macro can call. The game tools are: "
-            f"{TOOL_NAME_LIST}. The `def` names in this source are: {helpers}.",
+            f"{TOOL_NAME_LIST}. Other statements are `require()`, `wait_until()`, "
+            "`flag()`, `ask_verdict()`, and `checkpoint()`. The `def` names in this "
+            f"source are: {helpers}.",
             node.lineno,
         )
 
@@ -1457,6 +1553,47 @@ class _FunctionReader:
                 node.lineno,
             )
         return MacroRequireStatement(source=written, condition=condition, remedy=remedy)
+
+    def _wait_until(self, node: ast.Call, written: str) -> MacroWaitUntilStatement:
+        if node.keywords:
+            first = node.keywords[0].arg or "**"
+            raise MacroRejection(
+                f"`{first} = ...` inside `wait_until` is a keyword argument, not a "
+                "comparison. Use three positional arguments and write `==` to "
+                "compare values: `wait_until(<condition>, <seconds>, \"<remedy>\")`.",
+                node.lineno,
+            )
+        if len(node.args) != 3:
+            raise MacroRejection(
+                "`wait_until` takes exactly three positional arguments: a condition, "
+                "seconds, and a non-empty remedy string.",
+                node.lineno,
+            )
+        condition = self._condition(node.args[0])
+        seconds_literal = _literal(node.args[1])
+        if seconds_literal is None or type(seconds_literal.value) not in (int, float):
+            raise MacroRejection(
+                "the seconds of `wait_until` must be an int or float literal, not a "
+                "bool or name. The limit must be checked when the macro is stored.",
+                node.lineno,
+            )
+        seconds = float(seconds_literal.value)
+        if not 0 < seconds <= MAX_WAIT_PER_STATEMENT_SECONDS:
+            raise MacroRejection(
+                f"the seconds of `wait_until` must be greater than 0 and at most "
+                f"{MAX_WAIT_PER_STATEMENT_SECONDS}.",
+                node.lineno,
+            )
+        remedy = _string_literal(node.args[2], "the remedy of `wait_until`").strip()
+        if not remedy:
+            raise MacroRejection(
+                "the remedy of `wait_until` cannot be empty. Write what to do if "
+                "the condition remains false.",
+                node.lineno,
+            )
+        return MacroWaitUntilStatement(
+            source=written, condition=condition, seconds=seconds, remedy=remedy
+        )
 
     def _flag(self, node: ast.Call, written: str) -> MacroFlagStatement:
         if node.keywords or len(node.args) != 1:
@@ -1666,14 +1803,32 @@ def _reader_arguments(spec: ReaderSpec) -> str:
 # 평범한 경우다.
 
 
-def _called_helpers(statements: tuple[MacroStatement, ...]) -> list[str]:
-    """그 몸통이 부르는 helper 이름 전부, 부른 순서대로. 분기 안쪽까지 센다.
+def _predicate_callee(statement: MacroStatement) -> str | None:
+    if isinstance(
+        statement,
+        (
+            MacroRequireStatement,
+            MacroIfStatement,
+            MacroWhileStatement,
+            MacroWaitUntilStatement,
+            MacroReturnStatement,
+        ),
+    ) and isinstance(statement.condition, MacroPredicateCondition):
+        return statement.condition.callee
+    return None
 
-    같은 helper 를 두 번 부르면 두 번 적힌다. 세는 쪽이 그것을 알아야 statement 총수가
-    맞는다.
+
+def _called_helpers(statements: tuple[MacroStatement, ...]) -> list[str]:
+    """그 몸통이 부르는 helper 와 predicate 이름 전부, 부른 순서대로.
+
+    분기 안쪽까지 센다. 같은 `def` 를 두 번 부르면 두 번 적힌다. 세는 쪽이 그것을
+    알아야 statement 총수가 맞는다.
     """
     names: list[str] = []
     for statement in statements:
+        predicate = _predicate_callee(statement)
+        if predicate is not None:
+            names.append(predicate)
         if isinstance(statement, MacroHelperCallStatement):
             names.append(statement.callee)
         elif isinstance(statement, MacroIfStatement):
@@ -1771,6 +1926,7 @@ class _CallGraph:
 
         `if` 는 적힌 statement 를 세는 것을 바꾸지 않는다 — 최대값은 가지들 중 큰 쪽이라
         여전히 정적이다. helper 호출은 호출 그 자체 하나에 그 helper 의 총수를 더한다.
+        조건에서 부른 predicate 의 총수도 해당 statement 에 더한다.
 
         **반복 몸통은 한 번만 센다.** 몇 번 돌지는 저장 때 모른다. 그래서 이 수는 실행될
         양이 아니라 적힌 길이의 상한이 됐고, 실행된 양은 runner 가 `MAX_LOOP_PASSES` 와
@@ -1782,6 +1938,9 @@ class _CallGraph:
         """
         total = 0
         for statement in statements:
+            predicate = _predicate_callee(statement)
+            if predicate is not None:
+                total += self.statements_in(predicate)
             if isinstance(statement, MacroIfStatement):
                 total += 1 + max(
                     self._count(statement.body), self._count(statement.orelse)
@@ -1875,7 +2034,7 @@ class _CallGraph:
         return _Tally(delta=delta, lowest=lowest)
 
     def reject_checkpoint_while_holding(self) -> None:
-        """누름과 뗌 사이의 `checkpoint` 를 거절한다.
+        """누름과 뗌 사이의 `checkpoint`, 멈춘 시간 안의 `wait_until` 을 거절한다.
 
         거기서 턴이 끝나면 게임이 키를 누른 채로, 또는 시간이 멈춘 채로 턴을 넘긴다.
         `reject_unpaired` 는 macro 전체가 0 인지만 보므로 이것을 못 잡는다. 그리고 이
@@ -1900,6 +2059,15 @@ class _CallGraph:
                                 "after). The turn would end with the game in that "
                                 f"state. Move the checkpoint before `{pair.opens}` or "
                                 f"after `{pair.closes}`."
+                            )
+                elif isinstance(statement, MacroWaitUntilStatement):
+                    for pair, level in zip(PAIRED_TOOLS, levels):
+                        if pair.opens == "pause_game_time" and level != 0:
+                            raise MacroRejection(
+                                f"`{statement.source}` runs between `pause_game_time` "
+                                "and `resume_game_time`. Game state cannot change while "
+                                "time is frozen, so this wait would always time out. "
+                                "Move `wait_until` after `resume_game_time`."
                             )
                 elif isinstance(statement, MacroActionStatement):
                     levels = tuple(

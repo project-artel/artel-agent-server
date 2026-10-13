@@ -16,6 +16,7 @@ from app.agents.qa.macro.model import (
     MacroAssignStatement,
     MacroDefinition,
     MacroIfStatement,
+    MacroReturnStatement,
 )
 from app.agents.qa.macro.parser import macro_definition_from_source
 
@@ -317,3 +318,54 @@ def test_the_parser_is_the_only_place_a_definition_is_built() -> None:
 
     assert len(built) == 1, built
     assert built[0].startswith("agents/qa/macro/parser.py:")
+
+
+def test_wait_until_predicate_and_return_survive_a_json_round_trip() -> None:
+    definition = macro_definition_from_source(
+        "m",
+        'def m(card: object) -> None:\n'
+        '    wait_until(ready(card), 2.5, "Wait for the card.")\n\n'
+        'def ready(card: object) -> bool:\n'
+        '    if exists(card):\n'
+        '        return actionable(card)\n'
+        '    return False\n',
+    )
+
+    restored = round_trip(definition)
+    assert restored == definition
+    assert restored.entry.statements[0].kind == "wait_until"
+    assert restored.entry.statements[0].condition.kind == "predicate"
+    assert restored.helpers[0].returns == "bool"
+    assert restored.helpers[0].statements[0].body[0].kind == "return"
+    assert restored.helpers[0].statements[1].value is False
+
+
+def test_old_json_without_returns_defaults_to_none() -> None:
+    definition = macro_definition_from_source("attack", WITH_HELPERS)
+    written = json.loads(definition.model_dump_json())
+    del written["entry"]["returns"]
+    for helper in written["helpers"]:
+        del helper["returns"]
+
+    restored = MacroDefinition.model_validate(written)
+    assert restored == definition
+    assert restored.entry.returns == "none"
+    assert all(helper.returns == "none" for helper in restored.helpers)
+
+
+def test_return_statement_requires_exactly_one_condition_or_value() -> None:
+    condition = macro_definition_from_source(
+        "m",
+        'def m() -> None:\n    require(ready(), "Wait.")\n\n'
+        'def ready() -> bool:\n    return scene() == "Battle"\n',
+    ).helpers[0].statements[0].condition
+
+    assert MacroReturnStatement(source="return False", value=False).value is False
+    assert (
+        MacroReturnStatement(source="return scene() == ...", condition=condition).condition
+        == condition
+    )
+    with pytest.raises(ValidationError):
+        MacroReturnStatement(source="return")
+    with pytest.raises(ValidationError):
+        MacroReturnStatement(source="return both", condition=condition, value=True)

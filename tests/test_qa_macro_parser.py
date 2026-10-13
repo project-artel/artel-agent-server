@@ -27,8 +27,11 @@ from app.agents.qa.macro.model import (
     MacroFindValue,
     MacroFlagStatement,
     MacroIfStatement,
+    MacroPredicateCondition,
     MacroRequireStatement,
+    MacroReturnStatement,
     MacroSelectorValue,
+    MacroWaitUntilStatement,
 )
 from app.agents.qa.macro.parser import macro_definition_from_source
 
@@ -1098,3 +1101,233 @@ def test_a_docstring_does_not_count_toward_the_statement_limit() -> None:
     definition = macro_definition_from_source("m", source)
 
     assert len(definition.entry.statements) == MAX_STATEMENTS
+
+
+# --- `wait_until` 과 predicate (ARTEL-988) -------------------------------------
+
+
+def test_a_predicate_accepts_a_target_parameter_and_returns_a_condition() -> None:
+    definition = parse(
+        "def m(card: object) -> None:\n"
+        '    require(ready(card), "Wait for the card.")\n\n'
+        "def ready(target: object) -> bool:\n"
+        "    return actionable(target)\n"
+    )
+
+    assert definition.entry.returns == "none"
+    assert definition.helpers[0].returns == "bool"
+    condition = definition.entry.statements[0].condition
+    assert isinstance(condition, MacroPredicateCondition)
+    assert condition.callee == "ready"
+    assert condition.arguments[0].kind == "target"
+    result = definition.helpers[0].statements[0]
+    assert isinstance(result, MacroReturnStatement)
+    assert result.condition.kind == "call"
+
+
+def test_a_predicate_accepts_literal_returns_and_a_complete_elif_chain() -> None:
+    definition = parse(
+        "def m(card: object) -> None:\n"
+        '    require(ready(card), "Wait.")\n\n'
+        "def ready(card: object) -> bool:\n"
+        "    if exists(card):\n"
+        "        return True\n"
+        "    elif absent(card):\n"
+        "        return False\n"
+        "    else:\n"
+        "        return actionable(card)\n"
+    )
+    branch = definition.helpers[0].statements[0]
+    assert branch.body[0].value is True
+    assert branch.orelse[0].body[0].value is False
+    assert branch.orelse[0].orelse[0].condition.kind == "call"
+
+
+def test_a_predicate_must_return_on_every_path() -> None:
+    reason = rejection(
+        "def m() -> None:\n    require(ready(), \"Wait.\")\n\n"
+        "def ready() -> bool:\n"
+        '    if scene() == "Battle":\n        return True\n'
+        '    elif scene() == "Menu":\n        return False\n'
+    )
+    assert "every path" in reason and "return" in reason
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "    return True\n    return False\n",
+        "    if exists(target):\n        return True\n    else:\n        return False\n"
+        "    return True\n",
+    ],
+    ids=["after-return", "after-complete-if"],
+)
+def test_a_statement_after_return_is_refused(body: str) -> None:
+    source = (
+        "def m(target: object) -> None:\n"
+        '    require(ready(target), "Wait.")\n\n'
+        "def ready(target: object) -> bool:\n" + body
+    )
+    assert "cannot run" in rejection(source)
+
+
+def test_an_entry_point_cannot_be_a_predicate() -> None:
+    reason = rejection("def m() -> bool:\n    return True\n")
+    assert "entry point" in reason and "-> None" in reason
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '    click(target)\n',
+        '    require(exists(target), "Wait.")\n',
+        '    wait_until(exists(target), 1, "Wait.")\n',
+        '    for _ in range(1):\n        return True\n',
+        '    if exists(target):\n        click(target)\n    return False\n',
+    ],
+    ids=["action", "require", "wait_until", "for", "nested-action"],
+)
+def test_a_predicate_body_allows_only_assignment_if_and_return(body: str) -> None:
+    source = (
+        "def m(target: object) -> None:\n"
+        '    require(ready(target), "Wait.")\n\n'
+        "def ready(target: object) -> bool:\n" + body
+    )
+    reason = rejection(source)
+    assert "typed assignment" in reason and "`if`" in reason and "`return`" in reason
+
+
+def test_a_bare_return_in_a_predicate_is_refused() -> None:
+    assert "bare `return`" in rejection(
+        'def m() -> None:\n    require(ready(), "Wait.")\n\n'
+        "def ready() -> bool:\n    return\n"
+    )
+
+
+def test_a_predicate_cannot_be_called_as_a_statement() -> None:
+    reason = rejection(
+        "def m() -> None:\n    ready()\n\n"
+        "def ready() -> bool:\n    return True\n"
+    )
+    assert "returns a value" in reason and "condition" in reason
+
+
+def test_a_none_def_cannot_be_used_as_a_condition() -> None:
+    reason = rejection(
+        'def m() -> None:\n    require(act(), "Wait.")\n\n'
+        'def act() -> None:\n    flag("done")\n'
+    )
+    assert "-> None" in reason and "-> bool" in reason
+
+
+@pytest.mark.parametrize("kind", ["require", "if", "while", "wait_until"])
+def test_a_predicate_can_be_called_in_each_condition_statement(kind: str) -> None:
+    statement = {
+        "require": '    require(ready(), "Wait.")\n',
+        "if": '    if ready():\n        flag("ready")\n',
+        "while": '    while ready():\n        flag("ready")\n',
+        "wait_until": '    wait_until(ready(), 1, "Wait.")\n',
+    }[kind]
+    definition = parse(
+        "def m() -> None:\n" + statement + "\ndef ready() -> bool:\n    return True\n"
+    )
+    assert definition.entry.statements[0].condition.callee == "ready"
+
+
+def test_a_predicate_can_call_another_predicate_in_its_return() -> None:
+    definition = parse(
+        'def m() -> None:\n    require(first(), "Wait.")\n\n'
+        "def first() -> bool:\n    return second()\n\n"
+        "def second() -> bool:\n    return True\n"
+    )
+    assert definition.helpers[0].statements[0].condition.callee == "second"
+
+
+@pytest.mark.parametrize(
+    "predicates",
+    [
+        "def first() -> bool:\n    return first()\n",
+        "def first() -> bool:\n    return second()\n\n"
+        "def second() -> bool:\n    return first()\n",
+    ],
+    ids=["direct", "mutual"],
+)
+def test_predicate_recursion_is_refused(predicates: str) -> None:
+    reason = rejection('def m() -> None:\n    require(first(), "Wait.")\n\n' + predicates)
+    assert "recursion" in reason
+
+
+def test_call_depth_counts_predicates() -> None:
+    source = (
+        'def m() -> None:\n    require(first(), "Wait.")\n\n'
+        "def first() -> bool:\n    return second()\n\n"
+        "def second() -> bool:\n    return True\n"
+    )
+    parse(source)
+    reason = rejection(
+        source.replace("return True", "return third()")
+        + "\ndef third() -> bool:\n    return True\n"
+    )
+    assert str(MAX_CALL_DEPTH + 1) in reason
+
+
+def test_statement_count_includes_predicate_statements() -> None:
+    def source(assignments: int) -> str:
+        body = "".join(f"    n{index}: int = {index}\n" for index in range(assignments))
+        return (
+            'def m() -> None:\n    require(ready(), "Wait.")\n\n'
+            "def ready() -> bool:\n" + body + "    return True\n"
+        )
+
+    parse(source(MAX_STATEMENTS - 2))
+    assert str(MAX_STATEMENTS + 1) in rejection(source(MAX_STATEMENTS - 1))
+
+
+def test_wait_until_keeps_a_float_seconds_and_remedy() -> None:
+    definition = parse(
+        'def m() -> None:\n    wait_until(scene() == "Battle", 1, "Open Battle.")\n'
+    )
+    statement = definition.entry.statements[0]
+    assert isinstance(statement, MacroWaitUntilStatement)
+    assert statement.seconds == 1.0
+    assert statement.remedy == "Open Battle."
+
+
+@pytest.mark.parametrize(
+    "written, expected",
+    [
+        ('wait_until(scene() == "Battle", True, "Wait.")', "literal"),
+        ('wait_until(scene() == "Battle", 0, "Wait.")', "greater than 0"),
+        ('wait_until(scene() == "Battle", 31, "Wait.")', "30"),
+        ('wait_until(scene() == "Battle", seconds, "Wait.")', "stored"),
+        ('wait_until(scene() == "Battle", seconds=1, remedy="Wait.")', "=="),
+        ('wait_until(scene() == "Battle", 1)', "three"),
+        ('wait_until(scene() == "Battle", 1, "   ")', "empty"),
+    ],
+)
+def test_wait_until_rejects_invalid_arguments(written: str, expected: str) -> None:
+    assert expected in rejection(f"def m(seconds: int = 1) -> None:\n    {written}\n")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'def m() -> None:\n    pause_game_time()\n'
+        '    wait_until(scene() == "Battle", 1, "Wait.")\n    resume_game_time()\n',
+        'def m() -> None:\n    pause_game_time()\n    look()\n    resume_game_time()\n\n'
+        'def look() -> None:\n    wait_until(scene() == "Battle", 1, "Wait.")\n',
+    ],
+    ids=["direct", "helper"],
+)
+def test_wait_until_while_game_time_is_frozen_is_refused(source: str) -> None:
+    reason = rejection(source)
+    assert "pause_game_time" in reason and "resume_game_time" in reason
+    assert "time out" in reason
+
+
+def test_wait_until_while_a_key_is_held_is_allowed() -> None:
+    parse(
+        'def m() -> None:\n    hold_key("W")\n'
+        '    wait_until(scene() == "Battle", 1, "Wait.")\n'
+        '    release_key("W")\n'
+    )
