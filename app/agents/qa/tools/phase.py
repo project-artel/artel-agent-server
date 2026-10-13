@@ -109,6 +109,7 @@ _TOOL_PHASE: dict[str, RunPhase] = {
     "inspect_object": RunPhase.observe,
     "capture_screen": RunPhase.observe,
     "list_scene_capabilities": RunPhase.observe,
+    # 다른 phase 에서도 거절하지 않는다(`ANY_PHASE`).
     "search_knowledge": RunPhase.observe,
     "expand_knowledge": RunPhase.observe,
     # DECIDE — `full` 에만 있는 tool 하나.
@@ -175,7 +176,7 @@ def _answers(tool_name: str, phase: RunPhase) -> bool:
 
 # 어느 phase 에서든 통과하지만, 자기 phase 에서 불리면 그 phase 의 답으로도 치는 tool.
 #
-# `register_macro` 하나다. 등록은 이 런 밖에 남는 기록이라 `UPDATE_MEMORY` 의 답이 되지만,
+# `register_macro` 와 `search_knowledge` 둘이다. 등록은 이 런 밖에 남는 기록이라 `UPDATE_MEMORY` 의 답이 되지만,
 # 그 자리에서만 받으면 agent 가 등록하려고 마음먹은 순간과 허용되는 순간이 어긋난다.
 # `macro-continuity-l1`(2026-10-08) try 62 가 ACT 에서 `write_macro` 로 macro 를 쓰고 바로
 # `register_macro` 를 불렀다가 거절당했고, `UPDATE_MEMORY` 에서 다시 부르지 않아 초안이 런과
@@ -184,7 +185,14 @@ def _answers(tool_name: str, phase: RunPhase) -> bool:
 # `ALWAYS_ALLOWED` 에 넣지 않는 이유: 그 목록의 tool 은 어느 phase 도 끝내지 않는다. 등록은
 # `UPDATE_MEMORY` 에서 불리면 그 step 의 지식화를 끝내야 하므로 표에도 남는다. 다른 phase 에서
 # 불리면 phase 를 옮기지 않는다 — ACT 한가운데서 등록했다고 VERIFY 를 건너뛰면 안 된다.
-ANY_PHASE = frozenset({"register_macro"})
+#
+# `search_knowledge` 도 같은 자리에 둔다. `record_knowledge` 를 부르기 직전에 같은 규칙이 이미
+# 있는지 찾아야 `update_knowledge` 로 고칠지 새로 적을지 정할 수 있는데(`knowledge_base` skill),
+# 그 순간은 `UPDATE_MEMORY` 다. `OBSERVE` 에만 묶으면 거기서 검색하는 호출이 다음 step 의
+# `OBSERVE` 로 넘어가 버리고, 그 뒤의 `record_knowledge` 는 거절된다. 서버는 같은 사실을 두 번
+# 적어도 막지 않으므로 그대로 두면 중복 항목이 쌓인다. 읽기만 하는 tool 이라 어느 phase 에서
+# 불러도 아무것도 남기지 않는다. `OBSERVE` 에서 불리면 종전대로 `OBSERVE` 의 호출로 센다.
+ANY_PHASE = frozenset({"register_macro", "search_knowledge"})
 
 
 # 두 순서 모두 `REVIEW_DRAFT` 를 `VERIFY` 와 `UPDATE_MEMORY` 사이에 적어 두지만, 그 칸은 런이
