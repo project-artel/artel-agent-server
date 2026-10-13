@@ -369,6 +369,9 @@ RANGE = "range"
 FLAG = "flag"
 ASK_VERDICT = "ask_verdict"
 REQUIRE = "require"
+# 조건이 참이 될 때까지 새 `pulse` 를 기다리는 statement. `require` 와 같은 인자 둘에 기다릴
+# 최대 초를 하나 더 받는다.
+WAIT_UNTIL = "wait_until"
 # 턴을 agent 에게 돌려주는 statement. 실패가 아니고, agent 가 `resume_macro` 로 그
 # 자리부터 잇거나 그만둔다.
 CHECKPOINT = "checkpoint"
@@ -442,3 +445,17 @@ MAX_LOOP_PASSES = 50
 # macro 한 번이 실행하는 statement 의 상한. 반복이 중첩되면 회수가 곱이 되므로, 회수
 # 상한만으로는 천장이 안 선다. 저장 때 세는 128 의 실행 시점 짝이다.
 MAX_EXECUTED_STATEMENTS = 1000
+
+# `wait_until` 하나가 기다리는 최대 초. 저장 때 판정한다 — 리터럴로만 받는 이유가 이것이다.
+#
+# 30 인 이유: 장면 전환과 로딩이 이 안에 든다. 더 오래 기다릴 자리라면 agent 가 직접
+# 관측하는 편이 무엇이 멈췄는지 더 잘 본다. 첫 값이고, 런에서 잰 로딩 시간을 보고 고친다.
+MAX_WAIT_PER_STATEMENT_SECONDS = 30
+
+# macro 호출 하나가 기다리는 초의 합계. `resume_macro` 로 이어 돈 것까지 센다.
+#
+# 저장 때 셀 수 없다. `while` 안의 `wait_until` 은 50 회까지 돌 수 있으므로, 반복 회수와
+# 같은 자리에서 실행 중에 센다(`MAX_LOOP_PASSES` 와 `MAX_EXECUTED_STATEMENTS` 가 그렇게
+# 됐다, ARTEL-948). 60 은 `MAX_WAIT_PER_STATEMENT_SECONDS` 의 두 배다 — tool 호출 하나가
+# 이보다 오래 걸리면 operator 는 런이 멈춘 것과 구별하지 못한다.
+MAX_WAIT_PER_CALL_SECONDS = 60

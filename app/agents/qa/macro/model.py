@@ -19,7 +19,7 @@
 
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.agents.qa.macro.grammar import MacroOperator, MacroShape, MacroType
 
@@ -97,6 +97,34 @@ MacroStringRef = Annotated[
 ]
 
 
+# --- tool 과 helper 호출의 인자 -------------------------------------------------
+
+
+class MacroTargetArgument(_Frozen):
+    kind: Literal["target"] = "target"
+    parameter: str
+    target: MacroTarget
+
+
+class MacroLiteralArgument(_Frozen):
+    kind: Literal["literal"] = "literal"
+    parameter: str
+    literal: MacroLiteral
+
+
+class MacroNameArgument(_Frozen):
+    kind: Literal["name"] = "name"
+    parameter: str
+    name: str
+    declared_type: MacroType
+
+
+MacroArgument = Annotated[
+    Union[MacroTargetArgument, MacroLiteralArgument, MacroNameArgument],
+    Field(discriminator="kind"),
+]
+
+
 # --- 조건 ---------------------------------------------------------------------
 
 
@@ -162,8 +190,22 @@ class MacroReaderCondition(_Frozen):
     call: MacroReaderCall
 
 
+class MacroPredicateCondition(_Frozen):
+    """`-> bool` 인 `def` 하나를 부르는 조건. 인자 모양은 helper 호출과 같다.
+
+    `and`·`or`·`not` 연산자를 열지 않고 조건 둘 이상을 적는 자리가 이것이다. predicate
+    몸통의 `if` 가 각각 `return True` 하면 `or` 이고, 어느 `return` 에서 끝났는지가 줄 번호로
+    남는다.
+    """
+
+    kind: Literal["predicate"] = "predicate"
+    callee: str
+    arguments: tuple[MacroArgument, ...] = ()
+
+
 MacroCondition = Annotated[
-    Union[MacroComparisonCondition, MacroReaderCondition], Field(discriminator="kind")
+    Union[MacroComparisonCondition, MacroReaderCondition, MacroPredicateCondition],
+    Field(discriminator="kind"),
 ]
 
 
@@ -206,35 +248,7 @@ MacroAssignValue = Annotated[
 ]
 
 
-# --- tool 과 helper 호출의 인자 -------------------------------------------------
-
-
-class MacroTargetArgument(_Frozen):
-    kind: Literal["target"] = "target"
-    parameter: str
-    target: MacroTarget
-
-
-class MacroLiteralArgument(_Frozen):
-    kind: Literal["literal"] = "literal"
-    parameter: str
-    literal: MacroLiteral
-
-
-class MacroNameArgument(_Frozen):
-    kind: Literal["name"] = "name"
-    parameter: str
-    name: str
-    declared_type: MacroType
-
-
-MacroArgument = Annotated[
-    Union[MacroTargetArgument, MacroLiteralArgument, MacroNameArgument],
-    Field(discriminator="kind"),
-]
-
-
-# --- statement 일곱 종 ---------------------------------------------------------
+# --- statement 종류 ---------------------------------------------------------
 #
 # 한 목록에 섞고 `kind` 로 가른다. 순서가 곧 실행 순서이고, 종류별로 목록을 가르면
 # 그 순서를 다시 붙여야 한다 — 그것은 적힌 글에 이미 있는 사실을 두 번째로 적는 일이다.
@@ -357,6 +371,40 @@ class MacroWhileStatement(_Statement):
     body: tuple["MacroStatement", ...] = ()
 
 
+class MacroWaitUntilStatement(_Statement):
+    """`wait_until(<condition>, <seconds>, <remedy>)`. 조건이 참이 될 때까지 기다린다.
+
+    `require` 는 직전 action 뒤에 도착한 `pulse` 하나로 판정하므로, 게임이 몇 초 걸려 다음
+    상태로 가는 자리에서는 게임이 틀리지 않았는데도 실패한다. 이것은 새 `pulse` 가 올
+    때마다 조건을 다시 읽는다. `seconds` 는 리터럴이고
+    `MAX_WAIT_PER_STATEMENT_SECONDS` 를 넘지 않는다. `remedy` 는 `require` 의 것과 같은
+    이유로 필수다.
+    """
+
+    kind: Literal["wait_until"] = "wait_until"
+    condition: MacroCondition
+    seconds: float
+    remedy: str
+
+
+class MacroReturnStatement(_Statement):
+    """predicate `def` 안에서만 서는 `return`. 둘 중 정확히 하나가 찬다.
+
+    `return True`·`return False` 는 `value` 이고, 그 밖은 조건 하나인 `condition` 이다.
+    조건 문법에 bool 리터럴 하나뿐인 조건을 따로 열지 않으려고 둘을 가른다.
+    """
+
+    kind: Literal["return"] = "return"
+    condition: MacroCondition | None = None
+    value: bool | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> "MacroReturnStatement":
+        if (self.condition is None) == (self.value is None):
+            raise ValueError("a `return` carries exactly one of `condition` and `value`")
+        return self
+
+
 class MacroCheckpointStatement(_Statement):
     """턴을 agent 에게 돌려주는 자리. 실패가 아니다.
 
@@ -379,6 +427,8 @@ MacroStatement = Annotated[
         MacroForStatement,
         MacroWhileStatement,
         MacroCheckpointStatement,
+        MacroWaitUntilStatement,
+        MacroReturnStatement,
     ],
     Field(discriminator="kind"),
 ]
@@ -406,6 +456,9 @@ class MacroFunction(_Frozen):
     # `statements` 에 없고 runner 가 보지 않는다. 기본값 `None` 은 이 field 가 생기기 전에
     # 저장된 JSON 이 `extra="forbid"` 아래에서도 그대로 읽히게 한다.
     docstring: str | None = None
+    # `-> None` 이면 "none", predicate 이면 "bool". 기본값은 `docstring` 과 같은 이유로
+    # 이 field 가 생기기 전에 저장된 JSON 이 그대로 읽히게 한다.
+    returns: Literal["none", "bool"] = "none"
     statements: tuple[MacroStatement, ...] = ()
 
 
