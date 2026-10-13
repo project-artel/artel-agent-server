@@ -96,6 +96,23 @@ def test_turning_folding_off_changes_the_fingerprint() -> None:
     assert structure_of(resolved())[2] != structure_of(resolved(fold_stale_scenes=False))[2]
 
 
+def test_pulse_relevance_is_off_by_default_and_moves_the_fingerprint() -> None:
+    """The two arms of ARTEL-958 have to hash apart.
+
+    The view the model reads is what this knob changes, and `arch_fingerprint`
+    hashes nothing about the view. The knob itself is the only thing in the digest
+    that can separate the arms, so it has to be in `arch.model_dump()`.
+    """
+    assert DEFAULT_ARCH.pulse_relevance is False
+    assert structure_of(resolved())[2] != structure_of(resolved(pulse_relevance=True))[2]
+
+
+def test_report_step_view_is_on_by_default_and_moves_the_fingerprint() -> None:
+    """The two arms of ARTEL-960 have to hash apart, for the same reason as `pulse_relevance`."""
+    assert DEFAULT_ARCH.report_step_view is True
+    assert structure_of(resolved())[2] != structure_of(resolved(report_step_view=False))[2]
+
+
 def test_the_fingerprint_ignores_the_model_and_the_prompt() -> None:
     """The axes are independent, and a digest that moved with all of them could
     not group "the same structure under two models" — the comparison this exists
@@ -450,6 +467,40 @@ def test_the_default_structure_holds_the_run_to_the_phase_cycle() -> None:
     assert not mode.decides_in_its_own_turn
 
 
+# --- the skills axis ----------------------------------------------------------
+
+
+def test_skills_default_to_off() -> None:
+    assert QaArchSpec().skills == "off"
+    assert resolved().skills == "off"
+
+
+def test_an_unknown_skills_value_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        QaArchSpec(skills="always")
+
+
+def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
+    structure_of.cache_clear()
+    try:
+        off_names, _, off_fingerprint = structure_of(
+            resolved(**_PINNED_COMPACTION_KNOBS, skills="off")
+        )
+        on_names, _, on_fingerprint = structure_of(
+            resolved(**_PINNED_COMPACTION_KNOBS, skills="on_demand")
+        )
+    finally:
+        structure_of.cache_clear()
+
+    # `build_tools` registers the real `load_skill` itself, so the fingerprint
+    # reads its real schema (`name`, `thought`) rather than a stand-in.
+    assert "load_skill" not in off_names
+    # `build_tools` appends it before the compaction tool, so compare as sets.
+    assert set(on_names) == set(off_names) | {"load_skill"}
+    assert len(on_names) == len(off_names) + 1
+    assert on_fingerprint != off_fingerprint
+
+
 # --- the label stays paired with the structure it names ------------------------
 
 # Pinned next to the label they were computed under, so a diff to either one
@@ -464,7 +515,7 @@ def test_the_default_structure_holds_the_run_to_the_phase_cycle() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v7-phase-cycle-default"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v19-fold-in-one-batch"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -515,6 +566,13 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
     "pause_game_time",
     "resume_game_time",
     "reset_game",
+    "write_macro",
+    "edit_macro",
+    "read_macro",
+    "register_macro",
+    "run_macro",
+    "resume_macro",
+    "decline_macro_draft",
     "wait_for_operator",
     "report_step",
     "report_issue",
@@ -536,7 +594,49 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 # `capability_key` and `learned`, and the phase state machine sits in front of
 # every call. A run that names nothing is a different agent than it was, so the
 # label was bumped with it.
-_EXPECTED_DEFAULT_FINGERPRINT = "2a87923211b7"
+#
+# Moved once more, from `2a87923211b7`, when the skills branch merged develop:
+# `QaArchSpec` gained `skills` and `fold_stale_skills`, so the dump the digest
+# hashes gained two keys and every structure followed. Nothing the default run
+# does moved with it — `skills` defaults to `off`, so `load_skill` is not in the
+# list above, and the skill fold is wired only when `skills` is `on_demand`, so
+# the default middleware list is the same. The label moved to
+# `v8-skills-on-demand` anyway, because the structure now has a second shape
+# along that axis and a run has to say which side of it it was filed on.
+#
+# Moved again, from `e458f275968a`, for the five macro tools (ARTEL-925):
+# `write_macro`, `edit_macro`, `read_macro`, `register_macro` and `run_macro`
+# joined the set above. That is the first case in the docstring below — the tool
+# set changed — and `v9-macros` is the label bump it asks for. ARTEL-926 still owes
+# the QA run that gives the new label numbers to be read against; until then the
+# label separates the structures and no run supplies the comparison.
+#
+# Moved again within the same label, from `887277ea051d`, when `resume_macro`
+# joined the set for `checkpoint` (ARTEL-949). No run had been filed under
+# `v9-macros` yet, so the label still names the macro shape as it ships.
+#
+# And once more, from `388b1fc3438e`, when `QaArchSpec.macros` joined (ARTEL-926):
+# the dump the digest hashes gained a key. The default is `on`, so the default
+# tool set did not move — `macros=off` is the arm an A/B compares it against.
+#
+# And once more, from `2db1454a7b0f`, when `decline_macro_draft` joined the macro tools.
+# The default is `macros=on`, so the default tool set moved with it.
+#
+# And once more, from `450105a42315`, when `pulse_relevance` (ARTEL-958) joined
+# `QaArchSpec` at `False`. At `False` the default run's tools, middleware and view
+# are where they were, so the label stays.
+#
+# And from `6f4035a1242e`, when `report_step_view` (ARTEL-960) joined at `True`.
+# At `True` every tool answer is what it was, so the label stays.
+#
+# And once more, from `24e30f3191d9`, when the scene view, knowledge neighbour and skill
+# folds became the one `fold_context` middleware (v19). The tool set did not move.
+#
+# And once more, from `055e7ce108a3`, when `QaArchSpec.fold_threshold_chars` joined in v19:
+# the dump the digest hashes gained a key. Its default is the threshold v19 already used.
+#
+# And once more, from `83792f9f8d54`, when that default went from 56,000 to 112,000.
+_EXPECTED_DEFAULT_FINGERPRINT = "e7d85ceb94cd"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
@@ -614,3 +714,58 @@ def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
         "middleware or a loop bound. See this test's docstring for what to do "
         "next."
     )
+
+
+# --- macros 축 (ARTEL-926) -----------------------------------------------------
+
+
+def _with_macros(macros: str, skills: str = "on_demand"):
+    return resolve_arch(
+        QaArchSpec(vision=VisionMode.on, skills=skills, macros=macros),
+        LLMModel.gpt_6_luna,
+    )
+
+
+MACRO_TOOLS = (
+    "write_macro",
+    "edit_macro",
+    "read_macro",
+    "register_macro",
+    "run_macro",
+    "resume_macro",
+    "decline_macro_draft",
+)
+
+
+def test_macros_off_offers_none_of_the_six_macro_tools_and_changes_the_fingerprint() -> None:
+    """A/B 의 두 arm 이 macro 만큼 다르고 그 밖에는 같아야 한다."""
+    off_tools, off_middleware, off_print = structure_of(_with_macros("off"))
+    on_tools, on_middleware, on_print = structure_of(_with_macros("on"))
+
+    assert not set(MACRO_TOOLS) & set(off_tools)
+    assert [name for name in on_tools if name not in MACRO_TOOLS] == list(off_tools)
+    assert off_middleware == on_middleware
+    assert off_print != on_print
+
+
+def test_macros_off_withholds_the_macro_skill_from_every_list_of_skills() -> None:
+    """남기면 `off` arm 의 Skills 절이 없는 tool("before your first `write_macro`")을 가리킨다."""
+    from app.agents.qa.arch import _ThrowawayChannel, withheld_skills
+    from app.agents.qa.runner import _skills_directive, system_prompt_with_skills
+    from app.agents.qa.tools import QaRunState, build_tools
+
+    off, on = _with_macros("off"), _with_macros("on")
+
+    assert "`macro`" not in _skills_directive("v19", "on_demand", withheld_skills(off))
+    assert "`macro`" in _skills_directive("v19", "on_demand", withheld_skills(on))
+
+    inlined_off = system_prompt_with_skills("system", "v19", "off", withheld_skills(off))
+    inlined_on = system_prompt_with_skills("system", "v19", "off", withheld_skills(on))
+    assert "## Skill: macro" not in inlined_off
+    assert "## Skill: macro" in inlined_on
+
+    load_skill = {
+        one.name: one
+        for one in build_tools(_ThrowawayChannel(), QaRunState(total_steps=0), off, "v19")
+    }["load_skill"]
+    assert "macro" not in load_skill.description

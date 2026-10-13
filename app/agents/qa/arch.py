@@ -31,6 +31,7 @@ import hashlib
 import json
 from enum import StrEnum
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -161,11 +162,212 @@ from app.llm.models import LLMModel, get_model_spec
 # measurement supports "`lite` does not score worse and writes things down", and
 # that its cost and refusal figures are an upper bound rather than a reading of
 # this table.
-QA_ARCH_LABEL = "v7-phase-cycle-default"
+#
+# v8 because the agent can now read its skills on demand: with `skills=on_demand`
+# a `load_skill` tool joins the tool set, and the long sections of the system
+# prompt (knowledge base, content map, held state) leave it and are read through
+# that tool instead of being resent on every turn. Plan:
+# `.plan/general/2026-10-06-slim-the-qa-prompt-and-load-skills-on-demand.md`.
+# The new `QaArchSpec.skills` axis defaults to `off`, which is the shape every run
+# had before, so the default fingerprint moves only because `arch.model_dump()`
+# gained a key (see the v4 note above); the tool set and the middleware list of
+# the default run did not change. The label moves anyway because the structure now
+# has two shapes and a run must say which side of that axis it was filed on.
+#
+# This shape was written as `v6-skills-on-demand` on a branch that grew alongside
+# the phase cycle, and develop took v6 and v7 for the phase cycle first. No run
+# outside local measurement was filed under that name, so it is renumbered to v8
+# rather than kept, and v6 keeps meaning the phase cycle. The two axes are
+# independent: `skills` and `phase_cycle` can be set in any combination, and the
+# phase gate never refuses `load_skill`, because a skill is needed at the moment it
+# applies, which can be any phase.
+#
+# Folding loaded skills is part of the same `on_demand` shape, not a new one. With
+# `skills=on_demand` and the `fold_stale_skills` knob on, a middleware of the same
+# name keeps the newest loaded skill in full and replaces older ones with a note
+# naming the skill to load again (`app/agents/qa/context.py`). It landed together
+# with the `skills` axis, so no run was filed under this label without it. The
+# default fingerprint moves only because `arch.model_dump()` gained the
+# `skills` and `fold_stale_skills` keys; with `skills=off` the middleware list is
+# unchanged.
+#
+# v9 because the model now has six macro tools — `write_macro`, `edit_macro`,
+# `read_macro`, `register_macro`, `run_macro` and `resume_macro` — and can send a
+# whole sequence of actions in one call instead of one action per turn (ARTEL-914).
+# Six tool schemas appeared, so `arch_fingerprint` moves on its own here. A macro
+# may loop (`for`, `while`, ARTEL-948) and may hand the turn back at a `checkpoint`
+# and carry on through `resume_macro` (ARTEL-949); those landed before any run was
+# filed under this label.
+#
+# The macro grammar does NOT ride on those five descriptions. Each is under the
+# 500-character cap `validate_prompts` enforces, and the grammar and the two
+# worked examples sit in `qa_run/v19/skill_macro.md`, read through `load_skill`
+# when the skills axis is `on_demand` and inlined into the system prompt when it
+# is `off`. So the macro text costs a turn only when the model asks for it, which
+# is the whole point of the axis above.
+#
+# This was `v8-macros` until the branch underneath renumbered itself to
+# `v8-skills-on-demand` (above). No run was filed under `v8-macros`.
+#
+# v10 because a phased run with macros on now makes macros part of UPDATE_MEMORY
+# (ARTEL-914). `register_macro` moved from ACT to UPDATE_MEMORY in the phase table, so
+# registering a macro answers that step the way a knowledge entry does; the three draft
+# tools became always-allowed; and the phase directive of such a run gains a paragraph
+# (`qa_run/v19/macro_memory_directive.md`) asking, at that step, whether the step had a
+# sequence worth saving. None of this moves `arch_fingerprint` — the phase table is not
+# hashed and neither is the directive's text — while runs were already filed under
+# `v9-macros` (the `macro-ab-l1b` and `macro-ab-l1-nudge` measurements, 2026-10-07). The
+# label is the only thing that can tell them apart from runs after this, which is the
+# case the module docstring says the hand-bumped label exists for.
+#
+# v11 because a run with macros on is now handed a macro draft instead of being asked to
+# write one (ARTEL-915, ARTEL-916). Every action tool the agent calls by hand is recorded
+# in order, with its target lifted to a `selector(...)` or a `find(...)` against the pulse
+# memory of that moment, and when a step's verdict is accepted, `report_step`'s answer
+# carries a draft of that step's actions that one `register_macro` call keeps. This came
+# after `v10-macro-memory` (`macro-ab-l1-memory`, 2026-10-08) left B with zero macros in
+# six runs, as `v9-macros` had in twelve. Nothing hashed moves: the tool schemas are
+# unchanged and the draft lives in a tool's answer.
+#
+# v12 because a run with macros on now reads a list of the macros earlier runs registered on
+# this build, once, at the end of the scenario's opening message (ARTEL-934, ARTEL-935).
+# Until then a run could call a registered macro only if it already knew the name, and
+# nothing told it one existed, so what run 1 registered was unreachable by run 2. The list
+# is one line per macro, at most 12 (`MAX_MACROS_IN_FIRST_MESSAGE`), with a note saying how
+# many were cut. It is drawn there rather than under the scene view or at the tail of every
+# call because the opening message is fixed when the run starts, so the prompt prefix does
+# not change on later turns (ARTEL-621). A draft's first comment now names the step it was
+# drafted for, since that comment is the line the next run reads. A run with `macros=off`
+# or a build with no macros reads exactly what it did under v11. Nothing hashed moves: the
+# tool schemas are unchanged and the list is part of a message, not of a tool.
+#
+# v13 because `register_macro` is no longer refused outside UPDATE_MEMORY (`ANY_PHASE` in
+# `tools/phase.py`). Called during UPDATE_MEMORY it still answers that phase; called in any
+# other phase it runs and moves no phase. Under v12, try 62 of `macro-continuity-l1`
+# (2026-10-08) wrote a macro during ACT, had its registration refused, never retried it in
+# UPDATE_MEMORY, and the draft was dropped with the run. The macro paragraph of the phase
+# directive says so in one more sentence. Nothing hashed moves: the phase table is not
+# hashed and neither is the directive's text.
+#
+# v14 because the macro draft and what the agent is asked about it changed (`macro-continuity-l1`,
+# 2026-10-08: 34 drafts offered, 1 registered). A run of key presses that ended in a scene
+# change is drafted as `while scene() == "<scene>":` instead of the exact count, since the
+# action recording now keeps the scene after each call (`DispatchRecord.scene_after`). Drafts
+# are offered only for passed verdicts. The offer states that the scenario runs again and the
+# next run is shown this build's registered macros, and gives three answers — register, fix
+# with `edit_macro` then register, or decline by name — and an offered draft counts as read so
+# `edit_macro` accepts it. `skip_memory_update` refuses once a reason that does not name a
+# pending draft. The macro paragraph says the scenario runs again. Nothing hashed moves: the
+# tool schemas are unchanged.
+#
+# v15 because the macro draft gets a phase of its own, and with it a tool. Under v14 one
+# `skip_memory_update` still answered both "what did this step teach about the game" and "keep
+# this draft", and in v14 try 80 the agent read the draft and the fact that the next run sees
+# registered macros and still declined. A step whose passing verdict offers a draft now goes
+# VERIFY -> REVIEW_DRAFT -> UPDATE_MEMORY; REVIEW_DRAFT is answered by `register_macro` or the
+# new `decline_macro_draft` (name and what replaying it would do wrong), and a refused
+# registration keeps it open. Steps without a draft go VERIFY -> UPDATE_MEMORY as before, and
+# `skip_memory_update` is back to meaning only "no knowledge to write" (v14's one-time
+# refusal is gone). The offer makes registering the default for a passed step and states the
+# cost of not registering in tool calls. `decline_macro_draft` joins the default tool set, so
+# `arch_fingerprint` moves.
+#
+# v16 because a run with macros on is now told that macros are how it operates and the
+# action tools fill in (ARTEL-917, asked for on 2026-10-08). In `macro-continuity-l1-v14`
+# five of six first runs carried macros to their second run, but 6 of the 14 `run_macro`
+# calls in the second runs were refused for coming outside ACT and one second run carried
+# two macros and ran none. The macro paragraph now opens with the order for each step — a
+# registered macro first, then a macro written for any sequence, then hand actions only for
+# single presses, looks and recovery — `report_step`'s answer names the registered macro for
+# the next step, and a `run_macro` refused in UPDATE_MEMORY or REVIEW_DRAFT says to make it
+# the next step's first action. The action tools' descriptions are unchanged because a run
+# with macros off reads them too. Nothing hashed moves.
+#
+# v17 because stale pulse views are now folded out of what the model reads (asked for on
+# 2026-10-08). Measured from LangSmith traces of complete 24-step L1 runs: the last model call
+# of sol try 138 was 351,671 prompt tokens (1,065,132 chars, 276 messages), and the pulse view
+# text inside tool results was 89.8% of those chars (`run_macro` x15 alone 38%); luna try 131
+# ended at 158,141 tokens with the pulse view at 87.0%. Input grew linearly, 13k -> 158k -> 352k
+# tokens within try 138, and compaction, which triggers at 90% of a 922k window, never fired.
+# The cause: `fold_stale_scenes` matched only the `<<scene view N>>` markers, while a build that
+# sends only `pulse` gets the pulse-only view, which ARTEL-621 had left unfolded on purpose (the
+# runner's `views folded=0 kept=0` on every call). ARTEL-621 had two reasons, and each now has an
+# answer. First, folding the newest-but-one view on every call rewrote the middle of the prompt
+# every call, and with the single cache breakpoint at the end of the prompt nothing cached past
+# the first message. The fold now runs in batches: nothing is folded until more than
+# `DEFAULT_MAX_FULL_VIEWS` (8) full views have piled up, then all but the newest are folded at
+# once, so the cache is rewritten once per 8 calls and the calls between only append. Second,
+# the pulse view is a delta that does not redraw a value it has already shown, so folding the
+# old views loses values that moved once and then stayed put. When a batch is folded, the runner
+# now calls `PulseMemory.redraw_all_values_next`, and the first pulse view after the fold draws
+# every held value again, marked `(changed earlier)`. A folded view becomes one line naming its
+# reading and scene. Scene views follow the same batching. Nothing hashed moves: the middleware
+# list, the tools and the knobs are unchanged.
+#
+# v18 because a `run_macro` or `resume_macro` answer now carries one pulse view instead of one
+# per action (asked for on 2026-10-09). The macro runner sent each action through
+# `ToolContext.act`, which drew a pulse view onto every action's sentence, and `_render` listed
+# those sentences under "What the game said:" before the answer drew one more. In the first v17
+# run, try 143, a 30-action `advance_opening_dialogue` came back with 31 views in one 17k-char
+# answer, so the first macro alone crossed `DEFAULT_MAX_FULL_VIEWS` and the batch fold ran at
+# the 11th call with 32 views folded. Nothing read those views but the runner, which looks at
+# `ActionOutcome`'s data, not its text. The macro host now calls `act(screen=False)`: each
+# action's line keeps its outcome and any operator message, and the one view drawn when the
+# macro stops or ends covers every reading since the last answer. Nothing hashed moves.
+#
+# `pulse_relevance` (ARTEL-958) opened as an axis without moving this label, on
+# the `screen_capture` argument above. At its default `False` the tool set, the
+# tool schemas, the middleware list and every other knob are where they were, and
+# the view is byte-identical because `PulseMemory.relevance` stays empty — a test
+# in `tests/test_qa_pulse_cosmetic.py` holds that. At `True` the view moves, which
+# the fingerprint cannot see, so each arm carries its own label in
+# `benchmarks/wordventure/arch/pulse-relevance-*.json`.
+#
+# `report_step_view` (ARTEL-960) opened the same way. At its default `True` every
+# tool answer is what it was; at `False` only `report_step`'s answer loses its view,
+# which the fingerprint cannot see, so its arms carry their own labels too.
+#
+# v19 because the four folds now run as one middleware and fold in one batch (asked for on
+# 2026-10-09). The scene view, knowledge neighbour and skill folds were three middleware, and
+# `capture_vision` trimmed old `on_demand` screenshots on its own; each rewrote the middle of
+# the prompt at its own moment, so each paid for its own cache miss. Measured from the
+# LangSmith traces of L1 tries 178-183 (v18 and the uncommitted 16-view variant): with no fold
+# the next call read all but about 300 tokens of the previous prompt from cache, folds caused
+# 72-90% of the input that was not read from cache, and the skill fold, outside the pulse
+# batch, cost on average about 28,000 tokens each of the 6 times it ran. `fold_context` now
+# scores every stale block by its length (a picture as 4,000 chars), and once the blocks not yet
+# folded add up to a threshold it folds all of them at once; the run keeps the keys it folded
+# so later calls send the same prefix. The middleware list changes, so the fingerprint moves.
+# Merging alone did not change the bill: at a 56,000-char threshold (about the 8 views the old
+# batch waited for) an L1 A/B came out even on Luna (tries 197-202) and on Sol (tries 203-208),
+# because the batch still fired as often as the old pulse batch plus the skill folds. How often
+# it fires is what costs, so the threshold is `QaArchSpec.fold_threshold_chars`, and its default
+# `DEFAULT_FOLD_THRESHOLD_CHARS` is 112,000, picked by a Sol sweep (tries 209-220): 18% cheaper
+# runs than 56,000 at the same accuracy, and 98k-224k all within 3% per call. The numbers are
+# above that constant.
+QA_ARCH_LABEL = "v19-fold-in-one-batch"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
 _FINGERPRINT_SCHEME = 1
+
+# `fold` 하지 않은 후보의 점수 합계가 이 값에 이르면 그 호출에서 전부 `fold` 한다. 점수는 후보가
+# 차지하는 글자 수다. 기본값이고, 런마다 `QaArchSpec.fold_threshold_chars` 로 바꿀 수 있다.
+#
+# 112,000 은 L1 실측으로 고른 값이다. Sol 로 기준값마다 3번 돌린 결과(try 209–217, 2026-10-10):
+#
+#   기준값   다시 쓴 횟수   호출당 입력 token   run 비용   호출당 비용   일치 /24
+#   56k      12            약 37,000          $1.759     $0.01302     21
+#   112k     5             약 44,600          $1.436     $0.01094     21.3
+#   224k     2             약 56,800          $1.400     $0.01128     21
+#
+# 이어서 1번씩 돌린 점(try 218–220)은 98k $0.01129, 140k $0.01109, 182k $0.01129 였다.
+#
+# 기준값을 올리면 prompt 를 다시 쓰는 횟수는 줄지만, 오래된 block 이 남아 호출마다 `cache` 에서 읽는
+# 양이 는다. 56k 는 분명히 비싸다. 98k–224k 의 다섯 점은 호출당 비용이 3% 안에 모여 있고, 112k 의
+# 3번 사이 편차(7%)보다 작아 서로 구분되지 않는다. 그 안에서 3번 확인된 점이 112k 이고, 호출당 입력이
+# 224k 보다 27% 작아 오래된 block 을 덜 오래 모델 앞에 둔다.
+DEFAULT_FOLD_THRESHOLD_CHARS = 112_000
 
 # The fixed part of the tool-call budget: the opening observation, `finish_run`,
 # and the headroom between them. The per-run allowances are added on top of it
@@ -352,12 +554,52 @@ class QaArchSpec(BaseModel):
     # which carries no `phase_directive` for the gate's refusals to rest on and is
     # refused in `resolve_run_config` rather than gated in silence.
     phase_cycle: PhaseCycleMode = PhaseCycleMode.lite
+    # `off` keeps every skill inlined in the system prompt, as before. `on_demand`
+    # moves the skills behind the `load_skill` tool, which then joins the tool set.
+    skills: Literal["off", "on_demand"] = "off"
+    # The six macro tools and the `macro` skill. `off` is the shape every run had
+    # before macros (ARTEL-926): no macro tool in the list and no `macro` skill in
+    # the prompt or behind `load_skill`, so an A/B on this axis differs by exactly
+    # the macros. Withholding the skill matters as much as withholding the tools —
+    # left in, the Skills section would tell the `off` arm to load something
+    # "before your first `write_macro`", a tool it does not have.
+    macros: Literal["off", "on"] = "on"
     fold_stale_scenes: bool = True
     # Folds the neighbour blocks the search volunteers, and only those (ARTEL-277).
     # Separate from `fold_stale_scenes` because the two are independently useful
     # to turn off: what they fold is recovered by different tools out of
     # different budgets.
     fold_stale_knowledge: bool = True
+    # Folds every loaded skill but the newest, and only when `skills` is
+    # `on_demand`: with `off` the skills are in the system prompt and there is
+    # nothing loaded to fold. Separate from the two folds above because what it
+    # folds is recovered by a third tool, `load_skill`.
+    fold_stale_skills: bool = True
+    # `pulse` view 에서 cosmetic member 를 숨긴다(ARTEL-958). 켜면 run 이 member 타입마다
+    # Jev decision model 에 gameplay state 인지 묻고(`app/qa/relevance.py`), 확실히 아니라고
+    # 답한 member 를 `PulseMemory.render` 가 빼고 개수만 적는다.
+    #
+    # 기본값이 `False` 인 이유: 끄면 `PulseMemory.relevance` 가 비고, 그때 뷰는 이 axis 가
+    # 생기기 전과 byte 단위로 같다. 그래서 기본 run 의 모양이 안 움직이고 `QA_ARCH_LABEL` 도
+    # 그대로다 — `screen_capture` 와 같은 경우다. 두 arm 의 label 은 workspace 의
+    # `benchmarks/wordventure/arch/pulse-relevance-*.json` 이 붙인다.
+    pulse_relevance: bool = False
+    # `report_step` 결과에 `pulse` view 를 붙일지(ARTEL-960). 끄면 view 대신 "값이 몇 개
+    # 움직였다" 한 줄만 붙는다.
+    #
+    # `report_step` 은 게임을 조작하지 않고, 결과는 판정이 끝난 뒤에 돌아온다. 그래서 거기
+    # 실린 view 는 그 판정에 쓰일 수 없고, 담기는 것은 agent 가 생각하는 동안 일어난 변화다.
+    # 2026-10-09 L1 run 에서 전체 `pulse` view 의 37–42% 가 이 자리에 실렸다. 그 사이 움직인
+    # member 값은 다음 action 결과가 `(changed earlier)` 로 싣고(ARTEL-662), 사라지거나 꺼진
+    # 객체는 `PulseMemory.defer_view` 가 다음 view 로 넘긴다.
+    #
+    # 기본값이 `True` 인 이유는 `pulse_relevance` 와 같다. 기본 run 의 view 가 그대로라
+    # `QA_ARCH_LABEL` 이 안 움직인다.
+    report_step_view: bool = True
+    # `fold_context` 가 오래된 block 을 한 번에 `fold` 하는 기준. 낮추면 prompt 를 자주 다시 써서
+    # `cache` 를 덜 읽고, 높이면 오래된 block 이 오래 남아 `cache` 에서 읽는 양이 는다. 어느 쪽이
+    # 싼지는 재 봐야 해서 실험 축으로 둔다. `0` 은 오래된 block 을 매 호출 `fold` 한다.
+    fold_threshold_chars: int = Field(default=DEFAULT_FOLD_THRESHOLD_CHARS, ge=0, le=10_000_000)
     # Compaction rewrites what the model reads once a run grows past a fraction of
     # its context, so a run with it and a run without it are two agents even with
     # the same tools. `None` defers to the deployment's own setting, which is what
@@ -408,6 +650,21 @@ class QaArchSpec(BaseModel):
         return self
 
 
+# The skill that exists only for the macro tools. Named here, beside the axis that
+# decides whether the run has them.
+MACRO_SKILL = "macro"
+
+
+def withheld_skills(arch: "QaArchSpec | ResolvedArch") -> frozenset[str]:
+    """Skill names this structure must not see, though the prompt version has them.
+
+    One place, because three readers list skills — the inlined sections, the Skills
+    section and `load_skill` — and one of them forgetting would leave a line about
+    a tool the run does not have.
+    """
+    return frozenset() if arch.macros == "on" else frozenset({MACRO_SKILL})
+
+
 DEFAULT_ARCH = QaArchSpec()
 
 
@@ -431,8 +688,14 @@ class ResolvedArch(BaseModel):
     vision: bool
     screen_capture: ScreenCaptureMode
     phase_cycle: PhaseCycleMode
+    skills: Literal["off", "on_demand"]
+    macros: Literal["off", "on"]
     fold_stale_scenes: bool
     fold_stale_knowledge: bool
+    fold_stale_skills: bool
+    pulse_relevance: bool
+    report_step_view: bool
+    fold_threshold_chars: int
     compaction: bool
     compaction_trigger_fraction: float
     compaction_keep_messages: int
@@ -594,6 +857,8 @@ def structure_of(arch: ResolvedArch) -> tuple[tuple[str, ...], tuple[str, ...], 
     # is part of what the agent is.
     if arch.compaction:
         tools = tools + [build_compact_tool(state)]
+    # `load_skill` needs no line here: `build_tools` registers it itself when
+    # `arch.skills` is `on_demand`, so the fingerprint reads its real schema.
     names = tuple(tool.name for tool in tools)
     middleware = middleware_names_for(arch)
     return names, middleware, arch_fingerprint(arch, tools, middleware)
