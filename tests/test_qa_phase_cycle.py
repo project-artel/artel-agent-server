@@ -692,6 +692,67 @@ def test_macro_drafts_can_be_written_and_read_in_any_phase() -> None:
     assert cycle.phase is RunPhase.act
 
 
+def test_a_search_right_before_a_write_keeps_the_write_in_this_step() -> None:
+    """같은 규칙이 이미 있는지 찾고 나서 적어야 중복 항목이 안 생긴다. 그 검색이 step 을 넘기면 안 된다."""
+    cycle = _lite()
+    _into_update_memory(cycle)
+    cycle.advance("record_knowledge")
+
+    assert cycle.refusal_for("search_knowledge") is None
+    cycle.advance("search_knowledge")
+    assert cycle.phase is RunPhase.update_memory
+
+    for name in ("update_knowledge", "record_knowledge"):
+        assert cycle.refusal_for(name) is None, name
+        cycle.advance(name)
+    assert cycle.phase is RunPhase.update_memory
+
+
+def test_a_search_does_not_answer_update_memory() -> None:
+    """검색은 아무것도 남기지 않는다. 이 step 의 지식화는 따로 답해야 한다."""
+    cycle = _lite()
+    _into_update_memory(cycle)
+    cycle.advance("search_knowledge")
+
+    assert cycle.refusal_for("click") is not None
+
+
+def test_a_search_mid_act_does_not_leave_act() -> None:
+    cycle = _lite()
+    for name in ("observe_scene", "press_key"):
+        cycle.advance(name)
+
+    assert cycle.refusal_for("search_knowledge") is None
+    cycle.advance("search_knowledge")
+
+    assert cycle.phase is RunPhase.act
+    assert cycle.refusal_for("press_key") is None
+
+
+def test_a_search_in_observe_still_counts_as_observe() -> None:
+    cycle = _lite()
+    assert cycle.phase is RunPhase.observe
+
+    assert cycle.refusal_for("search_knowledge") is None
+    cycle.advance("search_knowledge")
+
+    assert cycle.phase is RunPhase.observe
+    assert cycle.refusal_for("click") is None
+
+
+def test_a_search_after_update_memory_is_answered_leaves_the_next_step_open() -> None:
+    """검색이 더는 다음 step 으로 넘기지 않는다. 다음 step 의 조작은 종전대로 받는다."""
+    cycle = _lite()
+    _into_update_memory(cycle)
+    cycle.advance("skip_memory_update")
+
+    cycle.advance("search_knowledge")
+
+    assert cycle.refusal_for("click") is None
+    cycle.advance("click")
+    assert cycle.phase is RunPhase.act
+
+
 def test_the_refusal_names_only_the_tools_this_run_has() -> None:
     """`macros=off` 런에 "`register_macro` 로 끝내라" 고 하면 없는 tool 을 찾는다."""
     offered = frozenset({"observe_scene", "click", "report_step", "record_knowledge", "skip_memory_update"})

@@ -345,7 +345,17 @@ from app.llm.models import LLMModel, get_model_spec
 # `DEFAULT_FOLD_THRESHOLD_CHARS` is 112,000, picked by a Sol sweep (tries 209-220): 18% cheaper
 # runs than 56,000 at the same accuracy, and 98k-224k all within 3% per call. The numbers are
 # above that constant.
-QA_ARCH_LABEL = "v19-fold-in-one-batch"
+#
+# v21 because `search_knowledge` is no longer refused outside OBSERVE (`ANY_PHASE` in
+# `tools/phase.py`), the same way `register_macro` stopped being refused outside UPDATE_MEMORY
+# in v13. Under v19 a search during UPDATE_MEMORY moved the run to the next step's OBSERVE and
+# the `record_knowledge` after it was refused, so the agent could not check for an existing
+# entry right before writing one, and the server files a repeated write twice. Called in OBSERVE
+# it still counts as an OBSERVE call; called in any other phase it runs and moves no phase. The
+# phase directive is unchanged: `qa_run/v19` is locked and the next prompt version is being
+# written on ARTEL-984. Nothing hashed moves: the phase table is not hashed. v20 is skipped
+# because the ARTEL-984 branch already uses `v20-macro-docstring-search`.
+QA_ARCH_LABEL = "v21-search-knowledge-any-phase"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
