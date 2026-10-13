@@ -80,7 +80,7 @@ class QaRunState:
         step_texts: list[str] | None = None,
     ) -> None:
         self.total_steps = total_steps
-        # 시나리오가 각 스텝에 적은 행위 문장, 1번 스텝이 0번 자리. macro 초안의 첫 주석이
+        # 시나리오가 각 스텝에 적은 행위 문장, 1번 스텝이 0번 자리. macro 초안의 docstring 이
         # 이것을 싣는다(`draft_for_step`). 비면 문장을 모르는 것이고 초안은 번호만 적는다.
         self.step_texts: list[str] = step_texts or []
         # 스텝별 (case_id, is_verification). report_step이 각 판정에 이를 붙이고, TC 판정(파생)은

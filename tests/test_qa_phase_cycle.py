@@ -103,7 +103,9 @@ def test_the_directive_names_the_same_tools_the_table_does() -> None:
     set may be named at all: a name the model cannot call is worse than no
     advice.
     """
-    for version, macros in (("v18", "off"), ("v19", "off"), ("v19", "on")):
+    # `v19` 는 macro 가 켜진 구조를 더는 재지 않는다. 그 지시문은 `search_macros` 보다
+    # 먼저 나왔고 released version 은 고치지 않으므로, 그 tool 을 못 대는 것이 맞다.
+    for version, macros in (("v18", "off"), ("v19", "off"), ("v20", "off"), ("v20", "on")):
         _the_directive_names_what_this_structure_offers(version, macros)
 
 

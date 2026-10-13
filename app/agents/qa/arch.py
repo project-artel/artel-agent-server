@@ -345,7 +345,21 @@ from app.llm.models import LLMModel, get_model_spec
 # `DEFAULT_FOLD_THRESHOLD_CHARS` is 112,000, picked by a Sol sweep (tries 209-220): 18% cheaper
 # runs than 56,000 at the same accuracy, and 98k-224k all within 3% per call. The numbers are
 # above that constant.
-QA_ARCH_LABEL = "v19-fold-in-one-batch"
+#
+# v20 because macros now describe themselves with a docstring and can be searched (ARTEL-984,
+# plan `.plan/general/2026-10-13-macro-docstring-and-search.md`). Three things move. The tool
+# set gains `search_macros`, which sends `MACRO_SEARCH` and lists the registered macros of this
+# build that match by name and docstring; the first-message list stops at 12, and before this a
+# run could not reach the rest without knowing a name. A macro's summary moves from the first
+# `#` line of its entry `def` to that `def`'s docstring: the parser accepts one string as the
+# first statement of any `def`, `MACRO_REGISTER` carries the entry's, `lift.py` drafts write
+# `"""Step N: ..."""`, and `register_macro` refuses an entry `def` without one, so every macro
+# registered from now on has a summary. And what the model reads changes: the first-message
+# list, the `report_step` hint and the search answer draw each macro as a `def` line with its
+# docstring indented under it, instead of `name(...) — summary  [scenes]`. Macros an earlier run
+# registered without a docstring still load and run. The new tool moves `arch_fingerprint`; the
+# rendering change does not, which is why it is named here.
+QA_ARCH_LABEL = "v20-macro-docstring-search"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

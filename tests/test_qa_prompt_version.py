@@ -267,7 +267,7 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v19() -> None:
+def test_the_default_qa_version_is_v20() -> None:
     """A run that names no version has to get the newest prompt.
 
     This is also the trap in adding a version: `resolve_version` returns the
@@ -297,11 +297,53 @@ def test_the_default_qa_version_is_v19() -> None:
     became `skill_*.md` files, and every tool description became a `tool_*.md`
     file. It was first written as v18 on a branch, and develop released its own
     v18 first, so it took the next number and v18 stays as released.
+
+    v20 ships with `search_macros` and the macro docstring (ARTEL-984): the macro
+    skill teaches the entry docstring as the summary `register_macro` requires,
+    `tool_search_macros.md` describes the new tool, and the macro memory directive
+    asks for a search before a new macro is written.
     """
-    # v19 moved the knowledge base, content map and held state sections into
-    # skill files and shortened the tool descriptions, on top of v18's three
-    # roles, so it is the newest directory and therefore the default.
-    assert resolve_version("qa_run") == "v19"
+    assert resolve_version("qa_run") == "v20"
+
+
+# v20 이 고쳐 쓴 v19 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
+V20_REWRITES_FROM_V19 = {
+    "skill_macro": (
+        "**Refused outright:**",
+        "**`register_macro` is what makes a draft callable**",
+        "What these do that a first draft usually does not:",
+        "```python\ndef attack_first_enemy_with",
+        "```python\ndef clear_the_wave",
+        "    # Name the screen first, as every macro should.",
+        "```python\ndef rename_the_save_slot",
+        "def confirm_combination() -> None:",
+    ),
+    "macro_memory_directive": (
+        "In this run, macros are how you operate the game.",
+        "Macros live inside the phase order too.",
+    ),
+}
+
+
+def test_v20_teaches_the_macro_docstring_and_search_and_keeps_the_rest_of_v19() -> None:
+    """v20 은 macro 문단 몇 개만 고친다 (ARTEL-984). 고친 문단은 이름으로 대고, 나머지는 v19 그대로다."""
+    skill = load_prompt("qa_run", "skill_macro", "v20").body
+    assert "**The docstring.** The entry `def` opens with a docstring" in skill
+    assert "`register_macro` refuses an entry\n`def` without one" in skill
+    assert "a docstring, re-assignment" not in skill
+    assert '    """Combine two cards from the hand' in skill
+
+    directive = load_prompt("qa_run", "macro_memory_directive", "v20").body
+    assert "call `search_macros` with what the step does" in directive
+    assert "`write_macro`, `edit_macro`, `read_macro` and `search_macros` ignore it" in directive
+
+    for role, rewrites in V20_REWRITES_FROM_V19.items():
+        v19 = load_prompt("qa_run", role, "v19").body
+        v20 = load_prompt("qa_run", role, "v20").body
+        for paragraph in v19.split("\n\n"):
+            if paragraph.lstrip("\n").startswith(rewrites):
+                continue
+            assert paragraph in v20, (role, paragraph[:80])
 
 
 def test_v18_without_the_memory_directive_renders_the_v17_text() -> None:

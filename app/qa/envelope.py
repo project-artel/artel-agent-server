@@ -10,7 +10,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class MessageType(StrEnum):
@@ -198,6 +198,17 @@ class MessageType(StrEnum):
     # 거절은 둘 다 요청의 `correlationId` 를 문 `ERROR` 다.
     MACRO_WRITE_RESULT = "MACRO_WRITE_RESULT"
     MACRO_READ_RESULT = "MACRO_READ_RESULT"
+    # Agent -> Orchestration
+    #
+    # 이 build 의 `content_map` 에 등록된 macro 를 이름과 docstring 으로 찾는다
+    # (ARTEL-984). `KNOWLEDGE_SEARCH` 와 같은 왕복이고 범위는 `MACRO_READ` 와 같다.
+    # 계약은 `.plan/general/2026-10-13-macro-docstring-and-search.md` 의 `Contract` 절이다.
+    MACRO_SEARCH = "MACRO_SEARCH"
+    # Orchestration -> Agent
+    #
+    # [MACRO_SEARCH] 의 답. 범위 밖의 요청과 `content_map` 이 없는 런은 요청의
+    # `correlationId` 를 문 `ERROR` 를 받는다.
+    MACRO_SEARCH_RESULT = "MACRO_SEARCH_RESULT"
     # Bidirectional
     ERROR = "ERROR"
     # Bidirectional. The operator talking to the Agent mid-run, and its reply.
@@ -1255,6 +1266,10 @@ class MacroRegisterPayload(BaseModel):
     definition: dict[str, Any]
     parameters: list[str] = Field(default_factory=list)
     screens: list[str] = Field(default_factory=list)
+    # 진입점 `def` 의 docstring, `inspect.cleandoc` 로 정리한 것. 없으면 `None` 이다.
+    # orchestration 은 Python 을 파싱하지 않으므로 summary 와 검색에 쓸 글을 여기서 따로
+    # 싣는다. 이 칸을 모르는 orchestration 은 모르는 field 를 무시한다.
+    docstring: str | None = None
 
 
 class MacroReadPayload(BaseModel):
@@ -1313,6 +1328,78 @@ class MacroReadResultPayload(BaseModel):
     definition: dict[str, Any] = Field(default_factory=dict)
     parameters: list[str] = Field(default_factory=list)
     screen_ids: list[str] = Field(default_factory=list)
+    # 저장된 `docstring` 칸. 이쪽은 `source` 를 다시 파싱해 docstring 을 얻으므로 이 칸은
+    # 읽지 않고, 저쪽이 보내는 모양을 적어 둔다.
+    docstring: str | None = None
+
+
+class MacroSearchPayload(BaseModel):
+    """`MACRO_SEARCH` 의 payload. 이 build 의 등록된 macro 를 글로 찾는다 (ARTEL-984).
+
+    범위는 보내지 않는다. 저쪽이 `MACRO_READ` 와 같은 방법으로 런에서 `content_map` 을
+    찾는다. `limit` 은 1 에서 10, `query` 는 비어 있지 않고 500자 이하 — tool 이 보내기 전에
+    확인한다. `step` 은 로그용이고 결과를 바꾸지 않는다.
+    """
+
+    query: str
+    limit: int
+    step: int | None = None
+
+
+class _MacroSearchPart(BaseModel):
+    """`MACRO_SEARCH_RESULT` 안의 객체가 공유하는 설정.
+
+    이 소켓의 payload 는 snake_case 이고 scene context 응답은 camelCase 다. 계약 문서는
+    `matchedBy` · `screenId` 처럼 camelCase 로 적었으므로 두 철자를 모두 받는다 — 한쪽
+    철자만 받으면 저쪽이 어느 쪽으로 보내든 field 하나가 조용히 기본값이 된다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+
+class MacroSearchParameter(_MacroSearchPart):
+    name: str = ""
+    type: str = ""
+
+
+class MacroSearchScreen(_MacroSearchPart):
+    screen_id: str = Field(
+        default="", validation_alias=AliasChoices("screen_id", "screenId")
+    )
+    scene_name: str = Field(
+        default="", validation_alias=AliasChoices("scene_name", "sceneName")
+    )
+
+
+class MacroSearchItem(_MacroSearchPart):
+    """찾은 macro 하나. `parameters` 와 `screens` 는 scene context `macros[]` 와 같은 모양이다.
+
+    `score` 는 reciprocal rank fusion 점수라 순서만 뜻이 있다. 모델에게 보여 주지 않는다.
+    """
+
+    name: str = ""
+    parameters: list[MacroSearchParameter] = Field(default_factory=list)
+    docstring: str | None = None
+    screens: list[MacroSearchScreen] = Field(default_factory=list)
+    matched_by: list[str] = Field(
+        default_factory=list, validation_alias=AliasChoices("matched_by", "matchedBy")
+    )
+    score: float = 0.0
+
+
+class MacroSearchResultPayload(_MacroSearchPart):
+    """`MACRO_SEARCH_RESULT` 의 payload. 좋은 것이 먼저이고 최대 `limit` 개다.
+
+    `vector_available` 이 false 면 query embedding 이 실패해 keyword 일치만 담겼다.
+    기본값이 true 인 이유는 이 칸을 빠뜨린 답을 "similarity 검색이 실패했다" 로 읽지 않기
+    위해서다. 빈 `items` 는 정상 답이다.
+    """
+
+    items: list[MacroSearchItem] = Field(default_factory=list)
+    vector_available: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("vector_available", "vectorAvailable"),
+    )
 
 
 class StatusPayload(BaseModel):

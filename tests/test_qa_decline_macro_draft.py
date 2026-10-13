@@ -7,7 +7,7 @@ from app.agents.qa.tools import QaRunState, build_tools
 from app.llm.models import LLMModel
 from app.qa.channel import QaRunChannel
 
-DRAFT = "def replay_step_1() -> None:\n    press_key(\"Space\", 0.1)\n    press_key(\"Space\", 0.1)\n"
+DRAFT = "def replay_step_1() -> None:\n    \"\"\"Step 1: press Space twice.\"\"\"\n    press_key(\"Space\", 0.1)\n    press_key(\"Space\", 0.1)\n"
 
 
 class _RecordingCycle:

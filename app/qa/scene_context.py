@@ -40,6 +40,9 @@ without the advice. The block is simply absent.
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Sequence
+from typing import Any
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -251,7 +254,7 @@ class SceneMacroScreen(_Payload):
 class SceneMacro(_Payload):
     """지난 런이 이 빌드에 등록한 macro 하나 (ARTEL-934, ARTEL-935).
 
-    `summary` 는 macro 본문의 첫 `#` 주석 줄이고 없으면 `None` 이다. `screens` 가 비어
+    `summary` 는 macro 진입점 `def` 의 docstring 이고 없으면 `None` 이다 (ARTEL-984). `screens` 가 비어
     있으면 어디서 쓰는지 아직 모른다는 뜻이다 — 쓸 수 없다는 뜻이 아니다.
     """
 
@@ -301,12 +304,15 @@ class SceneContext(_Payload):
         if len(shown) < total:
             heading = f"{heading} ({_cut_note(len(shown), total, 'macros')})"
         lines = [heading + ":"]
-        lines.extend(_macro_line(macro) for macro in shown)
+        for macro in shown:
+            lines.extend(_macro_lines(macro))
         lines.append(
-            "These were registered by earlier runs of this build. When a step has one, run "
-            "it with `run_macro` as that step's first action and act by hand only if it "
-            "fails; `read_macro` shows its source. Check the scene first — a macro tagged "
-            "with a scene was written there."
+            "These were registered by earlier runs of this build; the docstring under each "
+            "says what it does. When a step has one, run it with `run_macro` as that "
+            "step's first action and act by hand only if it fails; `read_macro` shows its "
+            "source. Check the scene first — a macro tagged with a scene was written "
+            "there. If nothing here fits, `search_macros` finds registered macros by name "
+            "and docstring before you write a new one."
         )
         return "\n\n" + "\n".join(lines)
 
@@ -397,27 +403,76 @@ def _capability_line(capability: SceneCapability) -> str:
     return line
 
 
-def _macro_line(macro: SceneMacro) -> str:
-    """macro 하나를 한 줄로: `name(param: type, ...) — summary  [SceneName]`.
-
-    scene 이름은 `screens` 에서 중복을 접고 처음 나온 순서를 지킨다. `screens` 가 비면
-    `[no screen yet]` — 쓸 곳을 아직 모르는 것이지 쓸 수 없는 것이 아니다. 이름이 비어
-    오는 `screen` 은 `screen <id>` 로 적는다.
-    """
-    parameters = ", ".join(
-        f"{parameter.name}: {parameter.type}" if parameter.type else parameter.name
-        for parameter in macro.parameters
+def _macro_lines(macro: SceneMacro) -> list[str]:
+    """첫 메시지 목록의 macro 하나. 모양은 `render_macro` 에 있다."""
+    return render_macro(
+        macro.name,
+        [(parameter.name, parameter.type) for parameter in macro.parameters],
+        macro.summary,
+        scene_labels(macro.screens),
+        indent="  ",
     )
-    line = f"  {macro.name}({parameters})"
-    if macro.summary:
-        line = f"{line} — {_clip(macro.summary)}"
 
-    scenes: list[str] = []
-    for screen in macro.screens:
+
+def scene_labels(screens: Sequence[Any]) -> list[str]:
+    """`screens` 의 scene 이름. 중복은 한 번만 적고 처음 나온 순서를 지킨다.
+
+    이름이 비어 오는 `screen` 은 `screen <id>` 로 적는다. scene context 의 `SceneMacroScreen`
+    과 `MACRO_SEARCH_RESULT` 의 `MacroSearchScreen` 이 같은 두 field 를 들어서 둘 다 받는다.
+    """
+    labels: list[str] = []
+    for screen in screens:
         label = screen.scene_name or (f"screen {screen.screen_id}" if screen.screen_id else "")
-        if label and label not in scenes:
-            scenes.append(label)
-    return f"{line}  [{', '.join(scenes) if scenes else 'no screen yet'}]"
+        if label and label not in labels:
+            labels.append(label)
+    return labels
+
+
+def docstring_summary(docstring: str | None, limit: int = MAX_TEXT_CHARS) -> str | None:
+    """docstring 의 첫 문단을 공백을 한 칸으로 줄여 `limit` 에서 자른 것. 없으면 `None`.
+
+    첫 문단만 쓰는 이유는 목록 한 줄의 크기다. 둘째 문단부터는 `read_macro` 가 source 로
+    돌려준다.
+    """
+    if not docstring or not docstring.strip():
+        return None
+    first_paragraph = re.split(r"\n\s*\n", docstring.strip(), maxsplit=1)[0]
+    text = " ".join(first_paragraph.split())
+    if len(text) > limit:
+        text = f"{text[:limit].rstrip()}…"
+    return text
+
+
+def render_macro(
+    name: str,
+    parameters: Sequence[tuple[str, str]],
+    docstring: str | None,
+    scenes: Sequence[str],
+    indent: str = "",
+    docstring_chars: int = MAX_TEXT_CHARS,
+) -> list[str]:
+    """등록된 macro 하나를 agent 가 보는 모양으로. 줄 둘, docstring 이 없으면 하나다.
+
+    ```
+    def cast_pair_at_enemy(spell: object, enemy: object)  [TurnBattleScene]
+        \"\"\"Cast the spell card and the element card at one enemy.\"\"\"
+    ```
+
+    첫 메시지 목록, `report_step` 의 hint, `search_macros` 결과가 모두 이 함수를 쓴다.
+    Python 의 `def` 와 docstring 모양으로 그리는 이유는 모델이 그 둘째 줄을 그 macro 의
+    설명으로 읽게 하려는 것이다. `screens` 가 비면 `[no screen yet]` — 쓸 곳을 아직 모르는
+    것이지 쓸 수 없는 것이 아니다.
+    """
+    written = ", ".join(
+        f"{parameter}: {declared}" if declared else parameter
+        for parameter, declared in parameters
+    )
+    where = ", ".join(scenes) if scenes else "no screen yet"
+    lines = [f"{indent}def {name}({written})  [{where}]"]
+    summary = docstring_summary(docstring, docstring_chars)
+    if summary:
+        lines.append(f'{indent}    """{summary}"""')
+    return lines
 
 
 def _cut_note(shown: int, total: int, what: str) -> str:

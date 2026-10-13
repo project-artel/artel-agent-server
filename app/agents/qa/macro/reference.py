@@ -1,6 +1,6 @@
 """`grammar.py` 가 받는 것을 글로 조립한다. 모델이 읽는 글은 아니다.
 
-모델이 읽는 것은 `app/prompts/qa_run/v19/skill_macro.md` 다. prompt 는 데이터로
+모델이 읽는 것은 `app/prompts/qa_run/v20/skill_macro.md` 다. prompt 는 데이터로
 버전 디렉터리에 살고 `prompts-lock.json` 이 그 본문을 해시하므로, 코드가 런타임에
 조립한 글로 대신할 수 없다 — 해시할 파일이 없어진다.
 
@@ -66,6 +66,14 @@ you store it, with a refusal that names what is accepted instead.
 other `def` in the same source is a helper it may call. Every parameter and
 every assignment carries a type, and the types are: {DECLARABLE_TYPE_NAMES}.
 Every `def` returns `-> None`, because a macro hands back no value.
+
+**The docstring.** The entry `def` opens with a docstring: a `\"\"\"...\"\"\"` string
+as its first statement, saying what the macro does and when to use it. That
+docstring is the macro's summary — later runs see it under the macro's name in
+their macro list and in `search_macros` — so `register_macro` refuses an entry
+`def` without one. A helper may have one too. A docstring is not a statement:
+it does not count toward the limits and nothing runs it. A string anywhere else
+is refused; write a `#` comment there.
 
 **The statements.**
 - an action: {_TOOLS}, or a helper `def` from this same source
@@ -144,8 +152,8 @@ other shape — a sprite, an animator state, a number the game could not read �
 refuses every operator rather than quietly answering false.
 
 **Refused outright:** `and`, `or`, `not`, a dot (`card.id`), a nested `def`,
-`import`, `lambda`, an f-string, `return`, a docstring, re-assignment,
-arithmetic, `break`, `continue`, and a list or any other call after `for ... in`.
+`import`, `lambda`, an f-string, `return`, a string anywhere but the docstring,
+re-assignment, arithmetic, `break`, `continue`, and a list or any other call after `for ... in`.
 And these, each for its own reason:
 
 {_FORBIDDEN}

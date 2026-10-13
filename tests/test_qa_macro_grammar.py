@@ -182,7 +182,7 @@ def test_the_macro_table_sends_what_the_real_tool_sends(spec: ToolSpec) -> None:
     macro_channel, macro_state, macro_tools, macro_sent = make()
     statements, index = _balanced(spec)
     body = "".join(f"    {_macro_call(one)}\n" for one in statements)
-    source = f"def once(aim: object) -> None:\n{body}"
+    source = f'def once(aim: object) -> None:\n    """Send one tool call."""\n{body}'
 
     asyncio.run(
         macro_tools["write_macro"].ainvoke(
@@ -273,6 +273,7 @@ def test_the_macro_table_names_exactly_the_tools_a_macro_may_call() -> None:
             "run_macro",
             "resume_macro",
             "decline_macro_draft",
+            "search_macros",
             # phase cycle 의 tool 둘. 게임을 움직이지 않고 런이 어느 phase 에 있는지만
             # 옮긴다 — `decide_next_action` 은 `full` 에서만 나온다.
             "skip_memory_update",

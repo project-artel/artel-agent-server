@@ -12,7 +12,6 @@ from app.agents.qa.arch import PhaseCycleMode, QaArchSpec, VisionMode, resolve_a
 from app.agents.qa.macro.book import RegisteredMacro
 from app.agents.qa.macro.for_step import (
     StepMacro,
-    first_body_comment,
     macros_for_step,
     render_step_macro_hint,
 )
@@ -33,8 +32,8 @@ def scene_macro(name: str, summary: str | None = None) -> SceneMacro:
     return SceneMacro(name=name, summary=summary)
 
 
-def registered(name: str, comment: str | None) -> RegisteredMacro:
-    body = f"    # {comment}\n" if comment else ""
+def registered(name: str, docstring: str | None) -> RegisteredMacro:
+    body = f'    """{docstring}"""\n' if docstring else ""
     source = f"def {name}() -> None:\n{body}    press_key(\"Space\", 0.1)\n"
     return RegisteredMacro(definition=macro_definition_from_source(name, source))
 
@@ -89,7 +88,8 @@ def test_this_runs_registrations_come_first_and_at_most_two_are_named() -> None:
 def test_a_name_in_both_sources_is_counted_once() -> None:
     mine = registered("replay_step_4", "Step 4: mine")
     found = macros_for_step(4, {"replay_step_4": mine}, [scene_macro("replay_step_4", "Step 4: old")])
-    assert found == [StepMacro("replay_step_4", "Step 4: mine")]
+    assert names(found) == ["replay_step_4"]
+    assert found[0].summary == "Step 4: mine"
 
 
 def test_nothing_matching_names_nothing() -> None:
@@ -97,17 +97,57 @@ def test_nothing_matching_names_nothing() -> None:
     assert render_step_macro_hint(5, []) == ""
 
 
-def test_the_first_comment_of_the_entry_body_is_the_summary() -> None:
-    source = "# header\ndef a() -> None:\n    # Step 3: x — 2 actions\n    # second\n    click()\n"
-    assert first_body_comment(source, "a") == "Step 3: x — 2 actions"
-    assert first_body_comment("def a() -> None:\n    click()\n", "a") is None
+def test_the_entry_docstring_is_the_summary_and_a_comment_is_not() -> None:
+    """summary 는 진입점 `def` 의 docstring 이다. 몸통 첫 `#` 줄은 더는 summary 가 아니다."""
+    with_docstring = registered("a", "Step 3: x — 2 actions")
+    found = macros_for_step(3, {"a": with_docstring}, [])
+    assert [(one.name, one.summary) for one in found] == [("a", "Step 3: x — 2 actions")]
+
+    commented = RegisteredMacro(
+        definition=macro_definition_from_source(
+            "b", 'def b() -> None:\n    # Step 3: x\n    press_key("Space", 0.1)\n'
+        )
+    )
+    assert macros_for_step(3, {"b": commented}, []) == []
 
 
 def test_the_hint_clips_a_long_summary_and_names_the_next_action() -> None:
     hint = render_step_macro_hint(4, [StepMacro("replay_step_4", "Step 4: " + "가" * 300)])
-    assert "`replay_step_4`" in hint
+    assert "def replay_step_4()  [no screen yet]" in hint
     assert "`run_macro` as the first action of step 4" in hint
     assert "…" in hint and len(hint) < 400
+
+
+def test_the_hint_draws_each_macro_as_a_def_with_its_docstring_under_it() -> None:
+    mine = RegisteredMacro(
+        definition=macro_definition_from_source(
+            "replay_step_2",
+            'def replay_step_2(card: object) -> None:\n'
+            '    """Step 2: deal a card.\n\n    Second paragraph is not drawn."""\n'
+            "    click(card)\n",
+        ),
+        screens=("41",),
+    )
+    older = SceneMacro.model_validate(
+        {
+            "name": "replay_step_2_2",
+            "parameters": [{"name": "count", "type": "int"}],
+            "summary": "Step 2: older one",
+            "screens": [{"screenId": "7", "sceneName": "TurnBattleScene"}],
+        }
+    )
+    found = macros_for_step(2, {"replay_step_2": mine}, [older])
+    hint = render_step_macro_hint(2, found)
+
+    assert hint == (
+        "\n\nStep 2 has registered macros:\n"
+        "  def replay_step_2(card: object)  [screen 41]\n"
+        '      """Step 2: deal a card."""\n'
+        "  def replay_step_2_2(count: int)  [TurnBattleScene]\n"
+        '      """Step 2: older one"""\n'
+        "Run one of them with `run_macro` as the first action of step 2; act by hand "
+        "only if it fails or does not cover the step."
+    )
 
 
 # --- through the real tools ---------------------------------------------------
@@ -142,8 +182,8 @@ def test_reporting_step_1_names_the_macro_of_step_2() -> None:
         _state, tools = make("on")
         answer = await report(tools, 1)
         assert "continue with step 2" in answer
-        assert "`replay_step_2`" in answer
-        assert "Step 2: 오프닝을 넘긴다" in answer
+        assert "def replay_step_2()  [no screen yet]" in answer
+        assert '"""Step 2: 오프닝을 넘긴다' in answer
         assert "`run_macro` as the first action of step 2" in answer
 
     asyncio.run(scenario())
@@ -153,7 +193,7 @@ def test_a_failed_step_still_names_the_macro_of_the_next_one() -> None:
     async def scenario() -> None:
         _state, tools = make("on")
         answer = await report(tools, 1, passed=False)
-        assert "`replay_step_2`" in answer
+        assert "def replay_step_2()" in answer
 
     asyncio.run(scenario())
 

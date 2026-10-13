@@ -189,6 +189,44 @@ def test_a_registration_that_fails_keeps_review_draft_open() -> None:
     asyncio.run(scenario())
 
 
+def test_the_offered_draft_registers_as_it_is_because_it_carries_a_step_docstring() -> None:
+    """`register_macro` 는 docstring 없는 진입점을 거절한다 (ARTEL-984). `lift.py` 초안은
+    `Step N:` docstring 을 이미 들고 있으므로 `REVIEW_DRAFT` 에서 고치지 않고 바로 등록된다."""
+
+    async def scenario() -> None:
+        state, tools = await offered_draft()
+
+        answer = await tools["register_macro"].ainvoke({"step": 1, "thought": "t", "name": DRAFT})
+
+        registered = state.macros.registered(DRAFT)
+        assert registered is not None, answer
+        assert registered.definition.entry.docstring.startswith("Step 1: ")
+        assert state.phase_cycle.phase is RunPhase.update_memory
+
+    asyncio.run(scenario())
+
+
+def test_a_draft_whose_docstring_was_edited_away_is_refused_and_review_stays_open() -> None:
+    async def scenario() -> None:
+        state, tools = await offered_draft()
+        docstring_line = state.macros.draft(DRAFT).splitlines()[1] + "\n"
+
+        await tools["edit_macro"].ainvoke(
+            {"step": 1, "thought": "t", "name": DRAFT, "old_text": docstring_line, "new_text": ""}
+        )
+        refused = await tools["register_macro"].ainvoke(
+            {"step": 1, "thought": "t", "name": DRAFT}
+        )
+
+        assert f"{DRAFT} was not registered" in refused
+        assert "has no docstring" in refused
+        assert "`edit_macro`" in refused
+        assert state.macros.registered(DRAFT) is None
+        assert state.phase_cycle.phase is RunPhase.review_draft
+
+    asyncio.run(scenario())
+
+
 def test_declining_the_draft_ends_review_draft_and_records_the_reason() -> None:
     """`decline_macro_draft` 가 있어야 돈다."""
 
