@@ -176,6 +176,28 @@ class MessageType(StrEnum):
     # `ERROR` 다 — 지식 쓰기(ARTEL-331)와 화면 판정 목록(ARTEL-657)이 이미 그 짝이라 이쪽에
     # 새로 나눠 볼 것이 생기지 않는다.
     CAPABILITY_WRITE_RESULT = "CAPABILITY_WRITE_RESULT"
+    # Agent -> Orchestration
+    #
+    # 등록된 macro 정의를 `content_map` 에 적고, 이름으로 다시 읽는다 (ARTEL-925).
+    #
+    # 철자와 payload 는 orchestration 의 `contentmap/macro/MacroWriteFrames.kt` 가 정한
+    # 것 그대로다. **여기서 지어내지 않는다** — PR 135 는 없는 frame 을 이 저장소가
+    # 정의했다가 통째로 닫혔다.
+    #
+    # 이 두 프레임이 macro 를 런 밖으로 내보내는 유일한 길이다. [MACRO_REGISTER] 가 없으면
+    # 등록된 macro 도 런이 끝나면 사라지고, [MACRO_READ] 가 없으면 지난 런이 등록한 것을
+    # 이번 런이 부를 수 없다.
+    MACRO_REGISTER = "MACRO_REGISTER"
+    MACRO_READ = "MACRO_READ"
+    # Orchestration -> Agent
+    #
+    # 위 둘의 답이고, 한 타입이 둘을 겸하지 않는다. 쓰기 답은 id 를 싣고 읽기 답은
+    # `source` 와 tree 를 실어 모양 자체가 다르다 — `KNOWLEDGE_WRITE_RESULT` 와
+    # `KNOWLEDGE_SEARCH_RESULT` 가 갈린 것과 같다.
+    #
+    # 거절은 둘 다 요청의 `correlationId` 를 문 `ERROR` 다.
+    MACRO_WRITE_RESULT = "MACRO_WRITE_RESULT"
+    MACRO_READ_RESULT = "MACRO_READ_RESULT"
     # Bidirectional
     ERROR = "ERROR"
     # Bidirectional. The operator talking to the Agent mid-run, and its reply.
@@ -1195,6 +1217,102 @@ class CapabilityWriteResultPayload(BaseModel):
     verification: str = ""
     observation_id: str | None = None
     created: bool = False
+
+
+# --- macro write frames (ARTEL-921 의 계약) ------------------------------------
+#
+# 계약 원본은 orchestration 의 `contentmap/macro/MacroWriteFrames.kt` 다. 그 저장소에
+# 산문 문서가 없다 — 그 KDoc 이 계약을 지고, payload 표는 PR 본문에 있다.
+#
+# id 는 전부 **JSON 문자열**이다. `screen.id` 를 싣는 `screens` 도 그렇다. 64비트 값이
+# JSON 숫자로 오가면 자바스크립트 소비자에서 정밀도가 깎인다 — 이 소켓의 다른 id 가 전부
+# 같은 이유로 문자열이다.
+
+
+class MacroRegisterPayload(BaseModel):
+    """`MACRO_REGISTER` 의 payload. 등록된 macro 정의 하나를 지도에 적는다.
+
+    `source` 가 원본이고 `definition` 이 파생이다. 둘 다 싣는 이유는
+    `app/agents/qa/macro/model.py` 가 적어 둔 것과 같다 — `ast.parse` 가 주석과 공백을
+    버리므로 tree 에서 텍스트를 다시 찍어내면 agent 가 적은 그대로가 아니고, tree 를 함께
+    적어 두는 것은 실행할 때마다 다시 파싱하지 않기 위해서다.
+
+    `definition` 만 `dict` 다. 저쪽은 이것을 `jsonb` 칸으로 그대로 넘기고 필드를 읽지
+    않으므로 passthrough 이고, 모양을 정하는 곳은 `MacroDefinition` 하나다. 다만 저쪽의
+    `ck_macro_require_carries_remedy` 와 `MacroDefinitionService` 가 `require` node 의
+    `kind` 와 `remedy` 두 key 에 기댄다 — `tests/test_qa_macro_model.py` 가 그 둘을
+    못박는다.
+
+    `parameters` 는 진입점 `def` 줄의 parameter 이름이고 **순서가 뜻을 가진다.**
+
+    `screens` 는 `screen.id` 문자열의 배열이고 **기존 관계에 더한다.** 저쪽은 이
+    build 의 `content_map` 에 없는 id 를 거절하므로 `scene` 이름을 실으면 안 된다.
+    비어 있는 것은 정상이고 "아직 어디서 쓸지 모른다" 는 뜻이다.
+    """
+
+    name: str
+    source: str
+    definition: dict[str, Any]
+    parameters: list[str] = Field(default_factory=list)
+    screens: list[str] = Field(default_factory=list)
+
+
+class MacroReadPayload(BaseModel):
+    """`MACRO_READ` 의 payload. 이름 하나로 조회한다.
+
+    찾는 범위는 이 build 의 `content_map` 안이다. 같은 이름이 다른 build 에 있어도 그것은
+    이 게임에서 돌지 않으므로 안 돌아온다.
+    """
+
+    name: str
+
+
+class MacroWriteResultPayload(BaseModel):
+    """`MACRO_WRITE_RESULT` 의 payload. `MACRO_REGISTER` 의 답이다.
+
+    `type` 은 무엇의 답인가다. 확인하지 않으면 남의 답으로 tool 을 풀어 준다 —
+    `CapabilityWriteResultPayload` 와 같은 검사이고 같은 이유다.
+
+    `created` 는 행을 **새로** 넣었을 때만 true 다. 같은 이름을 다시 등록한 갱신이면
+    false 이고, 그것을 모델에게 말해 주지 않으면 방금 새 macro 를 만들었다고 읽는다.
+
+    `screen_ids` 는 관계를 더한 **뒤의** 상태다. 이번에 보낸 것만이 아니라 이 macro 에
+    달린 `screen` 전부다.
+
+    전부 기본값이 있다. 필드를 하나 더한 orchestration 이 기다리는 tool 을 풀지 못하게
+    만들면 안 된다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str = ""
+    macro_id: str = ""
+    name: str = ""
+    created: bool = False
+    screen_ids: list[str] = Field(default_factory=list)
+
+
+class MacroReadResultPayload(BaseModel):
+    """`MACRO_READ_RESULT` 의 payload. 저장된 정의 하나가 돌아온다.
+
+    `source` 가 이 payload 에서 실제로 쓰이는 칸이다. 이쪽은 그것을 다시 파싱해
+    `MacroDefinition` 을 만든다 — `definition` tree 를 그대로 모델로 읽지 않는 이유는
+    `app/agents/qa/macro/model.py` 가 정의를 만드는 길을
+    `macro_definition_from_source` 하나로 못박았기 때문이고, 다시 파싱하면 그 사이에
+    좁아진 허용 목록도 실행 전에 걸린다.
+
+    전부 기본값이 있다. 이유는 `MacroWriteResultPayload` 와 같다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str = ""
+    macro_id: str = ""
+    name: str = ""
+    source: str = ""
+    definition: dict[str, Any] = Field(default_factory=dict)
+    parameters: list[str] = Field(default_factory=list)
+    screen_ids: list[str] = Field(default_factory=list)
 
 
 class StatusPayload(BaseModel):

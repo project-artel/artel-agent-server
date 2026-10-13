@@ -19,19 +19,26 @@ from app.agents.qa.arch import ResolvedArch, default_resolved_arch
 from app.agents.qa.tools.action_tools import build_action_tools
 from app.agents.qa.tools.capability_tools import build_capability_tools
 from app.agents.qa.tools.knowledge_tools import build_knowledge_tools
+from app.agents.qa.tools.macro_tools import build_macro_tools
 from app.agents.qa.tools.observation_tools import build_capture_tool, build_observation_tools
 from app.agents.qa.tools.phase import PhaseCycle, build_phase_cycle
 from app.agents.qa.tools.phase_tools import build_phase_tools
 from app.agents.qa.tools.reporting_tools import build_reporting_tools
 from app.agents.qa.tools.screen_tools import build_screen_selector_tools
+from app.agents.qa.tools.skill_tools import build_skill_tools
 from app.agents.qa.tools.state import PendingCapture, QaRunState
 from app.agents.qa.tools.tool_context import ToolContext
 from app.qa.channel import QaRunChannel
 
 
 def build_tools(
-    channel: QaRunChannel, state: QaRunState, arch: ResolvedArch | None = None
+    channel: QaRunChannel,
+    state: QaRunState,
+    arch: ResolvedArch | None = None,
+    prompt_version: str | None = None,
 ) -> list[BaseTool]:
+    """`prompt_version` only picks which skills `load_skill` reads; `None` resolves
+    the way `load_prompt` does."""
     ctx = ToolContext(channel, state, arch or default_resolved_arch())
     # 이 목록의 순서가 계약이다. `app/qa/run_config.py` 가 이 순서를 run config 의
     # `tools` 에 저장하고, 모델도 이 순서로 도구를 받는다. 주제 하나를 위아래로 옮기면
@@ -42,6 +49,10 @@ def build_tools(
         *build_screen_selector_tools(ctx),
         *build_capability_tools(ctx),
         *build_action_tools(ctx),
+        # action tool 바로 뒤다. macro 가 하는 일이 그 열넷을 이어서 다시 보내는 것이므로,
+        # 모델이 받는 목록에서도 그 옆에 선다. `macros=off` 면 통째로 빠지고, 그 런의
+        # 목록은 macro 가 생기기 전과 같다.
+        *(build_macro_tools(ctx) if ctx.arch.macros == "on" else []),
         *build_reporting_tools(ctx),
     ]
 
@@ -58,6 +69,13 @@ def build_tools(
     # 붙이면 `off` 런의 목록은 한 글자도 안 바뀐다.
     tools += build_phase_tools(ctx)
 
+    # After the phase tools, so a run with `skills=off` keeps the exact tool list
+    # and order it had before the axis existed, whatever `phase_cycle` says.
+    # `load_skill` is in neither of `phase.py`'s tables, so the gate below wraps it
+    # but never refuses it.
+    if ctx.arch.skills == "on_demand":
+        tools.extend(build_skill_tools(ctx, prompt_version))
+
     # 검사하는 자리가 여기 하나다. tool 은 `phase.py` 의 표에서 자기 phase 를 선언만 한다 —
     # tool 마다 스스로 세게 하면 tool 이 늘 때마다 하나씩 빠진다(`state.py` 의 docstring 이
     # 같은 이유를 적어 뒀다).
@@ -65,7 +83,7 @@ def build_tools(
     # `off` 와 `in_verdict` 에서는 `cycle` 이 `None` 이라 tool 이 감싸이지 않는다. 감싸는 것이
     # tool 의 이름도 `args` 도 안 바꾸므로 fingerprint 에는 안 잡히지만, 안 감싸면 실행 경로도
     # 종전 그대로라는 것이 읽는 사람에게 보인다.
-    cycle = build_phase_cycle(ctx.arch.phase_cycle)
+    cycle = build_phase_cycle(ctx.arch.phase_cycle, frozenset(one.name for one in tools))
     state.phase_cycle = cycle
     if cycle is None:
         return tools

@@ -267,7 +267,7 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v18() -> None:
+def test_the_default_qa_version_is_v19() -> None:
     """A run that names no version has to get the newest prompt.
 
     This is also the trap in adding a version: `resolve_version` returns the
@@ -292,8 +292,16 @@ def test_the_default_qa_version_is_v18() -> None:
     the only one a gated run can be honestly given, which
     `test_an_old_prompt_version_is_refused_rather_than_gated_in_silence` below
     holds the other end of.
+
+    v19 is the same v18 roles plus the skills: the long sections of `system.md`
+    became `skill_*.md` files, and every tool description became a `tool_*.md`
+    file. It was first written as v18 on a branch, and develop released its own
+    v18 first, so it took the next number and v18 stays as released.
     """
-    assert resolve_version("qa_run") == "v18"
+    # v19 moved the knowledge base, content map and held state sections into
+    # skill files and shortened the tool descriptions, on top of v18's three
+    # roles, so it is the newest directory and therefore the default.
+    assert resolve_version("qa_run") == "v19"
 
 
 def test_v18_without_the_memory_directive_renders_the_v17_text() -> None:
@@ -354,7 +362,7 @@ def test_an_old_prompt_version_is_refused_rather_than_gated_in_silence() -> None
 
 
 def test_every_version_carries_the_roles_its_rungs_need() -> None:
-    """`v18` is the newest, so an unpinned run at any rung has to resolve.
+    """The newest version decides what an unpinned run at any rung resolves to.
 
     This is what makes the refusal above a narrow rule rather than a trap: the
     default `prompt_version` is the newest directory, and the newest directory
@@ -384,6 +392,35 @@ def test_v18_with_the_memory_directive_adds_the_report_step_arguments() -> None:
     )
     assert "`capability_key`" in body
     assert "`learned`" in body
+
+
+def test_v19_with_the_memory_directive_adds_the_report_step_arguments() -> None:
+    """v19 carries the same role, now closing the scene context paragraphs.
+
+    v18 slotted `memory_directive` into the content map section of `system.md`.
+    v19 moved that section into the `content_map` skill, so the directive sits at
+    the end of "Reading what the game sends back" and names the skill it
+    overrides instead of "the paragraph above it". With every placeholder empty
+    the paragraph before it and the next heading stay one blank line apart.
+    """
+    template = load_prompt("qa_run", "system", "v19").body
+    common = {
+        "language_directive": "L",
+        "vision_directive": "V",
+        "phase_directive": "",
+        "decide_directive": "",
+        "skills_directive": "",
+    }
+    with_memory = template.format(
+        **common, memory_directive=load_prompt("qa_run", "memory_directive", "v19").body
+    )
+    assert "`capability_key`" in with_memory
+    assert "`learned`" in with_memory
+    assert "content_map skill" in with_memory
+    assert "the paragraph above it" not in with_memory
+
+    without = template.format(**common, memory_directive="")
+    assert "not something to aim at.\n\n## Finding the step's target" in without
 
 
 def test_v12_drops_the_screen_map_and_says_what_a_screen_anchors() -> None:

@@ -1,6 +1,6 @@
 """`QaRunner` actually folds stale scene views out of what the model sees.
 
-`tests/test_qa_agents_context.py` pins `fold_stale_scenes` in isolation. This
+`tests/test_qa_agents_context.py` pins `fold_context` in isolation. This
 drives a real `QaRunner.run` — real `create_agent`, real tool loop, real
 `QaRunChannel` — with a fake model standing in for the LLM, and inspects
 exactly what that model received on each turn. The point is the wiring, not
@@ -17,7 +17,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
-from app.agents.qa.context import DEFAULT_KEEP_SCENES
+from app.agents.qa.context import DEFAULT_FOLD_THRESHOLD_CHARS, DEFAULT_KEEP_SCENES, fold_context
 from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState
 from app.qa.schemas import QaCaseRef, QaScenario, QaStep
@@ -105,22 +105,45 @@ def tool_result_contents(messages: list[BaseMessage]) -> list[str]:
     return [m.content for m in messages if isinstance(m, ToolMessage) and isinstance(m.content, str)]
 
 
-def scripted_run(monkeypatch: pytest.MonkeyPatch) -> tuple[ScriptedModel, QaRunChannel, list[dict]]:
-    """Four observations, a verdict and a close, against a model that records
-    every message list it was handed."""
+def scripted_run(
+    monkeypatch: pytest.MonkeyPatch,
+    observations: int = 4,
+    fold_threshold_chars: int | None = None,
+) -> tuple[ScriptedModel, QaRunChannel, list[dict]]:
+    """`observations` observations, a verdict and a close, against a model that
+    records every message list it was handed.
 
+    `fold_threshold_chars` 는 runner 가 `fold_context` 를 부를 때 넘기는 기준을 바꾼다. 기준은
+    `fold_context` 의 기본 인자라 module 상수를 고쳐서는 닿지 않고, runner 가 부르는 함수를
+    감싸야 한다. 주지 않으면 실제 기본값 그대로다.
+    """
+
+    if fold_threshold_chars is not None:
+
+        def fold_with_threshold(messages, kinds, already_folded=frozenset(), **_):
+            return fold_context(
+                messages, kinds, already_folded, threshold_chars=fold_threshold_chars
+            )
+
+        monkeypatch.setattr("app.agents.qa.runner.fold_context", fold_with_threshold)
+
+    looks = [
+        {
+            "tool_calls": [
+                {"name": "observe_scene", "args": {"step": 1, "thought": f"{index}번째로 본다"}, "id": str(index)}
+            ]
+        }
+        for index in range(1, observations + 1)
+    ]
     model = ScriptedModel(
         turns=[
-            {"tool_calls": [{"name": "observe_scene", "args": {"step": 1, "thought": "본다"}, "id": "1"}]},
-            {"tool_calls": [{"name": "observe_scene", "args": {"step": 1, "thought": "다시 본다"}, "id": "2"}]},
-            {"tool_calls": [{"name": "observe_scene", "args": {"step": 1, "thought": "또 본다"}, "id": "3"}]},
-            {"tool_calls": [{"name": "observe_scene", "args": {"step": 1, "thought": "마지막으로 본다"}, "id": "4"}]},
+            *looks,
             {
                 "tool_calls": [
                     {
                         "name": "report_step",
                         "args": {"step": 1, "passed": True, "message": "화면 확인함", "thought": "판정"},
-                        "id": "5",
+                        "id": "report",
                     }
                 ]
             },
@@ -129,7 +152,7 @@ def scripted_run(monkeypatch: pytest.MonkeyPatch) -> tuple[ScriptedModel, QaRunC
                     {
                         "name": "finish_run",
                         "args": {"passed": True, "summary": "통과", "thought": "종료"},
-                        "id": "6",
+                        "id": "finish",
                     }
                 ]
             },
@@ -149,24 +172,25 @@ def scripted_run(monkeypatch: pytest.MonkeyPatch) -> tuple[ScriptedModel, QaRunC
     asyncio.run(runner.run(channel, scenario(), state))
 
     assert state.finished
-    assert len(model.received) >= 6
+    assert len(model.received) >= observations + 2
     return model, channel, sent
 
 
-def test_the_model_receives_folded_views_but_the_channel_keeps_the_full_text(
+def test_the_model_receives_folded_views_once_the_threshold_is_crossed_but_the_channel_keeps_the_full_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Four observations happen before the run ends; `DEFAULT_KEEP_SCENES` says
-    how many of those tool-result views survive in full — while the channel's own
-    scene memory and the sent LOG/STATUS frames are never touched by the fold."""
+    """오래된 view 의 글자 수가 기준에 이르면 `fold` 되고, `DEFAULT_KEEP_SCENES` 개만
+    전문으로 남는다 — while the channel's own scene memory and the sent LOG/STATUS
+    frames are never touched by the fold."""
 
-    model, channel, sent = scripted_run(monkeypatch)
+    observations = DEFAULT_KEEP_SCENES + 3
+    model, channel, sent = scripted_run(monkeypatch, observations, fold_threshold_chars=1)
 
-    # The 5th call is the first one made after all four observations landed.
-    fifth_call_results = tool_result_contents(model.received[4])
-    assert len(fifth_call_results) == 4
-    folded = fifth_call_results[: 4 - DEFAULT_KEEP_SCENES]
-    kept = fifth_call_results[4 - DEFAULT_KEEP_SCENES :]
+    # 관측이 전부 끝난 뒤의 첫 호출.
+    results = tool_result_contents(model.received[observations])
+    assert len(results) == observations
+    folded = results[: observations - DEFAULT_KEEP_SCENES]
+    kept = results[observations - DEFAULT_KEEP_SCENES :]
     assert all("you can act on:" not in content for content in folded)
     assert all("you can act on:" in content for content in kept)
     assert "observe_scene" in folded[0]
@@ -180,6 +204,23 @@ def test_the_model_receives_folded_views_but_the_channel_keeps_the_full_text(
         if frame["type"] in (MessageType.LOG.value, MessageType.STATUS.value)
     ]
     assert any(frame["type"] == MessageType.STATUS.value for frame in log_and_status_frames)
+
+
+def test_the_model_receives_every_view_in_full_while_the_stale_ones_stay_under_the_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """기준에 못 미치면 오래된 view 도 그대로다. 앞을 고쳐 쓰면 그 자리부터 `cache` 가
+    안 맞으므로, 모아서 한 번에 고칠 만큼 쌓이기 전에는 아무것도 안 한다."""
+
+    observations = DEFAULT_KEEP_SCENES + 3
+    model, _channel, _sent = scripted_run(monkeypatch, observations)
+
+    results = tool_result_contents(model.received[observations])
+    assert len(results) == observations
+    # 이 시나리오의 view 는 아주 작아서 기본 기준에 한참 못 미친다. 크기가 바뀌어 이
+    # 전제가 깨지면 아래 단언이 아니라 이 줄이 먼저 말해 준다.
+    assert sum(len(content) for content in results) < DEFAULT_FOLD_THRESHOLD_CHARS
+    assert all("you can act on:" in content for content in results)
 
 
 def test_아무것도_모델_뒤에_덧붙지_않는다(
@@ -231,7 +272,7 @@ def test_컨텍스트_분해가_종류별로_센다():
     assert "live=" not in shape
 
 def test_컨텍스트_분해가_접힌_뷰와_남은_뷰를_가른다():
-    """`fold_stale_scenes` 가 실제로 얼마나 누르는지는 이 둘의 비에서만 나온다."""
+    """`fold_context` 가 실제로 얼마나 누르는지는 이 둘의 비에서만 나온다."""
     from langchain_core.messages import ToolMessage
 
     from app.agents.qa.context import _placeholder
