@@ -17,11 +17,39 @@ from app.agents.qa.macro.errors import (
     REQUIRE_FAILED,
     SCENE_MISMATCH,
     SELECTOR_NOT_FOUND,
+    SELECTOR_AMBIGUOUS,
+    WAIT_TIMEOUT,
 )
 from app.agents.qa.macro.errors import LOOP_LIMIT, OPERATOR_INTERRUPTED, SCREEN_UNCHANGED
 from app.agents.qa.macro.parser import macro_definition_from_source
-from app.agents.qa.macro.runner import STILL_SCREENS_BEFORE_STOP, run_macro
+from app.agents.qa.macro.model import (
+    MacroAssignStatement,
+    MacroCheckpointStatement,
+    MacroComparisonCondition,
+    MacroDefinition,
+    MacroFindValue,
+    MacroFunction,
+    MacroIfStatement,
+    MacroLiteral,
+    MacroLiteralArgument,
+    MacroLiteralOperand,
+    MacroNameArgument,
+    MacroNameOperand,
+    MacroParameter,
+    MacroPredicateCondition,
+    MacroReaderCall,
+    MacroReaderOperand,
+    MacroRequireStatement,
+    MacroReturnStatement,
+    MacroSelectorTarget,
+    MacroStringLiteral,
+    MacroWaitUntilStatement,
+    MacroWhileStatement,
+)
+from app.agents.qa.macro.grammar import MacroOperator, MacroShape, MacroType
+from app.agents.qa.macro.runner import MacroPulseWait, STILL_SCREENS_BEFORE_STOP, run_macro
 from app.qa.acting import ActionOutcome, PressLanding, ScreenChange
+from app.qa.channel import QaCancelled
 from app.qa.envelope import JsonRpcAction
 from app.qa.pulse import PulseReading
 from app.qa.scene import SceneMemory
@@ -85,6 +113,9 @@ class FakeHost:
 
     def memories(self) -> MacroMemories:
         return MacroMemories(scene=self.memory)
+
+    async def wait_for_pulse(self, timeout: float) -> MacroPulseWait:
+        raise AssertionError("this macro did not expect a pulse wait")
 
     async def checkpoint(self, result) -> bool:
         self.paused.append(
@@ -1175,3 +1206,492 @@ def test_resuming_keeps_every_name_the_macro_bound_and_the_loop_it_was_in() -> N
     ]
     # 두 번 멈췄고 두 장을 다 냈다. 처음부터 다시 돌았다면 드래그가 넷이다.
     assert len(host.sent) == 2
+
+
+# --- `wait_until` 과 predicate (ARTEL-988) --------------------------------------
+
+
+def model_definition(*statements, helpers: tuple[MacroFunction, ...] = ()) -> MacroDefinition:
+    """`parser` 가 새 문법을 받기 전에도 `runner` 계약을 직접 검사한다."""
+    return MacroDefinition(
+        name="m",
+        source="model-built macro",
+        entry=MacroFunction(name="m", statements=statements),
+        helpers=helpers,
+    )
+
+
+def scene_is(name: str) -> MacroComparisonCondition:
+    return MacroComparisonCondition(
+        left=MacroReaderOperand(call=MacroReaderCall(reader="scene")),
+        operator=MacroOperator.equal,
+        right=MacroLiteralOperand(literal=MacroLiteral(shape=MacroShape.string, value=name)),
+    )
+
+
+def text_is(selector: str, value: str) -> MacroComparisonCondition:
+    return MacroComparisonCondition(
+        left=MacroReaderOperand(
+            call=MacroReaderCall(reader="text", target=MacroSelectorTarget(selector=selector))
+        ),
+        operator=MacroOperator.equal,
+        right=MacroLiteralOperand(literal=MacroLiteral(shape=MacroShape.string, value=value)),
+    )
+
+
+def wait_for(condition, seconds: float = 30, source: str = "wait_until(ready, 30, remedy)"):
+    return MacroWaitUntilStatement(
+        source=source, condition=condition, seconds=seconds, remedy="Observe the scene."
+    )
+
+
+class PulseHost(FakeHost):
+    def __init__(self, memory: SceneMemory, responses: list[tuple[MacroPulseWait, SceneMemory | None]]):
+        super().__init__(memory)
+        self.responses = list(responses)
+        self.timeouts: list[float] = []
+
+    async def wait_for_pulse(self, timeout: float) -> MacroPulseWait:
+        self.timeouts.append(timeout)
+        response, memory = self.responses.pop(0)
+        if memory is not None:
+            self.memory = memory
+        return response
+
+
+def run_model(host: FakeHost, *statements, helpers: tuple[MacroFunction, ...] = ()):
+    return asyncio.run(run_macro(host, model_definition(*statements, helpers=helpers), {}, 2))
+
+
+def test_wait_until_already_true_does_not_ask_host_to_wait() -> None:
+    host = PulseHost(scene_with(scene="Ready"), [])
+    result = run_model(host, wait_for(scene_is("Ready")))
+
+    assert result.passed
+    assert result.waits == ["m step 1 of 1: `wait_until(ready, 30, remedy)` was already true"]
+    assert result.waited == 0
+    assert host.timeouts == []
+
+
+def test_wait_until_succeeds_after_two_new_pulses() -> None:
+    host = PulseHost(
+        scene_with(scene="Loading"),
+        [
+            (MacroPulseWait(1, 1.2), scene_with(scene="Loading")),
+            (MacroPulseWait(1, 2.0), scene_with(scene="Ready")),
+        ],
+    )
+    result = run_model(host, wait_for(scene_is("Ready")))
+
+    assert result.passed
+    assert result.waited == pytest.approx(3.2)
+    assert result.waits == ["m step 1 of 1: `wait_until(ready, 30, remedy)` was true after 3.2s (2 pulses)"]
+    assert host.timeouts == [30, pytest.approx(28.8)]
+    assert result.executed == 1
+
+
+def test_wait_until_statement_timeout_reports_last_evaluation() -> None:
+    host = PulseHost(
+        scene_with(scene="Loading"),
+        [(MacroPulseWait(0, 4.0), None)],
+    )
+    result = run_model(host, wait_for(scene_is("Ready"), seconds=4))
+
+    assert result.failure.code == WAIT_TIMEOUT
+    assert {key: result.failure.payload[key] for key in (
+        "expected", "observed", "remedy", "waited_seconds", "readings", "evaluations", "limit"
+    )} == {
+        "expected": "wait_until(ready, 30, remedy)",
+        "observed": {"scene()": "'Loading'"},
+        "remedy": "Observe the scene.",
+        "waited_seconds": 4.0,
+        "readings": 0,
+        "evaluations": 1,
+        "limit": "statement",
+    }
+    assert "No pulse arrived, so the screen did not change at all." in result.failure.reason
+
+
+def test_wait_until_call_budget_exhausted_during_second_statement() -> None:
+    host = PulseHost(
+        scene_with(scene="Start"),
+        [
+            (MacroPulseWait(1, 30), scene_with(scene="Middle")),
+            (MacroPulseWait(0, 30), None),
+        ],
+    )
+    result = run_model(host, wait_for(scene_is("Middle")), wait_for(scene_is("End")))
+
+    assert result.failure.code == WAIT_TIMEOUT
+    assert result.failure.payload["limit"] == "call"
+    assert result.failure.payload["waited_seconds"] == 30
+    assert result.waited == 60
+    assert "the most one call may wait" in result.failure.reason
+
+
+def test_wait_until_zero_call_budget_does_not_claim_screen_was_unchanged() -> None:
+    host = PulseHost(
+        scene_with(scene="Start"),
+        [
+            (MacroPulseWait(1, 30), scene_with(scene="Middle")),
+            (MacroPulseWait(1, 30), scene_with(scene="Later")),
+        ],
+    )
+    result = run_model(
+        host,
+        wait_for(scene_is("Middle")),
+        wait_for(scene_is("Later")),
+        wait_for(scene_is("End")),
+    )
+
+    assert result.failure.code == WAIT_TIMEOUT
+    assert result.failure.payload["limit"] == "call"
+    assert result.failure.payload["waited_seconds"] == 0
+    assert result.failure.payload["evaluations"] == 1
+    assert "screen did not change" not in result.failure.reason
+    assert host.timeouts == [30, 30]
+
+
+def test_checkpoint_resume_refills_call_wait_budget() -> None:
+    host = PulseHost(
+        scene_with(scene="Start"),
+        [
+            (MacroPulseWait(1, 30), scene_with(scene="Middle")),
+            (MacroPulseWait(1, 30), scene_with(scene="Later")),
+            (MacroPulseWait(1, 5), scene_with(scene="End")),
+        ],
+    )
+    result = run_model(
+        host,
+        wait_for(scene_is("Middle")),
+        wait_for(scene_is("Later")),
+        MacroCheckpointStatement(source="checkpoint()"),
+        wait_for(scene_is("End")),
+    )
+
+    assert result.passed
+    assert result.waited == 65
+    assert host.timeouts == [30, 30, 30]
+
+
+def test_wait_until_treats_direct_selector_not_found_as_false() -> None:
+    selector = "Root[0]/Card[1]"
+    host = PulseHost(
+        scene_with(scene="Battle"),
+        [(MacroPulseWait(1, 1), scene_with(card(selector, text="ready")))],
+    )
+    result = run_model(host, wait_for(text_is(selector, "ready")))
+
+    assert result.passed
+    assert result.waited == 1
+    assert result.waits[0].endswith("(1 pulses)")
+
+
+def test_wait_until_treats_predicate_find_not_found_as_false() -> None:
+    predicate = MacroFunction(
+        name="ready",
+        returns="bool",
+        statements=(
+            MacroAssignStatement(
+                source='card: object = find(label="ready")',
+                name="card",
+                declared_type=MacroType.object_,
+                value=MacroFindValue(label=MacroStringLiteral(value="ready")),
+            ),
+            MacroReturnStatement(source="return True", value=True),
+        ),
+    )
+    host = PulseHost(
+        scene_with(scene="Battle"),
+        [(MacroPulseWait(1, 1), scene_with(card("Root[0]/Card[1]", text="ready")))],
+    )
+    result = run_model(host, wait_for(MacroPredicateCondition(callee="ready")), helpers=(predicate,))
+
+    assert result.passed
+    assert result.executed == 1
+
+
+def test_wait_until_selector_ambiguous_stops_immediately() -> None:
+    predicate = MacroFunction(
+        name="ready",
+        returns="bool",
+        statements=(
+            MacroAssignStatement(
+                source='card: object = find(label="ready")',
+                name="card",
+                declared_type=MacroType.object_,
+                value=MacroFindValue(label=MacroStringLiteral(value="ready")),
+            ),
+            MacroReturnStatement(source="return True", value=True),
+        ),
+    )
+    host = PulseHost(scene_with(card("A", text="ready"), card("B", text="ready")), [])
+    result = run_model(host, wait_for(MacroPredicateCondition(callee="ready")), helpers=(predicate,))
+
+    assert result.failure.code == SELECTOR_AMBIGUOUS
+    assert result.failure.payload["predicate"] == "ready step 1"
+    assert host.timeouts == []
+
+
+def test_wait_until_operator_message_interrupts_and_keeps_elapsed_time() -> None:
+    host = PulseHost(
+        scene_with(scene="Loading"),
+        [(MacroPulseWait(0, 0.4, ("Stop here",)), None)],
+    )
+    result = run_model(host, wait_for(scene_is("Ready")))
+
+    assert result.failure.code == OPERATOR_INTERRUPTED
+    assert "Stop here" in result.failure.reason
+    assert result.waited == pytest.approx(0.4)
+
+
+def test_wait_until_propagates_qa_cancelled() -> None:
+    class CancelledHost(FakeHost):
+        async def wait_for_pulse(self, timeout: float) -> MacroPulseWait:
+            raise QaCancelled()
+
+    with pytest.raises(QaCancelled):
+        run_model(CancelledHost(scene_with(scene="Loading")), wait_for(scene_is("Ready")))
+
+
+def test_predicate_two_ifs_act_as_or_without_counting_or_skipping_its_steps() -> None:
+    predicate = MacroFunction(
+        name="one_of_two",
+        returns="bool",
+        statements=(
+            MacroIfStatement(
+                source='if scene() == "A":',
+                condition=scene_is("A"),
+                body=(MacroReturnStatement(source="return True", value=True),),
+            ),
+            MacroIfStatement(
+                source='if scene() == "B":',
+                condition=scene_is("B"),
+                body=(MacroReturnStatement(source="return True", value=True),),
+            ),
+            MacroReturnStatement(source="return False", value=False),
+        ),
+    )
+    condition = MacroPredicateCondition(callee="one_of_two")
+    result = run_model(
+        FakeHost(scene_with(scene="B")),
+        MacroRequireStatement(source="require(one_of_two(), remedy)", condition=condition, remedy="Observe."),
+        helpers=(predicate,),
+    )
+
+    assert result.passed
+    assert result.executed == 1
+    assert result.skipped == []
+
+    failed = run_model(
+        FakeHost(scene_with(scene="C")),
+        MacroRequireStatement(source="require(one_of_two(), remedy)", condition=condition, remedy="Observe."),
+        helpers=(predicate,),
+    )
+    assert failed.failure.code == SCENE_MISMATCH
+    assert failed.failure.payload["observed"]["one_of_two returned at"] == "'step 5'"
+    assert failed.skipped == []
+
+
+def test_predicate_return_condition_reads_into_callers_observed() -> None:
+    predicate = MacroFunction(
+        name="ready",
+        returns="bool",
+        statements=(MacroReturnStatement(source='return scene() == "Ready"', condition=scene_is("Ready")),),
+    )
+    result = run_model(
+        FakeHost(scene_with(scene="Loading")),
+        MacroRequireStatement(
+            source="require(ready(), remedy)",
+            condition=MacroPredicateCondition(callee="ready"),
+            remedy="Observe.",
+        ),
+        helpers=(predicate,),
+    )
+
+    assert result.failure.payload["observed"] == {
+        "scene()": "'Loading'",
+        "ready returned at": "'step 1'",
+    }
+    assert result.executed == 1
+
+
+def test_predicate_passes_arguments_to_another_predicate() -> None:
+    inner = MacroFunction(
+        name="matches_scene",
+        returns="bool",
+        parameters=(MacroParameter(name="expected", declared_type=MacroType.string),),
+        statements=(
+            MacroReturnStatement(
+                source="return scene() == expected",
+                condition=MacroComparisonCondition(
+                    left=MacroReaderOperand(call=MacroReaderCall(reader="scene")),
+                    operator=MacroOperator.equal,
+                    right=MacroNameOperand(name="expected", declared_type=MacroType.string),
+                ),
+            ),
+        ),
+    )
+    outer = MacroFunction(
+        name="ready",
+        returns="bool",
+        parameters=(MacroParameter(name="expected", declared_type=MacroType.string),),
+        statements=(
+            MacroReturnStatement(
+                source="return matches_scene(expected)",
+                condition=MacroPredicateCondition(
+                    callee="matches_scene",
+                    arguments=(
+                        MacroNameArgument(
+                            parameter="expected", name="expected", declared_type=MacroType.string
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+    result = run_model(
+        FakeHost(scene_with(scene="Ready")),
+        MacroRequireStatement(
+            source="require(ready('Ready'), remedy)",
+            condition=MacroPredicateCondition(
+                callee="ready",
+                arguments=(
+                    MacroLiteralArgument(
+                        parameter="expected",
+                        literal=MacroLiteral(shape=MacroShape.string, value="Ready"),
+                    ),
+                ),
+            ),
+            remedy="Observe.",
+        ),
+        helpers=(outer, inner),
+    )
+
+    assert result.passed
+    assert result.executed == 1
+
+
+def test_predicate_failure_in_while_reports_while_line_after_first_pass() -> None:
+    predicate = MacroFunction(
+        name="card_is_here",
+        returns="bool",
+        statements=(
+            MacroAssignStatement(
+                source='card: object = find(label="ready")',
+                name="card",
+                declared_type=MacroType.object_,
+                value=MacroFindValue(label=MacroStringLiteral(value="ready")),
+            ),
+            MacroReturnStatement(source="return True", value=True),
+        ),
+    )
+
+    class VanishingCardHost(FakeHost):
+        async def checkpoint(self, result) -> bool:
+            self.memory = scene_with(scene="Battle")
+            return True
+
+    host = VanishingCardHost(scene_with(card("A", text="ready")))
+    result = run_model(
+        host,
+        MacroWhileStatement(
+            source="while card_is_here():",
+            condition=MacroPredicateCondition(callee="card_is_here"),
+            body=(MacroCheckpointStatement(source="checkpoint()"),),
+        ),
+        helpers=(predicate,),
+    )
+
+    assert result.failure.code == SELECTOR_NOT_FOUND
+    assert str(result.stopped_at) == "m step 1 of 2"
+    assert result.failure.payload["predicate"] == "card_is_here step 1"
+    assert result.executed == 2
+
+
+def test_wait_until_last_not_found_reason_is_in_timeout_observed() -> None:
+    selector = "Root[0]/Missing[1]"
+    host = PulseHost(scene_with(scene="Battle"), [(MacroPulseWait(0, 1), None)])
+    result = run_model(host, wait_for(text_is(selector, "ready"), seconds=1))
+
+    assert result.failure.code == WAIT_TIMEOUT
+    assert "matches nothing" in result.failure.payload["observed"]["not found"]
+    assert result.failure.payload["evaluations"] == 1
+
+
+# --- parser 를 거친 source 로 끝까지 ------------------------------------------------
+#
+# 위 `wait_until` 테스트는 parser 가 새 문법을 받기 전에 쓰여서 모델을 직접 만든다. 아래
+# 셋은 저자가 적는 글 그대로를 parser 에 넣고 runner 까지 돌린다 — 두 쪽이 같은 모양을
+# 주고받는지는 이 자리에서만 드러난다.
+
+_WAIT_FOR_THE_BANNER = '''
+def finish_the_wave() -> None:
+    """Wait for the wave to end, then dismiss the banner."""
+    wait_until(wave_is_over(), 10, "The wave did not end; observe whether an enemy is left.")
+    press_key("Space", 0.1)
+
+
+def wave_is_over() -> bool:
+    if exists(selector("Root[0]/VictoryBanner[0]")):
+        return True
+    return scene() == "Reward"
+'''
+
+
+def test_a_written_wait_until_with_a_predicate_waits_for_the_second_alternative() -> None:
+    # 배너는 끝내 안 뜨고 scene 이 바로 넘어간다. `or` 의 두 번째 가지가 참이 되는 경우다.
+    host = PulseHost(
+        scene_with(scene="Battle"),
+        [(MacroPulseWait(1, 1.5), scene_with(scene="Reward"))],
+    )
+    result = drive(host, _WAIT_FOR_THE_BANNER, "finish_the_wave", {})
+
+    assert result.passed
+    assert result.waits == [
+        'finish_the_wave step 1 of 2: `wait_until(wave_is_over(), 10, "The wave did not end; observe whether an enemy '
+        'is left.")` was true after 1.5s (1 pulses)'
+    ]
+    assert len(result.applied) == 1
+
+
+def test_a_written_wait_until_that_times_out_names_the_return_it_ended_on() -> None:
+    host = PulseHost(
+        scene_with(scene="Battle"),
+        [(MacroPulseWait(1, 4.0), None), (MacroPulseWait(0, 6.0), None)],
+    )
+    result = drive(host, _WAIT_FOR_THE_BANNER, "finish_the_wave", {})
+
+    assert result.failure.code == WAIT_TIMEOUT
+    assert result.failure.payload["readings"] == 1
+    assert result.failure.payload["evaluations"] == 2
+    assert result.failure.payload["observed"]["wave_is_over returned at"] == "'step 3'"
+    # 기다리다 멈춘 자리 뒤의 `press_key` 는 나가지 않았다.
+    assert result.applied == []
+    assert [str(place) for place in result.pending] == ["finish_the_wave step 2 of 2"]
+
+
+def test_a_written_wait_until_counts_a_find_that_matches_nothing_as_not_yet() -> None:
+    source = '''
+def open_the_reward() -> None:
+    """Wait for the reward chest to appear, then open it."""
+    wait_until(chest_is_there(), 5, "No chest appeared; observe the reward screen.")
+    chest: object = find(name="Chest")
+    click(chest)
+
+
+def chest_is_there() -> bool:
+    chest: object = find(name="Chest")
+    return exists(chest)
+'''
+    host = PulseHost(
+        scene_with(scene="Reward"),
+        [(MacroPulseWait(1, 0.8), scene_with(card("Root[0]/Chest[0]", instance_id=7), scene="Reward"))],
+    )
+    result = drive(host, source, "open_the_reward", {})
+
+    assert result.waits == [
+        'open_the_reward step 1 of 3: `wait_until(chest_is_there(), 5, "No chest appeared; observe the reward screen.")` '
+        "was true after 0.8s (1 pulses)"
+    ]
+    assert len(result.applied) == 1

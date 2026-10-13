@@ -385,7 +385,11 @@ class QaRunChannel:
         return result, arrived
 
     async def _await_reading(
-        self, after: int, timeout: float, frame: int | None = None
+        self,
+        after: int,
+        timeout: float,
+        frame: int | None = None,
+        interrupt: asyncio.Event | None = None,
     ) -> bool:
         """액션 이후의 판독이 올 때까지 기다린다. 최대 `timeout` 초.
 
@@ -411,18 +415,43 @@ class QaRunChannel:
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
-        while not arrived():
+        while True:
+            if interrupt is not None and interrupt.is_set():
+                return False
+            if arrived():
+                return True
             remaining = deadline - loop.time()
             if remaining <= 0:
                 return False
             # `on_pulse` 는 같은 이벤트 루프의 동기 콜백이라, 이 clear 와 위의 검사
             # 사이에 판독이 끼어들 수 없다.
             self._reading_arrived.clear()
+            waiters = [asyncio.create_task(self._reading_arrived.wait())]
+            if interrupt is not None:
+                waiters.append(asyncio.create_task(interrupt.wait()))
             try:
-                await asyncio.wait_for(self._reading_arrived.wait(), remaining)
-            except asyncio.TimeoutError:
-                return False
-        return True
+                done, _ = await asyncio.wait(
+                    waiters, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+                )
+                if not done:
+                    return False
+            finally:
+                for waiter in waiters:
+                    if not waiter.done():
+                        waiter.cancel()
+                await asyncio.gather(*waiters, return_exceptions=True)
+
+    async def wait_for_reading(self, timeout: float) -> int:
+        """호출 뒤의 새 `pulse` 를 기다리고, 그동안 늘어난 개수를 낸다.
+
+        operator 의 말도 대기를 끝낸다. 깨어난 횟수가 아니라 개수를 내는 이유는, 대기
+        task 가 돌기 전에 `pulse` 여럿이 도착하면 한 번 깨어나도 여럿이기 때문이다.
+        """
+        after = self.scene.pulse.readings
+        self._raise_if_cancelled()
+        await self._await_reading(after, timeout, interrupt=self._operator_arrived)
+        self._raise_if_cancelled()
+        return max(self.scene.pulse.readings - after, 0)
 
     async def dispatch_actions(
         self,
@@ -967,6 +996,10 @@ class QaRunChannel:
         self._operator_arrived.set()
 
     # --- operator ------------------------------------------------------------
+
+    def pending_operator_messages(self) -> tuple[str, ...]:
+        """다음 tool 결과에 붙일 operator 의 말을 비우지 않고 복사한다."""
+        return tuple(self._operator_messages)
 
     def drain_operator_messages(self) -> list[str]:
         messages = self._operator_messages
