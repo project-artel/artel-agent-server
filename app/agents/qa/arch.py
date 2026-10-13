@@ -346,6 +346,16 @@ from app.llm.models import LLMModel, get_model_spec
 # runs than 56,000 at the same accuracy, and 98k-224k all within 3% per call. The numbers are
 # above that constant.
 #
+# v21 because `search_knowledge` is no longer refused outside OBSERVE (`ANY_PHASE` in
+# `tools/phase.py`), the same way `register_macro` stopped being refused outside UPDATE_MEMORY
+# in v13. Under v19 a search during UPDATE_MEMORY moved the run to the next step's OBSERVE and
+# the `record_knowledge` after it was refused, so the agent could not check for an existing
+# entry right before writing one, and the server files a repeated write twice. Called in OBSERVE
+# it still counts as an OBSERVE call; called in any other phase it runs and moves no phase. The
+# phase directive is unchanged: `qa_run/v19` is locked and the next prompt version is being
+# written on ARTEL-984. Nothing hashed moves: the phase table is not hashed. v20 is skipped
+# because the ARTEL-984 branch already uses `v20-macro-docstring-search`.
+#
 # v20 because macros now describe themselves with a docstring and can be searched (ARTEL-984,
 # plan `.plan/general/2026-10-13-macro-docstring-and-search.md`). Three things move. The tool
 # set gains `search_macros`, which sends `MACRO_SEARCH` and lists the registered macros of this
@@ -359,7 +369,11 @@ from app.llm.models import LLMModel, get_model_spec
 # docstring indented under it, instead of `name(...) — summary  [scenes]`. Macros an earlier run
 # registered without a docstring still load and run. The new tool moves `arch_fingerprint`; the
 # rendering change does not, which is why it is named here.
-QA_ARCH_LABEL = "v20-macro-docstring-search"
+#
+# v23 because the v20 change above landed on develop after v21 did, so the merged structure is
+# both: `search_macros` on top of `search_knowledge` in any phase. v22 is skipped because the
+# ARTEL-988 branch already uses `v22-macro-wait-until`.
+QA_ARCH_LABEL = "v23-macro-docstring-search"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
