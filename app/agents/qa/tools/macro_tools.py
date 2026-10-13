@@ -1,6 +1,6 @@
 """성공한 action 순서를 macro 로 적어 두고 다시 부르고 찾는 tool.
 
-문구는 `app/prompts/qa_run/v20/tool_<name>.md` 파일에 있고, 문법과 예시와 수명주기
+문구는 `app/prompts/qa_run/v21/tool_<name>.md` 파일에 있고, 문법과 예시와 수명주기
 전체는 `skill_macro.md` 에 있다. 다섯 설명이 각각 500자 상한 아래라 매 호출마다 나가는
 글은 2.5KB 가 안 되고, 13KB 짜리 본문은 모델이 `load_skill("macro")` 를 부를 때만 간다.
 `app/agents/qa/macro/reference.py` 는 그 파일이 `grammar.py` 와 맞는지 재는 기준이다.
@@ -38,6 +38,7 @@ docstring 없이도 쓰고 고칠 수 있다 — 거절은 `register_macro` 에�
 계속 다시 보낸다.
 """
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any
@@ -53,6 +54,7 @@ from app.agents.qa.macro.parser import macro_definition_from_source
 from app.agents.qa.macro.session import MacroSession
 from app.agents.qa.macro.runner import (
     MacroPlace,
+    MacroPulseWait,
     MacroRunResult,
     run_macro as execute_macro,
 )
@@ -123,7 +125,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
     channel, state = ctx.channel, ctx.state
 
     class _Host:
-        """runner 가 바깥에 대고 하는 일 둘을 `ToolContext` 에 잇는다.
+        """runner 의 action, `pulse` 대기, `checkpoint` 를 런의 상태에 잇는다.
 
         runner 가 `ToolContext` 를 직접 받지 않는 이유는 `app/agents/qa/macro/runner.py`
         에 적혀 있다 — 그쪽이 `tools` 를 import 하면 순환이 된다. 그 잇는 자리가 여기
@@ -143,6 +145,13 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
 
         def memories(self) -> MacroMemories:
             return MacroMemories(scene=channel.scene)
+
+        async def wait_for_pulse(self, timeout: float) -> MacroPulseWait:
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            pulses = await channel.wait_for_reading(timeout)
+            waited = loop.time() - started
+            return MacroPulseWait(pulses, waited, channel.pending_operator_messages())
 
         async def checkpoint(self, result: MacroRunResult) -> bool:
             # 턴을 돌려주는 자리다. `run_macro` 나 `resume_macro` 가 `settle` 로 이것을
@@ -936,6 +945,14 @@ def _render(result: MacroRunResult) -> str:
         arrived = failure.payload.get("arrived")
         if arrived:
             lines.append(f"The value that arrived there: {arrived}")
+        if "waited_seconds" in failure.payload:
+            lines.append(f"Waited seconds: {failure.payload['waited_seconds']}")
+        if "readings" in failure.payload:
+            lines.append(f"Pulses arrived: {failure.payload['readings']}")
+        if "evaluations" in failure.payload:
+            lines.append(f"Condition evaluations: {failure.payload['evaluations']}")
+        if "predicate" in failure.payload:
+            lines.append(f"Predicate: {failure.payload['predicate']}")
 
     lines.append(_places("Reached the game", result.applied))
     not_yet = "Not sent yet" if result.paused_at is not None else "Did NOT reach the game"
@@ -949,6 +966,11 @@ def _render(result: MacroRunResult) -> str:
             "line; `(pass N)` says which turn of the loop around it. A loop's remaining "
             "passes are not listed one by one."
         )
+
+    if result.waits:
+        lines.append("Waits:")
+        lines.extend(result.waits)
+        lines.append(f"Waited {result.waited:.1f}s in all.")
 
     if result.outcomes:
         lines.append("What the game said:")

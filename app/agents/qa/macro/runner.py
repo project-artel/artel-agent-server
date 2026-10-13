@@ -66,13 +66,16 @@ from app.agents.qa.macro.errors import (
     OPERATOR_INTERRUPTED,
     REQUIRE_FAILED,
     SCENE_MISMATCH,
+    SELECTOR_NOT_FOUND,
     SCREEN_UNCHANGED,
     LOOP_LIMIT,
+    WAIT_TIMEOUT,
     MacroFailure,
 )
 from app.agents.qa.macro.grammar import (
     MAX_EXECUTED_STATEMENTS,
     MAX_LOOP_PASSES,
+    MAX_WAIT_PER_CALL_SECONDS,
     TOOLS_BY_NAME,
     ToolParameter,
     ToolSpec,
@@ -82,6 +85,7 @@ from app.agents.qa.macro.model import (
     MacroAskVerdictStatement,
     MacroAssignStatement,
     MacroCheckpointStatement,
+    MacroCondition,
     MacroDefinition,
     MacroFindValue,
     MacroFlagStatement,
@@ -92,10 +96,13 @@ from app.agents.qa.macro.model import (
     MacroLiteralValue,
     MacroReadValue,
     MacroParameter,
+    MacroPredicateCondition,
     MacroRequireStatement,
+    MacroReturnStatement,
     MacroSelectorValue,
     MacroStatement,
     MacroWhileStatement,
+    MacroWaitUntilStatement,
 )
 from app.qa.acting import ActionOutcome, PressLanding, ScreenChange
 from app.qa.envelope import JsonRpcAction
@@ -119,8 +126,24 @@ from app.qa.envelope import JsonRpcAction
 STILL_SCREENS_BEFORE_STOP = 3
 
 
+@dataclass(frozen=True)
+class MacroPulseWait:
+    """`wait_for_pulse` 한 번의 결과.
+
+    `pulses` 는 부른 뒤에 늘어난 `pulse` 개수다. 깨어난 횟수가 아니다 — 대기 task 가 돌기
+    전에 여럿이 도착하면 한 번 깨어나도 여럿이다. 0 이면 시간이 다 됐거나 operator 가
+    말해서 돌아온 것이다. `waited` 는 host 가 잰 실제 초다. runner 가 시계를 직접 읽지 않는 이유는 가짜 host 로
+    도는 테스트가 실제로 잠들지 않게 하려는 것이다. `operator_messages` 는 비우지 않은
+    복사본이다 — `_drive` 가 답 끝에 붙이려면 channel 에 남아 있어야 한다.
+    """
+
+    pulses: int
+    waited: float
+    operator_messages: tuple[str, ...] = ()
+
+
 class MacroHost(Protocol):
-    """runner 가 바깥에 대고 하는 일 둘.
+    """`runner` 가 바깥에 대고 하는 `action`, `pulse` 대기, `checkpoint`.
 
     `ToolContext` 를 받지 않는다. `app.agents.qa.tools.tool_context` 를 import 하면
     `tools/__init__.py` 가 먼저 돌고 그것이 `macro_tools` 를 import 하므로 순환이 된다.
@@ -138,6 +161,8 @@ class MacroHost(Protocol):
     ) -> ActionOutcome: ...
 
     def memories(self) -> MacroMemories: ...
+
+    async def wait_for_pulse(self, timeout: float) -> MacroPulseWait: ...
 
     async def checkpoint(self, result: "MacroRunResult") -> bool:
         """`checkpoint` 에서 턴을 돌려주고, agent 가 정할 때까지 기다린다.
@@ -211,6 +236,8 @@ class MacroRunResult:
     # `run` 이 돌려준 문장들. action 하나에 하나이고, 화면은 안 붙어 있다 — 화면은
     # `run_macro` 의 답 끝에 한 번만 붙는다.
     outcomes: list[str] = field(default_factory=list)
+    waits: list[str] = field(default_factory=list)
+    waited: float = 0.0
     # 멈춘 이유. 끝까지 갔으면 `None`.
     failure: MacroFailure | None = None
     # 멈춘 자리와 그 자리까지의 호출 사슬.
@@ -342,6 +369,7 @@ class _Runner:
         # 화면이 연달아 몇 번 그대로였나. 화면이 움직이면 0 으로 돌아가고, 움직였는지
         # 모르는 batch 는 세지도 지우지도 않는다 — 까닭은 `_went_wrong` 에 있다.
         self.still_screens = 0
+        self.waited_this_call = 0.0
 
     # -- 바깥 --
 
@@ -417,6 +445,7 @@ class _Runner:
     ) -> bool:
         place = frame.place(number)
         try:
+            assert not isinstance(statement, MacroReturnStatement)
             self.result.executed += 1
             if self.result.executed > MAX_EXECUTED_STATEMENTS:
                 raise MacroFailure(
@@ -433,6 +462,8 @@ class _Runner:
                 return await self._while(frame, place, statement)
             if isinstance(statement, MacroCheckpointStatement):
                 return await self._checkpoint(frame, place, statement)
+            if isinstance(statement, MacroWaitUntilStatement):
+                return await self._wait_until(frame, statement)
             if isinstance(statement, MacroAssignStatement):
                 self._assign(frame, statement)
                 return True
@@ -463,6 +494,7 @@ class _Runner:
                 return True
             if isinstance(statement, MacroHelperCallStatement):
                 return await self._helper(frame, statement)
+            assert isinstance(statement, MacroActionStatement)
             return await self._action(frame, place, statement)
         except MacroFailure as failure:
             self.stop(failure, place)
@@ -496,6 +528,149 @@ class _Runner:
         assert isinstance(value, MacroLiteralValue)
         frame.scope.bind(statement.name, value.literal.value)
 
+    def _evaluate(
+        self, frame: _Frame, condition: MacroCondition, observed: dict[str, Any]
+    ) -> bool:
+        if isinstance(condition, MacroPredicateCondition):
+            return self._predicate(frame, condition, observed)
+        return evaluate(self.memories(), frame.scope, condition, observed)
+
+    def _predicate(
+        self, caller: _Frame, condition: MacroPredicateCondition, observed: dict[str, Any]
+    ) -> bool:
+        function = self.definition.function(condition.callee)
+        if function is None:  # pragma: no cover - parser 가 없는 이름을 거절한다
+            raise MacroFailure(
+                ACTION_REJECTED, f"`{condition.callee}` is not a `def` in this macro."
+            )
+        arguments = {
+            parameter.name: value
+            for parameter, value in _helper_arguments(function, condition, caller, self)
+        }
+        frame = _Frame(function, MacroScope(arguments))
+
+        def walk(statements: tuple[MacroStatement, ...]) -> bool | None:
+            for statement in statements:
+                frame.at = frame.number_of(statement)
+                try:
+                    if isinstance(statement, MacroAssignStatement):
+                        self._assign(frame, statement)
+                    elif isinstance(statement, MacroIfStatement):
+                        branch = (
+                            statement.body
+                            if self._evaluate(frame, statement.condition, observed)
+                            else statement.orelse
+                        )
+                        returned = walk(branch)
+                        if returned is not None:
+                            return returned
+                    else:
+                        assert isinstance(statement, MacroReturnStatement)
+                        result = (
+                            statement.value
+                            if statement.condition is None
+                            else self._evaluate(frame, statement.condition, observed)
+                        )
+                        observed[f"{function.name} returned at"] = f"step {frame.at}"
+                        return result
+                except MacroFailure as failure:
+                    failure.payload.setdefault("predicate", f"{function.name} step {frame.at}")
+                    raise
+            return None
+
+        result = walk(function.statements)
+        assert result is not None  # parser 가 모든 경로의 `return` 을 검사한다.
+        return result
+
+    async def _wait_until(
+        self, frame: _Frame, statement: MacroWaitUntilStatement
+    ) -> bool:
+        waited_here = 0.0
+        readings = 0
+        evaluations = 0
+        observed: dict[str, Any] = {}
+
+        def condition_is_true() -> bool:
+            nonlocal evaluations, observed
+            evaluations += 1
+            observed = {}
+            try:
+                return self._evaluate(frame, statement.condition, observed)
+            except MacroFailure as failure:
+                if failure.code != SELECTOR_NOT_FOUND:
+                    raise
+                observed["not found"] = failure.reason
+                return False
+
+        # 반복 안에서 같은 줄이 여러 번 기다리므로 줄 번호와 회를 붙인다.
+        place = frame.place(frame.at)
+        if condition_is_true():
+            self.result.waits.append(f"{place}: `{statement.source}` was already true")
+            return True
+
+        while True:
+            statement_left = statement.seconds - waited_here
+            call_left = MAX_WAIT_PER_CALL_SECONDS - self.waited_this_call
+            limit = min(statement_left, call_left)
+            cap = "call" if call_left <= statement_left else "statement"
+            if limit <= 0:
+                raise self._wait_timeout(
+                    statement, observed, waited_here, readings, evaluations, cap
+                )
+
+            arrived = await self.host.wait_for_pulse(limit)
+            waited_here += arrived.waited
+            self.waited_this_call += arrived.waited
+            self.result.waited += arrived.waited
+            if arrived.operator_messages:
+                raise _operator_spoke(arrived.operator_messages)
+            if not arrived.pulses:
+                raise self._wait_timeout(
+                    statement, observed, waited_here, readings, evaluations, cap
+                )
+            readings += arrived.pulses
+            if condition_is_true():
+                self.result.waits.append(
+                    f"{place}: `{statement.source}` was true after {waited_here:.1f}s "
+                    f"({readings} pulses)"
+                )
+                return True
+
+    @staticmethod
+    def _wait_timeout(
+        statement: MacroWaitUntilStatement,
+        observed: dict[str, Any],
+        waited_here: float,
+        readings: int,
+        evaluations: int,
+        cap: str,
+    ) -> MacroFailure:
+        reason = (
+            f"`{statement.source}` was still false after {waited_here:.1f}s "
+            f"({readings} pulses arrived). {statement.remedy}"
+        )
+        if cap == "call":
+            reason += (
+                f" This tool call has now waited {MAX_WAIT_PER_CALL_SECONDS} seconds in "
+                "all, the most one call may wait."
+            )
+        # 기다린 적이 없으면 `pulse` 가 0 인 것은 화면에 대해 아무것도 말하지 않는다.
+        if waited_here > 0 and readings == 0:
+            reason += " No pulse arrived, so the screen did not change at all."
+        return MacroFailure(
+            WAIT_TIMEOUT,
+            reason,
+            {
+                "expected": statement.source,
+                "observed": _printable(observed),
+                "remedy": statement.remedy,
+                "waited_seconds": round(waited_here, 1),
+                "readings": readings,
+                "evaluations": evaluations,
+                "limit": cap,
+            },
+        )
+
     async def _require(
         self, frame: _Frame, place: MacroPlace, statement: MacroRequireStatement
     ) -> bool:
@@ -505,7 +680,7 @@ class _Runner:
         그 다음 statement 가 읽는 memory 는 이미 그 행위의 결과다.
         """
         observed: dict[str, Any] = {}
-        if evaluate(self.memories(), frame.scope, statement.condition, observed):
+        if self._evaluate(frame, statement.condition, observed):
             return True
 
         # `applied` 가 비어 있으면 들어선 자리가 틀렸다는 말이다. 하나라도 나갔으면
@@ -525,7 +700,7 @@ class _Runner:
         self, frame: _Frame, place: MacroPlace, statement: MacroIfStatement
     ) -> bool:
         observed: dict[str, Any] = {}
-        taken = evaluate(self.memories(), frame.scope, statement.condition, observed)
+        taken = self._evaluate(frame, statement.condition, observed)
         going, skipping = (
             (statement.body, statement.orelse)
             if taken
@@ -606,8 +781,12 @@ class _Runner:
             while True:
                 observed: dict[str, Any] = {}
                 if guard is not None:
-                    if not evaluate(self.memories(), frame.scope, guard.condition, observed):
-                        break
+                    try:
+                        if not self._evaluate(frame, guard.condition, observed):
+                            break
+                    except MacroFailure:
+                        frame.at = loop_number
+                        raise
                     if passes == MAX_LOOP_PASSES:
                         frame.at = loop_number
                         raise MacroFailure(
@@ -662,6 +841,7 @@ class _Runner:
         self.result.paused_at = None
         self.result.paused_reason = ""
         if go_on:
+            self.waited_this_call = 0.0
             self.result.pending = []
             return True
         self.result.abandoned_at = place
@@ -842,11 +1022,11 @@ def _argument_values(
 
 def _helper_arguments(
     helper: MacroFunction,
-    statement: MacroHelperCallStatement,
+    statement: MacroHelperCallStatement | MacroPredicateCondition,
     frame: _Frame,
     runner: "_Runner",
 ) -> Iterator[tuple[MacroParameter, Any]]:
-    """helper 의 parameter 마다 (parameter, 값). 안 적힌 자리는 `def` 줄의 기본값."""
+    """`helper` 와 `predicate` 의 parameter 마다 값. 안 적힌 자리는 `def` 줄의 기본값."""
     written = {argument.parameter: argument for argument in statement.arguments}
     for parameter in helper.parameters:
         argument = written.get(parameter.name)

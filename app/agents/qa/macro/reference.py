@@ -1,6 +1,6 @@
 """`grammar.py` 가 받는 것을 글로 조립한다. 모델이 읽는 글은 아니다.
 
-모델이 읽는 것은 `app/prompts/qa_run/v20/skill_macro.md` 다. prompt 는 데이터로
+모델이 읽는 것은 `app/prompts/qa_run/v21/skill_macro.md` 다. prompt 는 데이터로
 버전 디렉터리에 살고 `prompts-lock.json` 이 그 본문을 해시하므로, 코드가 런타임에
 조립한 글로 대신할 수 없다 — 해시할 파일이 없어진다.
 
@@ -20,6 +20,8 @@ from app.agents.qa.macro.grammar import (
     MAX_EXECUTED_STATEMENTS,
     MAX_LOOP_PASSES,
     MAX_STATEMENTS,
+    MAX_WAIT_PER_CALL_SECONDS,
+    MAX_WAIT_PER_STATEMENT_SECONDS,
     PAIRED_TOOLS,
     READER_NAMES,
     REPORTING_NAMES,
@@ -65,7 +67,9 @@ you store it, with a refusal that names what is accepted instead.
 **The shape.** One `def` named exactly like the macro is its entry point. Any
 other `def` in the same source is a helper it may call. Every parameter and
 every assignment carries a type, and the types are: {DECLARABLE_TYPE_NAMES}.
-Every `def` returns `-> None`, because a macro hands back no value.
+The entry `def` and its helpers return `-> None`: they act and hand back no
+value. A `def` declared `-> bool` is a predicate, a condition you name — see
+**Predicates** below.
 
 **The docstring.** The entry `def` opens with a docstring: a `\"\"\"...\"\"\"` string
 as its first statement, saying what the macro does and when to use it. That
@@ -86,6 +90,8 @@ is refused; write a `#` comment there.
 - `ask_verdict("<expected>")` — says the step `run_macro` was called with needs
   judging. There is no step number to write: it is always that step
 - `checkpoint("<what to look at>")` — hands the turn back to you mid-macro
+- `wait_until(<condition>, <seconds>, "<remedy>")` — waits until the condition
+  is true, for at most that many seconds
 
 **Aiming.** A target is `selector("<unity/hierarchy/path>")`, a parameter on the
 `def` line, or a name bound by `find(...)` or `selector(...)`. There is no syntax
@@ -125,6 +131,20 @@ name bound inside it, ends with the loop. `break`, `continue` and a loop's
 `else` are refused: a pass runs its whole body; to stop early, use a `while`
 whose condition turns false, and to skip part of a pass, put it under an `if`.
 
+**Waiting.** `require` judges the screen as it stood right after the previous
+action, so a loading screen or an animation that takes a few seconds fails it
+although the game did nothing wrong. `wait_until(<condition>, <seconds>,
+"<remedy>")` reads the condition at once and, while it is false, again every
+time the game reports a new pulse, until it is true or the seconds run out. The
+seconds are a number written in the macro, more than 0 and at most
+{MAX_WAIT_PER_STATEMENT_SECONDS}. Nothing is sent to the game while it waits.
+While it waits, a lookup that matches nothing counts as "not yet" instead of
+stopping the macro, so you can wait for something to appear. When the time runs
+out the macro stops with `WAIT_TIMEOUT`, saying how long it waited and how many
+pulses arrived; zero pulses means the screen never changed. Wait with this, not
+with `while`: a `while` with no action in it does not wait for the game, it
+re-reads the same screen until `LOOP_LIMIT`.
+
 **Checkpoints.** `checkpoint("check the slot holds both cards")` ends the
 macro's turn right there and hands you what it did so far, marked PAUSED — not
 a failure. Look at the screen, then call `resume_macro` with `proceed: true` to
@@ -135,10 +155,20 @@ committing to something that cannot be undone, or after a step whose result no
 `require` can describe.
 
 **Conditions.** One condition is ONE comparison (`==`, `!=`, `>`, `<`, `>=`,
-`<=`) or ONE reader call. `and`, `or` and `not` are refused — write two
-`require` calls, so each says on its own what to do when it fails. The readers
-are: {_READERS}. A condition written without a comparison has to be a bool, so
-only `actionable()`, `exists()` and `absent()` stand alone.
+`<=`), ONE reader call, or ONE predicate call. `and`, `or` and `not` are refused
+— for `and`, write two `require` calls, so each says on its own what to do when
+it fails; for `or`, write a predicate. The readers are: {_READERS}. A condition
+written without a comparison has to be a bool, so only `actionable()`,
+`exists()` and `absent()` stand alone.
+
+**Predicates.** A `def` declared `-> bool` is a predicate. Its body holds only
+typed assignments, `if` / `elif` / `else`, and `return`, and every path through
+it ends in `return True`, `return False` or `return <condition>`. Call it
+wherever a condition goes: `require`, `if`, `while`, `wait_until`, or another
+predicate's `return`. That is how to write `or`: one `if` per alternative that
+does `return True`, then `return False` at the end. A predicate sends nothing to
+the game, so it cannot act, `require`, wait or `checkpoint`, and the entry `def`
+cannot be one.
 
 **What each shape of value can be compared with.** The shape is the shape the
 value ARRIVES as, not the type you declared: `int` and `float` both arrive as a
@@ -152,7 +182,7 @@ other shape — a sprite, an animator state, a number the game could not read �
 refuses every operator rather than quietly answering false.
 
 **Refused outright:** `and`, `or`, `not`, a dot (`card.id`), a nested `def`,
-`import`, `lambda`, an f-string, `return`, a string anywhere but the docstring,
+`import`, `lambda`, an f-string, `return` outside a predicate, a string anywhere but the docstring,
 re-assignment, arithmetic, `break`, `continue`, and a list or any other call after `for ... in`.
 And these, each for its own reason:
 
@@ -164,8 +194,10 @@ register it. That includes holding inside one branch of an `if` and releasing
 outside it: hold and release in the same branch, or in neither. Inside a loop,
 hold and release in the same pass — a pass that presses without letting go
 presses once more on every turn. A `checkpoint` may not sit between a hold and
-its release, because the turn would end with the game held. Nothing releases
-these for you, and a key left down changes every step after the macro.
+its release, because the turn would end with the game held. A `wait_until` may
+not sit between `pause_game_time` and `resume_game_time`: with game time frozen,
+nothing it waits for can change. Nothing releases these for you, and a key left
+down changes every step after the macro.
 
 **The limits.** Checked when you register: at most {MAX_STATEMENTS} statements
 written along the longest path, counting each loop body once, and a call chain
@@ -173,8 +205,11 @@ at most {MAX_CALL_DEPTH} deep counting the entry point. Checked while it runs,
 because how often a loop turns is not known until then: a loop turns at most
 {MAX_LOOP_PASSES} times, and one call runs at most {MAX_EXECUTED_STATEMENTS}
 statements. Past either, the macro stops with `LOOP_LIMIT`, and what it already
-sent stays sent. A step number in the result is the written line; `(pass N)`
-says which turn of the loop around it."""
+sent stays sent. Each `run_macro` or `resume_macro` call waits at most
+{MAX_WAIT_PER_CALL_SECONDS} seconds across all its `wait_until` lines; past that
+the macro stops with `WAIT_TIMEOUT`. A
+step number in the result is the written line; `(pass N)` says which turn of
+the loop around it."""
 
 
 # 연속값 권고. 거절이 아니라 관용구를 주는 것이라 `GRAMMAR` 밖에 둔다 — skill 파일도

@@ -17,7 +17,13 @@ from app.agents.qa.arch import (
     resolve_arch,
 )
 from app.agents.qa.tools import macro_tools
-from app.agents.qa.macro.errors import COMPARISON_REJECTED, MACRO_NODE_REJECTED
+from app.agents.qa.macro.errors import (
+    COMPARISON_REJECTED,
+    MACRO_NODE_REJECTED,
+    WAIT_TIMEOUT,
+    MacroFailure,
+)
+from app.agents.qa.macro.runner import MacroRunResult
 from app.agents.qa.macro.grammar import TOOL_NAMES
 from app.agents.qa.tools import QaRunState, build_tools
 from app.qa.channel import QaCancelled, QaRunChannel
@@ -992,6 +998,83 @@ def test_every_macro_tool_body_is_guarded_against_a_leaking_exception() -> None:
     ):
         assert tools[name].coroutine.__code__.co_name == "answering", name
         assert tools[name].name == name
+
+
+def test_render_wait_timeout_reports_wait_and_predicate_details() -> None:
+    result = MacroRunResult(
+        name="wait_for_card",
+        failure=MacroFailure(
+            WAIT_TIMEOUT,
+            "The card is still missing.",
+            {
+                "expected": "card_ready()",
+                "observed": {"exists(card)": False},
+                "remedy": "Draw a card.",
+                "waited_seconds": 3.2,
+                "readings": 4,
+                "evaluations": 5,
+                "limit": "statement",
+                "predicate": "card_ready step 2",
+            },
+        ),
+    )
+
+    answer = macro_tools._render(result)
+
+    assert WAIT_TIMEOUT in answer
+    assert "Waited seconds: 3.2" in answer
+    assert "Pulses arrived: 4" in answer
+    assert "Condition evaluations: 5" in answer
+    assert "Predicate: card_ready step 2" in answer
+    assert "exists(card) = False" in answer
+
+
+def test_render_waits_has_its_own_section_before_game_outcomes() -> None:
+    waited = "`card_ready()` was true after 3.2s (4 pulses)"
+    already = "`scene_ready()` was already true"
+    result = MacroRunResult(
+        name="wait_for_card", waits=[waited, already], waited=3.2, outcomes=["Pressed A."]
+    )
+
+    answer = macro_tools._render(result)
+
+    assert f"Waits:\n{waited}\n{already}\nWaited 3.2s in all." in answer
+    assert "What the game said:\nPressed A." in answer
+    assert answer.index("Waits:") < answer.index("What the game said:")
+
+
+def test_host_wait_for_pulse_preserves_operator_messages_for_drive(monkeypatch) -> None:
+    channel, _, tools, _ = make()
+    call(tools["write_macro"], name="deal_a_card", source=SIMPLE)
+    call(tools["register_macro"], name="deal_a_card")
+    waits = []
+
+    async def wait_for_reading(timeout: float) -> int:
+        assert timeout == 4.0
+        channel.on_chat({"payload": {"message": "Wait for me."}})
+        return 0
+
+    async def execute(host, definition, bound, step):
+        waits.append(await host.wait_for_pulse(4.0))
+        assert channel.pending_operator_messages() == ("Wait for me.",)
+        return MacroRunResult(name=definition.name)
+
+    monkeypatch.setattr(channel, "wait_for_reading", wait_for_reading)
+    monkeypatch.setattr(macro_tools, "execute_macro", execute)
+
+    answer = call(
+        tools["run_macro"],
+        name="deal_a_card",
+        arguments={"card": "Root[0]/Hand[2]/Card(Clone)[3]"},
+    )
+
+    assert len(waits) == 1
+    assert waits[0].pulses == 0
+    assert waits[0].waited >= 0.0
+    assert waits[0].operator_messages == ("Wait for me.",)
+    assert "Wait for me." in answer
+    assert "applies from now on" in answer
+    assert channel.pending_operator_messages() == ()
 
 
 # --- checkpoint 와 resume_macro (ARTEL-949) --------------------------------------

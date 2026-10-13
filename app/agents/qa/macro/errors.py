@@ -50,6 +50,12 @@ OPERATOR_INTERRUPTED = "OPERATOR_INTERRUPTED"
 # agent 가 정한다.
 LOOP_LIMIT = "LOOP_LIMIT"
 
+# `wait_until` 의 조건이 기다린 시간 안에 참이 되지 않았다. `REQUIRE_FAILED` 와 가른다.
+# 그쪽은 게임이 다르게 동작했다는 말이고, 이쪽은 게임이 그 상태로 **아직** 안 갔다는 말일
+# 수도 있다 — 기다린 시간이 짧았는지 게임이 멈췄는지를 agent 가 관측해서 가린다. payload 의
+# `readings` 가 0 이면 그동안 `pulse` 가 한 장도 안 온 것이라 조건이 틀린 것이 아니다.
+WAIT_TIMEOUT = "WAIT_TIMEOUT"
+
 RUNTIME_CODES = (
     REQUIRE_FAILED,
     SCENE_MISMATCH,
@@ -60,6 +66,7 @@ RUNTIME_CODES = (
     COMPARISON_REJECTED,
     SCREEN_UNCHANGED,
     OPERATOR_INTERRUPTED,
+    WAIT_TIMEOUT,
 )
 
 
