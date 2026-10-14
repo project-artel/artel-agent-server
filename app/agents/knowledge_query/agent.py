@@ -44,9 +44,18 @@ class KnowledgeQueryAgent:
     instead of calling a real model.
     """
 
-    def __init__(self, structured_factory: StructuredFactory | None = None) -> None:
+    def __init__(
+        self,
+        structured_factory: StructuredFactory | None = None,
+        retry_backoff: bool = True,
+    ) -> None:
         self._prompt = build_knowledge_query_prompt()
         self._structured_factory = structured_factory or _default_structured_factory
+        # `False` 면 재시도 사이에 기다리지 않는다(ARTEL-1039). 기본값 `True` 는
+        # `with_retry` 의 exponential jitter backoff 그대로이고, 시도 횟수와 마지막 오류는
+        # 어느 쪽이든 같다. 형식이 틀린 답만 내는 가짜 모델로 재시도를 다 쓰는 테스트가
+        # 그 backoff 를 실제로 기다리던 자리다.
+        self.retry_backoff = retry_backoff
 
     async def run(
         self,
@@ -57,6 +66,7 @@ class KnowledgeQueryAgent:
         chain = (self._prompt | structured).with_retry(
             retry_if_exception_type=(OutputParserException,),
             stop_after_attempt=_MAX_ATTEMPTS,
+            wait_exponential_jitter=self.retry_backoff,
         )
         try:
             generated = await chain.ainvoke(
