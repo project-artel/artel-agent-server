@@ -66,13 +66,13 @@ class GameFunctionCatalog(BaseModel):
     cheats: list[GameFunctionEntry] = Field(default_factory=list)
     behaviors: list[GameFunctionEntry] = Field(default_factory=list)
 
-    def entries(self, kind: "FunctionKind") -> list[GameFunctionEntry]:
+    def entries(self, kind: FunctionKind) -> list[GameFunctionEntry]:
         return self.cheats if kind == "cheat" else self.behaviors
 
-    def entry(self, kind: "FunctionKind", name: str) -> GameFunctionEntry | None:
+    def entry(self, kind: FunctionKind, name: str) -> GameFunctionEntry | None:
         return next((one for one in self.entries(kind) if one.name == name), None)
 
-    def names(self, kind: "FunctionKind") -> list[str]:
+    def names(self, kind: FunctionKind) -> list[str]:
         return [one.name for one in self.entries(kind)]
 
 

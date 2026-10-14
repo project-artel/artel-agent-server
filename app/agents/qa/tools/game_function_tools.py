@@ -16,6 +16,7 @@ from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.tools.tool_context import ToolContext
 from app.prompts import load_tool_description
+from app.qa.channel import QaRunChannel
 from app.qa.envelope import ActionResultItem, JsonRpcAction
 from app.qa.game_functions import (
     ActiveBehavior,
@@ -270,7 +271,8 @@ def build_behavior_tools(ctx: ToolContext) -> list[BaseTool]:
         spent = _out_of_calls()
         if spent is not None:
             return spent
-        if (behavior_id is None) == (not all):
+        # 둘 중 정확히 하나여야 한다.
+        if all == (behavior_id is not None):
             return (
                 "Pass either `behavior_id` or `all: true`, not both and not neither. "
                 "Nothing was sent."
@@ -330,7 +332,7 @@ def build_behavior_tools(ctx: ToolContext) -> list[BaseTool]:
     return [start_behavior, stop_behavior, extend_behavior]
 
 
-def _stopped_line(channel, item: ActionResultItem) -> str:
+def _stopped_line(channel: QaRunChannel, item: ActionResultItem) -> str:
     """`stop_behavior` 의 답. 멈춘 id 를 도는 목록에서 바로 뺀다 — `BEHAVIOR_ENDED` 도 곧 온다."""
     if not item.success:
         return _failed(item)

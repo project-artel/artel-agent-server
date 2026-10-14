@@ -406,7 +406,7 @@ class PulseMemory(BaseModel):
     behaviors: list[RunningBehavior] = Field(default_factory=list)
     # view 에 function 줄을 그릴 때 쓰는, 지금 test case 가 허용하는 이름. 축이 꺼진 쪽은
     # `None` 이고 그 쪽 줄이 없다. 둘 다 `None` 이면 view 가 이 필드가 생기기 전과 같다.
-    # tool 이 지금 step 을 옮길 때 고친다(`GameFunctionSession.focus`).
+    # tool 이 지금 step 을 옮길 때 고친다(`app/agents/qa/tools/game_function_tools.py` 의 `focus`).
     allowed_cheats: list[str] | None = None
     allowed_behaviors: list[str] | None = None
 
