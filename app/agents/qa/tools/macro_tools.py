@@ -52,6 +52,7 @@ from app.agents.qa.macro.errors import MacroFailure, MacroRejection
 from app.agents.qa.macro.grammar import DECLARABLE_TYPE_NAMES, NONE_FITS, MacroType
 from app.agents.qa.macro.model import MacroDefinition, MacroParameter
 from app.agents.qa.macro.parser import imported_names, macro_definition_from_source
+from app.agents.qa.macro.selector_check import reject_unstable_selectors
 from app.agents.qa.macro.session import MacroSession
 from app.agents.qa.macro.runner import (
     MacroAskRequest,
@@ -335,7 +336,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         return state.macros.adopt(definition, tuple(answer.screen_ids)), ""
 
     async def _parsed(
-        name: str, source: str, importing: tuple[str, ...] = ()
+        name: str, source: str, importing: tuple[str, ...] = (), *, writing: bool = False
     ) -> tuple[MacroDefinition | None, str]:
         """파싱해 보고 결과를 말한다. 등록하지도, 실행하지도 않는다.
 
@@ -344,6 +345,10 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         지난 런이 등록한 것을 가져온다. 가져온 macro 도 자기 import 가 있으면 같은 길로
         파싱하므로, `importing` 이 지금 풀고 있는 이름들을 들고 가서 `a` 가 `b` 를, `b` 가
         `a` 를 가져오는 순환을 끊는다.
+
+        `writing` 은 쓰는 길(`write_macro`, `edit_macro`, `register_macro`)만 켠다. 그때는
+        `#id`, `-`, 빈 문자열을 겨누는 `selector` 도 거절한다(ARTEL-1026). 저장된 macro 와
+        가져온 macro 를 읽는 길은 켜지 않으므로 이미 저장된 row 는 계속 parse 된다.
         """
         imports: dict[str, MacroDefinition] = {}
         for imported in imported_names(source):
@@ -363,7 +368,10 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
                     ).render()
             imports[imported] = registered.definition
         try:
-            return macro_definition_from_source(name, source, imports=imports), ""
+            definition = macro_definition_from_source(name, source, imports=imports)
+            if writing:
+                reject_unstable_selectors(source)
+            return definition, ""
         except MacroRejection as rejection:
             return None, rejection.render()
 
@@ -379,7 +387,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         if not macro_name:
             return "`name` must say what to call this macro, so nothing was written."
 
-        definition, problem = await _parsed(macro_name, source or "")
+        definition, problem = await _parsed(macro_name, source or "", writing=True)
         if definition is None:
             # 거절된 초안도 저장하지 않는다. 저장하면 `read_macro` 가 부를 수 없는 글을
             # 초안이라고 돌려주고, agent 는 그것을 고치면 된다고 읽는다.
@@ -444,7 +452,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
             )
 
         changed = draft.replace(old_text, new_text, 1)
-        definition, problem = await _parsed(macro_name, changed)
+        definition, problem = await _parsed(macro_name, changed, writing=True)
         if definition is None:
             return (
                 f"{macro_name} was not changed, because the result does not parse: "
@@ -529,7 +537,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
                 "`write_macro` is where a draft starts."
             )
 
-        definition, problem = await _parsed(macro_name, draft)
+        definition, problem = await _parsed(macro_name, draft, writing=True)
         if definition is None:
             _review_stays_open()
             # 아무것도 등록하지 않는다. 저장된 뒤에 허용 목록이 좁아진 정의가 실행
