@@ -16,6 +16,7 @@ from app.llm.models import (
     get_model_spec,
     validate_reasoning,
 )
+from app.llm.api_key import KeyRefreshOnUnauthorized, get_llm_api_key_provider
 from app.llm.usage import UsageCallback
 
 
@@ -244,10 +245,15 @@ def build_chat_model(
         # Opus 4096) or nothing caches, silently and at no extra charge.
         extra_body["cache_control"] = {"type": "ephemeral"}
 
+    # A callable, not a string: this client is cached for the process, and the key
+    # must be able to change under it (an administrator replacing it) without a
+    # restart. The client calls it on every request.
+    key_provider = get_llm_api_key_provider()
+
     return ChatOpenAI(
         model=model.value,
         base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key or "missing",
+        api_key=key_provider.get_or_placeholder,
         temperature=TEMPERATURE,
         default_headers=headers or None,
         extra_body=extra_body,
@@ -255,7 +261,7 @@ def build_chat_model(
         # Why these values: see Settings.openrouter_timeout_seconds.
         timeout=settings.openrouter_timeout_seconds,
         max_retries=settings.openrouter_max_retries,
-        callbacks=[UsageCallback()],
+        callbacks=[UsageCallback(), KeyRefreshOnUnauthorized(key_provider)],
     )
 
 

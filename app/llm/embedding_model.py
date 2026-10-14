@@ -14,10 +14,12 @@ whether a re-index is due.
 from dataclasses import dataclass
 from functools import lru_cache
 
+import openai
 from langchain_core.embeddings import Embeddings
 from langchain_openai import OpenAIEmbeddings
 
 from app.config import Settings, get_settings
+from app.llm.api_key import get_llm_api_key_provider
 from app.llm.usage import build_usage_http_client
 
 
@@ -57,8 +59,11 @@ def build_embedding_model(
         model=model,
         dimensions=dimensions,
         openai_api_base=settings.embedding_base_url or settings.llm_base_url,
+        # An explicit embedding key wins and stays fixed. Otherwise the chat key
+        # provider answers on every request, so a key replaced by an administrator
+        # reaches embeddings too without a restart.
         openai_api_key=(
-            settings.embedding_api_key or settings.llm_api_key or "missing"
+            settings.embedding_api_key or get_llm_api_key_provider().get_or_placeholder
         ),
         default_headers=headers or None,
         # Left on, LangChain re-encodes every input with tiktoken, splits it at
@@ -117,7 +122,13 @@ class EmbeddingClient:
                 f"{len(texts)} texts exceeds the limit of {self._batch_limit} per call."
             )
 
-        vectors = await self._embeddings.aembed_documents(texts)
+        try:
+            vectors = await self._embeddings.aembed_documents(texts)
+        except openai.AuthenticationError:
+            # The key may have just been replaced. Forget the cached one and try
+            # once more; a second 401 is a genuinely bad key and propagates.
+            get_llm_api_key_provider().invalidate()
+            vectors = await self._embeddings.aembed_documents(texts)
         return EmbeddingResult(
             model=self._model,
             dimensions=self._dimensions,
