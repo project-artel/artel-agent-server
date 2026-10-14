@@ -1031,7 +1031,9 @@ def _render(result: MacroRunResult) -> str:
     lines.append(_places("Reached the game", result.applied))
     not_yet = "Not sent yet" if result.paused_at is not None else "Did NOT reach the game"
     lines.append(_places(not_yet, result.pending))
-    lines.append(_places("Skipped by an `if` or a loop that ran no passes", result.skipped))
+    lines.append(
+        _places("Skipped by an `if`, a `match` or a loop that ran no passes", result.skipped)
+    )
     if any(place.passes for place in result.applied + result.pending):
         # 반복이 있으면 번호는 적힌 줄이고, 몇 회째인지는 괄호에 있다. `pending` 은 적힌
         # 줄을 한 번씩만 든다 — 반복의 남은 회는 거기 따로 안 적힌다.
