@@ -369,3 +369,76 @@ def test_return_statement_requires_exactly_one_condition_or_value() -> None:
         MacroReturnStatement(source="return")
     with pytest.raises(ValidationError):
         MacroReturnStatement(source="return both", condition=condition, value=True)
+
+
+def test_match_ask_context_and_imports_survive_a_json_round_trip() -> None:
+    """parser 가 아직 이 문법을 받지 않으므로 모델을 직접 만든다."""
+    from app.agents.qa.macro.grammar import MacroShape
+    from app.agents.qa.macro.model import (
+        MacroAskCondition,
+        MacroContextFindAll,
+        MacroContextLiteral,
+        MacroContextName,
+        MacroContextTarget,
+        MacroDecideCall,
+        MacroFindValue,
+        MacroFunction,
+        MacroHelperCallStatement,
+        MacroLiteral,
+        MacroMatchCase,
+        MacroMatchStatement,
+        MacroNameTarget,
+        MacroStringLiteral,
+        MacroWhileStatement,
+    )
+
+    context = (
+        MacroContextTarget(key="boss", target=MacroNameTarget(name="boss")),
+        MacroContextFindAll(
+            key="hand", find=MacroFindValue(name=MacroStringLiteral(value="Card(Clone)"))
+        ),
+        MacroContextName(key="hp", name="hp", declared_type=MacroType.float_),
+        MacroContextLiteral(
+            key="goal", literal=MacroLiteral(shape=MacroShape.string, value="win")
+        ),
+    )
+    end_turn = MacroDefinition(
+        name="end_turn",
+        source="def end_turn() -> None: ...",
+        entry=MacroFunction(name="end_turn", docstring="End the turn."),
+    )
+    match = MacroMatchStatement(
+        source="match decide(...):",
+        decide=MacroDecideCall(question="What now?", context=context),
+        cases=(
+            MacroMatchCase(
+                option="end_turn",
+                body=(MacroHelperCallStatement(source="end_turn()", callee="end_turn"),),
+            ),
+        ),
+    )
+    loop = MacroWhileStatement(
+        source="while ask(...):",
+        condition=MacroAskCondition(question="Still fighting?", context=context),
+        body=(match,),
+    )
+    definition = MacroDefinition(
+        name="play",
+        source="...",
+        entry=MacroFunction(name="play", docstring="Play.", statements=(loop,)),
+        imports=(end_turn,),
+    )
+
+    restored = MacroDefinition.model_validate(json.loads(definition.model_dump_json()))
+
+    assert restored == definition
+    assert restored.imported("end_turn") == end_turn
+    assert restored.function("end_turn") is None
+
+
+def test_old_json_without_imports_defaults_to_none() -> None:
+    definition = macro_definition_from_source("attack_with_combined_card", EXAMPLE)
+    stored = json.loads(definition.model_dump_json())
+    del stored["imports"]
+
+    assert MacroDefinition.model_validate(stored).imports == ()

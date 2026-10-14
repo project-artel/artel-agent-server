@@ -214,6 +214,21 @@ def test_write_macro_reports_the_parameters_run_macro_will_ask_for() -> None:
     assert "card: object" in answer
 
 
+def test_write_macro_refuses_an_instance_id_selector() -> None:
+    """`#id` 는 게임을 다시 띄우면 바뀐다. 쓰는 길에서 거절한다 (ARTEL-1026)."""
+    _, state, tools, _ = make()
+    source = (
+        "def tap_it() -> None:\n"
+        '    """Tap one thing."""\n'
+        '    click(selector("#-64624"))\n'
+    )
+
+    answer = call(tools["write_macro"], name="tap_it", source=source)
+
+    assert "changes between game launches" in answer
+    assert state.macros.draft("tap_it") is None
+
+
 # --- read ----------------------------------------------------------------------
 
 
@@ -609,11 +624,12 @@ def test_a_macro_answer_carries_one_pulse_view_however_many_actions_it_sent() ->
 
     answer = asyncio.run(drive())
 
-    assert "ran to the end. 2 action(s) reached the game." in answer
+    # `fold_stale_macro_results` 가 켜진 기본 run 은 끝까지 간 결과를 한 줄로 낸다(ARTEL-1026).
+    assert "two_presses ran to the end; 2 action(s) reached the game" in answer
     assert len(actions(sent)) == 2
     assert answer.count(PULSE_VIEW_START) == 1
-    # view 는 답의 끝, action 줄들 뒤에 있다.
-    assert answer.index("What the game said:") < answer.index(PULSE_VIEW_START)
+    # view 는 답의 끝, macro 결과 줄 뒤에 있다.
+    assert answer.index("ran to the end") < answer.index(PULSE_VIEW_START)
 
 
 def test_a_hand_sent_action_still_answers_with_the_screen() -> None:
@@ -953,7 +969,7 @@ def test_an_operator_ending_the_run_is_not_turned_into_a_sentence(monkeypatch) -
     call(tools["write_macro"], name="judge_the_card", source=COMPARED)
     call(tools["register_macro"], name="judge_the_card")
 
-    def give_up(_result):
+    def give_up(*_arguments, **_keywords):
         raise QaCancelled()
 
     monkeypatch.setattr(macro_tools, "_render", give_up)
@@ -1263,3 +1279,182 @@ def test_a_blank_docstring_counts_as_none_when_registering() -> None:
 
     assert "has no docstring" in refused
     assert state.macros.registered("blank") is None
+
+
+# --- import, match decide, ask --------------------------------------------------
+#
+# Jev 는 `JevClient(post=...)` 로 갈아 끼운다. 가져온 macro 는 게임에 아무것도 안 보내도록
+# `flag` 만 한다 — 이 층에서 재는 것은 import 를 찾는 길과 Jev 의 답이 글로 나오는 모양이다.
+
+END_TURN = (
+    "def end_turn() -> None:\n"
+    '    """End the turn when no card pair is worth casting."""\n'
+    '    flag("ended the turn")\n'
+)
+HEAL = (
+    "def heal() -> None:\n"
+    '    """Cast a holy card on the player when health is low."""\n'
+    '    flag("healed")\n'
+)
+PLAY = (
+    "from macros import end_turn, heal\n"
+    "\n"
+    "def play() -> None:\n"
+    '    """Pick one move for this turn."""\n'
+    '    match decide("What should the player do now?", goal="win"):\n'
+    '        case "end_turn":\n'
+    "            end_turn()\n"
+    '        case "heal":\n'
+    "            heal()\n"
+)
+
+
+def jev_answering(state: QaRunState, answer: dict, requests: list[dict] | None = None) -> None:
+    from app.qa.jev import JevClient
+
+    async def post(body: dict) -> dict:
+        if requests is not None:
+            requests.append(body)
+        return {"answers": {"answer": answer}}
+
+    state.jev = JevClient(post=post)
+
+
+def registered_play():
+    channel, state, tools, sent = make()
+    with_cards(channel)
+    for name, source in (("end_turn", END_TURN), ("heal", HEAL), ("play", PLAY)):
+        call(tools["write_macro"], name=name, source=source)
+        call(tools["register_macro"], name=name)
+    return channel, state, tools, sent
+
+
+def test_a_macro_imports_one_registered_in_this_run() -> None:
+    _channel, state, _tools, _sent = registered_play()
+
+    registered = state.macros.registered("play")
+
+    assert registered is not None
+    assert [one.name for one in registered.definition.imports] == ["end_turn", "heal"]
+
+
+def test_an_import_nobody_registered_is_refused_before_anything_is_written() -> None:
+    _channel, state, tools, sent = make()
+
+    async def scenario():
+        refuse_macro(_channel, sent, MessageType.MACRO_READ, "no macro by that name")
+        return await invoke(tools["write_macro"], name="play", source=PLAY)
+
+    answer = asyncio.run(scenario())
+
+    assert MACRO_NODE_REJECTED in answer
+    assert "`end_turn` is imported but cannot be found" in answer
+    assert state.macros.draft("play") is None
+
+
+def test_imports_that_go_round_in_a_circle_are_refused() -> None:
+    _channel, state, tools, sent = make()
+    loop_a = (
+        "from macros import loop_b\n\n"
+        "def loop_a() -> None:\n"
+        '    """A."""\n'
+        "    loop_b()\n"
+    )
+    loop_b = (
+        "from macros import loop_a\n\n"
+        "def loop_b() -> None:\n"
+        '    """B."""\n'
+        "    loop_a()\n"
+    )
+
+    async def scenario():
+        answer_macro(
+            _channel,
+            sent,
+            MessageType.MACRO_READ,
+            MessageType.MACRO_READ_RESULT,
+            {"name": "loop_b", "source": loop_b, "screen_ids": []},
+        )
+        return await invoke(tools["write_macro"], name="loop_a", source=loop_a)
+
+    answer = asyncio.run(scenario())
+
+    assert MACRO_NODE_REJECTED in answer
+    assert "go round in a circle: loop_a → loop_b → loop_a" in answer
+
+
+def test_decide_runs_the_case_jev_picked_and_lists_the_decision() -> None:
+    _channel, state, tools, _sent = registered_play()
+    requests: list[dict] = []
+    jev_answering(state, {"choice": "heal"}, requests)
+
+    answer = call(tools["run_macro"], name="play")
+
+    assert "ran to the end" in answer
+    assert "Decisions:" in answer and "decide picked heal" in answer
+    assert "FLAG" in answer and "healed" in answer and "ended the turn" not in answer
+    question = requests[0]["questions"]["answer"]
+    assert question["type"] == "choice"
+    assert question["instructions"] == "What should the player do now?"
+    # 선택지 설명은 가져온 macro 의 docstring 이고, `none_fits` 가 맨 끝에 붙는다.
+    assert question["criteria"]["heal"]["what"] == (
+        "Cast a holy card on the player when health is low."
+    )
+    assert list(question["criteria"])[-1] == "none_fits"
+    assert requests[0]["state"]["goal"] == "win"
+    assert requests[0]["state"]["scene"] == "Battle"
+
+
+def test_none_fits_pauses_and_tells_the_agent_to_add_the_missing_macro() -> None:
+    _channel, state, tools, _sent = registered_play()
+    jev_answering(state, {"choice": "none_fits"})
+
+    async def scenario():
+        paused = await invoke(tools["run_macro"], name="play")
+        carried_on = await invoke(tools["resume_macro"], proceed=True)
+        return paused, carried_on
+
+    paused, carried_on = asyncio.run(scenario())
+
+    assert "PAUSED" in paused and "none of the imported macros fits" in paused
+    assert "Options it had: end_turn, heal." in paused
+    assert '"goal": "win"' in paused
+    assert "add a `case` for it" in paused
+    assert "ran to the end" in carried_on
+    assert state.paused_macro is None
+
+
+def test_jev_failing_stops_the_macro_with_jev_failed() -> None:
+    _channel, state, tools, _sent = registered_play()
+    from app.qa.jev import JevClient
+
+    async def post(body: dict) -> dict:
+        raise RuntimeError("connection refused")
+
+    state.jev = JevClient(post=post)
+
+    answer = call(tools["run_macro"], name="play")
+
+    assert "JEV_FAILED" in answer
+    assert "connection refused" in answer
+
+
+def test_ask_turns_jev_probability_into_a_branch() -> None:
+    channel, state, tools, _sent = make()
+    with_cards(channel)
+    source = (
+        "def look() -> None:\n"
+        '    """Flag whether the board looks finished."""\n'
+        '    if ask("Is the fight over?", goal="win"):\n'
+        '        flag("over")\n'
+        "    else:\n"
+        '        flag("still going")\n'
+    )
+    call(tools["write_macro"], name="look", source=source)
+    call(tools["register_macro"], name="look")
+    jev_answering(state, {"noul": 0.2})
+
+    answer = call(tools["run_macro"], name="look")
+
+    assert "still going" in answer
+    assert "ask 'Is the fight over?' -> 0.20 (false)" in answer

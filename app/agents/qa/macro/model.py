@@ -203,15 +203,9 @@ class MacroPredicateCondition(_Frozen):
     arguments: tuple[MacroArgument, ...] = ()
 
 
-MacroCondition = Annotated[
-    Union[MacroComparisonCondition, MacroReaderCondition, MacroPredicateCondition],
-    Field(discriminator="kind"),
-]
-
-
-# --- 대입의 오른쪽 -------------------------------------------------------------
-
-
+# `find(...)` 의 모양. 대입의 오른쪽이 주로 쓰지만, 아래 `MacroContextFindAll` 이 먼저
+# 참조하므로 여기 둔다. Python 3.13 이하(CI image 는 3.12)에서는 class 본문의 annotation 이
+# 정의되는 순간 평가되어, 뒤에 두면 import 할 때 `NameError` 가 난다.
 class MacroFindValue(_Frozen):
     """`find(label=..., name=..., under=...)`. keyword 만 받는다."""
 
@@ -219,6 +213,103 @@ class MacroFindValue(_Frozen):
     label: MacroStringRef | None = None
     name: MacroStringRef | None = None
     under: MacroStringRef | None = None
+
+
+# --- Jev 에게 넘기는 context ----------------------------------------------------
+#
+# `decide(...)` 와 `ask(...)` 의 keyword 인자 하나가 Jev 요청 `state` 의 key 하나다. key 는
+# agent 가 적은 keyword 이름 그대로이고, 값의 모양은 아래 넷 중 하나다. `scene` 은 runner 가
+# 언제나 넣으므로 keyword 로 쓸 수 없다.
+
+
+class MacroContextTarget(_Frozen):
+    """`boss=boss` 나 `boss=selector("...")`. 그 object 의 member 값 전부가 들어간다."""
+
+    kind: Literal["target"] = "target"
+    key: str
+    target: MacroTarget
+
+
+class MacroContextFindAll(_Frozen):
+    """`hand=find_all(name="Card(Clone)")`. 잡힌 object 전부의 목록이 들어간다.
+
+    손패처럼 같은 이름의 object 여럿을 한 번에 보여 줄 자리다. `for` 의 `find_all` 과 같은
+    keyword 를 받고, 0 개면 빈 목록이다.
+    """
+
+    kind: Literal["find_all"] = "find_all"
+    key: str
+    find: MacroFindValue
+
+
+class MacroContextUnder(_Frozen):
+    """`hand=under("DebugCanvas[4]/Hand[1]")` 나 `hud=under(panel)`. 그 object 와 그 아래 전부.
+
+    `pulse` 가 들고 있는 live object 중 경로가 `root` 의 경로와 같거나 그 아래인 것 전부의
+    목록이 들어간다. `find_all` 과 달리 이름을 몰라도 되므로, 패널 하나를 통째로 보여 줄
+    자리다. 경로 문자열은 `MacroSelectorTarget` 으로, object 이름은 `MacroNameTarget` 으로 든다.
+    """
+
+    kind: Literal["under"] = "under"
+    key: str
+    root: MacroTarget
+
+
+class MacroContextName(_Frozen):
+    """`hp=hp`. 앞에서 reader 로 bind 한 값이 bind 된 그대로 들어간다."""
+
+    kind: Literal["name"] = "name"
+    key: str
+    name: str
+    declared_type: MacroType
+
+
+class MacroContextLiteral(_Frozen):
+    """`goal="beat the boss"`. 적힌 리터럴이 그대로 들어간다."""
+
+    kind: Literal["literal"] = "literal"
+    key: str
+    literal: MacroLiteral
+
+
+MacroContextArgument = Annotated[
+    Union[
+        MacroContextTarget,
+        MacroContextFindAll,
+        MacroContextUnder,
+        MacroContextName,
+        MacroContextLiteral,
+    ],
+    Field(discriminator="kind"),
+]
+
+
+class MacroAskCondition(_Frozen):
+    """`ask("<question>", key=value, ...)`. Jev 가 참이라고 볼 확률이 0.5 이상이면 참이다.
+
+    `if`·`while`·`require` 의 조건 **전체**로만 선다. 조건 평가는 동기 함수이고 Jev 호출은
+    네트워크를 타므로, 그 세 statement 가 평가 전에 따로 기다린다. `wait_until` 과 predicate
+    안에서는 저장 때 거절한다 — 앞의 것은 `pulse` 마다 Jev 를 부르게 되고, 뒤의 것은 동기로
+    평가된다.
+    """
+
+    kind: Literal["ask"] = "ask"
+    question: str
+    context: tuple[MacroContextArgument, ...] = ()
+
+
+MacroCondition = Annotated[
+    Union[
+        MacroComparisonCondition,
+        MacroReaderCondition,
+        MacroPredicateCondition,
+        MacroAskCondition,
+    ],
+    Field(discriminator="kind"),
+]
+
+
+# --- 대입의 오른쪽 -------------------------------------------------------------
 
 
 class MacroSelectorValue(_Frozen):
@@ -415,6 +506,32 @@ class MacroCheckpointStatement(_Statement):
     reason: str = ""
 
 
+class MacroDecideCall(_Frozen):
+    """`match` 의 주어인 `decide("<question>", key=value, ...)`."""
+
+    question: str
+    context: tuple[MacroContextArgument, ...] = ()
+
+
+class MacroMatchCase(_Frozen):
+    """`case "<imported macro>":` 하나. Jev 가 읽는 선택지 설명은 그 macro 의 docstring 이다."""
+
+    option: str
+    body: tuple["MacroStatement", ...] = ()
+
+
+class MacroMatchStatement(_Statement):
+    """`match decide(...):`. Jev 가 고른 `case` 하나의 몸통을 돈다.
+
+    runner 가 선택지에 `NONE_FITS` 를 하나 더 붙인다. Jev 가 그것을 고르면 `checkpoint` 와
+    같은 방식으로 멈추고 agent 에게 턴을 돌려준다.
+    """
+
+    kind: Literal["match"] = "match"
+    decide: MacroDecideCall
+    cases: tuple[MacroMatchCase, ...] = ()
+
+
 MacroStatement = Annotated[
     Union[
         MacroActionStatement,
@@ -429,11 +546,14 @@ MacroStatement = Annotated[
         MacroCheckpointStatement,
         MacroWaitUntilStatement,
         MacroReturnStatement,
+        MacroMatchStatement,
     ],
     Field(discriminator="kind"),
 ]
 
 MacroIfStatement.model_rebuild()
+MacroMatchCase.model_rebuild()
+MacroMatchStatement.model_rebuild()
 MacroForStatement.model_rebuild()
 MacroWhileStatement.model_rebuild()
 
@@ -475,11 +595,25 @@ class MacroDefinition(_Frozen):
     source: str
     entry: MacroFunction
     helpers: tuple[MacroFunction, ...] = ()
+    # `from macros import a, b` 로 가져온 등록된 macro 들. 각자 자기 `entry` 와 `helpers` 를
+    # 그대로 들어서, 두 macro 의 helper 이름이 겹쳐도 섞이지 않는다. 저장된 JSON 에도 실리지만
+    # 읽는 쪽은 없다 — 읽을 때마다 `source` 를 **지금** 등록된 macro 들로 다시 파싱한다.
+    imports: tuple["MacroDefinition", ...] = ()
 
     def function(self, name: str) -> MacroFunction | None:
+        """이 source 에 적힌 `def` 하나. 가져온 macro 는 `imported` 로 찾는다."""
         if name == self.entry.name:
             return self.entry
         for helper in self.helpers:
             if helper.name == name:
                 return helper
         return None
+
+    def imported(self, name: str) -> "MacroDefinition | None":
+        for definition in self.imports:
+            if definition.name == name:
+                return definition
+        return None
+
+
+MacroDefinition.model_rebuild()

@@ -272,6 +272,8 @@ def fold_kinds_for(arch: ResolvedArch) -> frozenset[FoldKind]:
         kinds.add(FoldKind.knowledge_neighbours)
     if arch.skills == "on_demand" and arch.fold_stale_skills:
         kinds.add(FoldKind.skill)
+    if arch.fold_stale_macro_results:
+        kinds.add(FoldKind.macro_result)
     if arch.vision:
         kinds.add(FoldKind.image)
     return frozenset(kinds)
@@ -814,6 +816,9 @@ class QaRunner:
             if state.paused_macro is not None:
                 state.paused_macro.cancel()
                 state.paused_macro = None
+            if state.jev is not None:
+                jev, state.jev = state.jev, None
+                await jev.aclose()
             judge = channel.pulse_relevance
             if judge is not None:
                 channel.pulse_relevance = None

@@ -1695,3 +1695,477 @@ def chest_is_there() -> bool:
         "was true after 0.8s (1 pulses)"
     ]
     assert len(result.applied) == 1
+
+
+# --- `import`, `match decide(...)`, `ask(...)` --------------------------------------
+#
+# parser 가 아직 새 문법을 안 받으므로 정의를 model 로 직접 세운다.
+
+from app.agents.qa.macro.errors import JEV_FAILED  # noqa: E402
+from app.agents.qa.macro.grammar import NONE_FITS, NONE_FITS_DESCRIPTION  # noqa: E402
+from app.agents.qa.macro.model import (  # noqa: E402
+    MacroActionStatement,
+    MacroAskCondition,
+    MacroContextLiteral,
+    MacroDecideCall,
+    MacroForStatement,
+    MacroHelperCallStatement,
+    MacroMatchCase,
+    MacroMatchStatement,
+    MacroRangeIterable,
+)
+from app.agents.qa.macro.runner import MacroJevUnavailable  # noqa: E402
+
+
+def press(key: str) -> MacroActionStatement:
+    """`press_key` 하나. 어느 몸통이 돌았는지를 `summaries` 로 읽으려고 key 를 이름처럼 쓴다."""
+    return MacroActionStatement(
+        source=f'press_key("{key}", 0.1)',
+        callee="press_key",
+        arguments=(
+            MacroLiteralArgument(
+                parameter="key_code", literal=MacroLiteral(shape=MacroShape.string, value=key)
+            ),
+            MacroLiteralArgument(
+                parameter="duration_seconds",
+                literal=MacroLiteral(shape=MacroShape.number, value=0.1),
+            ),
+        ),
+    )
+
+
+def call(callee: str) -> MacroHelperCallStatement:
+    return MacroHelperCallStatement(source=f"{callee}()", callee=callee)
+
+
+def function(name: str, *statements, docstring: str | None = None) -> MacroFunction:
+    return MacroFunction(name=name, docstring=docstring, statements=statements)
+
+
+def macro(
+    name: str,
+    *statements,
+    docstring: str | None = None,
+    helpers: tuple[MacroFunction, ...] = (),
+    imports: tuple[MacroDefinition, ...] = (),
+) -> MacroDefinition:
+    return MacroDefinition(
+        name=name,
+        source="model-built macro",
+        entry=function(name, *statements, docstring=docstring),
+        helpers=helpers,
+        imports=imports,
+    )
+
+
+def match(*options: tuple[str, tuple], question: str = "What now?", context=()) -> MacroMatchStatement:
+    return MacroMatchStatement(
+        source=f'match decide("{question}"):',
+        decide=MacroDecideCall(question=question, context=context),
+        cases=tuple(MacroMatchCase(option=option, body=body) for option, body in options),
+    )
+
+
+def ask(question: str = "Is it on?") -> MacroAskCondition:
+    return MacroAskCondition(question=question)
+
+
+class JevHost(FakeHost):
+    """`decide` 와 `ask` 가 적어 둔 답을 차례로 낸다. 예외를 적어 두면 그것을 낸다."""
+
+    def __init__(
+        self,
+        memory: SceneMemory | None = None,
+        picks: list | None = None,
+        probabilities: list | None = None,
+        decisions: list[bool] | None = None,
+    ) -> None:
+        super().__init__(memory or scene_with(scene="Battle"), decisions=decisions)
+        self.picks = list(picks or [])
+        self.probabilities = list(probabilities or [])
+        self.decide_requests: list = []
+        self.ask_requests: list = []
+        self.paused_decisions: list = []
+
+    async def decide(self, request) -> str:
+        self.decide_requests.append(request)
+        answer = self.picks.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    async def ask(self, request) -> float:
+        self.ask_requests.append(request)
+        answer = self.probabilities.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    async def checkpoint(self, result) -> bool:
+        self.paused_decisions.append(result.paused_decision)
+        return await super().checkpoint(result)
+
+    def keys(self) -> list[str]:
+        return [actions[0].params[0] for actions, _, _ in self.sent]
+
+
+def run_definition(host: FakeHost, definition: MacroDefinition):
+    return asyncio.run(run_macro(host, definition, {}, 2))
+
+
+def fight() -> MacroDefinition:
+    return macro(
+        "fight",
+        call("strike"),
+        docstring="Strike the boss once.",
+        helpers=(function("strike", press("F")),),
+    )
+
+
+def heal() -> MacroDefinition:
+    return macro("heal", press("H"), docstring="Heal the player with the holy card.")
+
+
+def test_an_imported_macro_runs_its_own_helper_not_the_callers_helper_of_the_same_name() -> None:
+    host = JevHost()
+    root = macro(
+        "m",
+        call("fight"),
+        call("strike"),
+        helpers=(function("strike", press("R")),),
+        imports=(fight(),),
+    )
+
+    result = run_definition(host, root)
+
+    assert result.passed, result.failure
+    assert host.keys() == ["F", "R"]
+    assert [str(place) for place in result.applied] == [
+        "strike step 1 of 1",
+        "strike step 1 of 1",
+    ]
+
+
+def test_an_imported_macro_resolves_its_own_imports() -> None:
+    host = JevHost()
+    inner = macro("inner", press("I"), docstring="Inner.")
+    middle = macro("middle", call("inner"), press("M"), docstring="Middle.", imports=(inner,))
+    root = macro("m", call("middle"), press("R"), imports=(middle,))
+
+    result = run_definition(host, root)
+
+    assert result.passed, result.failure
+    assert host.keys() == ["I", "M", "R"]
+    assert [str(place) for place in result.applied] == [
+        "inner step 1 of 1",
+        "middle step 2 of 2",
+        "m step 2 of 2",
+    ]
+
+
+def test_a_failure_inside_an_imported_macro_names_the_import_in_the_chain() -> None:
+    host = JevHost()
+    broken = macro(
+        "broken",
+        MacroRequireStatement(
+            source='require(scene() == "Elsewhere", "Go elsewhere.")',
+            condition=scene_is("Elsewhere"),
+            remedy="Go elsewhere.",
+        ),
+        docstring="Broken.",
+    )
+    root = macro("m", call("broken"), press("R"), imports=(broken,))
+
+    result = run_definition(host, root)
+
+    assert result.failure.code == SCENE_MISMATCH
+    assert [str(place) for place in result.chain] == ["m step 1 of 2", "broken step 1 of 1"]
+    assert [str(place) for place in result.pending] == ["m step 2 of 2"]
+    assert result.failure.payload["macro"] == "m"
+
+
+def test_a_checkpoint_inside_an_imported_macro_pauses_the_whole_run() -> None:
+    host = JevHost(decisions=[False])
+    paused = macro(
+        "paused",
+        MacroCheckpointStatement(source='checkpoint("look")', reason="look"),
+        press("P"),
+        docstring="Pauses.",
+    )
+    root = macro("m", call("paused"), press("R"), imports=(paused,))
+
+    result = run_definition(host, root)
+
+    assert host.paused[0]["at"] == "paused step 1 of 2"
+    assert host.paused[0]["pending"] == ["paused step 2 of 2", "m step 2 of 2"]
+    assert host.paused_decisions == [None]
+    assert host.sent == []
+    assert str(result.abandoned_at) == "paused step 1 of 2"
+    assert result.failure is None
+
+
+def fight_or_heal(**keywords) -> MacroDefinition:
+    return macro(
+        "m",
+        match(("fight", (call("fight"),)), ("heal", (call("heal"), press("X"))), **keywords),
+        press("Z"),
+        imports=(fight(), heal()),
+    )
+
+
+@pytest.mark.parametrize(
+    ("pick", "keys", "skipped"),
+    [
+        ("fight", ["F", "Z"], ["m step 3 of 5", "m step 4 of 5"]),
+        ("heal", ["H", "X", "Z"], ["m step 2 of 5"]),
+    ],
+)
+def test_decide_runs_only_the_case_jev_picked_and_skips_the_others(pick, keys, skipped) -> None:
+    host = JevHost(picks=[pick])
+
+    result = run_definition(host, fight_or_heal())
+
+    assert result.passed, result.failure
+    assert host.keys() == keys
+    assert [str(place) for place in result.skipped] == skipped
+    assert result.decisions == [f"m step 1 of 5: decide picked {pick}"]
+    # `match` 하나와 고른 몸통만 센다. fight 는 `match`·`fight()`·`strike()`·F·Z, heal 은
+    # `match`·`heal()`·H·X·Z 로 둘 다 다섯이다.
+    assert result.executed == 5
+
+
+def test_the_options_are_the_imported_docstrings_with_none_fits_last() -> None:
+    goal = MacroContextLiteral(
+        key="goal", literal=MacroLiteral(shape=MacroShape.string, value="beat the boss")
+    )
+    host = JevHost(picks=["fight"])
+
+    run_definition(host, fight_or_heal(question="Which?", context=(goal,)))
+
+    (request,) = host.decide_requests
+    assert request.question == "Which?"
+    assert [(option.name, option.description) for option in request.options] == [
+        ("fight", "Strike the boss once."),
+        ("heal", "Heal the player with the holy card."),
+        (NONE_FITS, NONE_FITS_DESCRIPTION),
+    ]
+    assert request.state == {"scene": "Battle", "goal": "beat the boss"}
+    assert request.clipped == 0
+
+
+def test_a_case_that_names_no_imported_macro_has_an_empty_description() -> None:
+    host = JevHost(picks=["wait"])
+    root = macro(
+        "m",
+        match(("fight", (call("fight"),)), ("wait", (press("W"),))),
+        imports=(fight(),),
+    )
+
+    result = run_definition(host, root)
+
+    assert result.passed, result.failure
+    assert host.keys() == ["W"]
+    assert host.decide_requests[0].options[1].description == ""
+
+
+def test_none_fits_pauses_with_the_decision_and_resuming_goes_on_after_the_match() -> None:
+    host = JevHost(picks=[NONE_FITS], decisions=[True])
+
+    result = run_definition(host, fight_or_heal(question="Which?"))
+
+    assert result.passed, result.failure
+    assert host.keys() == ["Z"]
+    (decision,) = host.paused_decisions
+    assert decision is host.decide_requests[0]
+    assert host.paused == [
+        {
+            "at": "m step 1 of 5",
+            "reason": "no imported macro fits — Which?",
+            "applied": [],
+            "pending": ["m step 5 of 5"],
+            "sent": 0,
+        }
+    ]
+    assert result.decisions == [f"m step 1 of 5: decide picked {NONE_FITS}"]
+    assert [str(place) for place in result.skipped] == [
+        "m step 2 of 5",
+        "m step 3 of 5",
+        "m step 4 of 5",
+    ]
+    assert result.paused_decision is None and result.paused_at is None
+
+
+def test_none_fits_and_stopping_abandons_the_macro() -> None:
+    host = JevHost(picks=[NONE_FITS], decisions=[False])
+
+    result = run_definition(host, fight_or_heal())
+
+    assert host.sent == []
+    assert result.failure is None
+    assert str(result.abandoned_at) == "m step 1 of 5"
+    assert not result.passed
+    assert result.paused_decision is None
+
+
+def test_decide_inside_a_loop_asks_once_per_pass_and_names_the_pass() -> None:
+    host = JevHost(picks=["fight", "heal", "fight"])
+    loop = MacroForStatement(
+        source="for turn in range(3):",
+        name="turn",
+        declared_type=MacroType.int_,
+        iterable=MacroRangeIterable(count=MacroLiteral(shape=MacroShape.number, value=3)),
+        body=(match(("fight", (call("fight"),)), ("heal", (call("heal"),))),),
+    )
+    root = macro("m", loop, imports=(fight(), heal()))
+
+    result = run_definition(host, root)
+
+    assert result.passed, result.failure
+    assert host.keys() == ["F", "H", "F"]
+    assert result.decisions == [
+        "m step 2 of 4 (pass 1): decide picked fight",
+        "m step 2 of 4 (pass 2): decide picked heal",
+        "m step 2 of 4 (pass 3): decide picked fight",
+    ]
+    assert len(host.decide_requests) == 3
+
+
+def test_an_answer_that_is_not_an_option_stops_with_jev_failed() -> None:
+    host = JevHost(picks=["flee"])
+
+    result = run_definition(host, fight_or_heal(question="Which?"))
+
+    assert result.failure.code == JEV_FAILED
+    assert result.failure.payload["question"] == "Which?"
+    assert "'flee'" in result.failure.payload["reason"]
+    assert str(result.stopped_at) == "m step 1 of 5"
+    assert host.sent == []
+    assert result.decisions == []
+
+
+def test_jev_unavailable_on_decide_stops_with_jev_failed() -> None:
+    host = JevHost(picks=[MacroJevUnavailable("HTTP 503")])
+
+    result = run_definition(host, fight_or_heal(question="Which?"))
+
+    assert result.failure.code == JEV_FAILED
+    assert result.failure.payload["question"] == "Which?"
+    assert result.failure.payload["reason"] == "HTTP 503"
+    assert [str(place) for place in result.pending] == [
+        "m step 2 of 5",
+        "m step 3 of 5",
+        "m step 4 of 5",
+        "m step 5 of 5",
+    ]
+
+
+def test_a_decide_that_leaves_objects_out_says_how_many() -> None:
+    crowd = scene_with(
+        *(card(f"Root[0]/Crowd[1]/Member[{index}]", text="x" * 70) for index in range(200))
+    )
+    host = JevHost(crowd, picks=["fight"])
+
+    result = run_definition(host, fight_or_heal())
+
+    clipped = host.decide_requests[0].clipped
+    assert clipped > 0
+    assert result.decisions == [
+        f"m step 1 of 5: decide picked fight ({clipped} objects left out of the context)"
+    ]
+
+
+@pytest.mark.parametrize(("probability", "keys"), [(0.5, ["Y"]), (0.49, ["N"])])
+def test_ask_in_an_if_is_true_from_one_half(probability, keys) -> None:
+    host = JevHost(probabilities=[probability])
+    branch = MacroIfStatement(
+        source='if ask("Is it on?"):', condition=ask(), body=(press("Y"),), orelse=(press("N"),)
+    )
+
+    result = run_definition(host, macro("m", branch))
+
+    assert result.passed, result.failure
+    assert host.keys() == keys
+    value = "true" if probability >= 0.5 else "false"
+    assert result.decisions == [f"m step 1 of 3: ask 'Is it on?' -> {probability:.2f} ({value})"]
+    assert host.ask_requests[0].state == {"scene": "Battle", "objects": []}
+
+
+def test_ask_in_an_elif_is_asked_only_when_the_if_was_false() -> None:
+    host = JevHost(probabilities=[0.2, 0.8])
+    inner = MacroIfStatement(
+        source='elif ask("Second?"):', condition=ask("Second?"), body=(press("B"),)
+    )
+    branch = MacroIfStatement(
+        source='if ask("First?"):', condition=ask("First?"), body=(press("A"),), orelse=(inner,)
+    )
+
+    result = run_definition(host, macro("m", branch))
+
+    assert host.keys() == ["B"]
+    assert [request.question for request in host.ask_requests] == ["First?", "Second?"]
+    assert result.decisions == [
+        "m step 1 of 4: ask 'First?' -> 0.20 (false)",
+        "m step 3 of 4: ask 'Second?' -> 0.80 (true)",
+    ]
+    assert [str(place) for place in result.skipped] == ["m step 2 of 4"]
+
+
+def test_ask_as_a_while_guard_is_asked_before_every_pass() -> None:
+    host = JevHost(probabilities=[0.9, 0.5, 0.1])
+    loop = MacroWhileStatement(
+        source='while ask("Still fighting?"):', condition=ask("Still fighting?"), body=(press("F"),)
+    )
+
+    result = run_definition(host, macro("m", loop, press("Z")))
+
+    assert result.passed, result.failure
+    assert host.keys() == ["F", "F", "Z"]
+    assert result.decisions == [
+        "m step 1 of 3: ask 'Still fighting?' -> 0.90 (true)",
+        "m step 1 of 3: ask 'Still fighting?' -> 0.50 (true)",
+        "m step 1 of 3: ask 'Still fighting?' -> 0.10 (false)",
+    ]
+
+
+def test_ask_in_a_require_that_is_false_carries_the_probability() -> None:
+    host = JevHost(probabilities=[0.49])
+    requirement = MacroRequireStatement(
+        source='require(ask("Is the boss down?"), "Hit it again.")',
+        condition=ask("Is the boss down?"),
+        remedy="Hit it again.",
+    )
+
+    result = run_definition(host, macro("m", requirement, press("Z")))
+
+    assert result.failure.code == SCENE_MISMATCH
+    assert result.failure.payload["observed"] == {
+        "ask": repr({"question": "Is the boss down?", "probability": 0.49})
+    }
+    assert host.sent == []
+
+
+def test_ask_in_a_require_that_is_true_goes_on() -> None:
+    host = JevHost(probabilities=[0.5])
+    requirement = MacroRequireStatement(
+        source='require(ask("Ready?"), "Wait.")', condition=ask("Ready?"), remedy="Wait."
+    )
+
+    result = run_definition(host, macro("m", requirement, press("Z")))
+
+    assert result.passed, result.failure
+    assert host.keys() == ["Z"]
+
+
+def test_jev_unavailable_on_ask_stops_with_jev_failed() -> None:
+    host = JevHost(probabilities=[MacroJevUnavailable("no API key")])
+    loop = MacroWhileStatement(
+        source='while ask("Still fighting?"):', condition=ask("Still fighting?"), body=(press("F"),)
+    )
+
+    result = run_definition(host, macro("m", loop))
+
+    assert result.failure.code == JEV_FAILED
+    assert result.failure.payload["question"] == "Still fighting?"
+    assert result.failure.payload["reason"] == "no API key"
+    assert str(result.stopped_at) == "m step 1 of 2"
+    assert host.sent == []
