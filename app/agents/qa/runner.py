@@ -808,9 +808,6 @@ class QaRunner:
             if state.paused_macro is not None:
                 state.paused_macro.cancel()
                 state.paused_macro = None
-            if state.jev is not None:
-                jev, state.jev = state.jev, None
-                await jev.aclose()
             judge = channel.pulse_relevance
             if judge is not None:
                 channel.pulse_relevance = None

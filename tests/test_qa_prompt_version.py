@@ -306,14 +306,8 @@ def test_the_default_qa_version_is_v21() -> None:
     v21 ships with `wait_until` and the `-> bool` predicate (ARTEL-988): the macro
     skill's grammar gains the Waiting and Predicates sections, and its third example
     writes an `or` as a predicate and waits for the victory banner.
-
-    v22 ships with `from macros import`, `match decide(...)` and `ask(...)`: the
-    macro skill's grammar gains the Imports, Deciding, Asking and What Jev reads
-    sections, a fourth example plays a scene by letting Jev pick an imported macro
-    per turn, and the macro memory directive asks for that orchestration macro when
-    a scene already has macros.
     """
-    assert resolve_version("qa_run") == "v22"
+    assert resolve_version("qa_run") == "v21"
 
 
 # v20 이 고쳐 쓴 v19 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
@@ -1009,41 +1003,3 @@ def test_v21_teaches_wait_until_and_predicates_and_keeps_the_rest_of_v20() -> No
             if paragraph.lstrip("\n").startswith(rewrites):
                 continue
             assert paragraph in v21, (role, paragraph[:80])
-
-
-# v22 가 고쳐 쓴 v21 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
-V22_REWRITES_FROM_V21 = {
-    "skill_macro": (
-        "**The shape.**",
-        "**The statements.**",
-        "**Checkpoints.**",
-        "**Conditions.**",
-        "**Refused outright:**",
-        "**What you hold, you release.**",
-        "**The limits.**",
-        "**`resume_macro` answers a macro paused",
-        "## Three macros that pass",
-    ),
-    "tool_resume_macro": ("Carry on, or stop,",),
-    "macro_memory_directive": ("3. Send by hand only",),
-}
-
-
-def test_v22_teaches_import_decide_and_ask_and_keeps_the_rest_of_v21() -> None:
-    """v22 는 macro skill, resume_macro 설명, macro 지시문의 문단 몇 개만 고친다."""
-    skill = load_prompt("qa_run", "skill_macro", "v22").body
-    assert "**Imports.** `from macros import end_turn, cast_pair`" in skill
-    assert "**Deciding.** `match decide(" in skill
-    assert "**Asking.** `ask(" in skill
-    assert "**What Jev reads.**" in skill
-    assert "def play_the_battle() -> None:" in skill
-    directive = load_prompt("qa_run", "macro_memory_directive", "v22").body
-    assert "write one orchestration macro for the scene" in directive
-
-    for role, rewrites in V22_REWRITES_FROM_V21.items():
-        v21 = load_prompt("qa_run", role, "v21").body
-        v22 = load_prompt("qa_run", role, "v22").body
-        for paragraph in v21.split("\n\n"):
-            if paragraph.lstrip("\n").startswith(rewrites):
-                continue
-            assert paragraph in v22, (role, paragraph[:80])

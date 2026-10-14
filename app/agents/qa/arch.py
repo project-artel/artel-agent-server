@@ -390,18 +390,7 @@ from app.llm.models import LLMModel, get_model_spec
 #
 # v24 because the v22 change above landed on develop after v23 did, so the merged structure is
 # both: macros that can wait on top of `search_macros` and docstrings.
-#
-# v25 because a macro can now call other registered macros and let the Jev decision model choose
-# among them (plan `.plan/general/2026-10-13-macro-import-decide-and-ask.md`). `from macros import
-# a, b` makes registered macros callable like helpers; `match decide("<question>", key=value):`
-# asks Jev which imported macro's `case` fits the game now, reading each macro's docstring as the
-# option and the keywords as its context, and pauses like a `checkpoint` when none fits; `ask(...)`
-# is a condition Jev answers. The macro memory directive (prompt v22) asks the agent to write one
-# such orchestration macro per scene that already has macros. The tool set and every argument
-# schema are unchanged, so `arch_fingerprint` does not move; the label moves because an agent whose
-# macros pick their own next macro plays a scene with far fewer model turns than one that picks
-# every macro itself, and one bucket would mix the two.
-QA_ARCH_LABEL = "v25-macro-decide"
+QA_ARCH_LABEL = "v24-macro-wait-until"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

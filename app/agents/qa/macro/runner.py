@@ -61,10 +61,8 @@ from app.agents.qa.macro.binding import (
     resolve_find_all,
     resolve_target,
 )
-from app.agents.qa.macro.context import build_context_state
 from app.agents.qa.macro.errors import (
     ACTION_REJECTED,
-    JEV_FAILED,
     OPERATOR_INTERRUPTED,
     REQUIRE_FAILED,
     SCENE_MISMATCH,
@@ -75,19 +73,15 @@ from app.agents.qa.macro.errors import (
     MacroFailure,
 )
 from app.agents.qa.macro.grammar import (
-    ASK_TRUE_AT,
     MAX_EXECUTED_STATEMENTS,
     MAX_LOOP_PASSES,
     MAX_WAIT_PER_CALL_SECONDS,
-    NONE_FITS,
-    NONE_FITS_DESCRIPTION,
     TOOLS_BY_NAME,
     ToolParameter,
     ToolSpec,
 )
 from app.agents.qa.macro.model import (
     MacroActionStatement,
-    MacroAskCondition,
     MacroAskVerdictStatement,
     MacroAssignStatement,
     MacroCheckpointStatement,
@@ -100,7 +94,6 @@ from app.agents.qa.macro.model import (
     MacroHelperCallStatement,
     MacroIfStatement,
     MacroLiteralValue,
-    MacroMatchStatement,
     MacroReadValue,
     MacroParameter,
     MacroPredicateCondition,
@@ -149,47 +142,6 @@ class MacroPulseWait:
     operator_messages: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True)
-class MacroDecideOption:
-    """`decide` 의 선택지 하나. `description` 은 그 macro 의 docstring 이다."""
-
-    name: str
-    description: str
-
-
-@dataclass(frozen=True)
-class MacroDecideRequest:
-    """`match decide(...)` 한 번이 Jev 에 묻는 것.
-
-    `state` 는 agent 가 keyword 로 적은 context 를 runner 가 값으로 푼 것이다. 게임이 보낸
-    값이 그대로 실리므로 모양을 정할 수 없어 JSON 사전으로 둔다 — Jev 요청 본문으로 그대로
-    나가는 passthrough 다. `options` 의 마지막은 언제나 `NONE_FITS` 다.
-    """
-
-    question: str
-    options: tuple[MacroDecideOption, ...]
-    state: dict[str, Any]
-    # `MAX_DECIDE_STATE_CHARS` 를 넘어 뺀 object 수. 결정 줄에 적는다.
-    clipped: int = 0
-
-
-@dataclass(frozen=True)
-class MacroAskRequest:
-    """`ask(...)` 한 번이 Jev 에 묻는 것. `state` 는 `MacroDecideRequest.state` 와 같다."""
-
-    question: str
-    state: dict[str, Any]
-    clipped: int = 0
-
-
-class MacroJevUnavailable(Exception):
-    """host 가 Jev 답을 못 받았을 때 낸다. runner 가 `JEV_FAILED` 로 바꾼다.
-
-    host 가 `MacroFailure` 를 직접 만들지 않는 이유는 멈춘 자리와 호출 사슬을 runner 만
-    알기 때문이다.
-    """
-
-
 class MacroHost(Protocol):
     """`runner` 가 바깥에 대고 하는 `action`, `pulse` 대기, `checkpoint`.
 
@@ -217,18 +169,7 @@ class MacroHost(Protocol):
 
         `result` 는 거기까지의 장부이고 `paused_at` 이 찬 채로 온다. 이으면 `True`, 그만두면
         `False` 다. 그만두면 runner 는 아무것도 더 안 보낸다.
-
-        `decide` 가 `NONE_FITS` 를 받은 자리에서도 이것으로 멈춘다. 그때는
-        `result.paused_decision` 이 찬다.
         """
-        ...
-
-    async def decide(self, request: MacroDecideRequest) -> str:
-        """Jev 가 고른 선택지 이름. 못 받으면 `MacroJevUnavailable` 을 낸다."""
-        ...
-
-    async def ask(self, request: MacroAskRequest) -> float:
-        """Jev 가 질문을 참이라고 볼 확률. 못 받으면 `MacroJevUnavailable` 을 낸다."""
         ...
 
 
@@ -307,13 +248,8 @@ class MacroRunResult:
     # `checkpoint` 에서 턴을 돌려준 자리와 그 이유. 이어 돌면 다시 비운다.
     paused_at: MacroPlace | None = None
     paused_reason: str = ""
-    # `decide` 가 `NONE_FITS` 를 받아 멈췄을 때 Jev 에 물은 것. `checkpoint` 로 멈췄으면
-    # `None` 이다. agent 는 이것으로 어떤 macro 가 빠졌는지 본다.
-    paused_decision: MacroDecideRequest | None = None
     # agent 가 `checkpoint` 에서 그만두기로 한 자리. 실패가 아니다.
     abandoned_at: MacroPlace | None = None
-    # `decide` 와 `ask` 가 낸 답, 한 번에 한 줄. `step 4 (pass 3): decide picked end_turn`.
-    decisions: list[str] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
@@ -349,25 +285,15 @@ def _bodies(statement: MacroStatement) -> tuple[tuple[MacroStatement, ...], ...]
         return (statement.body, statement.orelse)
     if isinstance(statement, (MacroForStatement, MacroWhileStatement)):
         return (statement.body,)
-    if isinstance(statement, MacroMatchStatement):
-        # `case` 의 적힌 순서대로. 번호도 그 순서로 매겨진다.
-        return tuple(case.body for case in statement.cases)
     return ()
 
 
 class _Frame:
-    """한 `def` 가 도는 동안의 장부. 번호를 한 번만 매기고 들고 있는다.
+    """한 `def` 가 도는 동안의 장부. 번호를 한 번만 매기고 들고 있는다."""
 
-    `definition` 은 이 `def` 가 적힌 macro 다. 가져온 macro 의 `entry` 는 그 macro 의 정의를
-    들고 돌아서, 그 안의 helper 와 import 가 부른 쪽이 아니라 자기 정의에서 풀린다.
-    """
-
-    def __init__(
-        self, function: MacroFunction, scope: MacroScope, definition: MacroDefinition
-    ) -> None:
+    def __init__(self, function: MacroFunction, scope: MacroScope) -> None:
         self.function = function
         self.scope = scope
-        self.definition = definition
         self.flat = numbered(function.statements)
         self.total = len(self.flat)
         # statement 하나하나의 번호. 같은 글의 statement 둘이 서로 다른 객체라 `id` 로
@@ -427,7 +353,7 @@ async def run_macro(
     부르기 전이다.
     """
     runner = _Runner(host, definition, step)
-    await runner.walk(definition.entry, arguments, definition)
+    await runner.walk(definition.entry, arguments)
     return runner.result
 
 
@@ -495,18 +421,9 @@ class _Runner:
 
     # -- 몸통 --
 
-    async def walk(
-        self,
-        function: MacroFunction,
-        arguments: dict[str, Any],
-        definition: MacroDefinition,
-    ) -> bool:
-        """`def` 하나를 돈다. 끝까지 가면 `True`, 멈추면 `False`.
-
-        `definition` 은 `function` 이 적힌 macro 다. 진입점이면 `self.definition` 이고,
-        가져온 macro 의 `entry` 면 그 macro 다.
-        """
-        frame = _Frame(function=function, scope=MacroScope(arguments), definition=definition)
+    async def walk(self, function: MacroFunction, arguments: dict[str, Any]) -> bool:
+        """`def` 하나를 돈다. 끝까지 가면 `True`, 멈추면 `False`."""
+        frame = _Frame(function=function, scope=MacroScope(arguments))
         self.frames.append(frame)
         try:
             return await self._statements(frame, function.statements)
@@ -545,8 +462,6 @@ class _Runner:
                 return await self._while(frame, place, statement)
             if isinstance(statement, MacroCheckpointStatement):
                 return await self._checkpoint(frame, place, statement)
-            if isinstance(statement, MacroMatchStatement):
-                return await self._match(frame, place, statement)
             if isinstance(statement, MacroWaitUntilStatement):
                 return await self._wait_until(frame, statement)
             if isinstance(statement, MacroAssignStatement):
@@ -616,10 +531,6 @@ class _Runner:
     def _evaluate(
         self, frame: _Frame, condition: MacroCondition, observed: dict[str, Any]
     ) -> bool:
-        assert not isinstance(condition, MacroAskCondition), (
-            "an `ask(...)` condition goes through `_condition`, which awaits Jev; "
-            "`_evaluate` is synchronous and must never receive one"
-        )
         if isinstance(condition, MacroPredicateCondition):
             return self._predicate(frame, condition, observed)
         return evaluate(self.memories(), frame.scope, condition, observed)
@@ -627,7 +538,7 @@ class _Runner:
     def _predicate(
         self, caller: _Frame, condition: MacroPredicateCondition, observed: dict[str, Any]
     ) -> bool:
-        function = caller.definition.function(condition.callee)
+        function = self.definition.function(condition.callee)
         if function is None:  # pragma: no cover - parser 가 없는 이름을 거절한다
             raise MacroFailure(
                 ACTION_REJECTED, f"`{condition.callee}` is not a `def` in this macro."
@@ -636,7 +547,7 @@ class _Runner:
             parameter.name: value
             for parameter, value in _helper_arguments(function, condition, caller, self)
         }
-        frame = _Frame(function, MacroScope(arguments), caller.definition)
+        frame = _Frame(function, MacroScope(arguments))
 
         def walk(statements: tuple[MacroStatement, ...]) -> bool | None:
             for statement in statements:
@@ -769,7 +680,7 @@ class _Runner:
         그 다음 statement 가 읽는 memory 는 이미 그 행위의 결과다.
         """
         observed: dict[str, Any] = {}
-        if await self._condition(frame, place, statement.condition, observed):
+        if self._evaluate(frame, statement.condition, observed):
             return True
 
         # `applied` 가 비어 있으면 들어선 자리가 틀렸다는 말이다. 하나라도 나갔으면
@@ -789,7 +700,7 @@ class _Runner:
         self, frame: _Frame, place: MacroPlace, statement: MacroIfStatement
     ) -> bool:
         observed: dict[str, Any] = {}
-        taken = await self._condition(frame, place, statement.condition, observed)
+        taken = self._evaluate(frame, statement.condition, observed)
         going, skipping = (
             (statement.body, statement.orelse)
             if taken
@@ -871,9 +782,7 @@ class _Runner:
                 observed: dict[str, Any] = {}
                 if guard is not None:
                     try:
-                        if not await self._condition(
-                            frame, frame.place(loop_number), guard.condition, observed
-                        ):
+                        if not self._evaluate(frame, guard.condition, observed):
                             break
                     except MacroFailure:
                         frame.at = loop_number
@@ -920,26 +829,17 @@ class _Runner:
     async def _checkpoint(
         self, frame: _Frame, place: MacroPlace, statement: MacroCheckpointStatement
     ) -> bool:
-        """턴을 돌려주고 agent 의 답을 기다린다. 실패가 아니다."""
-        return await self._pause(place, statement.reason, None)
-
-    async def _pause(
-        self, place: MacroPlace, reason: str, decision: MacroDecideRequest | None
-    ) -> bool:
-        """`checkpoint` 와 `decide` 의 `NONE_FITS` 가 같이 쓰는 멈춤. 이으면 `True` 다.
+        """턴을 돌려주고 agent 의 답을 기다린다. 실패가 아니다.
 
         기다리는 동안의 `pending` 은 이 자리 뒤의 것이다. 이어 돌면 비운다 — 끝났을 때의
-        `pending` 은 끝난 자리가 정한다. 이으면 호출 하나의 대기 예산도 다시 찬다. agent 가
-        턴을 쓴 사이의 시간은 이 macro 가 기다린 시간이 아니다.
+        `pending` 은 끝난 자리가 정한다.
         """
         self.result.paused_at = place
-        self.result.paused_reason = reason
-        self.result.paused_decision = decision
+        self.result.paused_reason = statement.reason
         self.result.pending = self.pending()
         go_on = await self.host.checkpoint(self.result)
         self.result.paused_at = None
         self.result.paused_reason = ""
-        self.result.paused_decision = None
         if go_on:
             self.waited_this_call = 0.0
             self.result.pending = []
@@ -948,123 +848,20 @@ class _Runner:
         self.result.chain = self.chain()
         return False
 
-    async def _match(
-        self, frame: _Frame, place: MacroPlace, statement: MacroMatchStatement
-    ) -> bool:
-        """Jev 가 고른 `case` 하나의 몸통을 돈다. 나머지 `case` 는 `skipped` 다.
-
-        `NONE_FITS` 면 `checkpoint` 처럼 멈춘다. 이으면 이 `match` 를 건너뛰고 그 뒤로 간다 —
-        agent 가 그 회를 직접 했다는 뜻이다.
-        """
-        question = statement.decide.question
-        state, clipped = build_context_state(
-            self.memories(), frame.scope, statement.decide.context
-        )
-        options = tuple(
-            MacroDecideOption(
-                name=case.option, description=_option_description(frame, case.option)
-            )
-            for case in statement.cases
-        ) + (MacroDecideOption(name=NONE_FITS, description=NONE_FITS_DESCRIPTION),)
-        request = MacroDecideRequest(
-            question=question, options=options, state=state, clipped=clipped
-        )
-        try:
-            answer = await self.host.decide(request)
-        except MacroJevUnavailable as error:
-            raise _jev_failed(question, str(error)) from error
-        if answer not in {option.name for option in options}:
-            raise _jev_failed(
-                question,
-                f"Jev answered {answer!r}, which is not one of "
-                f"{', '.join(option.name for option in options)}",
-            )
-
-        line = f"{place}: decide picked {answer}"
-        if clipped:
-            line += f" ({clipped} objects left out of the context)"
-        self.result.decisions.append(line)
-
-        chosen = next((case for case in statement.cases if case.option == answer), None)
-        # 가지 않는 `case` 는 `if` 의 거짓인 가지와 같다. `NONE_FITS` 면 전부 안 간다.
-        for case in statement.cases:
-            if case is chosen:
-                continue
-            for skipped_number in _spanned(case.body, frame):
-                frame.skipped.add(skipped_number)
-                self.result.skipped.append(frame.place(skipped_number))
-        if chosen is None:
-            return await self._pause(
-                place, f"no imported macro fits — {question}", request
-            )
-        return await self._statements(frame, chosen.body)
-
-    async def _condition(
-        self,
-        frame: _Frame,
-        place: MacroPlace,
-        condition: MacroCondition,
-        observed: dict[str, Any],
-    ) -> bool:
-        """`require`·`if`·`while` 의 조건. `ask` 만 Jev 를 기다리고 나머지는 동기로 판정한다."""
-        if isinstance(condition, MacroAskCondition):
-            return await self._ask(frame, place, condition, observed)
-        return self._evaluate(frame, condition, observed)
-
-    async def _ask(
-        self,
-        frame: _Frame,
-        place: MacroPlace,
-        condition: MacroAskCondition,
-        observed: dict[str, Any],
-    ) -> bool:
-        """Jev 가 참이라고 볼 확률이 `ASK_TRUE_AT` 이상이면 참이다.
-
-        확률을 `observed["ask"]` 에 적는다. 조건이 거짓이라 `require` 가 멈추면 payload 가
-        Jev 가 얼마로 봤는지를 싣는다.
-        """
-        state, clipped = build_context_state(self.memories(), frame.scope, condition.context)
-        request = MacroAskRequest(question=condition.question, state=state, clipped=clipped)
-        try:
-            probability = await self.host.ask(request)
-        except MacroJevUnavailable as error:
-            raise _jev_failed(condition.question, str(error)) from error
-        value = probability >= ASK_TRUE_AT
-        observed["ask"] = {"question": condition.question, "probability": round(probability, 3)}
-        line = (
-            f"{place}: ask {condition.question!r} -> {probability:.2f} "
-            f"({'true' if value else 'false'})"
-        )
-        if clipped:
-            line += f" ({clipped} objects left out of the context)"
-        self.result.decisions.append(line)
-        return value
-
     async def _helper(
         self, frame: _Frame, statement: MacroHelperCallStatement
     ) -> bool:
-        """펼치지 않고 호출로 돈다. payload 가 호출 사슬을 싣는 이유가 이것이다.
-
-        부른 쪽 frame 의 정의에서 찾는다. 그 source 의 `def` 가 먼저이고, 없으면 가져온
-        macro 다. 가져온 macro 는 자기 `entry` 를 자기 정의를 든 frame 에서 돈다.
-        """
-        definition = frame.definition
-        helper = definition.function(statement.callee)
-        if helper is None:
-            imported = definition.imported(statement.callee)
-            if imported is not None:
-                definition = imported
-                helper = imported.entry
+        """펼치지 않고 호출로 돈다. payload 가 호출 사슬을 싣는 이유가 이것이다."""
+        helper = self.definition.function(statement.callee)
         if helper is None:  # pragma: no cover - parser 가 없는 이름을 거절한다
             raise MacroFailure(
-                ACTION_REJECTED,
-                f"`{statement.callee}` is neither a `def` in this macro nor an imported macro.",
+                ACTION_REJECTED, f"`{statement.callee}` is not a `def` in this macro."
             )
         arguments = {
             parameter.name: value
             for parameter, value in _helper_arguments(helper, statement, frame, self)
         }
-        return await self.walk(helper, arguments, definition)
+        return await self.walk(helper, arguments)
 
     async def _action(
         self, frame: _Frame, place: MacroPlace, statement: MacroActionStatement
@@ -1178,24 +975,6 @@ def _operator_spoke(messages: tuple[str, ...]) -> MacroFailure:
         "rather than sending the rest, so you read that before the game moves any "
         "further. Neither the game nor the macro did anything wrong — decide what the "
         "operator wants, and call the macro again if it still applies.",
-    )
-
-
-def _option_description(frame: _Frame, option: str) -> str:
-    """Jev 가 읽는 선택지 설명. 그 이름으로 가져온 macro 의 docstring 이고, 없으면 빈 문자열이다."""
-    imported = frame.definition.imported(option)
-    if imported is None:
-        return ""
-    return imported.entry.docstring or ""
-
-
-def _jev_failed(question: str, reason: str) -> MacroFailure:
-    return MacroFailure(
-        JEV_FAILED,
-        f"Jev could not answer {question!r}: {reason}. Nothing after this was sent. This "
-        "is neither the game nor the macro — call the macro again, or play this part by "
-        "hand.",
-        {"question": question, "reason": reason},
     )
 
 

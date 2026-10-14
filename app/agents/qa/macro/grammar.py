@@ -459,29 +459,3 @@ MAX_WAIT_PER_STATEMENT_SECONDS = 30
 # 됐다, ARTEL-948). 60 은 `MAX_WAIT_PER_STATEMENT_SECONDS` 의 두 배다 — tool 호출 하나가
 # 이보다 오래 걸리면 operator 는 런이 멈춘 것과 구별하지 못한다.
 MAX_WAIT_PER_CALL_SECONDS = 60
-
-
-# --- import 와 Jev 결정 (`decide`, `ask`) ---------------------------------------------
-
-# `from macros import a, b` 의 module 이름. 이것 말고는 import 를 거절한다.
-IMPORT_MODULE = "macros"
-DECIDE = "decide"
-ASK = "ask"
-# `decide`·`ask` 의 context 값으로만 쓰는 호출. object 하나와 그 아래 전부를 넘긴다.
-UNDER = "under"
-# runner 가 `decide` 의 선택지에 언제나 덧붙이는 것. Jev 가 이것을 고르면 macro 가 멈추고
-# agent 가 그 회를 직접 하거나 빠진 macro 를 만든다. `case` 에 이 이름을 쓸 수 없다.
-NONE_FITS = "none_fits"
-NONE_FITS_DESCRIPTION = "None of the other options fits the current state."
-# `decide` 는 고를 것이 둘 이상이어야 뜻이 있다. 하나면 그 macro 를 그냥 부르면 된다.
-MIN_MATCH_CASES = 2
-# `ask` 가 참이 되는 확률. 조정 knob 이 아니다 — 같은 입력의 확률이 0.100 까지 움직였다
-# (ARTEL-944, `JevScenarioRouter` docstring). 그 폭 안에서 값을 고르는 것은 잡음을 고르는 일이다.
-ASK_TRUE_AT = 0.5
-# Jev 에 넘기는 값 하나와 `state` 전체의 글자 상한. 값 하나는 `relevance.VALUE_CHARS` 와
-# 같은 80 이다. 6000 자는 약 1.5k token 으로, Jev 의 32k context 에서 선택지 설명과 질문을
-# 넉넉히 남긴다. 넘으면 뒤의 object 부터 빼고 뺀 수를 결정 줄에 적는다.
-MAX_CONTEXT_VALUE_CHARS = 80
-MAX_DECIDE_STATE_CHARS = 6000
-# runner 가 `state` 에 언제나 넣는 key. keyword 로 쓸 수 없다.
-RESERVED_CONTEXT_KEYS = frozenset({"scene"})
