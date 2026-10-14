@@ -26,7 +26,7 @@ import asyncio
 import logging
 import re
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
 
@@ -59,6 +59,7 @@ from app.agents.scenario.schemas import (
     ScenarioChange,
     ScenarioPlan,
     ScenarioQuestion,
+    free_steps,
 )
 from app.llm.chat_model import build_chat_model
 from app.llm.models import LLMModel, ReasoningConfig
@@ -94,6 +95,23 @@ class Group(BaseModel):
             "If this journey covers substantially the same ground as an EXISTING"
             " SCENARIO, its id — the scenario will be rewritten to this journey"
             " instead of creating a duplicate. Empty for a genuinely new journey."
+        ),
+    )
+    # FREE 묶음은 writer 를 거치지 않는다 — 스텝이 TC 마다 하나라 쓸 문장이 없다([free_steps]).
+    # 비어 있으면 `scenario_id` 가 가리키는 기존 시나리오의 모드를 잇고, 새 시나리오면 ORDERED 다.
+    execution_mode: Literal["ORDERED", "FREE"] | None = Field(
+        default=None,
+        description=(
+            "FREE only when the user asked for an unordered bundle of test cases, or when"
+            " this journey reuses an existing FREE scenario and the user did not ask to"
+            " convert it. ORDERED when converting a FREE scenario back. Empty otherwise."
+        ),
+    )
+    description: str = Field(
+        default="",
+        description=(
+            "Only for a FREE journey: one sentence in the user's language on what the"
+            " bundle verifies. Empty for an ORDERED journey — a later stage writes it."
         ),
     )
 
@@ -160,6 +178,22 @@ class ModifyPlan(BaseModel):
     title: str = ""
     description: str = ""
     steps: list[AuthoredStep] = Field(default_factory=list)
+    # FREE 시나리오를 고칠 때는 스텝 대신 이것을 낸다. 스텝은 코드가 만든다([free_steps]).
+    case_ids: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Only when the edited scenario is FREE (after any conversion): every case id it"
+            " holds after the edit — not a diff. Leave `steps` empty then. Empty for an"
+            " ORDERED scenario."
+        ),
+    )
+    execution_mode: Literal["ORDERED", "FREE"] | None = Field(
+        default=None,
+        description=(
+            "Empty keeps the scenario's current mode. Set it only when the user explicitly"
+            " asks to convert: FREE (fill `case_ids`) or ORDERED (write full `steps`)."
+        ),
+    )
     # **합치기의 나머지 절반.** 칸이 `scenario_id` 하나뿐이던 동안, "이 둘을 합쳐 줘" 는 한쪽에
     # 둘의 내용을 다 적는 것까지가 낼 수 있는 전부였고 원본 한쪽이 그대로 남아 같은 흐름이 두
     # 벌이 됐다. 여기에 적힌 것은 요청이지 명령이 아니다 — 지워도 되는지는 오케가 센다(흡수된
@@ -182,7 +216,8 @@ def _render_current(request: ScenarioAgentRequest) -> str:
     for scenario in request.current_scenarios:
         if scenario.scenario_id is None:
             continue  # 저장 전 잔상은 수정 대상이 아니다 — id 없는 것은 교체 저장이 안 된다
-        lines.append(f"[id {scenario.scenario_id}] {scenario.title}")
+        free_tag = " [FREE — unordered bundle of cases]" if scenario.is_free() else ""
+        lines.append(f"[id {scenario.scenario_id}] {scenario.title}{free_tag}")
         if scenario.description:
             lines.append(f"  {scenario.description}")
         for order, step in enumerate(scenario.steps, start=1):
@@ -399,7 +434,7 @@ def _existing_scenarios(request: ScenarioAgentRequest) -> str:
     스텝 본문은 싣지 않는다: 겹치는지 보는 데는 무엇을 검증하는 여정인지(케이스 구성)면
     충분하고, 본문까지 실으면 턴마다 변하는 tail 이 무거워진다."""
     lines = [
-        f"[id {s.scenario_id}] {s.title} — cases: "
+        f"[id {s.scenario_id}] {s.title}{' [FREE]' if s.is_free() else ''} — cases: "
         + ", ".join(str(step.case_id) for step in s.steps if step.case_id is not None)
         for s in request.current_scenarios
         if s.scenario_id is not None
@@ -511,6 +546,47 @@ async def _call(model: LLMModel, reasoning: ReasoningConfig | None, schema, prom
     return await chain.ainvoke(messages)
 
 
+def _groups_of(plan: GroupingPlan, request: ScenarioAgentRequest) -> list[Group]:
+    """B 의 묶음에서 모르는 번호를 걷어내고 실행 모드를 정한다.
+
+    유령 id 방어 — 하네스 실측은 0/30 이었지만, 지어낸 번호가 D 까지 가면 반려다.
+    모드를 비워 둔 묶음은 가리킨 기존 시나리오의 모드를 잇는다. FREE 시나리오를 같은 범위로
+    다시 짜 달라는 요청이 말없이 ORDERED 로 바뀌면 안 된다.
+    """
+    known_ids = {case.id for case in request.test_case_list}
+    current_modes = {
+        s.scenario_id: s.mode() for s in request.current_scenarios if s.scenario_id is not None
+    }
+    groups: list[Group] = []
+    for group in plan.groups:
+        scenario_id = group.scenario_id if group.scenario_id in current_modes else None
+        mode = group.execution_mode or current_modes.get(scenario_id) or "ORDERED"
+        case_ids = [i for i in group.case_ids if i in known_ids]
+        if mode == "FREE":
+            case_ids = list(dict.fromkeys(case_ids))
+        if case_ids:
+            groups.append(group.model_copy(update={
+                "case_ids": case_ids, "scenario_id": scenario_id, "execution_mode": mode,
+            }))
+    return groups
+
+
+def _free_scenario(group: Group, ko: bool) -> ScenarioPlan:
+    """FREE 묶음은 모델을 부르지 않고 바로 시나리오가 된다 — 스텝은 TC 마다 하나다."""
+    description = group.description.strip() or (
+        f"TC {len(group.case_ids)}개를 순서 없이 확인한다. 순서는 QA agent 가 정한다."
+        if ko else
+        f"Verifies {len(group.case_ids)} test cases in no fixed order; the QA agent picks the order."
+    )
+    return ScenarioPlan(
+        scenario_id=group.scenario_id,
+        title=group.title,
+        description=description,
+        steps=free_steps(group.case_ids),
+        execution_mode="FREE",
+    )
+
+
 async def run_authoring_workflow(
     request: ScenarioAgentRequest,
     context: AgentContext,
@@ -528,19 +604,7 @@ async def run_authoring_workflow(
     plan: GroupingPlan = await _call(
         request.model, request.reasoning, GroupingPlan, _grouping_prompt(request)
     )
-    # 유령 id 방어 — 하네스 실측은 0/30 이었지만, 지어낸 번호가 D 까지 가면 반려다.
-    known_scenario_ids = {
-        s.scenario_id for s in request.current_scenarios if s.scenario_id is not None
-    }
-    groups = [
-        Group(
-            title=g.title,
-            case_ids=[i for i in g.case_ids if i in known_ids],
-            scenario_id=g.scenario_id if g.scenario_id in known_scenario_ids else None,
-        )
-        for g in plan.groups
-    ]
-    groups = [g for g in groups if g.case_ids]
+    groups = _groups_of(plan, request)
     # B 가 끝났다. **묶음 수를 함께 보낸다** — 이 수가 뒤따르는 문장 쓰기의 분모다.
     await channel.report(GROUPED, total=len(groups))
     trace.record(
@@ -550,6 +614,7 @@ async def run_authoring_workflow(
         + (f"\n{plan.detail}" if plan.detail else "")
         + "".join(
             f"\n  · {g.title} — {len(g.case_ids)}케이스"
+            + (" · FREE" if g.execution_mode == "FREE" else "")
             + (f" (기존 id {g.scenario_id} 에 잇기)" if g.scenario_id is not None else "")
             for g in groups
         ),
@@ -575,22 +640,16 @@ async def run_authoring_workflow(
     # 고칠 수 있는 유일한 자리에서 잡는다. 재작성은 한 번 — prefix 캐시 덕에 재호출
     # 입력은 0.1배라, 비용은 사실상 출력분뿐이다. 그래도 남으면 기록하고 진행한다
     # (막지 않는다 — 저장 뒤 판 요약에도 같은 잣대가 다시 적힌다).
-    findings = await _score_groups(request, groups)
+    # FREE 묶음은 순서가 없어 걷기 검증의 대상이 아니다. 묶음이 전부 FREE 면 부르지 않는다.
+    ordered_groups = [g for g in groups if g.execution_mode != "FREE"]
+    findings = await _score_groups(request, ordered_groups) if ordered_groups else None
     if findings:
         retried_plan = await _call(
             request.model, request.reasoning, GroupingPlan,
             _grouping_prompt(request, findings=findings),
         )
         await channel.report(BRIDGING)
-        retried_groups = [
-            Group(
-                title=g.title,
-                case_ids=[i for i in g.case_ids if i in known_ids],
-                scenario_id=g.scenario_id if g.scenario_id in known_scenario_ids else None,
-            )
-            for g in retried_plan.groups
-        ]
-        retried_groups = [g for g in retried_groups if g.case_ids]
+        retried_groups = _groups_of(retried_plan, request)
         if retried_groups:
             groups = retried_groups
             if retried_plan.detail or retried_plan.questions:
@@ -598,7 +657,9 @@ async def run_authoring_workflow(
                     "detail": retried_plan.detail or plan.detail,
                     "questions": retried_plan.questions or plan.questions,
                 })
-        remaining = await _score_groups(request, groups)
+        remaining = await _score_groups(
+            request, [g for g in groups if g.execution_mode != "FREE"]
+        )
         trace.record(
             run_id, "워크플로 B — 걷기 검증",
             f"어긋남 {len(findings)}건 → 재작성 1회 → 남은 어긋남 "
@@ -612,11 +673,13 @@ async def run_authoring_workflow(
     # 묶음이 끝날 때마다 n/N 을 올린다. 병렬이라 **끝난 순서**로 센다 — 어느 묶음이 먼저
     # 끝났는지는 알 바가 아니고, 움직이고 있다는 것만 보이면 된다.
     done = 0
+    # 분모는 writer 를 부르는 묶음 수다. FREE 묶음은 모델 호출 없이 끝난다.
+    writing_total = len([g for g in groups if g.execution_mode != "FREE"])
 
     async def write(group: Group, feedback: str = "") -> ScenarioPlan | None:
         # 호출이 시작됐다는 박동. 보수 호출도 여기로 오므로 그때도 한 줄이 나가고, 그것이
         # "아직 움직인다" 는 유일한 신호다 — 한 호출이 29~54초다(run 87 실측).
-        await channel.report(WRITING, done=done, total=len(groups))
+        await channel.report(WRITING, done=done, total=writing_total)
         try:
             out: _Writer = await _call(
                 request.model, request.reasoning, _Writer, _writer_prompt(request, group, feedback)
@@ -629,6 +692,7 @@ async def run_authoring_workflow(
             title=group.title,
             description=out.description,
             steps=out.steps,
+            execution_mode=group.execution_mode,
         )
 
     def _unplaced(group: Group, plan_: ScenarioPlan | None) -> list[int]:
@@ -660,10 +724,15 @@ async def run_authoring_workflow(
                 scenario = repaired
         nonlocal done
         done += 1
-        await channel.report(WRITING, done=done, total=len(groups))
+        await channel.report(WRITING, done=done, total=writing_total)
         return scenario
 
-    written = await asyncio.gather(*(write_covering(g) for g in groups))
+    async def compose(group: Group) -> ScenarioPlan | None:
+        if group.execution_mode == "FREE":
+            return _free_scenario(group, ko)
+        return await write_covering(group)
+
+    written = await asyncio.gather(*(compose(g) for g in groups))
     trace.record(
         run_id, "워크플로 C — 문장",
         "\n".join(
@@ -691,7 +760,8 @@ async def run_authoring_workflow(
         if answer is not None and not answer.accepted and answer.detail:
             # 반려 라우팅: 그 묶음 worker 만 이유를 들고 한 번 다시 쓴다. B 복귀는 없다 —
             # 묶기·순서가 틀렸다는 신호가 아니라 문장·근거의 지적이기 때문이다.
-            retried = await write(group, feedback=answer.detail)
+            # FREE 묶음은 다시 써도 같은 스텝이 나오므로 재시도 없이 버린다.
+            retried = None if scenario.is_free() else await write(group, feedback=answer.detail)
             if retried is not None:
                 scenario = retried
                 answer = await channel.submit_scenario(retried.model_dump(by_alias=True))
@@ -777,21 +847,42 @@ async def run_modify_workflow(
     되돌리기를 태우지 않는다(`TestScenarioAgentService` 738행의 그 분기).
     """
     run_id = request.run_id
-    known_scenario_ids = {
-        scenario.scenario_id
+    current_by_id = {
+        scenario.scenario_id: scenario
         for scenario in request.current_scenarios
         if scenario.scenario_id is not None
     }
+    known_scenario_ids = set(current_by_id)
+    known_case_ids = {case.id for case in request.test_case_list}
+
+    def settled(p: ModifyPlan) -> ModifyPlan:
+        """실행 모드를 정하고, FREE 면 스텝을 코드가 만든다.
+
+        모드를 비워 둔 답은 대상의 모드를 잇는다 — FREE 시나리오는 사용자가 바꾸라고 하지 않는
+        한 FREE 로 남는다. FREE 의 수정은 TC 를 넣고 빼는 것이라 writer 도 순서 검사도 거치지
+        않는다. `case_ids` 를 비우고 스텝만 냈으면 그 스텝의 `case_id` 를 쓴다.
+        """
+        target = current_by_id.get(p.scenario_id)
+        if target is None:
+            return p
+        mode = p.execution_mode or target.mode()
+        if mode != "FREE":
+            return p.model_copy(update={"execution_mode": mode})
+        case_ids = p.case_ids or [step.case_id for step in p.steps if step.case_id is not None]
+        if known_case_ids:
+            case_ids = [i for i in case_ids if i in known_case_ids]
+        return p.model_copy(update={"execution_mode": mode, "steps": free_steps(case_ids)})
 
     async def edit(feedback: str = "") -> ModifyPlan | None:
         await channel.report(MODIFYING)
         try:
-            return await _call(
+            answer = await _call(
                 request.model, request.reasoning, ModifyPlan, _modify_prompt(request, feedback)
             )
         except Exception as error:  # noqa: BLE001 — 수정 실패가 세션을 죽이면 안 된다
             logger.warning("[scenario] modify call failed: %s", error)
             return None
+        return settled(answer)
 
     ko = request.locale.value == "ko"
     plan = await edit()
@@ -799,6 +890,7 @@ async def run_modify_workflow(
         run_id, "워크플로 E — 수정",
         "호출 실패" if plan is None else (
             f"대상 id {plan.scenario_id} · 스텝 {len(plan.steps)}"
+            + (f" · {plan.execution_mode}" if plan.execution_mode else "")
             + "".join(f" · 질문: {q.text}" for q in plan.questions)
             + (f"\n{plan.detail}" if plan.detail else "")
         ),
@@ -843,6 +935,7 @@ async def run_modify_workflow(
             title=p.title or original.title,
             description=p.description or original.description,
             steps=p.steps,
+            execution_mode=p.execution_mode,
         )
 
     # 합치기에서 걷어낼 것들. 대상 자신과 모르는 번호는 뺀다 — 지우는 일에 유령 번호가
@@ -883,6 +976,12 @@ async def run_modify_workflow(
             return False
         if (p.description or original.description) != original.description:
             return False
+        if (p.execution_mode or original.mode()) != original.mode():
+            return False
+        if original.is_free():
+            # FREE 본문은 TC 집합이 전부다. 순서에는 뜻이 없고, 저장된 스텝의 `step_source` 는
+            # 비어 있을 수 있어 스텝째 비교하면 같은 TC 묶음도 고친 것으로 보인다.
+            return {s.case_id for s in p.steps} == {s.case_id for s in original.steps}
         return _body(p.steps) == _body(original.steps)
 
     # **안 고쳤으면 한 번 더 시킨다.** 요청을 받고 본문을 그대로 돌려준 것은 답이 아니다 —
