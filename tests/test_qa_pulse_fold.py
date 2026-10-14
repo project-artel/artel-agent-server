@@ -83,10 +83,18 @@ def stale_chars(messages) -> int:
 
 
 def messages_reaching_the_default_threshold() -> list[ToolMessage]:
-    """오래된 view 의 합이 처음으로 `DEFAULT_FOLD_THRESHOLD_CHARS` 에 이르는 가장 짧은 목록."""
+    """오래된 view 의 합이 처음으로 `DEFAULT_FOLD_THRESHOLD_CHARS` 에 이르는 가장 짧은 목록.
+
+    합을 이어서 더한다. 매번 `stale_chars` 로 처음부터 다시 세면 목록이 600개 가까이 되는
+    동안 view 를 n² 번 그려서 이 helper 하나가 2초를 썼다. 셈은 같다 — 길이 L 인 목록의
+    `stale_chars` 는 1..L-1 번 view 의 합이고, 하나를 붙일 때마다 L 번 view 가 더해진다.
+    """
     messages = [tool_message(1)]
-    while stale_chars(messages) < DEFAULT_FOLD_THRESHOLD_CHARS:
+    stale = 0
+    while stale < DEFAULT_FOLD_THRESHOLD_CHARS:
+        stale += len(pulse_view(len(messages)))
         messages.append(tool_message(len(messages) + 1))
+    assert stale == stale_chars(messages)
     return messages
 
 
