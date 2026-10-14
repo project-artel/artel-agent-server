@@ -8,6 +8,7 @@ from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.macro.for_step import macros_for_step, render_step_macro_hint
 from app.agents.qa.macro.lift import draft_for_step, offer
+from app.agents.qa.macro.stage_draft import offer_stage, stage_draft_for_visit
 from app.agents.qa.tools.phase import MAX_CONSECUTIVE_REFUSALS
 from app.agents.qa.tools.state import QaRunState
 from app.agents.qa.tools.tool_context import ToolContext
@@ -139,6 +140,34 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             "you mean."
         )
 
+    # 초안을 따져 본 `scene` visit 의 번호(`MacroCallLog.visit`). 런마다 하나다.
+    handled_visits: set[int] = set()
+
+    def _stage_draft(step: int) -> str:
+        """방금 끝난 `scene` visit 에서 부른 macro 를 엮은 초안. 못 만들면 빈 문자열.
+
+        step 초안과 같은 자리(`offered_drafts[step]`)와 같은 길(`expect_draft_review`)로 내민다.
+        `REVIEW_DRAFT` 와 `decline_macro_draft` 가 그대로 돈다. 책(`state.macros`)만 읽고 네트워크는
+        읽지 않는다.
+        """
+        standing = (channel.scene.scene or channel.scene.pulse.scene or "").strip()
+        taken = (
+            set(state.macros.drafts)
+            | set(state.macros.registrations)
+            | set(state.offered_drafts.values())
+        )
+        draft, _why = stage_draft_for_visit(
+            state.macro_calls, state.macros, standing, taken, handled_visits
+        )
+        if draft is None:
+            return ""
+        state.macros.write(draft.name, draft.source)
+        state.macros.remember_read(draft.name)
+        state.offered_drafts[step] = draft.name
+        if state.phase_cycle is not None:
+            state.phase_cycle.expect_draft_review()
+        return offer_stage(draft)
+
     def _macro_draft(step: int, passed: bool) -> str:
         """이 step 에 손으로 보낸 것을 macro 초안으로 만들어 내민다. macro 를 켠 런에만.
 
@@ -161,6 +190,8 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         if arch.macros != "on" or not passed or step in state.drafted_steps:
             return ""
         state.drafted_steps.add(step)
+        if arch.stage_draft and (staged := _stage_draft(step)):
+            return staged
         taken = set(state.macros.drafts) | set(state.macros.registrations)
         # 시나리오 밖의 번호(모델이 지어낸 step)는 문장이 없다. 범위를 보고 빈 문자열로 둔다.
         in_range = 1 <= step <= len(state.step_texts)
