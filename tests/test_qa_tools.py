@@ -30,13 +30,22 @@ _NO_PHASE_GATE = default_resolved_arch().model_copy(
 )
 
 
-def make(total_steps: int = 1, timeout: float = 0.05):
+def make(total_steps: int = 1, timeout: float = 0.05, reading_wait: float = 0.05):
     sent: list[dict] = []
 
     async def send(frame: dict) -> None:
         sent.append(frame)
 
-    channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=timeout, write_timeout=timeout)
+    # `answer` 는 액션에 `pulse` 를 실어 보내지 않는다. 그러면 액션마다 `reading_wait` 를 다
+    # 기다리므로 운영값 대신 짧게 준다. `pulse` 를 보내는 테스트는 액션의 답과 같은 자리에서
+    # 보내므로 이 값에 기대지 않는다.
+    channel = QaRunChannel(
+        qa_try_id=7,
+        send=send,
+        action_timeout=timeout,
+        write_timeout=timeout,
+        reading_wait=reading_wait,
+    )
     state = QaRunState(total_steps=total_steps)
     tools = {tool.name: tool for tool in build_tools(channel, state, arch=_NO_PHASE_GATE)}
     return channel, state, tools, sent
@@ -1604,13 +1613,42 @@ def test_지식_검색은_화면을_안_들고_온다() -> None:
     하면 두 번째가 첫 번째와 같은 것을 반복한다."""
 
     async def run() -> None:
-        _channel, _state, tools, _sent = _with_a_screen()
+        channel, _state, tools, sent = _with_a_screen()
 
-        # 답이 안 와도 좋다. 검사하는 것은 돌아온 문자열에 화면이 없다는 것뿐이다.
+        # Orchestration 이 답하는 평소의 길로 잰다. 답이 없으면 `search_timeout` 을 다 기다린
+        # 뒤 정해진 문장이 돌아오는데, 그 문장에 화면이 없는 것은 이 테스트가 지키려는 것이
+        # 아니다.
+        async def reply() -> None:
+            while not [f for f in sent if f["type"] == MessageType.KNOWLEDGE_SEARCH.value]:
+                await asyncio.sleep(0)
+            search = [f for f in sent if f["type"] == MessageType.KNOWLEDGE_SEARCH.value][-1]
+            channel.on_knowledge_search_result(
+                {
+                    "type": MessageType.KNOWLEDGE_SEARCH_RESULT.value,
+                    "correlationId": search["messageId"],
+                    "payload": {
+                        "query": "조합 규칙",
+                        "model": "e5",
+                        "results": [
+                            {
+                                "id": "41",
+                                "tag": "RULE",
+                                "source": "DOCS",
+                                "summary": "불 카드 둘을 합치면 화염구가 된다",
+                                "description": "같은 속성 카드 두 장을 조합 창에 올린다.",
+                                "score": 0.8,
+                            }
+                        ],
+                    },
+                }
+            )
+
+        asyncio.create_task(reply())
         answered = await tools["search_knowledge"].ainvoke(
             {"step": 1, "thought": "찾아본다", "query": "조합 규칙"}
         )
 
+        assert "화염구" in answered, "검색의 답이 실제로 돌아왔다"
         assert "Card(Clone)[16]" not in answered
 
     asyncio.run(run())

@@ -12,13 +12,21 @@ from app.qa.channel import (
 from app.qa.envelope import JsonRpcAction, MessageType
 
 
-def make_channel(timeout: float = 30.0) -> tuple[QaRunChannel, list[dict]]:
+def make_channel(
+    timeout: float = 30.0, reading_wait: float = READING_WAIT_SECONDS
+) -> tuple[QaRunChannel, list[dict]]:
     sent: list[dict] = []
 
     async def send(frame: dict) -> None:
         sent.append(frame)
 
-    channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=timeout, write_timeout=timeout)
+    channel = QaRunChannel(
+        qa_try_id=7,
+        send=send,
+        action_timeout=timeout,
+        write_timeout=timeout,
+        reading_wait=reading_wait,
+    )
     return channel, sent
 
 
@@ -97,7 +105,9 @@ def test_looking_reports_false_when_nothing_has_ever_arrived() -> None:
     """
 
     async def run() -> None:
-        channel, sent = make_channel(timeout=0.05)
+        # 빈손으로 끝나는 길이 재는 것이고, 그 길이는 아니다. 운영값의 상한에서 풀리는지는
+        # `test_a_still_screen_is_not_the_game_failing_to_answer` 가 잰다.
+        channel, sent = make_channel(timeout=0.05, reading_wait=0.05)
         assert await channel.look(0.0) is False
         assert sent == [], "빈손이어도 묻지는 않는다"
 

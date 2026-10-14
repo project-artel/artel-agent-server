@@ -8,6 +8,7 @@ run died exactly this way, on `{"id": 1, "success": true, "error": ""}`.
 
 import asyncio
 
+from app.qa.channel import KNOWLEDGE_SEARCH_TIMEOUT_SECONDS, READING_WAIT_SECONDS
 from app.qa.schemas import QaCaseRef, QaRunScenario, QaScenario, QaStep
 from app.qa.service import QaExecutionService
 from app.qa.store import InMemoryQaSessionStore
@@ -175,6 +176,30 @@ def test_an_unknown_type_is_still_rejected() -> None:
         service, session_id, task = await _running_service()
         try:
             assert service.deliver(session_id, {"type": "NOPE"}) is False
+        finally:
+            task.cancel()
+
+    asyncio.run(run())
+
+
+def test_the_run_builds_its_channel_with_the_production_waits() -> None:
+    """런이 세우는 채널은 `READING_WAIT_SECONDS` 와 `KNOWLEDGE_SEARCH_TIMEOUT_SECONDS` 를 쓴다.
+
+    테스트 대부분이 `reading_wait` 와 `search_timeout` 을 짧게 주입한다(ARTEL-1039). 그러면
+    운영이 어떤 값으로 도는지는 그 테스트들이 말해 주지 않으므로, `QaExecutionService.run` 이
+    실제로 세운 채널을 여기서 본다.
+
+    private 필드를 읽는다. 검색의 상한은 다 기다려 봐야만 밖에서 보이는데 그것이 20초다.
+    액션 뒤 대기의 상한은 `tests/test_qa_channel.py` 의
+    `test_a_still_screen_is_not_the_game_failing_to_answer` 가 기본값 채널로 직접 잰다.
+    """
+
+    async def run() -> None:
+        service, session_id, task = await _running_service()
+        try:
+            channel = service._channels[session_id]
+            assert channel._reading_wait == READING_WAIT_SECONDS
+            assert channel._search_timeout == KNOWLEDGE_SEARCH_TIMEOUT_SECONDS
         finally:
             task.cancel()
 

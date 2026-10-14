@@ -7,7 +7,6 @@
 """
 
 import asyncio
-from unittest.mock import patch
 
 from tests.test_qa_macro_tools import call, macro_frames, make, refuse_macro
 
@@ -167,10 +166,9 @@ def test_an_error_frame_says_search_is_unavailable_and_what_still_works() -> Non
 
 
 def test_no_answer_says_the_same() -> None:
-    _channel, _state, tools, _sent = make()
+    _channel, _state, tools, _sent = make(search_timeout=0.05)
 
-    with patch("app.qa.channel.KNOWLEDGE_SEARCH_TIMEOUT_SECONDS", 0.05):
-        answer = search(tools, query="cast")
+    answer = search(tools, query="cast")
 
     assert answer.startswith("Macro search is unavailable right now")
 

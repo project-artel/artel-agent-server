@@ -26,7 +26,7 @@ from app.agents.qa.macro.errors import (
 from app.agents.qa.macro.runner import MacroRunResult
 from app.agents.qa.macro.grammar import TOOL_NAMES
 from app.agents.qa.tools import QaRunState, build_tools
-from app.qa.channel import QaCancelled, QaRunChannel
+from app.qa.channel import KNOWLEDGE_SEARCH_TIMEOUT_SECONDS, QaCancelled, QaRunChannel
 from app.qa.envelope import MessageType
 from app.llm.models import LLMModel
 from app.qa.pulse import PULSE_VIEW_START, PulseReading
@@ -43,14 +43,26 @@ async def _discard(frame: dict) -> None:
     return None
 
 
-def make(total_steps: int = 3, timeout: float = 0.05):
+def make(
+    total_steps: int = 3,
+    timeout: float = 0.05,
+    search_timeout: float = KNOWLEDGE_SEARCH_TIMEOUT_SECONDS,
+):
     sent: list[dict] = []
 
     async def send(frame: dict) -> None:
         sent.append(frame)
 
+    # 이 가짜 게임은 액션 뒤에 `pulse` 를 안 보내므로 액션마다 `reading_wait` 를 다 기다린다.
+    # 검색은 기본값 그대로 기다린다. 답하는 테스트가 답을 별도 task 로 보내므로, 줄이면 그
+    # 답과 `timeout` 이 경주한다. 아무도 답하지 않는 검색을 재는 테스트만 줄인다.
     channel = QaRunChannel(
-        qa_try_id=9, send=send, action_timeout=timeout, write_timeout=timeout
+        qa_try_id=9,
+        send=send,
+        action_timeout=timeout,
+        write_timeout=timeout,
+        reading_wait=timeout,
+        search_timeout=search_timeout,
     )
     state = QaRunState(total_steps=total_steps)
     # phase cycle 을 끄고 만든다. 이 파일은 macro 가 무엇을 하는지를 재고, macro tool 이
@@ -994,7 +1006,9 @@ def test_every_macro_tool_body_is_guarded_against_a_leaking_exception() -> None:
     # phase cycle 을 끄고 만든다. 켜면 `tools/__init__.py` 의 `_phase_gated` 가 모든 tool
     # 을 `guarded` 로 한 겹 더 감싸는데, 그 wrapper 는 `__wrapped__` 를 안 남겨서 맨 바깥만
     # 보이고 그 안의 이 guard 는 안 보인다. 재려는 것은 macro 본문의 guard 다.
-    channel = QaRunChannel(qa_try_id=9, send=_discard, action_timeout=0.05, write_timeout=0.05)
+    channel = QaRunChannel(
+        qa_try_id=9, send=_discard, action_timeout=0.05, write_timeout=0.05, reading_wait=0.05
+    )
     without_phases = resolve_arch(
         QaArchSpec(vision=VisionMode.on, phase_cycle=PhaseCycleMode.off), "openai/gpt-6-luna"
     )

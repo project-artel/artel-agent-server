@@ -25,7 +25,10 @@ def make(macros: str, phase_cycle: PhaseCycleMode = PhaseCycleMode.lite):
     async def send(frame: dict) -> None:
         pass
 
-    channel = QaRunChannel(qa_try_id=9, send=send, action_timeout=0.05, write_timeout=0.05)
+    # 이 가짜 게임은 액션 뒤에 `pulse` 를 안 보내므로 액션마다 `reading_wait` 를 다 기다린다.
+    channel = QaRunChannel(
+        qa_try_id=9, send=send, action_timeout=0.05, write_timeout=0.05, reading_wait=0.05
+    )
     channel.scene.pulse.apply(
         PulseReading.model_validate(
             {

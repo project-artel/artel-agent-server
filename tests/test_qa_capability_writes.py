@@ -41,12 +41,14 @@ def make(timeout: float = 0.05):
     async def send(frame: dict) -> None:
         sent.append(frame)
 
+    # 이 가짜 게임은 액션 뒤에 `pulse` 를 안 보내므로 액션마다 `reading_wait` 를 다 기다린다.
     channel = QaRunChannel(
         qa_try_id=7,
         send=send,
         action_timeout=timeout,
         write_timeout=timeout,
         screen_selector_timeout=timeout,
+        reading_wait=timeout,
     )
     state = QaRunState(total_steps=1)
     tools = {tool.name: tool for tool in build_tools(channel, state, arch=_NO_PHASE_GATE)}
