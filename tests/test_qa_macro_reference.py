@@ -20,7 +20,7 @@ from app.agents.qa.macro.grammar import (
     allowed_operators,
     operator_names,
 )
-from app.agents.qa.macro.parser import macro_definition_from_source
+from app.agents.qa.macro.parser import imported_names, macro_definition_from_source
 from app.agents.qa.macro.reference import GRAMMAR, NUMBER_EQUALITY
 from app.prompts import (
     TOOL_DESCRIPTION_MAX_CHARS,
@@ -76,20 +76,27 @@ def test_the_skill_carries_what_grammar_py_assembles(section: str) -> None:
     )
 
 
-def test_the_skill_holds_three_examples() -> None:
+def test_the_skill_holds_four_examples() -> None:
     """하나로 줄면 가르치는 것이 준다 — 분기와 helper 가 든 긴 것, 반복과 checkpoint 가 든
-    것, 짝을 보여 주는 짧은 것."""
-    assert len(examples_in_the_skill()) == 3
+    것, 짝을 보여 주는 짧은 것, 앞의 둘을 import 해 Jev 가 고르게 하는 것."""
+    assert len(examples_in_the_skill()) == 4
 
 
 def test_every_example_in_the_skill_passes_the_parser() -> None:
-    """모델이 베껴 쓸 글이므로, 거절되는 글이 거기 있으면 안 된다."""
-    for name, source in examples_in_the_skill():
+    """모델이 베껴 쓸 글이므로, 거절되는 글이 거기 있으면 안 된다.
+
+    import 하는 예시는 같은 skill 의 다른 예시를 import 한다. 그래서 import 가 없는 예시를
+    먼저 파싱하고, 그 정의를 등록된 macro 처럼 넘긴다.
+    """
+    examples = examples_in_the_skill()
+    parsed = {}
+    for name, source in sorted(examples, key=lambda example: bool(imported_names(example[1]))):
         try:
-            definition = macro_definition_from_source(name, source)
+            definition = macro_definition_from_source(name, source, imports=parsed)
         except MacroRejection as rejected:
             pytest.fail(f"the {name!r} example in skill_{SKILL}.md is refused: {rejected}")
         assert definition.entry.name == name
+        parsed[name] = definition
 
 
 def test_an_example_shows_a_branch_and_a_helper_and_a_held_key() -> None:
@@ -106,6 +113,10 @@ def test_an_example_shows_a_branch_and_a_helper_and_a_held_key() -> None:
     assert "in find_all(" in sources and "in range(" in sources
     assert "while " in sources
     assert "checkpoint(" in sources
+    # orchestration 예시. 이것 없이는 import 와 Jev 가 문법 설명에만 있다.
+    assert "from macros import" in sources
+    assert "match decide(" in sources and 'case "' in sources
+    assert "while ask(" in sources
 
 
 @pytest.mark.parametrize("name", MACRO_TOOLS)

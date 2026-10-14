@@ -1,6 +1,6 @@
 """`grammar.py` 가 받는 것을 글로 조립한다. 모델이 읽는 글은 아니다.
 
-모델이 읽는 것은 `app/prompts/qa_run/v21/skill_macro.md` 다. prompt 는 데이터로
+모델이 읽는 것은 `app/prompts/qa_run/v22/skill_macro.md` 다. prompt 는 데이터로
 버전 디렉터리에 살고 `prompts-lock.json` 이 그 본문을 해시하므로, 코드가 런타임에
 조립한 글로 대신할 수 없다 — 해시할 파일이 없어진다.
 
@@ -14,14 +14,19 @@
 """
 
 from app.agents.qa.macro.grammar import (
+    ASK_TRUE_AT,
     DECLARABLE_TYPE_NAMES,
     FORBIDDEN_TOOLS,
     MAX_CALL_DEPTH,
+    MAX_CONTEXT_VALUE_CHARS,
+    MAX_DECIDE_STATE_CHARS,
     MAX_EXECUTED_STATEMENTS,
     MAX_LOOP_PASSES,
     MAX_STATEMENTS,
     MAX_WAIT_PER_CALL_SECONDS,
     MAX_WAIT_PER_STATEMENT_SECONDS,
+    MIN_MATCH_CASES,
+    NONE_FITS,
     PAIRED_TOOLS,
     READER_NAMES,
     REPORTING_NAMES,
@@ -69,7 +74,8 @@ other `def` in the same source is a helper it may call. Every parameter and
 every assignment carries a type, and the types are: {DECLARABLE_TYPE_NAMES}.
 The entry `def` and its helpers return `-> None`: they act and hand back no
 value. A `def` declared `-> bool` is a predicate, a condition you name — see
-**Predicates** below.
+**Predicates** below. A macro can also call macros that are already
+registered — see **Imports** below.
 
 **The docstring.** The entry `def` opens with a docstring: a `\"\"\"...\"\"\"` string
 as its first statement, saying what the macro does and when to use it. That
@@ -80,7 +86,8 @@ it does not count toward the limits and nothing runs it. A string anywhere else
 is refused; write a `#` comment there.
 
 **The statements.**
-- an action: {_TOOLS}, or a helper `def` from this same source
+- an action: {_TOOLS}, a helper `def` from this same source, or a macro named
+  in `from macros import ...`
 - `require(<condition>, "<remedy>")` — both arguments are required. The remedy
   is what the agent reading the failure is told to do about it
 - a typed assignment: `card: object = find(label="shoot")`
@@ -92,6 +99,8 @@ is refused; write a `#` comment there.
 - `checkpoint("<what to look at>")` — hands the turn back to you mid-macro
 - `wait_until(<condition>, <seconds>, "<remedy>")` — waits until the condition
   is true, for at most that many seconds
+- `match decide("<question>", ...):` with one `case "<imported macro>":` per
+  option — Jev picks the case that runs
 
 **Aiming.** A target is `selector("<unity/hierarchy/path>")`, a parameter on the
 `def` line, or a name bound by `find(...)` or `selector(...)`. There is no syntax
@@ -154,8 +163,48 @@ you a turn, so place one only where a person would want to look: before
 committing to something that cannot be undone, or after a step whose result no
 `require` can describe.
 
+**Imports.** `from macros import end_turn, cast_pair` at the top of the source,
+before the first `def`, makes registered macros callable like helpers, each with
+its own parameters. `macros` is the only module, and a name must be registered
+in this run or an earlier one: an unknown name is refused when you store the
+macro. An imported macro runs the version registered when you CALL it, so
+fixing it with `edit_macro` and `register_macro` changes every macro that imports
+it. Its own helpers stay its own, and its depth and length count toward this
+macro's limits.
+
+**Deciding.** `match decide("<question>", key=value, ...):` asks Jev, a decision
+model, which `case` fits the game right now, and runs that case alone. Each
+`case "<name>":` names an imported macro, and Jev reads that macro's docstring
+as the description of the option — a vague docstring is an option Jev cannot
+pick well. A case body is ordinary statements; it usually finds what it needs
+and calls that macro. At least {MIN_MATCH_CASES} cases; no `case _`, no guard.
+Jev always has one more option, `{NONE_FITS}`. When it picks that, the macro
+PAUSES as at a checkpoint and shows you the question, the options and what Jev
+read: play that part by hand and call `resume_macro` with `proceed: true` to go
+on after the `match`, or stop it, write the macro that was missing, import it,
+add its `case`, and run again. Every answer is listed under Decisions in the
+result. When Jev cannot answer, the macro stops with `JEV_FAILED`.
+
+**Asking.** `ask("<question>", key=value, ...)` is a condition Jev answers: true
+when Jev puts yes at {ASK_TRUE_AT} or above. It is the whole condition of an
+`if`, `elif`, `while` or `require`, and nothing else — not one side of a
+comparison, not in `wait_until`, where it would ask Jev on every pulse, and not
+in a predicate. Prefer a comparison or a predicate whenever the answer is a
+value you can read: they cost nothing and never guess.
+
+**What Jev reads.** The keywords of `decide` and `ask` are what Jev sees, under
+the names you give them, together with the `scene`. An object name or
+`selector(...)` gives that object's path, text and members; `find_all(...)`
+gives every match; a name bound to a reading gives its value; a literal gives
+itself. With no keyword, Jev reads every object on the screen. Each value is cut
+at {MAX_CONTEXT_VALUE_CHARS} characters and the whole at {MAX_DECIDE_STATE_CHARS};
+objects past that are left out, and the decision line says how many. Give Jev
+what a person would look at to answer the question, not everything. `scene` is
+taken, so it cannot be a keyword.
+
 **Conditions.** One condition is ONE comparison (`==`, `!=`, `>`, `<`, `>=`,
-`<=`), ONE reader call, or ONE predicate call. `and`, `or` and `not` are refused
+`<=`), ONE reader call, ONE predicate call, or ONE `ask(...)`. `and`, `or`
+and `not` are refused
 — for `and`, write two `require` calls, so each says on its own what to do when
 it fails; for `or`, write a predicate. The readers are: {_READERS}. A condition
 written without a comparison has to be a bool, so only `actionable()`,
@@ -182,7 +231,8 @@ other shape — a sprite, an animator state, a number the game could not read �
 refuses every operator rather than quietly answering false.
 
 **Refused outright:** `and`, `or`, `not`, a dot (`card.id`), a nested `def`,
-`import`, `lambda`, an f-string, `return` outside a predicate, a string anywhere but the docstring,
+`import` other than `from macros import ...` at the top, `decide(...)` outside
+`match`, `lambda`, an f-string, `return` outside a predicate, a string anywhere but the docstring,
 re-assignment, arithmetic, `break`, `continue`, and a list or any other call after `for ... in`.
 And these, each for its own reason:
 
@@ -196,12 +246,14 @@ hold and release in the same pass — a pass that presses without letting go
 presses once more on every turn. A `checkpoint` may not sit between a hold and
 its release, because the turn would end with the game held. A `wait_until` may
 not sit between `pause_game_time` and `resume_game_time`: with game time frozen,
-nothing it waits for can change. Nothing releases these for you, and a key left
+nothing it waits for can change. A `match` may not sit between a hold and its
+release either, and each `case` releases what it holds, because `{NONE_FITS}`
+can skip every case. Nothing releases these for you, and a key left
 down changes every step after the macro.
 
 **The limits.** Checked when you register: at most {MAX_STATEMENTS} statements
 written along the longest path, counting each loop body once, and a call chain
-at most {MAX_CALL_DEPTH} deep counting the entry point. Checked while it runs,
+at most {MAX_CALL_DEPTH} deep counting the entry point and every imported macro. Checked while it runs,
 because how often a loop turns is not known until then: a loop turns at most
 {MAX_LOOP_PASSES} times, and one call runs at most {MAX_EXECUTED_STATEMENTS}
 statements. Past either, the macro stops with `LOOP_LIMIT`, and what it already
