@@ -24,7 +24,13 @@ from app.qa.relevance import RELEVANCE_MODEL, TIMEOUT_SECONDS, post_decision
 logger = logging.getLogger(__name__)
 
 # 이 확률 이상으로 미도달이면 판정을 기록하지 않고 돌려보낸다.
-UNREACHED_THRESHOLD = 0.8
+#
+# qa_try 3 의 실패 판정 12개로 정했다(2026-10-14, jev-1.13-20260917). 미도달인 것은 TC 16
+# 0.86, 17 0.91, 18 0.85, 20 0.70, 14 0.69(주문이 아직 차징 중인데 HP 를 읽었다)였고, 실제로
+# 해 보고 실패했거나 precondition 이 깨진 것은 21 0.15·0.16, 11 0.19·0.27, 6 0.42, 9 0.54 였다.
+# 0.65 는 그 사이다. TC 19(0.24)는 미도달인데 못 잡는다. 잘못 돌려보내면 호출 한 번이 더
+# 들고 `MAX_UNREACHED_REFUSALS` 에서 멈추지만, 놓치면 틀린 판정이 남으므로 낮은 쪽을 골랐다.
+UNREACHED_THRESHOLD = 0.65
 # 같은 TC 를 이만큼 돌려보냈으면 다음 보고는 기록한다. agent 가 정말 갈 수 없는 TC 에서
 # 런이 멈추지 않게 하는 상한이다.
 MAX_UNREACHED_REFUSALS = 2
@@ -38,16 +44,14 @@ _CRITERIA = {
 Decide = Callable[[dict], Awaitable[dict]]
 
 
-def _instructions(test_step: str, expected: str, message: str) -> str:
-    return (
-        "A game QA tester reported a test case as FAILED.\n"
-        f"Test step: {test_step}\n"
-        f"Expected result: {expected}\n"
-        f"Tester's report: {message}\n"
-        "Did the tester actually carry out the test step and see that the expected result "
-        "did not happen (or find the precondition permanently unreachable), rather than "
-        "stopping before reaching or finishing the test step?"
-    )
+# 판정할 내용은 `state` 에 싣는다. Jev 결정 API 는 `state` 가 없으면 400 을 돌려준다
+# (2026-10-14 확인). 질문 문장은 TC 마다 같다.
+_INSTRUCTIONS = (
+    "A game QA tester reported this test case as FAILED. Did the tester actually carry "
+    "out the test step and see that the expected result did not happen (or find the "
+    "precondition permanently unreachable), rather than stopping before reaching or "
+    "finishing the test step?"
+)
 
 
 class UnreachedJudge:
@@ -63,10 +67,11 @@ class UnreachedJudge:
         """미도달일 확률. 판단하지 못하면 None."""
         body = {
             "model": RELEVANCE_MODEL,
+            "state": {"test_step": test_step, "expected": expected, "tester_report": message},
             "questions": {
                 "verdict": {
                     "type": "noul",
-                    "instructions": _instructions(test_step, expected, message),
+                    "instructions": _INSTRUCTIONS,
                     "criteria": dict(_CRITERIA),
                 }
             },

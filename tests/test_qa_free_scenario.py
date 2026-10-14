@@ -386,9 +386,13 @@ def test_unreached_judge_asks_jev_and_reads_the_attempted_probability() -> None:
         UnreachedJudge(decide).unreached_probability("웨이브를 격파한다", "클리어 화면", "전투 진행 중")
     )
     assert probability == 0.75
-    question = bodies[0]["questions"]["verdict"]
-    assert question["type"] == "noul"
-    assert "전투 진행 중" in question["instructions"]
+    # Jev 결정 API 는 `state` 가 없으면 400 이다.
+    assert bodies[0]["state"] == {
+        "test_step": "웨이브를 격파한다",
+        "expected": "클리어 화면",
+        "tester_report": "전투 진행 중",
+    }
+    assert bodies[0]["questions"]["verdict"]["type"] == "noul"
 
 
 def test_unreached_judge_fails_open() -> None:
