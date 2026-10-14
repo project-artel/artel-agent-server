@@ -129,7 +129,7 @@ def test_cache_writes_survive_the_ephemeral_ttl_shape() -> None:
     )
     result = LLMResult(
         generations=[[ChatGeneration(message=message)]],
-        llm_output={"model_name": "bedrock/us.anthropic.claude-haiku-5-5"},
+        llm_output={"model_name": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"},
     )
 
     async def scenario() -> None:
@@ -194,7 +194,7 @@ def test_a_bedrock_call_is_priced_from_the_catalog_when_nobody_billed_it() -> No
             UsageCallback(buffer),
             _chat_result(
                 cost=None,
-                model="bedrock/us.anthropic.claude-haiku-5-5",
+                model="bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
             ),
         )
 
@@ -203,7 +203,7 @@ def test_a_bedrock_call_is_priced_from_the_catalog_when_nobody_billed_it() -> No
     (record,) = sender.payloads[0]["records"]
     # input 12,043 중 10,240 이 캐시 읽기, 정가 대상은 1,803. 캐시 쓰기 512, 출력 318.
     expected = (
-        1_803 * 0.10 + 10_240 * 0.01 + 512 * 0.125 + 318 * 0.50
+        1_803 * 1.00 + 10_240 * 0.10 + 512 * 1.25 + 318 * 5.00
     ) / 1_000_000
     assert record["costUsd"] == pytest.approx(expected)
     # 우리가 계산한 값이다. provider 가 청구한 값과 한 칸에 섞이면 안 된다.
@@ -465,7 +465,7 @@ def test_a_bedrock_model_keeps_its_vendor_in_provider() -> None:
     """
     sender = RecordingSender()
     buffer = _buffer(sender, flush_size=1)
-    profile = "us.anthropic.claude-haiku-5-5"
+    profile = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
     async def scenario() -> None:
         set_usage_scope("QA_RUN", 7)

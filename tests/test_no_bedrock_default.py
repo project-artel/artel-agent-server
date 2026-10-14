@@ -34,10 +34,10 @@ def test_router_defaults_to_an_openrouter_model(no_bedrock):
 
 
 def test_router_model_can_be_set_to_bedrock_by_an_operator(no_bedrock, monkeypatch):
-    monkeypatch.setenv("ROUTER_MODEL", "bedrock/us.anthropic.claude-haiku-5-5")
+    monkeypatch.setenv("ROUTER_MODEL", "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0")
     get_settings.cache_clear()
 
-    assert router_model() == "bedrock/us.anthropic.claude-haiku-5-5"
+    assert router_model() == "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
 def test_router_model_outside_the_catalog_is_rejected_when_used(no_bedrock, monkeypatch):

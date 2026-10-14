@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
@@ -12,7 +13,9 @@ from app.config import get_settings
 from app.llm.models import (
     LLMModel,
     LLMProvider,
+    ModelSpec,
     ReasoningConfig,
+    ReasoningKind,
     get_model_spec,
     validate_reasoning,
 )
@@ -36,8 +39,33 @@ BEDROCK_PREFIX = "bedrock/"
 # Converse API 가 캐시 경계를 읽는 표기. 이 block 까지가 되읽을 수 있는 prefix 다.
 CACHE_POINT: dict[str, Any] = {"cachePoint": {"type": "default"}}
 
-# Bedrock 모델(Haiku 5.5, GPT-6.1 Sol)이 허용하는 최대 출력이다. 추론 token 도 이 안에
-# 들어가므로 낮게 고정하면 답을 쓰기 전에 `max_tokens` 로 끝날 수 있다.
+# Anthropic 은 thinking 이 켜진 호출의 temperature 를 1 로만 받는다. 실측:
+# `temperature may only be set to 1 when thinking is enabled`.
+#
+# 그래서 추론을 켜면 `TEMPERATURE` 를 못 쓴다. 그 값이 "두 모델의 비교가 비교이려면
+# 샘플링이 같아야 한다"는 이유로 고정돼 있으므로, 바꾸는 것이 아니라 **추론을 켠 호출은
+# 다른 샘플링이었다**는 사실로 남긴다. 비교할 때 이 축이 함께 움직인 것을 알아야 한다.
+THINKING_TEMPERATURE = 1.0
+
+# 추론 예산 위에 답이 설 자리. `max_tokens` 는 예산보다 커야 하고, 그 합이
+# `ModelSpec.max_input_tokens` 이 창에서 빼 둔 출력 예약분과 같아야 한다 — 두 수가
+# 어긋나면 압축이 도는 임계와 provider 가 거절하는 지점이 어긋난다.
+#
+# 4,096 은 스트리밍 주석 자신이 적어 둔 실측과 어긋나 있었다 — 시나리오 서른 스텝짜리
+# 답 하나가 8,000 token 이다. 그 값으로 맞춘다.
+OUTPUT_RESERVE = 8_192
+
+# 예산은 상한이 아니라 **목표치**다(Anthropic 문서). 작은 과제에선 지켜지지만
+# (실측: 목표 1,024 에 사용 949), 88건 저작처럼 무거운 과제에선 넘는다 — 실측
+# (2026-09-08): 목표 4,096 에 8,188 token 을 생각하고도 문장 중간에서 잘렸다.
+# `max_tokens` 가 목표 바로 위에 있으면 생각이 창을 다 먹고 답도 도구 호출도 없이
+# 끝난다. 그래서 생각 자리는 목표의 두 배로 잡는다 — 그 실측이 정한 배수다.
+THINKING_HEADROOM = 2
+
+# effort 로 추론하는 Bedrock 모델(Haiku 5.5, GPT-6.1 Sol)이 허용하는 최대 출력이다.
+# 추론 token 도 이 안에 들어가므로 낮게 고정하면 답을 쓰기 전에 `max_tokens` 로 끝날 수
+# 있다. token 예산으로 추론하는 Haiku 4.5 는 이 값이 아니라 예산에서 `max_tokens` 를
+# 계산한다.
 BEDROCK_MAX_OUTPUT_TOKENS = 128_000
 
 
@@ -101,31 +129,70 @@ class _CachingChatBedrockConverse(ChatBedrockConverse):
         yield from super()._stream(self._with_cache_point(messages), stop, run_manager, **kwargs)
 
 
-def _bedrock_request_fields(
-    provider: LLMProvider, reasoning: ReasoningConfig | None
-) -> dict[str, Any] | None:
-    """Converse 요청의 `additionalModelRequestFields`. 추론을 싣는 표기가 provider 마다 다르다.
+@dataclass(frozen=True)
+class _BedrockRequest:
+    """Converse 요청에서 추론 설정에 따라 달라지는 세 값."""
 
-    `anthropic` 은 adaptive `thinking` 과 `output_config.effort` 를 받는다. Haiku 5.5 는
-    고정 `budget_tokens` 를 거절한다. 아무 값도 고르지 않으면 provider 기본값인 medium
-    으로 생각한다.
+    # `additionalModelRequestFields`. 실을 것이 없으면 None 이다.
+    fields: dict[str, Any] | None
+    # None 이면 sampling parameter 를 보내지 않는다.
+    temperature: float | None
+    # None 이면 model 의 기본 최대 출력을 쓴다.
+    max_tokens: int | None
+
+
+def _bedrock_request(spec: ModelSpec, reasoning: ReasoningConfig | None) -> _BedrockRequest:
+    """추론을 싣는 표기가 provider 와 `ModelSpec.reasoning` 에 따라 셋으로 나뉜다.
+
+    `anthropic` 이고 `max_tokens` 이면(Haiku 4.5) `thinking.budget_tokens` 로 켠다.
+    고르지 않았으면 catalog 의 `reasoning_default_tokens` 로 켜고, 0 이면 끈다.
+
+    `anthropic` 이고 `effort` 이면(Haiku 5.5) adaptive `thinking` 과
+    `output_config.effort` 를 싣는다. Haiku 5.5 는 고정 `budget_tokens` 를 거절한다.
+    아무 값도 고르지 않으면 provider 기본값인 medium 으로 생각한다.
 
     `openai` 는 `reasoning_effort` 하나를 받고 `thinking` 을 모른다. 추론을 끄는 값이
     없으므로, 끄라고 했거나 고르지 않았으면 아무것도 싣지 않는다 — 그때는 provider
     기본값으로 추론한다.
     """
-    if provider is LLMProvider.openai:
+    if spec.provider is LLMProvider.openai:
         if reasoning is None or reasoning.disabled or reasoning.effort is None:
-            return None
-        return {"reasoning_effort": reasoning.effort.value}
+            return _BedrockRequest(None, None, BEDROCK_MAX_OUTPUT_TOKENS)
+        return _BedrockRequest(
+            {"reasoning_effort": reasoning.effort.value}, None, BEDROCK_MAX_OUTPUT_TOKENS
+        )
 
-    extra: dict[str, Any] = {}
+    if spec.reasoning is ReasoningKind.max_tokens:
+        # 고르지 않았으면 카탈로그의 기본 예산으로 켠다. Bedrock 은 provider 기본값이
+        # 없어서, 안 정하면 추론이 아예 일어나지 않는다.
+        budget = (
+            reasoning.max_tokens
+            if reasoning is not None and reasoning.max_tokens is not None
+            else spec.reasoning_default_tokens
+        )
+        # 0 은 "끈다" — None(미지정→기본 예산)과 다르다. `ReasoningConfig.disabled` 참조.
+        if not budget:
+            return _BedrockRequest(None, TEMPERATURE, None)
+        return _BedrockRequest(
+            {"thinking": {"type": "enabled", "budget_tokens": budget}},
+            THINKING_TEMPERATURE,
+            # `max_tokens` 가 예산보다 커야 한다(실측: `max_tokens must be greater than
+            # thinking.budget_tokens`). 예산에 답할 자리를 더해 잡는다 — 이 값이 곧
+            # `max_input_tokens` 이 빼 둔 출력 예약분이다.
+            budget * THINKING_HEADROOM + OUTPUT_RESERVE,
+        )
+
+    # Haiku 5.5 는 sampling parameter 를 보내면 400 을 돌려준다.
     if reasoning is not None and reasoning.disabled:
-        extra["thinking"] = {"type": "disabled"}
+        fields: dict[str, Any] | None = {"thinking": {"type": "disabled"}}
     elif reasoning is not None and reasoning.effort is not None:
-        extra["thinking"] = {"type": "adaptive"}
-        extra["output_config"] = {"effort": reasoning.effort.value}
-    return extra or None
+        fields = {
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": reasoning.effort.value},
+        }
+    else:
+        fields = None
+    return _BedrockRequest(fields, None, BEDROCK_MAX_OUTPUT_TOKENS)
 
 
 def _bedrock(
@@ -143,28 +210,26 @@ def _bedrock(
     모델 id 에서 `bedrock/` 접두만 떼면 inference profile ID 가 된다. 그 문자열이 리전
     접두와 판을 담고 있어 어느 요율로 청구되는지까지 정한다.
 
-    추론 설정은 `_bedrock_request_fields` 가 provider 에 맞춰 싣는다. `cachePoint` 는
+    추론 설정, temperature, `max_tokens` 는 `_bedrock_request` 가 정한다. `cachePoint` 는
     `anthropic` 모델에만 찍는다. OpenAI 모델이 Converse 에서 `cachePoint` block 을
     받는지는 확인하지 못했다.
     """
     settings = get_settings()
-    provider = get_model_spec(model).provider
-    caches_prompt = cache_prompt and provider is LLMProvider.anthropic
+    spec = get_model_spec(model)
+    caches_prompt = cache_prompt and spec.provider is LLMProvider.anthropic
     factory = _CachingChatBedrockConverse if caches_prompt else ChatBedrockConverse
-    extra = _bedrock_request_fields(provider, reasoning)
+    request = _bedrock_request(spec, reasoning)
 
     return factory(
         model=model.removeprefix(BEDROCK_PREFIX),
         region_name=settings.bedrock_region,
-        # None 을 **명시해서** 넘긴다. 인자를 빼면 `ChatBedrockConverse` 가
-        # `AWS_BEARER_TOKEN_BEDROCK` 환경 변수를 읽는데, 키는 database 에만 있어야 한다.
-        # None 이면 표준 AWS 자격증명 사슬이 답한다.
+        # admin page 에 저장된 키만 넘긴다. None 이면 표준 AWS 자격증명 사슬이 답한다.
+        # `AWS_BEARER_TOKEN_BEDROCK` 은 그 사슬의 일부라, langchain-aws 1.8 은 None 을
+        # 받아도 그 환경 변수를 읽는다. 예전 설정인 `BEDROCK_API_KEY` 는 읽지 않는다.
         bedrock_api_key=bedrock_api_key,
-        # Haiku 5.5 는 sampling parameter 를 보내면 400을 돌려준다. 추론 모델인 GPT-6.1 Sol
-        # 도 같은 이유로 보내지 않는다.
-        temperature=None,
-        max_tokens=BEDROCK_MAX_OUTPUT_TOKENS,
-        additional_model_request_fields=extra,
+        temperature=request.temperature,
+        max_tokens=request.max_tokens,
+        additional_model_request_fields=request.fields,
         # **답을 토막으로 받는다.** 통째로 받으면 다 쓸 때까지 연결에 아무것도 안 오고, 그
         # 조용한 시간이 곧 답의 길이다 — 실측으로 출력 token 당 5.3ms 라 8,000 token 짜리
         # 답 하나가 42초다. 시나리오 하나가 서른 스텝을 넘는 것은 정상이므로, 기다림 한도를

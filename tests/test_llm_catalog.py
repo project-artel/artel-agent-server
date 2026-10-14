@@ -25,19 +25,19 @@ from tests.conftest import MODEL_CATALOG_FIXTURE
 BASE_URL = "http://orchestration:8081"
 
 SEED_IDS = [
-    "openai/gpt-5.6-luna",
-    "openai/gpt-5.6-sol",
-    "openai/gpt-chat-latest",
-    "anthropic/claude-haiku-5.5",
-    "anthropic/claude-sonnet-5",
-    "anthropic/claude-opus-5",
+    "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "openai/gpt-6.1-sol",
+    "openai/gpt-6-astra",
+    "openai/gpt-6-luna",
+    "openai/gpt-5.6-terra",
+    "anthropic/claude-opus-5.5",
+    "anthropic/claude-sonnet-5.5",
     "google/gemini-3.8-flash",
-    "google/gemini-3.7-flash",
     "google/gemma-4-31b-it:free",
-    "x-ai/grok-4.6",
+    "x-ai/grok-4.7",
     "moonshotai/kimi-k3",
     "z-ai/glm-5.3-flash",
-    "qwen/qwen3.8-max",
+    "qwen/qwen3.7-max",
     "bedrock/us.anthropic.claude-haiku-5-5",
     "bedrock/us.openai.gpt-6.1-sol",
 ]
@@ -119,6 +119,8 @@ def test_parsing_builds_specs_with_id_enabled_reasoning_and_pricing() -> None:
         long_context_cache_read_per_mtok=0.05,
     )
 
+    assert haiku.reasoning_default_tokens is None
+
     sol = catalog["bedrock/us.openai.gpt-6.1-sol"]
     assert sol.provider is LLMProvider.openai
     assert sol.max_input_tokens == 922_000
@@ -126,14 +128,39 @@ def test_parsing_builds_specs_with_id_enabled_reasoning_and_pricing() -> None:
     assert sol.pricing is None
 
 
-def test_null_reasoning_and_null_pricing_parse_as_none() -> None:
-    chat_latest = parse_model_catalog(fixture_rows())["openai/gpt-chat-latest"]
+def test_a_token_budget_row_parses_its_default_budget() -> None:
+    """Haiku 4.5 reasons on a token budget and has no provider default, so the
+    catalog's `reasoning.defaultTokens` is what turns reasoning on when a request
+    leaves it unset."""
+    haiku = parse_model_catalog(fixture_rows())["bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"]
 
-    assert chat_latest.reasoning is None
-    assert chat_latest.reasoning_efforts is None
-    assert chat_latest.reasoning_min_tokens is None
-    assert chat_latest.pricing is None
-    assert chat_latest.enabled is True
+    assert haiku.enabled is True
+    assert haiku.supports_strict_json is True
+    assert haiku.max_input_tokens == 183_616
+    assert haiku.reasoning is ReasoningKind.max_tokens
+    assert haiku.reasoning_efforts is None
+    assert haiku.reasoning_min_tokens == 1_024
+    assert haiku.reasoning_max_tokens == 32_000
+    assert haiku.reasoning_default_tokens == 4_096
+    assert haiku.pricing == ModelPricing(
+        input_per_mtok=1.00,
+        output_per_mtok=5.00,
+        cache_write_per_mtok=1.25,
+        cache_read_per_mtok=0.10,
+        as_of="2026-09-03",
+        source="AWS 콘솔, Claude Haiku 4.5 / us-west-2 / on-demand",
+    )
+
+
+def test_null_reasoning_and_null_pricing_parse_as_none() -> None:
+    qwen = parse_model_catalog(fixture_rows())["qwen/qwen3.7-max"]
+
+    assert qwen.reasoning is None
+    assert qwen.reasoning_efforts is None
+    assert qwen.reasoning_min_tokens is None
+    assert qwen.reasoning_default_tokens is None
+    assert qwen.pricing is None
+    assert qwen.enabled is True
 
 
 def test_parsing_orders_by_sort_order_and_skips_an_unreadable_row() -> None:
@@ -143,7 +170,7 @@ def test_parsing_orders_by_sort_order_and_skips_an_unreadable_row() -> None:
 
     catalog = parse_model_catalog(rows)
 
-    assert list(catalog) == ["openai/gpt-5.6-luna", "openai/gpt-5.6-sol"]
+    assert list(catalog) == ["bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", "openai/gpt-6.1-sol"]
 
 
 def test_a_body_that_is_not_an_array_is_refused() -> None:
@@ -168,13 +195,13 @@ def test_catalog_is_cached_within_the_ttl_and_refetched_after_it() -> None:
     bodies = iter([fixture_rows()[:1], fixture_rows()[:2]])
     provider, calls = build_provider(lambda request: httpx.Response(200, json=next(bodies)), clock=clock)
 
-    assert list(provider.get()) == ["openai/gpt-5.6-luna"]
+    assert list(provider.get()) == SEED_IDS[:1]
     clock.now += 29
-    assert list(provider.get()) == ["openai/gpt-5.6-luna"]
+    assert list(provider.get()) == SEED_IDS[:1]
     assert len(calls) == 1
 
     clock.now += 2
-    assert list(provider.get()) == ["openai/gpt-5.6-luna", "openai/gpt-5.6-sol"]
+    assert list(provider.get()) == SEED_IDS[:2]
     assert len(calls) == 2
 
 
@@ -199,7 +226,7 @@ def test_last_good_catalog_answers_when_a_refresh_fails() -> None:
     assert len(calls) == 2
 
     clock.now += 2
-    assert list(provider.get()) == ["openai/gpt-5.6-luna"]
+    assert list(provider.get()) == SEED_IDS[:1]
 
 
 @pytest.mark.parametrize(
@@ -262,7 +289,7 @@ def test_invalidate_makes_the_next_get_ask_again() -> None:
 
 
 def test_get_model_spec_reads_the_installed_catalog() -> None:
-    assert get_model_spec("openai/gpt-5.6-luna").label == "GPT-5.6 Luna"
+    assert get_model_spec("openai/gpt-6-luna").label == "GPT-6 Luna"
     with pytest.raises(ValueError, match="not in the catalog"):
         get_model_spec("openai/not-a-model")
 

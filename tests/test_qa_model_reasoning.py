@@ -34,15 +34,15 @@ def test_catalog_carries_reasoning_selection_capabilities() -> None:
     catalog = get_model_catalog()
 
     every_effort = tuple(ReasoningEffort)
-    assert catalog["anthropic/claude-sonnet-5"].reasoning is ReasoningKind.effort
-    assert catalog["anthropic/claude-sonnet-5"].reasoning_efforts == every_effort
-    assert catalog["anthropic/claude-haiku-5.5"].reasoning_efforts == every_effort
-    assert catalog["anthropic/claude-haiku-5.5"].input_modalities == (
-        "text",
-        "image",
-        "file",
-    )
-    assert catalog["anthropic/claude-haiku-5.5"].supports_strict_json is True
+    assert catalog["anthropic/claude-sonnet-5.5"].reasoning is ReasoningKind.effort
+    assert catalog["anthropic/claude-sonnet-5.5"].reasoning_efforts == every_effort
+    # The one row left that takes a token budget instead of an effort.
+    haiku = catalog["bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"]
+    assert haiku.reasoning is ReasoningKind.max_tokens
+    assert haiku.reasoning_efforts is None
+    assert haiku.reasoning_min_tokens == 1_024
+    assert haiku.reasoning_max_tokens == 32_000
+    assert haiku.reasoning_default_tokens == 4_096
     assert catalog["bedrock/us.anthropic.claude-haiku-5-5"].reasoning_efforts == every_effort
     assert catalog["bedrock/us.openai.gpt-6.1-sol"].reasoning_efforts == every_effort
     assert catalog["google/gemini-3.8-flash"].input_modalities == (
@@ -52,23 +52,26 @@ def test_catalog_carries_reasoning_selection_capabilities() -> None:
         "audio",
         "video",
     )
-    assert catalog["openai/gpt-5.6-luna"].reasoning_efforts == every_effort
+    assert catalog["openai/gpt-6-luna"].reasoning_efforts == every_effort
     # Three, not five. The picker has to offer what the model takes: an
     # effort it never advertised is a 400 the user only sees mid-run.
     three = (ReasoningEffort.high, ReasoningEffort.medium, ReasoningEffort.low)
-    assert catalog["google/gemini-3.7-flash"].reasoning_efforts == three
-    # 3.8 Flash carries the same three efforts as 3.7. Pinned separately so a
-    # copied row that widened them fails here rather than at the provider.
     assert catalog["google/gemini-3.8-flash"].reasoning_efforts == three
-    assert catalog["openai/gpt-chat-latest"].reasoning is None
+    assert catalog["qwen/qwen3.7-max"].reasoning is None
 
 
-def test_request_accepts_effort_reasoning_for_openrouter_and_bedrock() -> None:
+def test_request_accepts_each_supported_reasoning_shape() -> None:
     install_catalog_with_enabled("bedrock/us.anthropic.claude-haiku-5-5")
     effort = OpenQaSessionRequest.model_validate(
         open_request(
-            model="anthropic/claude-haiku-5.5",
+            model="anthropic/claude-sonnet-5.5",
             reasoning={"effort": "high"},
+        )
+    )
+    budget = OpenQaSessionRequest.model_validate(
+        open_request(
+            model="bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            reasoning={"max_tokens": 2048},
         )
     )
     haiku_effort = OpenQaSessionRequest.model_validate(
@@ -79,17 +82,19 @@ def test_request_accepts_effort_reasoning_for_openrouter_and_bedrock() -> None:
     )
 
     assert effort.reasoning == ReasoningConfig(effort=ReasoningEffort.high)
+    assert budget.reasoning == ReasoningConfig(max_tokens=2048)
     assert haiku_effort.reasoning == ReasoningConfig(effort=ReasoningEffort.medium)
 
 
 @pytest.mark.parametrize(
     ("model", "reasoning"),
     [
-        ("openai/gpt-chat-latest", {"effort": "low"}),
-        ("anthropic/claude-sonnet-5", {"max_tokens": 2048}),
+        ("qwen/qwen3.7-max", {"effort": "low"}),
+        ("anthropic/claude-sonnet-5.5", {"max_tokens": 2048}),
+        ("bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", {"effort": "high"}),
         ("bedrock/us.anthropic.claude-haiku-5-5", {"max_tokens": 2048}),
         # The right kind, an effort the model does not offer.
-        ("google/gemini-3.7-flash", {"effort": "max"}),
+        ("google/gemini-3.8-flash", {"effort": "max"}),
         ("google/gemini-3.8-flash", {"effort": "xhigh"}),
         ("moonshotai/kimi-k3", {"effort": "medium"}),
     ],
@@ -110,12 +115,19 @@ def test_reasoning_budget_requires_exactly_one_setting() -> None:
         ReasoningConfig(effort=ReasoningEffort.low, max_tokens=1024)
 
 
-def test_request_rejects_unknown_reasoning_fields() -> None:
+def test_request_rejects_unknown_or_out_of_range_reasoning_fields() -> None:
     with pytest.raises(ValidationError):
         OpenQaSessionRequest.model_validate(
             open_request(
-                model="anthropic/claude-sonnet-5",
+                model="anthropic/claude-sonnet-5.5",
                 reasoning={"effort": "high", "max_token": 2048},
+            )
+        )
+    with pytest.raises(ValidationError, match="max_tokens >= 1024"):
+        OpenQaSessionRequest.model_validate(
+            open_request(
+                model="bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                reasoning={"max_tokens": 1023},
             )
         )
 
@@ -141,7 +153,7 @@ def test_service_persists_reasoning_and_passes_it_to_runner() -> None:
             scenarios=[
                 QaRunScenario(qa_try_id=7, test_scenario_id=1, scenario=make_scenario())
             ],
-            model="anthropic/claude-sonnet-5",
+            model="anthropic/claude-sonnet-5.5",
             reasoning=reasoning,
         )
 
@@ -174,7 +186,7 @@ def test_service_rejects_invalid_reasoning_before_saving() -> None:
                 ],
                 # Named rather than left to DEFAULT_MODEL: the default now
                 # reasons, and this case needs a model that does not.
-                model="openai/gpt-chat-latest",
+                model="qwen/qwen3.7-max",
                 reasoning=ReasoningConfig(effort=ReasoningEffort.low),
             )
 
@@ -219,7 +231,7 @@ def test_langchain_sends_reasoning_in_openrouter_request(monkeypatch) -> None:
     chat_model.build_chat_model.cache_clear()
     try:
         chat_model.build_chat_model(
-            "anthropic/claude-sonnet-5",
+            "anthropic/claude-sonnet-5.5",
             ReasoningConfig(effort=ReasoningEffort.high),
         ).invoke("test")
     finally:
@@ -240,9 +252,9 @@ def test_omitted_reasoning_is_not_sent_and_uses_a_distinct_cache_entry(
     monkeypatch.setattr(chat_model, "ChatOpenAI", FakeChat)
     chat_model.build_chat_model.cache_clear()
     try:
-        plain = chat_model.build_chat_model("anthropic/claude-sonnet-5")
+        plain = chat_model.build_chat_model("anthropic/claude-sonnet-5.5")
         reasoned = chat_model.build_chat_model(
-            "anthropic/claude-sonnet-5",
+            "anthropic/claude-sonnet-5.5",
             ReasoningConfig(effort=ReasoningEffort.low),
         )
         assert plain is not reasoned
@@ -275,9 +287,9 @@ def test_caching_is_opt_in_and_only_for_anthropic(monkeypatch) -> None:
     monkeypatch.setattr(chat_model, "ChatOpenAI", FakeChat)
     chat_model.build_chat_model.cache_clear()
     try:
-        chat_model.build_chat_model("anthropic/claude-opus-5", cache_prompt=True)
-        chat_model.build_chat_model("anthropic/claude-opus-5")
-        chat_model.build_chat_model("openai/gpt-chat-latest", cache_prompt=True)
+        chat_model.build_chat_model("anthropic/claude-opus-5.5", cache_prompt=True)
+        chat_model.build_chat_model("anthropic/claude-opus-5.5")
+        chat_model.build_chat_model("openai/gpt-6-luna", cache_prompt=True)
     finally:
         chat_model.build_chat_model.cache_clear()
 
@@ -311,7 +323,7 @@ def test_run_start_log_names_reasoning(monkeypatch, caplog) -> None:
 
         runner = QaRunner(
             resolve_run_config(
-                model="anthropic/claude-sonnet-5",
+                model="anthropic/claude-sonnet-5.5",
                 reasoning=ReasoningConfig(effort=ReasoningEffort.high),
             )
         )
@@ -330,7 +342,7 @@ def test_run_start_log_names_reasoning(monkeypatch, caplog) -> None:
         if "[QA] run starting" in record.getMessage()
     ]
     assert len(starting) == 1
-    assert "'model': 'anthropic/claude-sonnet-5'" in starting[0]
+    assert "'model': 'anthropic/claude-sonnet-5.5'" in starting[0]
     assert "'reasoning': {'effort': 'high'}" in starting[0]
 
 
@@ -352,7 +364,7 @@ def test_a_model_call_carries_a_request_timeout_and_bounded_retries(
     monkeypatch.setattr(chat_model, "ChatOpenAI", FakeChat)
     chat_model.build_chat_model.cache_clear()
     try:
-        chat_model.build_chat_model("anthropic/claude-sonnet-5")
+        chat_model.build_chat_model("anthropic/claude-sonnet-5.5")
     finally:
         chat_model.build_chat_model.cache_clear()
 
@@ -366,12 +378,20 @@ def test_a_model_call_carries_a_request_timeout_and_bounded_retries(
 
 
 def test_zero_budget_disables_reasoning_on_both_paths() -> None:
-    """max_tokens=0 = 추론 끔 — None(미지정→provider 기본값)과 다르다. 라우터가
-    쓴다: 669토큰 분류에 추론이 지연 13초를 먹던 실측이 이 값의 이유다."""
+    """max_tokens=0 = 추론 끔 — None(미지정)과 다르다. 미지정은 token 예산 row 에서는
+    기본 예산으로 켜고, effort row 에서는 provider 기본값에 맡긴다. 라우터가 쓴다:
+    669토큰 분류에 추론이 지연 13초를 먹던 실측이 이 값의 이유다."""
     from app.llm.chat_model import build_chat_model
     from app.llm.models import ReasoningConfig
 
     off = ReasoningConfig(max_tokens=0)
+    haiku_4_5 = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+    budget_off = build_chat_model(haiku_4_5, off)
+    assert "thinking" not in (budget_off.additional_model_request_fields or {})
+
+    budget_default_on = build_chat_model(haiku_4_5)
+    assert "thinking" in budget_default_on.additional_model_request_fields
 
     bedrock = build_chat_model("bedrock/us.anthropic.claude-haiku-5-5", off)
     assert bedrock.additional_model_request_fields == {"thinking": {"type": "disabled"}}

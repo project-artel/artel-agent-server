@@ -123,8 +123,10 @@ class ModelSpec:
     #
     # A model without vision is not a failure: the QA run drops to text-only rather
     # than refusing to start, and the capture tool is left out of its toolset so it
-    # cannot ask for a picture nothing can read. Every model in the catalog
-    # currently sees, so that path is covered by tests rather than by a live model.
+    # cannot ask for a picture nothing can read. `qwen/qwen3.7-max` is the one
+    # catalog row that takes this path — it advertises `text` alone — so a vision
+    # arm cannot be run on it and a measurement that compares it against a seeing
+    # model is comparing two things at once.
     input_modalities: tuple[str, ...] = ("text", "image")
     # Verified against the live catalog's `reasoning` object. None means the
     # model must not receive OpenRouter's reasoning parameter.
@@ -155,6 +157,16 @@ class ModelSpec:
     # `cache_write` 는 캐시에 처음 실을 때, `cache_read` 는 캐시에서 읽어 올 때의 단가다.
     # 셋 다 input 계열이지만 배수가 달라 따로 적는다.
     pricing: ModelPricing | None = None
+    # 사용자가 고르지 않았을 때 켤 예산. **provider 기본값이 없는 모델에만 쓴다.**
+    #
+    # OpenRouter 의 GPT-5.6 은 파라미터를 생략하면 자기 기본값(medium)으로 추론한다.
+    # Bedrock 의 Anthropic 은 생략하면 아예 안 한다 — `budget_tokens` 가 필수이고
+    # 그것을 안 주면 `thinking` 을 켤 수 없다. 그래서 같은 "안 골랐다"가 두 모델에서
+    # 정반대로 작동했고, 한쪽만 추론하는 상태로 둘을 비교하고 있었다.
+    #
+    # 여기에 값이 있으면 고르지 않은 런도 그 예산으로 켠다. 없으면 provider 에게
+    # 맡긴다 — OpenRouter 쪽이 그 경우다. catalog 의 `reasoning.defaultTokens` 다.
+    reasoning_default_tokens: int | None = None
     # 관리자가 끈 모델은 False 다. 사용자가 고르는 요청(`EnabledLLMModel`)만 이 값을 보고
     # 거절한다. router·compaction·사용량 단가처럼 내부에서 쓰는 쪽은 꺼진 row 도 그대로 쓴다.
     enabled: bool = True
@@ -204,7 +216,14 @@ LLMModel = Annotated[str, AfterValidator(require_known_model)]
 EnabledLLMModel = Annotated[str, AfterValidator(require_enabled_model)]
 
 
-DEFAULT_MODEL: str = "openai/gpt-5.6-luna"
+# Moved off `gpt-5.6-luna` on 2026-10-06 when that slug left the catalog along
+# with `gpt-5.6-sol` and `gpt-chat-latest`. `gpt-6-luna` is the same family's
+# newest entry, so a deployment that never set `DEFAULT_MODEL` keeps reasoning
+# at the provider's `medium` with the same window and modalities as before.
+#
+# The id has to stay a row in the orchestration server's `llm_model` table:
+# `get_model_spec` raises `ValueError` for an id the catalog does not carry.
+DEFAULT_MODEL: str = "openai/gpt-6-luna"
 
 
 def validate_reasoning(

@@ -61,6 +61,7 @@ class _ReasoningRow(_CamelRow):
     min_tokens: int | None = None
     max_tokens: int | None = None
     step: int | None = None
+    default_tokens: int | None = None
 
 
 class _PricingRow(_CamelRow):
@@ -108,6 +109,7 @@ class _CatalogRow(_CamelRow):
             reasoning_min_tokens=reasoning.min_tokens if reasoning else None,
             reasoning_max_tokens=reasoning.max_tokens if reasoning else None,
             reasoning_step=reasoning.step if reasoning else None,
+            reasoning_default_tokens=reasoning.default_tokens if reasoning else None,
             pricing=(
                 ModelPricing(**pricing.model_dump()) if pricing is not None else None
             ),

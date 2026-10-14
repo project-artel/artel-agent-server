@@ -11,8 +11,8 @@ from app.main import app
 BASE_URL = "http://orchestration:8081"
 
 CATALOG_ROW = {
-    "id": "openai/gpt-5.6-luna",
-    "label": "GPT-5.6 Luna",
+    "id": "openai/gpt-6-luna",
+    "label": "GPT-6 Luna",
     "provider": "openai",
     "supportsStrictJson": True,
     "maxInputTokens": 1000,

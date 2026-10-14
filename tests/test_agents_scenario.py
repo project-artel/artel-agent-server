@@ -280,7 +280,7 @@ def test_language_directives_cover_every_language() -> None:
 
 
 def test_select_structured_method_by_model() -> None:
-    assert select_structured_method("openai/gpt-5.6-luna") == "json_schema"
+    assert select_structured_method("openai/gpt-6-luna") == "json_schema"
     assert select_structured_method("google/gemma-4-31b-it:free") == "json_mode"
 
 

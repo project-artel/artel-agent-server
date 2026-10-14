@@ -20,7 +20,7 @@ To read it as a spreadsheet:
 
     python -m app.affordance.csv output/wv-editor-ALL-AB-latest.json
 
-`SPEC_MODEL` overrides the model by catalog id (for example `openai/gpt-5.6-luna`).
+`SPEC_MODEL` overrides the model by catalog id (for example `openai/gpt-6-luna`).
 `LANGSMITH_TRACING=false` silences the tracing client when its quota is spent.
 """
 

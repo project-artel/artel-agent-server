@@ -81,11 +81,14 @@ def test_a_changed_key_reaches_a_new_client_without_a_restart(monkeypatch) -> No
 def test_no_key_leaves_the_standard_aws_chain_alone(monkeypatch) -> None:
     """키가 저장되지 않은 배포는 표준 AWS 자격증명 사슬(IAM role 등)로 간다.
 
-    None 을 **명시해서** 넘겨야 한다. 인자를 빼면 `ChatBedrockConverse` 가
-    `AWS_BEARER_TOKEN_BEDROCK` 환경 변수를 읽는데, 키는 database 에만 있어야 한다.
-    그래서 그 변수를 세워 둔 채로 검사한다.
+    예전 설정인 `BEDROCK_API_KEY` 는 세워 둔 채로 검사한다. 그 값이 client 에 실리면
+    키가 database 가 아닌 곳에서 온 것이다.
+
+    `AWS_BEARER_TOKEN_BEDROCK` 은 지운다. 그것은 AWS 자신의 표준 자격증명이라 사슬의
+    일부이고, langchain-aws 1.8 은 `bedrock_api_key=None` 을 받아도 그 변수를 읽는다.
+    셸에 남은 값에 이 테스트가 흔들리지 않게 하려고 지운다.
     """
-    monkeypatch.setenv(BEARER_ENV, "env-token")
+    monkeypatch.delenv(BEARER_ENV, raising=False)
     monkeypatch.setenv("BEDROCK_API_KEY", "env-key")
     _use_keys(monkeypatch, _FixedKeys(None))
 

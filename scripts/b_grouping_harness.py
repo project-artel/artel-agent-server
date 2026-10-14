@@ -32,7 +32,7 @@ PROMPTS = {
     "full": "전부 커버해줘",
 }
 
-MODEL = "bedrock/us.anthropic.claude-haiku-5-5"
+MODEL = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
 class Group(BaseModel):

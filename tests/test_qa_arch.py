@@ -39,7 +39,7 @@ from app.qa.run_config import resolve_run_config
 
 
 def resolved(**overrides) -> ResolvedArch:
-    return resolve_arch(QaArchSpec(**overrides), "openai/gpt-chat-latest")
+    return resolve_arch(QaArchSpec(**overrides), "openai/gpt-6-luna")
 
 
 # --- the fingerprint ----------------------------------------------------------
@@ -99,9 +99,9 @@ def test_the_fingerprint_ignores_the_model_and_the_prompt() -> None:
     """The axes are independent, and a digest that moved with all of them could
     not group "the same structure under two models" — the comparison this exists
     to make possible."""
-    sonnet = resolve_run_config(model="anthropic/claude-sonnet-5")
-    gpt = resolve_run_config(model="openai/gpt-chat-latest")
-    pinned = resolve_run_config(model="openai/gpt-chat-latest", prompt_version="v1")
+    sonnet = resolve_run_config(model="anthropic/claude-sonnet-5.5")
+    gpt = resolve_run_config(model="openai/gpt-6-luna")
+    pinned = resolve_run_config(model="openai/gpt-6-luna", prompt_version="v1")
 
     assert sonnet.agent_fingerprint == gpt.agent_fingerprint == pinned.agent_fingerprint
     assert pinned.prompt_version != gpt.prompt_version
@@ -126,7 +126,7 @@ def test_a_relabelled_structure_keeps_its_fingerprint() -> None:
 
 def test_auto_follows_the_model() -> None:
     assert resolved(vision=VisionMode.auto).vision is get_model_spec(
-        "openai/gpt-chat-latest"
+        "openai/gpt-6-luna"
     ).supports_vision
 
 
@@ -137,14 +137,14 @@ def test_vision_on_is_refused_when_the_model_cannot_see(monkeypatch) -> None:
     is a wrong data point — and wrong is worse than absent, because nobody
     re-checks the rows that are there.
     """
-    blind = replace(get_model_spec("openai/gpt-chat-latest"), input_modalities=("text",))
+    blind = replace(get_model_spec("openai/gpt-6-luna"), input_modalities=("text",))
     monkeypatch.setattr(arch_module, "get_model_spec", lambda _model: blind)
 
     with pytest.raises(QaArchError, match="cannot read images"):
-        resolve_arch(QaArchSpec(vision=VisionMode.on), "openai/gpt-chat-latest")
+        resolve_arch(QaArchSpec(vision=VisionMode.on), "openai/gpt-6-luna")
 
     # `auto` still resolves, to the truth about the model.
-    assert resolve_arch(QaArchSpec(vision=VisionMode.auto), "openai/gpt-chat-latest").vision is False
+    assert resolve_arch(QaArchSpec(vision=VisionMode.auto), "openai/gpt-6-luna").vision is False
 
 
 def test_every_call_is_refused_when_the_run_resolves_to_no_vision(monkeypatch) -> None:
@@ -157,19 +157,19 @@ def test_every_call_is_refused_when_the_run_resolves_to_no_vision(monkeypatch) -
     over — and it cannot be caught from the spec alone, because `vision='auto'` is
     still `auto` until a model is named.
     """
-    blind = replace(get_model_spec("openai/gpt-chat-latest"), input_modalities=("text",))
+    blind = replace(get_model_spec("openai/gpt-6-luna"), input_modalities=("text",))
     monkeypatch.setattr(arch_module, "get_model_spec", lambda _model: blind)
 
     every_call = QaArchSpec(screen_capture=ScreenCaptureMode.every_call)
     with pytest.raises(QaArchError, match="needs vision"):
-        resolve_arch(every_call, "openai/gpt-chat-latest")
+        resolve_arch(every_call, "openai/gpt-6-luna")
 
     stated_off = QaArchSpec(vision=VisionMode.off, screen_capture=ScreenCaptureMode.every_call)
     with pytest.raises(QaArchError, match="needs vision"):
-        resolve_arch(stated_off, "openai/gpt-chat-latest")
+        resolve_arch(stated_off, "openai/gpt-6-luna")
 
     # The default mode is unaffected by any of this.
-    assert resolve_arch(QaArchSpec(), "openai/gpt-chat-latest").vision is False
+    assert resolve_arch(QaArchSpec(), "openai/gpt-6-luna").vision is False
 
 
 def test_the_two_capture_arms_are_two_structures_with_one_tool_set() -> None:
@@ -184,7 +184,7 @@ def test_the_two_capture_arms_are_two_structures_with_one_tool_set() -> None:
     on_demand = resolved(vision=VisionMode.on)
     every_call = resolve_arch(
         QaArchSpec(vision=VisionMode.on, screen_capture=ScreenCaptureMode.every_call),
-        "openai/gpt-chat-latest",
+        "openai/gpt-6-luna",
     )
 
     on_demand_tools, on_demand_middleware, on_demand_print = structure_of(on_demand)
@@ -206,7 +206,7 @@ def test_the_three_capture_modes_are_three_structures_with_one_tool_set() -> Non
     """
     resolved_modes = {
         mode: resolve_arch(
-            QaArchSpec(vision=VisionMode.on, screen_capture=mode), "openai/gpt-chat-latest"
+            QaArchSpec(vision=VisionMode.on, screen_capture=mode), "openai/gpt-6-luna"
         )
         for mode in ScreenCaptureMode
     }
@@ -225,15 +225,15 @@ def test_every_automatic_mode_is_refused_without_vision(monkeypatch) -> None:
     `middleware_names_for` 가 vision 이 켜진 런에만 `capture_vision` 을 붙이므로, 통과시키면
     그림을 실으라고 적힌 런이 한 장도 없이 돈다.
     """
-    blind = replace(get_model_spec("openai/gpt-chat-latest"), input_modalities=("text",))
+    blind = replace(get_model_spec("openai/gpt-6-luna"), input_modalities=("text",))
     monkeypatch.setattr(arch_module, "get_model_spec", lambda _model: blind)
 
     for mode in (ScreenCaptureMode.every_call, ScreenCaptureMode.by_role):
         with pytest.raises(QaArchError, match="needs vision"):
-            resolve_arch(QaArchSpec(screen_capture=mode), "openai/gpt-chat-latest")
+            resolve_arch(QaArchSpec(screen_capture=mode), "openai/gpt-6-luna")
 
     # 기본 mode 는 그대로 통과한다.
-    assert resolve_arch(QaArchSpec(), "openai/gpt-chat-latest").vision is False
+    assert resolve_arch(QaArchSpec(), "openai/gpt-6-luna").vision is False
 
 
 def test_deleting_without_being_able_to_replace_is_refused() -> None:
@@ -374,11 +374,11 @@ def test_a_pinned_summarizer_stays_apart_from_the_run_model() -> None:
         get_settings(), "qa_compaction_model", "google/gemma-4-31b-it:free"
     ):
         resolved = resolve_run_config(
-            arch=QaArchSpec(compaction=True), model="openai/gpt-5.6-luna"
+            arch=QaArchSpec(compaction=True), model="openai/gpt-6-luna"
         )
 
     assert resolved.compaction_model == "google/gemma-4-31b-it:free"
-    assert resolved.model == "openai/gpt-5.6-luna"
+    assert resolved.model == "openai/gpt-6-luna"
 
 
 # --- the label stays paired with the structure it names ------------------------
@@ -512,7 +512,7 @@ def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
     """
     resolved_arch = resolve_arch(
         QaArchSpec(vision=VisionMode.on, **_PINNED_COMPACTION_KNOBS),
-        "openai/gpt-chat-latest",
+        "openai/gpt-6-luna",
     )
     names, _middleware, fingerprint = structure_of(resolved_arch)
 

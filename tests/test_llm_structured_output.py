@@ -18,15 +18,27 @@ def _capture(monkeypatch) -> MagicMock:
     return chat
 
 
-BEDROCK = "bedrock/us.anthropic.claude-haiku-5-5"
-OPENROUTER = "openai/gpt-5.6-luna"
+BEDROCK = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+BEDROCK_WITHOUT_STRICT = "bedrock/us.anthropic.claude-haiku-5-5"
+OPENROUTER = "openai/gpt-6-luna"
+
+
+def test_bedrock_gets_json_schema_without_strict(monkeypatch) -> None:
+    """`ChatBedrockConverse._converse_params()` 가 `strict` 인자를 받지 않는다
+    (ARTEL-806). `json_schema` 자체는 Bedrock 도 받으므로 `json_mode` 로 내리지 않는다."""
+    chat = _capture(monkeypatch)
+
+    structured(BEDROCK, _Schema)
+
+    chat.with_structured_output.assert_called_once_with(_Schema, method="json_schema")
+    assert "strict" not in chat.with_structured_output.call_args.kwargs
 
 
 def test_bedrock_without_structured_outputs_uses_function_calling(monkeypatch) -> None:
     """Haiku 5.5 Bedrock 은 structured outputs 미지원이라 tool schema 로 받는다."""
     chat = _capture(monkeypatch)
 
-    structured(BEDROCK, _Schema)
+    structured(BEDROCK_WITHOUT_STRICT, _Schema)
 
     chat.with_structured_output.assert_called_once_with(
         _Schema, method="function_calling"
@@ -44,11 +56,12 @@ def test_openrouter_still_gets_strict(monkeypatch) -> None:
     )
 
 
-def test_bedrock_catalog_reports_no_strict_schema_support() -> None:
-    assert select_structured_method(BEDROCK) == "json_mode"
+def test_bedrock_catalog_reports_strict_schema_support_per_row() -> None:
+    assert select_structured_method(BEDROCK) == "json_schema"
+    assert select_structured_method(BEDROCK_WITHOUT_STRICT) == "json_mode"
 
 
-@pytest.mark.parametrize("model", [BEDROCK, OPENROUTER])
+@pytest.mark.parametrize("model", [BEDROCK, BEDROCK_WITHOUT_STRICT, OPENROUTER])
 def test_no_call_site_decides_this_for_itself(model) -> None:
     """네 agent 가 각자 고르지 않고 이 함수를 지난다.
 

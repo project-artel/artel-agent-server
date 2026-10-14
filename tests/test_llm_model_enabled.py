@@ -9,7 +9,14 @@ import app.llm.catalog as catalog_module
 from app.api.qa_sessions import OpenQaSessionRequest
 from app.api.sessions import OpenSessionRequest, TurnMessage
 from app.llm.catalog import ModelCatalogUnavailableError
-from app.llm.chat_model import _CachingChatBedrockConverse, build_chat_model
+from app.llm.chat_model import (
+    OUTPUT_RESERVE,
+    TEMPERATURE,
+    THINKING_HEADROOM,
+    THINKING_TEMPERATURE,
+    _CachingChatBedrockConverse,
+    build_chat_model,
+)
 from app.llm.models import ReasoningConfig, ReasoningEffort, get_model_spec
 from app.llm.usage import _estimate_cost
 from app.main import app
@@ -83,7 +90,7 @@ def test_request_answers_503_when_no_catalog_has_loaded(monkeypatch) -> None:
     monkeypatch.setattr(catalog_module, "_installed", Unavailable())
 
     response = TestClient(app, raise_server_exceptions=False).post(
-        "/internal/sessions", json={"user_input": "shop flow", "model": "openai/gpt-5.6-luna"}
+        "/internal/sessions", json={"user_input": "shop flow", "model": "openai/gpt-6-luna"}
     )
 
     assert response.status_code == 503
@@ -141,7 +148,7 @@ def test_bedrock_openai_never_gets_cache_points() -> None:
     assert not isinstance(chat, _CachingChatBedrockConverse)
 
 
-def test_bedrock_anthropic_fields_are_unchanged() -> None:
+def test_bedrock_anthropic_effort_row_uses_adaptive_thinking() -> None:
     high = build_chat_model(DISABLED_HAIKU, ReasoningConfig(effort=ReasoningEffort.high))
     off = build_chat_model(DISABLED_HAIKU, ReasoningConfig(max_tokens=0))
     cached = build_chat_model(DISABLED_HAIKU, cache_prompt=True)
@@ -154,3 +161,48 @@ def test_bedrock_anthropic_fields_are_unchanged() -> None:
     assert high.temperature is None
     assert high.max_tokens == 128_000
     assert type(cached) is _CachingChatBedrockConverse
+
+
+# --- Bedrock Anthropic on a token budget (Haiku 4.5) -------------------------------
+
+HAIKU_4_5 = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+
+def test_bedrock_budget_row_reasons_on_the_default_budget_when_unset() -> None:
+    """Bedrock 의 Anthropic 은 `budget_tokens` 없이는 추론하지 않는다. 고르지 않은
+    요청도 catalog 의 `reasoning_default_tokens` 로 켠다."""
+    assert get_model_spec(HAIKU_4_5).reasoning_default_tokens == 4_096
+
+    chat = build_chat_model(HAIKU_4_5)
+
+    assert chat.model_id == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    assert chat.additional_model_request_fields == {
+        "thinking": {"type": "enabled", "budget_tokens": 4_096}
+    }
+    assert chat.max_tokens == 4_096 * THINKING_HEADROOM + OUTPUT_RESERVE == 16_384
+    assert chat.temperature == THINKING_TEMPERATURE == 1.0
+
+
+def test_bedrock_budget_row_uses_an_explicit_budget() -> None:
+    chat = build_chat_model(HAIKU_4_5, ReasoningConfig(max_tokens=2_048))
+
+    assert chat.additional_model_request_fields == {
+        "thinking": {"type": "enabled", "budget_tokens": 2_048}
+    }
+    assert chat.max_tokens == 2_048 * 2 + 8_192
+    assert chat.temperature == 1.0
+
+
+def test_bedrock_budget_row_zero_turns_reasoning_off() -> None:
+    """0 은 끄는 값이다. 그때는 `thinking` 을 싣지 않고, 기본 sampling 으로 돌아간다."""
+    chat = build_chat_model(HAIKU_4_5, ReasoningConfig(max_tokens=0))
+
+    assert chat.additional_model_request_fields is None
+    assert chat.temperature == TEMPERATURE == 0.2
+    assert chat.max_tokens is None
+
+
+def test_bedrock_budget_row_is_enabled_and_cached() -> None:
+    """Haiku 4.5 는 켜진 채로 시드되는 Bedrock row 이고, Anthropic 이라 `cachePoint` 를 찍는다."""
+    assert get_model_spec(HAIKU_4_5).enabled is True
+    assert type(build_chat_model(HAIKU_4_5, cache_prompt=True)) is _CachingChatBedrockConverse
