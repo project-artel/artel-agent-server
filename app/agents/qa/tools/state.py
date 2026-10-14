@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.agents.qa.macro.book import MacroBook
+from app.agents.qa.macro.call_log import MacroCallLog
 from app.agents.qa.macro.lift import DispatchRecord
 from app.agents.qa.macro.session import MacroSession
 from app.qa.envelope import ActionResultItem, JsonRpcAction
@@ -199,6 +200,10 @@ class QaRunState:
         # 는 method 마다 마지막 한 벌만 남겨 순서도 tool 도 없다 — 그쪽은 capability 의 재현
         # 칸이 쓰는 것이라 뜻을 안 바꾸고, 이 기록을 옆에 둔다. macro 초안이 여기서 나온다.
         self.dispatches: list[DispatchRecord] = []
+        # `run_macro` 호출과 step 별 손 조작 수(ARTEL-1026). `dispatches` 는 손으로 부른 것만
+        # 담으므로 macro 호출은 여기 따로 남는다. stage draft, macro hint, macro result
+        # `fold` 가 이것을 읽는다.
+        self.macro_calls = MacroCallLog()
         # macro 초안을 이미 내민 step. 같은 step 을 다시 판정해도 초안을 또 만들지 않는다.
         self.drafted_steps: set[int] = set()
         # step 마다 내민 초안의 이름. 통과한 판정에만 초안이 붙으므로 `drafted_steps` 의

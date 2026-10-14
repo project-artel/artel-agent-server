@@ -641,6 +641,18 @@ class QaArchSpec(BaseModel):
     # 기본값이 `True` 인 이유는 `pulse_relevance` 와 같다. 기본 run 의 view 가 그대로라
     # `QA_ARCH_LABEL` 이 안 움직인다.
     report_step_view: bool = True
+    # macro 를 더 쓰게 하는 세 가지(ARTEL-1026). 셋 다 기본값이 `False` 라 기본 run 의 모양이
+    # 그대로다 — 켜는 것은 이 작업의 `QA_ARCH_LABEL` 을 올리는 commit 이 한다.
+    #
+    # - `stage_draft`: 전투 `scene` visit 이 끝났을 때 그 visit 에서 부른 macro 를 엮은 초안을
+    #   `report_step` 답에 싣는다.
+    # - `macro_hint`: 한 step 의 세 번째 손 조작에서 Jev decision model 이 고른 등록된 macro
+    #   한 줄을 그 조작의 결과에 싣는다.
+    # - `fold_stale_macro_results`: 호출한 step 이 보고된 뒤 오래된 `run_macro` 결과를 한 줄로
+    #   `fold` 한다.
+    stage_draft: bool = False
+    macro_hint: bool = False
+    fold_stale_macro_results: bool = False
     # `fold_context` 가 오래된 block 을 한 번에 `fold` 하는 기준. 낮추면 prompt 를 자주 다시 써서
     # `cache` 를 덜 읽고, 높이면 오래된 block 이 오래 남아 `cache` 에서 읽는 양이 는다. 어느 쪽이
     # 싼지는 재 봐야 해서 실험 축으로 둔다. `0` 은 오래된 block 을 매 호출 `fold` 한다.
@@ -740,6 +752,9 @@ class ResolvedArch(BaseModel):
     fold_stale_skills: bool
     pulse_relevance: bool
     report_step_view: bool
+    stage_draft: bool
+    macro_hint: bool
+    fold_stale_macro_results: bool
     fold_threshold_chars: int
     compaction: bool
     compaction_trigger_fraction: float

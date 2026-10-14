@@ -287,6 +287,9 @@ def _recorded(tool: BaseTool, ctx: ToolContext) -> BaseTool:
         outcome = ctx.state.last_outcome
         # 돌아온 뒤의 scene. 키 연타가 scene 을 바꿨는지는 이 값으로 안다(`lift._fold`).
         scene_after = (ctx.channel.scene.scene or ctx.channel.scene.pulse.scene or "").strip()
+        # 게임에 닿았는지와 상관없이 센다. macro hint 는 손으로 몇 번 시도했는지를 본다
+        # (ARTEL-1026).
+        ctx.state.macro_calls.record_hand_action(arguments.get("step"), scene, scene_after)
         if outcome is not None:
             ctx.state.dispatches.append(
                 DispatchRecord(

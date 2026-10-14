@@ -640,7 +640,11 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 #
 # And from `e7d85ceb94cd`, when `search_macros` joined the macro tools (ARTEL-984, v20).
 # The default is `macros=on`, so the default tool set moved with it.
-_EXPECTED_DEFAULT_FINGERPRINT = "1024ec5d29c8"
+#
+# And once more, from `1024ec5d29c8`, when `stage_draft`, `macro_hint` and
+# `fold_stale_macro_results` (ARTEL-1026) joined `QaArchSpec` at `False`. At `False` the
+# default run's tools, middleware and answers are where they were, so the label stays.
+_EXPECTED_DEFAULT_FINGERPRINT = "fdf1038bbff9"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:

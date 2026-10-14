@@ -163,9 +163,18 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
 
         멈췄으면 그 session 을 런의 상태에 둔다. `resume_macro` 가 거기서 찾는다.
         """
+        answer, _result, _paused = await _settle(session)
+        return answer
+
+    async def _settle(session: MacroSession) -> tuple[str, MacroRunResult, bool]:
+        """`_drive` 와 같고, 그 결과와 멈췄는지도 돌려준다. `run_macro` 가 호출 기록에 쓴다."""
         result, paused = await session.settle()
         state.paused_macro = session if paused else None
-        return ctx.answer(_render(result), channel.drain_operator_messages())
+        return ctx.answer(_render(result), channel.drain_operator_messages()), result, paused
+
+    def _standing_scene() -> str:
+        """지금 서 있는 `scene` 이름. 모르면 빈 문자열."""
+        return (channel.scene.scene or channel.scene.pulse.scene or "").strip()
 
     def _standing_screen() -> str:
         """등록하는 순간 agent 가 서 있는 `screen.id`. 모르면 빈 문자열.
@@ -574,8 +583,20 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
             return problem
 
         session = MacroSession(macro_name, step)
+        scene = _standing_scene()
         session.start(execute_macro(_Host(session), definition, bound, step))
-        return await _drive(session)
+        answer, result, paused = await _settle(session)
+        # stage draft, macro hint, macro result `fold` 가 읽는 기록(ARTEL-1026).
+        state.macro_calls.record_call(
+            step=step,
+            name=macro_name,
+            arguments=arguments or {},
+            scene=scene,
+            scene_after=_standing_scene(),
+            passed=result.passed,
+            paused=paused,
+        )
+        return answer
 
     @tool(description=load_tool_description("resume_macro").body)
     @_answers_instead_of_raising
