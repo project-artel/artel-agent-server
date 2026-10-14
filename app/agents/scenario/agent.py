@@ -151,11 +151,15 @@ class ScenarioAgent:
         self,
         agent_factory: AgentFactory | None = None,
         router: ScenarioRouter | None = None,
+        replier: ScenarioReplier | None = None,
     ) -> None:
         self._agent_factory = agent_factory or _default_agent_factory
         # 라우터 없음 = 예전 그대로(모든 입력이 루프로). 검사와 롤백이 이 기본값 하나로
         # 선다 — 켜는 쪽(세션 서비스)이 명시적으로 넣는다.
         self._router = router
+        # 인사·가드레일 문구를 쓰는 `ScenarioReplier`. 테스트가 실제 모델 대신 정해진 답을
+        # 물릴 수 있게 열어 두고, 안 주면 운영과 같은 기본값을 세운다.
+        self._replier = replier or ScenarioReplier()
 
     async def run(
         self,
@@ -176,7 +180,7 @@ class ScenarioAgent:
                 # 저작 없이 끝나지만 문구는 필요하다. 라우터가 문구까지 만들던 구조는 라우터가
                 # 자유 텍스트를 낼 수 있을 때만 서므로(결정 모델은 못 쓴다), 문구를 못 받았으면
                 # 문구 노드에 맡기고 그마저 실패하면 고정 문구로 떨어진다.
-                message = verdict.reply or await ScenarioReplier().write(verdict.route, request.user_input)
+                message = verdict.reply or await self._replier.write(verdict.route, request.user_input)
                 return ScenarioAgentResult(message=message or _CANNED[verdict.route], scenarios=[])
             if verdict.route is Route.AUTHORING and get_settings().scenario_workflow_enabled:
                 # **본선 워크플로**(Step 2): B 묶기·순서(전량 1회) → C 병렬 문장(묶음만)

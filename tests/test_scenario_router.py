@@ -56,16 +56,32 @@ def test_greeting_ends_without_any_model_loop() -> None:
     assert "system_prompt" not in seen  # 루프가 아예 안 돌았다 — 74k 를 안 읽었다
 
 
+class _RecordingReplier:
+    """`ScenarioReplier` 자리에 서서 받은 갈래와 입력을 적고 정해진 문구를 돌려준다."""
+
+    def __init__(self, reply: str) -> None:
+        self.reply = reply
+        self.calls: list[tuple[Route, str]] = []
+
+    async def write(self, route: Route, user_input: str) -> str:
+        self.calls.append((route, user_input))
+        return self.reply
+
+
 def test_offtopic_gets_a_polite_decline() -> None:
+    replier = _RecordingReplier("날씨는 제가 도와드리기 어려워요.")
     agent = ScenarioAgent(
         agent_factory=_capturing_factory({}),
         router=_fixed_router(Route.OFFTOPIC),
+        replier=replier,
     )
 
     out = asyncio.run(agent.run(_request(user_input="오늘 날씨 어때"), _CTX, _channel()))
 
     assert out.scenarios == []
-    assert out.message  # 라우터가 문구를 안 만들면 기본 문구가 나간다
+    assert out.message  # 라우터가 문구를 안 만들면 `ScenarioReplier` 가 쓴 문구가 나간다
+    assert replier.calls == [(Route.OFFTOPIC, "오늘 날씨 어때")]
+    assert out.message == "날씨는 제가 도와드리기 어려워요."
 
 
 def test_question_reenters_slim_on_the_search_fallback() -> None:
