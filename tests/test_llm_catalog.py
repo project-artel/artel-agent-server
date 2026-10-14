@@ -44,9 +44,14 @@ SEED_IDS = [
     "claude/claude-sonnet-5-5",
     "claude/claude-haiku-5-5",
     "claude/claude-fable-5-1",
+    "gpt/gpt-6.1-sol",
+    "gpt/gpt-6-astra",
+    "gpt/gpt-6-luna",
+    "gpt/gpt-5.6-terra",
 ]
 
-CLAUDE_IDS = SEED_IDS[-4:]
+CLAUDE_IDS = SEED_IDS[15:19]
+GPT_IDS = SEED_IDS[19:]
 
 
 class FakeClock:
@@ -84,11 +89,11 @@ def answer(rows):
 # --- the fixture mirrors the seed ----------------------------------------------
 
 
-def test_fixture_mirrors_the_nineteen_seed_rows_in_order() -> None:
+def test_fixture_mirrors_the_twenty_three_seed_rows_in_order() -> None:
     rows = fixture_rows()
 
     assert [row["id"] for row in rows] == SEED_IDS
-    assert [row["sortOrder"] for row in rows] == list(range(10, 200, 10))
+    assert [row["sortOrder"] for row in rows] == list(range(10, 240, 10))
     disabled = [row["id"] for row in rows if not row["enabled"]]
     assert disabled == [
         "bedrock/us.anthropic.claude-haiku-5-5",
@@ -143,6 +148,17 @@ def test_claude_api_rows_parse_with_effort_reasoning_and_pricing() -> None:
 
 # --- parsing --------------------------------------------------------------------
 
+
+
+def test_gpt_rows_copy_their_openrouter_rows_but_the_id_and_label() -> None:
+    rows = {row["id"]: row for row in fixture_rows()}
+
+    for model_id in GPT_IDS:
+        gpt_row = rows[model_id]
+        openrouter_row = rows[model_id.replace("gpt/", "openai/", 1)]
+        differing = {key for key in gpt_row if gpt_row[key] != openrouter_row[key]}
+        assert differing == {"id", "label", "sortOrder"}
+        assert gpt_row["label"] == f"{openrouter_row['label']} (OpenAI API)"
 
 def test_parsing_builds_specs_with_id_enabled_reasoning_and_pricing() -> None:
     catalog = parse_model_catalog(fixture_rows())

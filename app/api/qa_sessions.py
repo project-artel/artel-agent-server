@@ -6,6 +6,8 @@ from pydantic import BaseModel, model_validator
 
 from app.agents.qa.arch import DEFAULT_ARCH, QaArchSpec, resolve_arch
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage
+from app.llm.chat_model import key_service_of
+from app.llm.credentials import LlmKey, LlmKeyService
 from app.llm.models import (
     DEFAULT_MODEL,
     EnabledLLMModel,
@@ -86,6 +88,9 @@ class OpenQaSessionRequest(BaseModel):
     # Omit it for today's structure; set it to compare two structures without
     # deploying twice. See `app/agents/qa/arch.py`.
     arch: QaArchSpec = DEFAULT_ARCH
+    # 런을 시작한 사용자가 등록한 key. 사용자 key 로 도는 런에만 실려 온다. 없으면 공용 key 다.
+    # 세션 기록에만 두고 `run_config`·로그·응답에는 넣지 않는다(`app/llm/credentials.py`).
+    llm_key: LlmKey | None = None
 
     @model_validator(mode="after")
     def validate_against_model(self) -> "OpenQaSessionRequest":
@@ -97,6 +102,15 @@ class OpenQaSessionRequest(BaseModel):
         """
         validate_reasoning(self.model, self.reasoning)
         resolve_arch(self.arch, self.model)
+        # `gpt/` 에는 공용 key 가 없다. 첫 model 호출에서 실패하게 두면 런이 시작됐다고 보고된
+        # 뒤에 첫 턴에서 죽는다.
+        if key_service_of(self.model) is LlmKeyService.openai and (
+            self.llm_key is None or self.llm_key.service is not LlmKeyService.openai
+        ):
+            raise ValueError(
+                f"Model '{self.model}' is called with the user's own OpenAI API key; "
+                "send llm_key with service 'openai'."
+            )
         return self
 
 
@@ -144,6 +158,7 @@ async def open_qa_session(
         prompt_version=payload.prompt_version,
         reasoning=payload.reasoning,
         arch=payload.arch,
+        llm_key=payload.llm_key,
     )
     return OpenQaSessionResponse(session_id=session_id, run_config=run_config)
 
@@ -169,6 +184,10 @@ async def qa_session_ws(websocket: WebSocket, session_id: str) -> None:
     async def send(frame: dict) -> None:
         async with write_lock:
             await websocket.send_json(frame)
+
+    # 런을 띄우기 전에 묶는다. 런 task 는 지금의 context 를 복사해 가고, receive loop 는 이
+    # task 에서 돌며 `screen_verdict`·`screen_name` task 를 띄운다. 둘 다 사용자 key 를 쓴다.
+    await service.bind_llm_key(session_id)
 
     # The run drives itself; this coroutine only feeds it what arrives.
     run = asyncio.create_task(service.run(session_id, send))

@@ -44,6 +44,11 @@ MAX_RECORDS_PER_REQUEST = 200
 
 Service = Literal["QA_RUN", "SCENARIO", "KNOWLEDGE_QUERY", "GAME_CONTEXT", "EMBEDDING"]
 
+# 그 호출을 누구의 key 로 했는가. `user` 는 세션에 묶인 사용자 key(`app/llm/credentials.py`),
+# `platform` 은 관리자가 넣은 공용 key 다. orchestration 은 `llm_usage.key_source` 에 남겨
+# 공용 지출과 개인 지출을 가른다.
+KeySource = Literal["platform", "user"]
+
 
 @dataclass(frozen=True)
 class UsageScope:
@@ -178,6 +183,7 @@ def _build_record(
     cost_usd: float | None = None,
     started_at: datetime,
     latency_ms: int,
+    key_source: KeySource = "platform",
 ) -> dict[str, Any] | None:
     """One record in the wire shape, or None when the call has no scope.
 
@@ -203,6 +209,7 @@ def _build_record(
         "reasoningTokens": reasoning_tokens,
         "latencyMs": latency_ms,
         "calledAt": _isoformat(started_at),
+        "keySource": key_source,
     }
     # provider 가 청구액을 줬으면 그것이 답이다. 계산은 안 줄 때만 한다 — 실제로 나간
     # 돈을 추정치로 덮으면 그 행은 영영 되돌릴 수 없다.
@@ -353,8 +360,12 @@ class UsageCallback(AsyncCallbackHandler):
         buffer: UsageBuffer | None = None,
         slug: str | None = None,
         input_includes_cache_write: bool = False,
+        key_source: KeySource = "platform",
     ) -> None:
         self._buffer = buffer
+        # client 하나는 key 하나로 만들어지므로(`build_chat_model` 의 cache key) 출처도 client
+        # 마다 하나다.
+        self._key_source = key_source
         # 카탈로그가 쓰는 이름. 응답이 vendor 접두를 잃고 돌아올 때 이것으로 되살린다.
         # Bedrock 이 그렇다 — 클라이언트에는 `bedrock/` 을 뗀 profile ID 만 넘기므로
         # 응답의 `model_name` 에 슬래시가 없고, 그러면 `provider` 가 모델 이름
@@ -388,7 +399,11 @@ class UsageCallback(AsyncCallbackHandler):
         started = self._started.pop(run_id, None)
         try:
             record = _record_from_response(
-                response, started, self._slug, self._input_includes_cache_write
+                response,
+                started,
+                self._slug,
+                self._input_includes_cache_write,
+                self._key_source,
             )
             if record is not None:
                 await self._target.add(record)
@@ -402,6 +417,7 @@ def _record_from_response(
     started: tuple[float, datetime] | None,
     slug: str | None = None,
     input_includes_cache_write: bool = False,
+    key_source: KeySource = "platform",
 ) -> dict[str, Any] | None:
     generations = response.generations[0] if response.generations else []
     message = getattr(generations[0], "message", None) if generations else None
@@ -440,6 +456,7 @@ def _record_from_response(
         cost_usd=float(cost) if isinstance(cost, (int, float)) else None,
         started_at=started[1] if started else datetime.now(UTC),
         latency_ms=int((now - started[0]) * 1000) if started else 0,
+        key_source=key_source,
     )
 
 
