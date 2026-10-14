@@ -76,10 +76,54 @@ def test_the_skill_carries_what_grammar_py_assembles(section: str) -> None:
     )
 
 
-def test_the_skill_holds_three_examples() -> None:
+def test_the_skill_holds_four_examples() -> None:
     """하나로 줄면 가르치는 것이 준다 — 분기와 helper 가 든 긴 것, 반복과 checkpoint 가 든
-    것, 짝을 보여 주는 짧은 것."""
-    assert len(examples_in_the_skill()) == 3
+    것, 짝을 보여 주는 짧은 것, 전투 하나를 처음 턴부터 끝까지 진행하는 것(ARTEL-1026)."""
+    assert len(examples_in_the_skill()) == 4
+
+
+def test_an_example_plays_a_whole_battle_without_a_checkpoint() -> None:
+    """stage 단위 예시가 보여 주기로 한 것: 턴을 도는 `while`, 상대 턴을 기다리는
+    `wait_until`, `and` 를 대신하는 predicate. `checkpoint` 로 기다리지 않는다 — stage 에
+    등록된 전투 macro 가 턴마다 `checkpoint` 를 불러 턴마다 model 호출을 하나씩 썼다."""
+    battle = dict(examples_in_the_skill())["clear_forest_battle"]
+
+    assert 'while scene() == "Battle":' in battle
+    assert "wait_until(player_can_act()" in battle
+    assert "def pair_still_playable(spell: object, element: object) -> bool:" in battle
+    assert "checkpoint(" not in battle
+
+
+# 시나리오 benchmark 인 WordVenture 의 이름. prompt 예시에 실리면 측정이 prompt 를 재게 된다.
+_BENCHMARK_NAMES = (
+    "WordVenture",
+    "Card(Clone)",
+    "CombineSystem",
+    "CombineZone",
+    "TurnBattleScene",
+    "TurnEndButton",
+    "MeleeRock",
+    "MeleeCrab",
+    "RangedAqua",
+    "Boss_Undead",
+    "StoryScene",
+    "MapScene",
+    "GameClearScene",
+)
+
+
+def test_no_macro_prompt_names_the_benchmark_game() -> None:
+    """macro 를 가르치는 두 글만 잰다. `skill_content_map.md`, `skill_held_state.md`,
+    `tool_click.md` 는 v21 부터 `Card(Clone)` 과 `CombineSystem` 을 예로 들고 있어, 그것을
+    고치는 일은 이 변경 밖이다."""
+    from app.prompts import PROMPTS_ROOT, resolve_version
+
+    version = resolve_version("qa_run")
+    directory = PROMPTS_ROOT / "qa_run" / version
+    for path in (directory / "skill_macro.md", directory / "macro_memory_directive.md"):
+        text = path.read_text(encoding="utf-8")
+        for name in _BENCHMARK_NAMES:
+            assert name not in text, f"{path.name} names {name!r}, a WordVenture object"
 
 
 def test_every_example_in_the_skill_passes_the_parser() -> None:
