@@ -34,6 +34,9 @@ class MacroCall:
     passed: bool
     paused: bool
     visit: int
+    # 부르기 직전에 서 있던 `screen.id`. 모르면 빈 문자열이다. stage draft 를 등록할 때 이
+    # 값으로 관계를 맺는다 — 등록은 이미 다음 `scene` 에서 일어나기 때문이다.
+    screen: str = ""
 
 
 @dataclass
@@ -78,6 +81,7 @@ class MacroCallLog:
         scene_after: str,
         passed: bool,
         paused: bool,
+        screen: str = "",
     ) -> MacroCall:
         visit = self.notice_scene(scene)
         call = MacroCall(
@@ -89,6 +93,7 @@ class MacroCallLog:
             passed=passed,
             paused=paused,
             visit=visit,
+            screen=screen.strip(),
         )
         self.calls.append(call)
         self.notice_scene(scene_after)

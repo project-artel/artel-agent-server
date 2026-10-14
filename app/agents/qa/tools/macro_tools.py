@@ -72,6 +72,7 @@ from app.qa.envelope import (
     MacroSearchPayload,
     MacroSearchResultPayload,
 )
+from app.qa.macro_hint import log_hint_counts
 from app.qa.scene_context import render_macro, scene_labels
 
 # `search_macros` 의 `limit` 범위와 `query` 길이. `MACRO_SEARCH` 계약이 정한 값이고,
@@ -519,7 +520,13 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
             return problem
 
         standing = _standing_screen()
-        relations = tuple([standing] if standing else []) + tuple(named)
+        # stage draft 는 그 `scene` 을 떠난 뒤에 등록되므로 서 있는 `screen` 이 아니라 그
+        # visit 에서 macro 를 부를 때 서 있던 `screen` 에 맺는다(ARTEL-1026).
+        drafted_on = state.stage_draft_screens.get(macro_name)
+        if drafted_on is not None:
+            relations = tuple(drafted_on) + tuple(named)
+        else:
+            relations = tuple([standing] if standing else []) + tuple(named)
         # **저쪽에 보내기 전에 이 런의 책에 넣는다.** 저쪽이 거절하든 답이 없든
         # `run_macro` 는 이번 런 안에서 이 macro 를 부를 수 있어야 한다.
         registered = book.register(definition, relations)
@@ -598,6 +605,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
 
         session = MacroSession(macro_name, step)
         scene = _standing_scene()
+        screen = _standing_screen()
         session.start(execute_macro(_Host(session), definition, bound, step))
         answer, result, paused = await _settle(session)
         # stage draft, macro hint, macro result `fold` 가 읽는 기록(ARTEL-1026).
@@ -609,7 +617,12 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
             scene_after=_standing_scene(),
             passed=result.passed,
             paused=paused,
+            screen=screen,
         )
+        if state.macro_hint_steps.get(step):
+            # hint 를 받은 step 에서 `run_macro` 를 불렀다. 마지막 hint 를 따른 호출도 log 에
+            # 남도록 여기서 한 번 더 센다.
+            log_hint_counts(state)
         return answer
 
     @tool(description=load_tool_description("resume_macro").body)

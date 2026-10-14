@@ -204,6 +204,9 @@ class QaRunState:
         # 담으므로 macro 호출은 여기 따로 남는다. stage draft, macro hint, macro result
         # `fold` 가 이것을 읽는다.
         self.macro_calls = MacroCallLog()
+        # 내민 stage draft 이름 → 그 visit 에서 macro 를 부를 때 서 있던 `screen.id`.
+        # `register_macro` 가 서 있는 `screen` 대신 이것으로 관계를 맺는다.
+        self.stage_draft_screens: dict[str, tuple[str, ...]] = {}
         # macro hint 를 Jev 에게 이미 물은 step → 그 답으로 hint 가 결과에 실렸나(ARTEL-1026).
         # 한 step 에 한 번만 묻는다. 실린 step 중 `run_macro` 를 부른 것이 "따랐다" 의 수다.
         self.macro_hint_steps: dict[int, bool] = {}

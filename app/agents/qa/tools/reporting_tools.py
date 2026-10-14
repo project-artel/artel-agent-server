@@ -164,6 +164,7 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         state.macros.write(draft.name, draft.source)
         state.macros.remember_read(draft.name)
         state.offered_drafts[step] = draft.name
+        state.stage_draft_screens[draft.name] = draft.screens
         if state.phase_cycle is not None:
             state.phase_cycle.expect_draft_review()
         return offer_stage(draft)

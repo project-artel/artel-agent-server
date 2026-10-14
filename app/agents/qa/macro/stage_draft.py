@@ -32,13 +32,12 @@ from app.agents.qa.macro.call_log import MacroCall, MacroCallLog
 from app.agents.qa.macro.errors import MacroRejection
 from app.agents.qa.macro.grammar import CHECKPOINT, MacroType
 from app.agents.qa.macro.model import MacroDefinition, MacroParameter
+from app.agents.qa.macro.lift import _SPAWNED
 from app.agents.qa.macro.parser import macro_definition_from_source
+from app.agents.qa.macro.selector_check import is_unstable_selector, reject_unstable_selectors
 
 # 한 visit 에서 이만큼은 불렀어야 한다. 하나뿐인 호출은 그 macro 자체가 이미 초안이다.
 MIN_VISIT_CALLS = 2
-
-# spawn 된 객체의 경로 표지. `lift._SPAWNED` 와 같은 이유로 고정된 경로가 아니다.
-_SPAWNED = "(Clone)"
 
 
 @dataclass(frozen=True)
@@ -50,6 +49,8 @@ class StageDraft:
     macros: tuple[str, ...]
     # 이 초안의 근거가 된 `run_macro` 호출 수.
     calls: int
+    # 그 visit 에서 macro 를 부를 때 서 있던 `screen.id`. 등록할 때 이것으로 관계를 맺는다.
+    screens: tuple[str, ...] = ()
 
 
 def stage_draft_for_visit(
@@ -59,25 +60,47 @@ def stage_draft_for_visit(
     taken: set[str],
     handled_visits: set[int],
 ) -> tuple[StageDraft | None, str]:
-    """가장 최근 `run_macro` 의 visit 이 끝났으면 그 visit 의 초안. `(초안, 안 만든 이유)`.
+    """끝난 visit 중 아직 따져 보지 않은 것의 초안, 최근 것부터. `(초안, 안 만든 이유)`.
 
     `handled_visits` 는 이미 따져 본 visit 의 번호이고 이 함수가 채운다. 초안을 못 만든
     visit 도 담는다 — 같은 visit 은 다음 `report_step` 에서도 같은 이유로 못 만든다.
+    가장 최근 호출만 보지 않는 이유: 전투 1 에서 세 번 부르고 Reward 를 지나 전투 2 에서 한
+    번 부르면, 전투 2 가 끝난 뒤 가장 최근 호출은 전투 2 의 것이라 전투 1 을 영영 놓친다.
     네트워크를 읽지 않는다. 정의는 `book` 에 있는 것만 쓴다.
     """
-    if not log.calls:
-        return None, ""
-    last = log.calls[-1]
     standing = standing_scene.strip()
-    if last.visit in handled_visits or not last.scene or not standing:
+    if not log.calls or not standing:
         return None, ""
-    if standing == last.scene:
-        return None, ""
-    # 여기서부터 이 visit 은 끝났다. 어떻게 끝나든 한 번만 따진다.
-    handled_visits.add(last.visit)
+    visits: list[int] = []
+    for call in reversed(log.calls):
+        if call.visit not in visits:
+            visits.append(call.visit)
+    why = ""
+    for visit in visits:
+        if visit in handled_visits:
+            continue
+        calls = log.calls_in_visit(visit)
+        scene = calls[0].scene
+        if not scene:
+            continue
+        if visit == log.visit and scene == standing:
+            # 아직 그 `scene` 에 있다. visit 이 끝나지 않았다.
+            continue
+        # 여기서부터 이 visit 은 끝났다. 어떻게 끝나든 한 번만 따진다.
+        handled_visits.add(visit)
+        draft, why = _draft_for(calls, scene, book, taken)
+        if draft is not None:
+            return draft, ""
+    return None, why
+
+
+def _draft_for(
+    visit_calls: list[MacroCall], scene: str, book: MacroBook, taken: set[str]
+) -> tuple[StageDraft | None, str]:
+    """끝난 visit 하나의 초안."""
 
     # 끝까지 간 호출만 쓴다. 실패했거나 멈춘 호출을 되풀이하는 초안은 같은 곳에서 또 멈춘다.
-    ran = [call for call in log.calls_in_visit(last.visit) if call.passed and not call.paused]
+    ran = [call for call in visit_calls if call.passed and not call.paused]
     if len(ran) < MIN_VISIT_CALLS:
         return None, ""
 
@@ -101,14 +124,18 @@ def stage_draft_for_visit(
             return None, why
         lines.append(written)
 
-    entry = _free_name(f"clear_{_snake(last.scene)}", taken)
+    entry = _free_name(f"clear_{_snake(scene)}", taken)
     names = tuple(first_calls)
-    source = _assemble(entry, last.scene, names, definitions, lines, len(ran))
+    source = _assemble(entry, scene, names, definitions, lines, len(ran))
     try:
         macro_definition_from_source(entry, source)
+        # 복사한 helper 는 저장된 원문이라 `#id` 를 담고 있을 수 있다. `register_macro` 가
+        # 그것을 거절하므로, 등록이 기본인 초안이라면 여기서 내지 않는다.
+        reject_unstable_selectors(source)
     except MacroRejection as rejected:
         return None, f"the stage draft did not parse: {rejected}"
-    return StageDraft(entry, source, last.scene, names, len(ran)), ""
+    screens = tuple(dict.fromkeys(call.screen for call in ran if call.screen))
+    return StageDraft(entry, source, scene, names, len(ran), screens), ""
 
 
 # --- 조립 ---------------------------------------------------------------------
@@ -255,7 +282,7 @@ def _argument(parameter: MacroParameter, value: Any) -> str | None:
         if not isinstance(value, str):
             return None
         selector = value.strip()
-        if not selector or selector.startswith(("#", "-")) or _SPAWNED in selector:
+        if is_unstable_selector(selector) or selector.startswith("-") or _SPAWNED in selector:
             return None
         if not _is_selector(selector):
             return None

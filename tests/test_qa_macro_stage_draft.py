@@ -124,13 +124,61 @@ def test_one_call_is_not_enough_and_a_visit_is_drafted_once() -> None:
     assert draft(log, book, handled=set())[0] is not None
 
 
-def test_only_the_most_recent_visit_is_considered() -> None:
+def test_an_earlier_ended_visit_is_still_drafted() -> None:
+    """전투 1 에서 두 번 부르고 Shop 에서 한 번 부르면, 가장 최근 호출은 Shop 의 것이다.
+    가장 최근 호출만 보면 전투 1 을 영영 놓친다."""
     log = MacroCallLog()
-    call(log, "end_turn", scene="Battle", after="Shop")
+    call(log, "end_turn", scene="Battle")
     call(log, "end_turn", scene="Battle", after="Shop")
     call(log, "speak", {"line": "hi"}, scene="Shop")
 
-    assert draft(log, book_with(end_turn=END_TURN, speak=SPEAK), standing="Map")[0] is None
+    found, _why = draft(log, book_with(end_turn=END_TURN, speak=SPEAK), standing="Map")
+
+    assert found is not None and found.scene == "Battle"
+
+
+def test_a_visit_back_on_the_same_scene_is_a_new_visit() -> None:
+    log = MacroCallLog()
+    call(log, "end_turn", scene="Battle")
+    call(log, "end_turn", scene="Battle", after="Reward")
+    log.record_hand_action(4, "Reward", "Battle")
+    call(log, "end_turn", scene="Battle")
+
+    # 두 번째 전투가 아직 진행 중이어도 첫 전투는 끝났다.
+    found, _why = draft(log, book_with(end_turn=END_TURN), standing="Battle")
+
+    assert found is not None and found.calls == 2
+
+
+def test_a_copied_helper_with_an_instance_id_blocks_the_draft() -> None:
+    """저장된 macro 는 `#id` 를 담고 있을 수 있다. 그 초안은 `register_macro` 가 거절하므로
+    내밀지 않는다."""
+    stale = (
+        "def tap() -> None:\n"
+        '    """Tap one thing."""\n'
+        '    click(selector("#-64624"))\n'
+    )
+    log = MacroCallLog()
+    call(log, "tap")
+    call(log, "tap", after="Reward")
+
+    found, why = draft(log, book_with(tap=stale))
+
+    assert found is None
+    assert "changes between game launches" in why
+
+
+def test_the_draft_carries_the_screens_the_macros_were_called_on() -> None:
+    log = MacroCallLog()
+    for after in ("Battle", "Reward"):
+        log.record_call(
+            step=3, name="end_turn", arguments={}, scene="Battle", scene_after=after,
+            passed=True, paused=False, screen="12",
+        )
+
+    found, _why = draft(log, book_with(end_turn=END_TURN))
+
+    assert found is not None and found.screens == ("12",)
 
 
 def test_failed_calls_do_not_count() -> None:
@@ -311,6 +359,28 @@ def test_report_step_offers_the_stage_draft_through_review_draft() -> None:
         # 같은 visit 은 다시 내밀지 않는다.
         again = await report(tools, step=2)
         assert "Stage draft ready" not in again
+
+    asyncio.run(scenario())
+
+
+def test_registering_a_stage_draft_relates_it_to_the_battle_screen() -> None:
+    """등록은 이미 다음 `scene` 에서 일어난다. 서 있는 `screen` 에 맺으면 다음 런은 전투에서
+    이 macro 를 못 찾는다."""
+
+    async def scenario() -> None:
+        state, tools = make(True)
+        state.macro_calls.calls[:] = [
+            type(one)(**{**one.__dict__, "screen": "12"}) for one in state.macro_calls.calls
+        ]
+
+        await report(tools)
+        await tools["register_macro"].ainvoke(
+            {"step": 1, "thought": "keep it", "name": "clear_battle"}
+        )
+
+        registered = state.macros.registered("clear_battle")
+        assert registered is not None
+        assert registered.screens == ("12",)
 
     asyncio.run(scenario())
 
