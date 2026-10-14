@@ -353,6 +353,12 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
             return await handler(request)
 
         messages = await self._screen_messages()
+        # `claude/` 모델에서는 이 요청에만 붙이고 버리는 그림 때문에, 이번 답의 thinking block 이
+        # 다음 요청에서 무효가 된다. 그 block 은 그림이 붙은 이력을 앞에 두고 만들어졌다.
+        # Claude API 는 block 앞의 메시지가 바뀐 채로 그 block 을 다시 받으면 400 을 돌려준다
+        # (2026-08-31 이후 만든 계정). `ClaudeApiChat`(`app/llm/claude_api.py`)이 그런 block 을
+        # 그 요청에서 빼므로 400 은 나지 않지만, 바뀐 지점 뒤 turn 들의 추론은 다음 호출에 넘어가지
+        # 않는다.
         return await handler(
             request.override(messages=[*request.messages, *messages] if messages else request.messages)
         )

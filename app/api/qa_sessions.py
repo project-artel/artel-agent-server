@@ -8,7 +8,7 @@ from app.agents.qa.arch import DEFAULT_ARCH, QaArchSpec, resolve_arch
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage
 from app.llm.models import (
     DEFAULT_MODEL,
-    LLMModel,
+    EnabledLLMModel,
     ReasoningConfig,
     validate_reasoning,
 )
@@ -74,7 +74,8 @@ class QaContext(BaseModel):
 
 class OpenQaSessionRequest(BaseModel):
     context: QaContext
-    model: LLMModel = DEFAULT_MODEL
+    # 관리자가 끈 모델은 422 로 거절한다(`EnabledLLMModel`).
+    model: EnabledLLMModel = DEFAULT_MODEL
     language: OutputLanguage = DEFAULT_LANGUAGE
     # Pins this run to one prompt version (a directory under
     # app/prompts/qa_run/), so two runs can be compared. Omit it to take

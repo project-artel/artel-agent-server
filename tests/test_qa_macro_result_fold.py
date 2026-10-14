@@ -13,7 +13,6 @@ from app.agents.qa.macro.errors import WAIT_TIMEOUT, MacroFailure
 from app.agents.qa.macro.runner import MacroFlagged, MacroPlace, MacroRunResult
 from app.agents.qa.runner import fold_kinds_for
 from app.agents.qa.tools.macro_tools import _render
-from app.llm.models import LLMModel
 
 
 def finished(actions: int = 15) -> MacroRunResult:
@@ -148,7 +147,7 @@ def test_the_fold_waits_for_the_batch_threshold() -> None:
 
 
 def test_the_knob_turns_the_fold_kind_on() -> None:
-    off = resolve_arch(QaArchSpec(fold_stale_macro_results=False), LLMModel.gpt_6_luna)
+    off = resolve_arch(QaArchSpec(fold_stale_macro_results=False), "openai/gpt-6-luna")
     on = default_resolved_arch()
 
     assert FoldKind.macro_result not in fold_kinds_for(off)

@@ -2,7 +2,7 @@ from functools import lru_cache
 
 from typing import Literal
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,20 +23,22 @@ class Settings(BaseSettings):
     #
     # `OPENROUTER_*` 를 함께 받는 것은 하위호환이다. 이 필드를 옮기는 배포와
     # 옮기지 않은 배포가 같은 이미지로 돌 수 있어야 한다. 새 이름이 우선한다.
-    llm_api_key: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("LLM_API_KEY", "OPENROUTER_API_KEY"),
-    )
-    # How long a key fetched from the orchestration server is trusted before the
-    # next model call asks again (see app/llm/api_key.py). A provider answering 401
-    # drops it sooner. The fetch timeout bounds how long one call can wait when
-    # orchestration is down; the environment key above answers after that.
-    llm_key_cache_ttl_seconds: float = 30.0
-    llm_key_fetch_timeout_seconds: float = 3.0
     llm_base_url: str = Field(
         default="https://openrouter.ai/api/v1",
         validation_alias=AliasChoices("LLM_BASE_URL", "OPENROUTER_BASE_URL"),
     )
+    # Provider keys are not settings. The OpenRouter key and the Bedrock API key
+    # are entered on the admin page, stored encrypted by the orchestration server,
+    # and read from `GET {orchestration_base_url}/internal/settings/llm` (see
+    # app/llm/api_key.py). `OPENROUTER_API_KEY`, `LLM_API_KEY` and `BEDROCK_API_KEY`
+    # in the environment are ignored.
+    #
+    # How long a fetched pair of keys is trusted before the next model call asks
+    # again. A provider rejecting a key, or `POST /internal/llm-cache/invalidate`,
+    # drops it sooner. The fetch timeout bounds how long one call can wait when
+    # orchestration is down; the last keys that loaded answer after that.
+    llm_key_cache_ttl_seconds: float = 30.0
+    llm_key_fetch_timeout_seconds: float = 3.0
     openrouter_site_url: str | None = None
     openrouter_app_title: str = "Artel Agent Server"
     # Per-request ceiling on a model call, and how many times the client retries.
@@ -136,11 +138,10 @@ class Settings(BaseSettings):
     #
     # The summarizer model is fixed rather than "whatever the run uses": the job
     # is compression, and paying a frontier model's rate for it on every trigger
-    # buys nothing the run can use. It is an OpenRouter slug rather than an
-    # `LLMModel` because this module cannot import `app.llm` — importing any part
-    # of that package runs its `__init__`, which pulls in `chat_model`, which
-    # imports this module back. The validator below closes the same gap the type
-    # would have: a slug outside the catalog fails on the first `get_settings()`.
+    # buys nothing the run can use. It is a plain string rather than an `LLMModel`
+    # because the catalog lives in the orchestration server and is not reachable
+    # while settings load. `resolve_run_config` checks it against the catalog when
+    # a QA session opens, so a typo fails the open with the setting's name in it.
     qa_compaction_enabled: bool = True
     qa_compaction_trigger_fraction: float = 0.9
     qa_compaction_keep_messages: int = 20
@@ -157,46 +158,15 @@ class Settings(BaseSettings):
     # 런의 모델을 따르면 그 의존이 사라진다. 값싼 모델로 고정하고 싶은 배치는 여전히
     # 슬러그를 적으면 된다.
     qa_compaction_model: str | None = None
-
-    @field_validator("qa_compaction_model")
-    @classmethod
-    def known_model(cls, value: str | None) -> str | None:
-        if value is None or value == "":
-            return None
-
-        from app.llm.models import LLMModel
-
-        try:
-            LLMModel(value)
-        except ValueError as error:
-            known = ", ".join(model.value for model in LLMModel)
-            raise ValueError(
-                f"qa_compaction_model '{value}' is not in the catalog. Known: {known}."
-            ) from error
-        return value
     scenario_prompt_version: str | None = None
     # Model for the scenario router's one-shot classification. Empty means the
     # catalog's `DEFAULT_MODEL`, an OpenRouter slug, so a default install needs no
-    # AWS credential and a catalog update cannot leave a stale slug here. An
+    # AWS credential and a catalog change cannot leave a stale slug here. An
     # operator who has Bedrock credentials can set the `bedrock/...` catalog value
-    # to keep the cheaper Haiku route.
+    # to keep the cheaper Haiku route. Checked against the catalog by
+    # `router_model()` when the router runs, not here: the catalog is fetched from
+    # the orchestration server and settings load first.
     router_model: str = ""
-
-    @field_validator("router_model")
-    @classmethod
-    def known_router_model(cls, value: str) -> str:
-        from app.llm.models import LLMModel
-
-        if not value:
-            return value
-        try:
-            LLMModel(value)
-        except ValueError as error:
-            known = ", ".join(model.value for model in LLMModel)
-            raise ValueError(
-                f"router_model '{value}' is not in the catalog. Known: {known}."
-            ) from error
-        return value
 
     # 입구 라우터(워크플로 재편 Step 1). 끄면 예전 그대로 모든 입력이 루프로 간다 —
     # 실험의 롤백 스위치다.
@@ -255,14 +225,6 @@ class Settings(BaseSettings):
     # Bedrock 호출이 갈 리전. 모델 값의 `us.` 접두가 inference profile 을 정하고,
     # 이 값은 어느 엔드포인트에 말을 거는지를 정한다. 둘은 다른 축이다.
     bedrock_region: str = "us-west-2"
-    # Bedrock API key. 없으면 `None` 이고, 그때는 표준 AWS 자격증명 사슬이 그대로 답한다 —
-    # 이 값을 안 쥔 배포는 종전과 똑같이 돈다.
-    #
-    # 여기 두는 것은 `boto3` 가 읽는 `AWS_BEARER_TOKEN_BEDROCK` 을 `.env` 로 줄 수 없기
-    # 때문이다. `env_file` 은 이 `Settings` 만 채우고 `os.environ` 에는 안 넣는데 그 변수를
-    # 보는 것은 `boto3` 라, `.env` 에 그 이름으로 적으면 아무 말 없이 무시된다.
-    # `ChatBedrockConverse` 가 `bedrock_api_key` 로 키를 직접 받으므로 그리로 넘긴다.
-    bedrock_api_key: str | None = None
 
     # 답이 안 오는 호출은 기다림이 아니라 실패로 끝나야 한다. botocore 는 기본 60초를
     # 쓰고 재시도를 우리 뜻과 무관하게 정하는데, 저작 한 판이 그 한 번에 죽었다 —
@@ -279,6 +241,11 @@ class Settings(BaseSettings):
     bedrock_timeout_seconds: float = 120.0
     bedrock_max_attempts: int = 3
 
+    # `claude/` 모델 호출의 한도. 답을 streaming 으로 받으므로 이 값은 다음 chunk 를 기다리는
+    # 시간이다. Bedrock 과 같은 120초로 둔다. 재시도는 anthropic SDK 기본값인 2회다.
+    anthropic_timeout_seconds: float = 120.0
+    anthropic_max_retries: int = 2
+
     embedding_base_url: str | None = None
     embedding_api_key: str | None = None
     embedding_dimensions: int = 1024
@@ -290,9 +257,10 @@ class Settings(BaseSettings):
     # call, so this bounds fan-out, not payload size.
     knowledge_query_batch_limit: int = 100_000
 
-    # Where LLM usage records are shipped. Unset switches collection off
-    # entirely — a local run or a test has nowhere to send them, and an
-    # unreachable endpoint would only produce a warning per batch.
+    # Required for any model call: the provider keys and the model catalog are
+    # read from here. It is also where LLM usage records are shipped. Unset,
+    # usage collection is off, no key is found (OpenRouter answers 401, Bedrock
+    # falls to the AWS credential chain), and the catalog is unavailable.
     orchestration_base_url: str | None = None
     # A batch leaves once either bound is hit. The size keeps a busy QA run from
     # holding a long backlog; the interval keeps a quiet process from holding a
@@ -303,6 +271,13 @@ class Settings(BaseSettings):
     # Ceiling on records held while Orchestration is unreachable. Past it the
     # oldest go, because an outage must cost accuracy rather than the process.
     llm_usage_max_buffer: int = 1_000_000
+    # The model catalog is read from `GET {orchestration_base_url}/internal/llm-models`
+    # (see app/llm/catalog.py). The TTL is how long a fetched catalog is trusted, so
+    # an administrator turning a model off takes effect within it. The timeout bounds
+    # how long one request waits when orchestration is down; the last catalog that
+    # loaded keeps answering after that.
+    model_catalog_ttl_seconds: float = 30.0
+    model_catalog_fetch_timeout_seconds: float = 3.0
 
     # /extract source fetch guards. allowed_hosts empty = no host restriction
     # (rely on the caller passing presigned URLs to the expected bucket).

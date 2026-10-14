@@ -2,14 +2,15 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from redis.asyncio import from_url as redis_from_url
 
 from app.agents import GameContextAgent, KnowledgeQueryAgent, StepPhrasingAgent
 from app.api.embeddings import router as embeddings_router
 from app.api.extract import router as extract_router
 from app.api.knowledge_queries import router as knowledge_queries_router
-from app.api.models import router as models_router
+from app.api.llm_cache import router as llm_cache_router
 from app.api.qa_sessions import router as qa_sessions_router
 from app.api.routes import router as api_router
 from app.api.sessions import router as sessions_router
@@ -18,6 +19,7 @@ from app.api.step_phrasing import router as step_phrasing_router
 from app.config import get_settings
 from app.documents import ExtractionService
 from app.llm import build_embedding_client
+from app.llm.catalog import ModelCatalogUnavailableError
 from app.llm.usage import get_usage_buffer
 from app.logging_config import configure_logging
 from app.observability import configure_langsmith
@@ -122,10 +124,19 @@ def create_app() -> FastAPI:
     app.include_router(extract_router, prefix=INTERNAL_PREFIX)
     app.include_router(embeddings_router, prefix=INTERNAL_PREFIX)
     app.include_router(knowledge_queries_router, prefix=INTERNAL_PREFIX)
-    app.include_router(models_router, prefix=INTERNAL_PREFIX)
     app.include_router(specs_v2_router, prefix=INTERNAL_PREFIX)
     app.include_router(step_phrasing_router, prefix=INTERNAL_PREFIX)
+    app.include_router(llm_cache_router, prefix=INTERNAL_PREFIX)
+    app.add_exception_handler(ModelCatalogUnavailableError, _model_catalog_unavailable)
     return app
+
+
+async def _model_catalog_unavailable(
+    _request: Request, error: Exception
+) -> JSONResponse:
+    # catalog 를 한 번도 못 읽었으면 모델 id 를 검사할 수 없다. 요청이 틀린 것이 아니라
+    # orchestration server 에 닿지 못한 것이므로 422 가 아니라 503 이다.
+    return JSONResponse(status_code=503, content={"detail": str(error)})
 
 
 app = create_app()

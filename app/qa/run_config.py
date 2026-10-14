@@ -167,6 +167,22 @@ class RunConfig(BaseModel):
     image_tag: str | None
 
 
+def _compaction_model(configured: str | None, run_model: str) -> str:
+    """압축에 쓸 모델. 설정이 비어 있으면 런의 모델이다.
+
+    설정 값은 settings 를 읽을 때 검사할 수 없다 — catalog 는 orchestration server 에
+    있다. 그래서 세션을 열 때 여기서 검사하고, 틀렸으면 설정 이름을 적어 거절한다.
+    꺼진 row 도 받는다.
+    """
+    if not configured:
+        return run_model
+    try:
+        get_model_spec(configured)
+    except ValueError as error:
+        raise ValueError(f"qa_compaction_model (QA_COMPACTION_MODEL): {error}") from error
+    return configured
+
+
 def resolve_run_config(
     model: LLMModel = DEFAULT_MODEL,
     language: OutputLanguage = DEFAULT_LANGUAGE,
@@ -233,7 +249,7 @@ def resolve_run_config(
     # 설정이 비어 있으면 런의 모델로 압축한다. 그래야 압축이 런과 같은 provider 를
     # 쓰고, 한쪽 credit 이 없을 때 압축만 조용히 실패하는 일이 없다.
     compaction_model = (
-        (settings.qa_compaction_model or model.value)
+        _compaction_model(settings.qa_compaction_model, model)
         if resolved_arch.compaction
         else None
     )

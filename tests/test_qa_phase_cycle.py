@@ -41,7 +41,7 @@ from app.qa.channel import QaRunChannel
 
 def arch_for(mode: PhaseCycleMode):
     return resolve_arch(
-        QaArchSpec(vision=VisionMode.on, phase_cycle=mode), LLMModel.gpt_6_luna
+        QaArchSpec(vision=VisionMode.on, phase_cycle=mode), "openai/gpt-6-luna"
     )
 
 
@@ -79,7 +79,7 @@ def test_every_tool_the_default_run_offers_has_a_phase_or_is_always_allowed() ->
     for macros in ("off", "on"):
         arch = resolve_arch(
             QaArchSpec(vision=VisionMode.on, phase_cycle=PhaseCycleMode.full, macros=macros),
-            LLMModel.gpt_6_luna,
+            "openai/gpt-6-luna",
         )
         names, _middleware, _print = structure_of(arch)
         unplaced = [
@@ -129,7 +129,7 @@ def _the_directive_names_what_this_structure_offers(version: str, macros: str) -
 
     arch = resolve_arch(
         QaArchSpec(vision=VisionMode.on, phase_cycle=PhaseCycleMode.full, macros=macros),
-        LLMModel.gpt_6_luna,
+        "openai/gpt-6-luna",
     )
     body = phase_directive_for(arch, version)
     tools, _middleware, _print = structure_of(arch)
@@ -795,7 +795,7 @@ def test_the_macro_paragraph_reaches_only_a_phased_run_with_macros_on_a_version_
 
     arch = resolve_arch(
         QaArchSpec(vision=VisionMode.on, phase_cycle=phase_cycle, macros=macros),
-        LLMModel.gpt_6_luna,
+        "openai/gpt-6-luna",
     )
 
     assert macro_memory_directive_applies(arch, version) is applies

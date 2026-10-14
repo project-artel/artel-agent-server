@@ -199,7 +199,7 @@ def test_an_empty_list_renders_nothing() -> None:
 
 def arch_of(macros: str):
     return resolve_arch(
-        QaArchSpec(phase_cycle=PhaseCycleMode.off, macros=macros), LLMModel.gpt_6_luna
+        QaArchSpec(phase_cycle=PhaseCycleMode.off, macros=macros), "openai/gpt-6-luna"
     )
 
 

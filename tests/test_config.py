@@ -1,8 +1,7 @@
 import pytest
-from pydantic import ValidationError
 
-from app.config import Settings
-from app.llm.models import LLMModel
+from app.config import Settings, get_settings
+from app.qa.run_config import resolve_run_config
 
 
 def test_settings_can_load_from_env_file(tmp_path) -> None:
@@ -13,7 +12,6 @@ def test_settings_can_load_from_env_file(tmp_path) -> None:
                 'APP_NAME="Test Server"',
                 'APP_VERSION="9.9.9"',
                 'APP_ENV="test"',
-                'OPENROUTER_API_KEY="test-key"',
                 'OPENROUTER_BASE_URL="https://openrouter.test/api/v1"',
                 'OPENROUTER_SITE_URL="https://example.test"',
                 'OPENROUTER_APP_TITLE="Test Title"',
@@ -29,7 +27,6 @@ def test_settings_can_load_from_env_file(tmp_path) -> None:
     assert settings.environment == "test"
     # 옛 이름으로 적힌 .env 가 그대로 읽힌다. 이 줄이 하위호환의 전부다 —
     # 배포가 `LLM_*` 로 옮기기 전에도 같은 이미지가 돌아야 한다.
-    assert settings.llm_api_key == "test-key"
     assert settings.llm_base_url == "https://openrouter.test/api/v1"
     assert settings.openrouter_site_url == "https://example.test"
     assert settings.openrouter_app_title == "Test Title"
@@ -83,12 +80,15 @@ def test_compaction_defaults_are_safe_to_deploy_with() -> None:
     assert settings.qa_compaction_model is None
 
 
-def test_a_summarizer_outside_the_catalog_is_refused_at_startup() -> None:
-    """The slug cannot be typed as `LLMModel` here — importing `app.llm` from this
-    module would import `chat_model`, which imports this module back. The validator
-    is what keeps a typo from surviving until the first QA run compacts."""
-    with pytest.raises(ValidationError):
-        Settings(_env_file=None, qa_compaction_model="openai/not-a-model")
+def test_a_summarizer_outside_the_catalog_is_refused_when_a_run_opens(monkeypatch) -> None:
+    """Settings load before the catalog, which lives in the orchestration server, is
+    reachable, so the check moved to the place that uses the value: opening a QA
+    session. The error names the setting so the operator knows what to fix."""
+    assert Settings(_env_file=None, qa_compaction_model="openai/not-a-model")
+
+    monkeypatch.setattr(get_settings(), "qa_compaction_model", "openai/not-a-model")
+    with pytest.raises(ValueError, match="qa_compaction_model .*not in the catalog"):
+        resolve_run_config()
 
 
 def test_the_new_name_wins_over_the_old_one(tmp_path) -> None:
@@ -100,13 +100,28 @@ def test_the_new_name_wins_over_the_old_one(tmp_path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(
         "OPENROUTER_BASE_URL=https://old.test/api/v1\n"
-        "OPENROUTER_API_KEY=old-key\n"
-        "LLM_BASE_URL=https://new.test/v1\n"
-        "LLM_API_KEY=new-key\n",
+        "LLM_BASE_URL=https://new.test/v1\n",
         encoding="utf-8",
     )
 
     settings = Settings(_env_file=env_file)
 
     assert settings.llm_base_url == "https://new.test/v1"
-    assert settings.llm_api_key == "new-key"
+
+
+def test_provider_keys_in_the_environment_are_not_settings(tmp_path, monkeypatch) -> None:
+    """키는 admin page 에서 넣고 orchestration server 가 저장한다. `.env` 와 shell 의 키는
+    읽지 않는다 — shell 이 `OPENROUTER_API_KEY` 를 export 해도 이 server 에 닿지 않는다."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "shell-key")
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "LLM_API_KEY=file-key\nBEDROCK_API_KEY=file-bedrock-key\n", encoding="utf-8"
+    )
+
+    dumped = Settings(_env_file=env_file).model_dump()
+
+    assert "llm_api_key" not in dumped
+    assert "bedrock_api_key" not in dumped
+    assert not {"shell-key", "file-key", "file-bedrock-key"} & {
+        value for value in dumped.values() if isinstance(value, str)
+    }

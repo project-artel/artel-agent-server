@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # 라우터와 같은 모델로 고정한다. 한두 문장을 쓰는 일이고, 세션 모델(비쌀 수 있다)을 끌어올
 # 이유가 없다 — 노드별 모델 혼합의 둘째 사례다.
-REPLY_MODEL = LLMModel.claude_haiku_4_5_bedrock
+REPLY_MODEL = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 # 문구 노드가 답을 못 줄 때의 마지막 그물. 라우터가 문구를 쓰던 시절의 고정 문구와 같다.
 FALLBACK = {

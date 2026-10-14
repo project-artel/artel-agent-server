@@ -28,7 +28,7 @@ def make(macros: str):
     state = QaRunState(total_steps=3)
     arch = resolve_arch(
         QaArchSpec(vision=VisionMode.on, phase_cycle=PhaseCycleMode.off, macros=macros),
-        LLMModel.gpt_6_luna,
+        "openai/gpt-6-luna",
     )
     tools = {one.name: one for one in build_tools(channel, state, arch)}
     return state, tools
