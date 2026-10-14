@@ -22,12 +22,15 @@
 
 import ast
 import inspect
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from app.agents.qa.macro.errors import MacroRejection
 from app.agents.qa.macro.grammar import (
+    ASK,
     ASK_VERDICT,
     CHECKPOINT,
+    DECIDE,
     DECLARABLE_TYPE_NAMES,
     DECLARABLE_TYPES,
     FIND,
@@ -36,10 +39,13 @@ from app.agents.qa.macro.grammar import (
     FIND_REQUIRED_KEYWORDS,
     FLAG,
     FORBIDDEN_TOOLS,
+    IMPORT_MODULE,
     MAX_CALL_DEPTH,
     MAX_LOOP_PASSES,
     MAX_STATEMENTS,
     MAX_WAIT_PER_STATEMENT_SECONDS,
+    MIN_MATCH_CASES,
+    NONE_FITS,
     PAIRED_TOOLS,
     PairedTools,
     READER_NAME_LIST,
@@ -48,6 +54,7 @@ from app.agents.qa.macro.grammar import (
     REPORTING_NAMES,
     RANGE,
     REQUIRE,
+    RESERVED_CONTEXT_KEYS,
     WAIT_UNTIL,
     SELECTOR,
     TOOL_NAME_LIST,
@@ -64,12 +71,19 @@ from app.agents.qa.macro.grammar import (
 from app.agents.qa.macro.model import (
     MacroActionStatement,
     MacroArgument,
+    MacroAskCondition,
     MacroAskVerdictStatement,
     MacroAssignStatement,
     MacroAssignValue,
     MacroCheckpointStatement,
     MacroComparisonCondition,
     MacroCondition,
+    MacroContextArgument,
+    MacroContextFindAll,
+    MacroContextLiteral,
+    MacroContextName,
+    MacroContextTarget,
+    MacroDecideCall,
     MacroDefinition,
     MacroFindAllIterable,
     MacroFindValue,
@@ -83,6 +97,8 @@ from app.agents.qa.macro.model import (
     MacroLiteralArgument,
     MacroLiteralOperand,
     MacroLiteralValue,
+    MacroMatchCase,
+    MacroMatchStatement,
     MacroRangeIterable,
     MacroReadValue,
     MacroNameArgument,
@@ -155,11 +171,34 @@ _NO_DOT = (
 )
 
 _STATEMENT_KINDS = (
-    "an action call (one of the game tools, or a helper `def` in this same source), "
+    "an action call (one of the game tools, a helper `def` in this same source, or a "
+    "macro imported with `from macros import ...`), "
     "`require(<condition>, <remedy>)`, `wait_until(<condition>, <seconds>, <remedy>)`, "
     "a typed assignment (`name: object = find(...)`), "
-    "`if`, `for`, `while`, `flag(<message>)`, `ask_verdict(<expected>)`, or "
-    "`checkpoint(<reason>)`"
+    "`if`, `for`, `while`, `match decide(...)` over imported macros, `flag(<message>)`, "
+    "`ask_verdict(<expected>)`, or `checkpoint(<reason>)`"
+)
+
+# `decide`·`ask` 의 keyword 인자 하나가 받는 다섯 모양. 거절 문장 세 곳이 같은 말을 한다.
+_CONTEXT_FORMS = (
+    "a name declared `object` (a parameter, a `find(...)` or `selector(...)` name, or a "
+    "`for` name), `selector(\"<path>\")`, `find_all(label=..., name=..., under=...)`, a "
+    "name bound earlier to an `int`, `float`, `string` or `bool`, or one literal (an int, "
+    "a float, a string or a bool)"
+)
+
+# 몸통 안의 `decide(...)` 를 `match` 밖에서 만났을 때의 거절 문장.
+_DECIDE_ONLY_IN_MATCH = (
+    "`decide(...)` stands only as the subject of a `match`: write "
+    '`match decide("<question>", key=value, ...):` with one `case "<imported macro>":` '
+    "per option. Jev picks the case; it hands back no value to bind or compare."
+)
+
+# `ask(...)` 가 조건 전체가 아닌 자리에 왔을 때의 거절 문장.
+_ASK_ONLY_AS_CONDITION = (
+    '`ask("<question>", key=value, ...)` stands only as the whole condition of `if`, '
+    "`elif`, `while` or `require` in a `-> None` def. It cannot be compared, combined, "
+    "bound to a name, or written on its own line."
 )
 
 
@@ -232,15 +271,47 @@ def _written(node: ast.AST, lines: list[str], header_only: bool = False) -> str:
     return "\n".join(taken).rstrip()
 
 
-def macro_definition_from_source(name: str, source: str) -> MacroDefinition:
+def imported_names(source: str) -> tuple[str, ...]:
+    """`from macros import a, b` 로 가져오는 이름, 적힌 순서대로. 겹친 이름은 한 번만.
+
+    tool 계층이 파싱 **전에** 가져올 macro 를 찾는 데 쓴다. 등록된 macro 를 읽는 것은 async
+    이고 `macro_definition_from_source` 는 순수 함수라서, 가져온 정의를 먼저 모아 넘긴다.
+    검사는 하지 않는다 — 문법 오류면 `()` 를 내고, 그 거절은 본 파싱이 줄 번호와 함께 한다.
+    """
+    try:
+        module = ast.parse(source)
+    except SyntaxError:
+        return ()
+    names: list[str] = []
+    for node in module.body:
+        if not (
+            isinstance(node, ast.ImportFrom)
+            and node.module == IMPORT_MODULE
+            and node.level == 0
+        ):
+            continue
+        for alias in node.names:
+            if alias.name != "*" and alias.name not in names:
+                names.append(alias.name)
+    return tuple(names)
+
+
+def macro_definition_from_source(
+    name: str,
+    source: str,
+    imports: Mapping[str, MacroDefinition] | None = None,
+) -> MacroDefinition:
     """macro 텍스트 하나를 통과시켜 정의로 만든다. 못 통과하면 `MacroRejection`.
 
     정의를 만드는 **유일한** 길이다. JSON 만 고치는 경로를 만들지 않는 것이 이 모듈과
     `model.py` 의 계약이고, 그래서 `MacroDefinition` 은 여기서만 생긴다.
+
+    `imports` 는 `from macros import ...` 로 가져오는 이름 → 이미 파싱된 등록 macro 다.
+    가져오는 이름은 전부 key 여야 하고, 남는 key 는 무시한다.
     """
     module = _module(source)
     lines = source.splitlines()
-    functions = _top_level_functions(module)
+    import_nodes, functions = _top_level_statements(module)
     signatures = _signatures(name, functions)
     if signatures[name].returns == "bool":
         raise MacroRejection(
@@ -248,11 +319,18 @@ def macro_definition_from_source(name: str, source: str) -> MacroDefinition:
             "calls. Declare the entry point `-> None`.",
             next(node.lineno for node in functions if node.name == name),
         )
+    imported = _imported_definitions(name, import_nodes, signatures, imports or {})
+    imported_signatures = {
+        definition.name: _Signature(
+            definition.name, definition.entry.parameters, "none"
+        )
+        for definition in imported
+    }
 
     entry: MacroFunction | None = None
     helpers: list[MacroFunction] = []
     for node in functions:
-        reader = _FunctionReader(signatures, node.name, lines)
+        reader = _FunctionReader(signatures, node.name, lines, imported_signatures)
         docstring, body_nodes = _split_docstring(node)
         built = MacroFunction(
             name=node.name,
@@ -273,7 +351,11 @@ def macro_definition_from_source(name: str, source: str) -> MacroDefinition:
         )
 
     definition = MacroDefinition(
-        name=name, source=source, entry=entry, helpers=tuple(helpers)
+        name=name,
+        source=source,
+        entry=entry,
+        helpers=tuple(helpers),
+        imports=tuple(imported),
     )
     # 네 검사가 같은 호출 그래프에 묻는다. 그래프를 네 번 다시 세우고 memo 를 네 번
     # 손으로 달면, 빠뜨린 하나가 지수로 터진다.
@@ -344,7 +426,15 @@ def _split_docstring(node: ast.FunctionDef) -> tuple[str | None, list[ast.stmt]]
     return (cleaned or None), list(node.body[1:])
 
 
-def _top_level_functions(module: ast.Module) -> list[ast.FunctionDef]:
+def _top_level_statements(
+    module: ast.Module,
+) -> tuple[list[ast.ImportFrom], list[ast.FunctionDef]]:
+    """맨 위의 `from macros import ...` 들과 `def` 들. 그 밖은 거절한다.
+
+    import 는 첫 `def` 보다 앞에만 선다. 읽는 사람이 macro 가 무엇을 부를 수 있는지를 맨
+    위에서 한 번에 보게 하려는 것이다.
+    """
+    import_nodes: list[ast.ImportFrom] = []
     functions: list[ast.FunctionDef] = []
     for node in module.body:
         if isinstance(node, ast.FunctionDef):
@@ -355,13 +445,9 @@ def _top_level_functions(module: ast.Module) -> list[ast.FunctionDef]:
                 "`async def` is not allowed. Write a plain `def`.", node.lineno
             )
         if isinstance(node, (ast.Import, ast.ImportFrom)):
-            raise MacroRejection(
-                "`import` is not allowed anywhere in a macro. Everything a macro can "
-                f"call is already named for it: the game tools ({TOOL_NAME_LIST}), the "
-                f"readers ({READER_NAME_LIST}), `find()`, `selector()`, `require()`, "
-                "`wait_until()`, `flag()`, `ask_verdict()`, and `checkpoint()`.",
-                node.lineno,
-            )
+            _reject_import_form(node, after_def=bool(functions))
+            import_nodes.append(node)  # type: ignore[arg-type]
+            continue
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
             raise MacroRejection(
                 "a bare string is not allowed at the top of a macro source. A docstring "
@@ -370,15 +456,111 @@ def _top_level_functions(module: ast.Module) -> list[ast.FunctionDef]:
                 node.lineno,
             )
         raise MacroRejection(
-            "only `def` is allowed at the top of a macro source. The `def` named after "
-            "the macro is its entry point and every other `def` is a helper it may call.",
+            "only `def` and `from macros import ...` are allowed at the top of a macro "
+            "source. The `def` named after the macro is its entry point and every other "
+            "`def` is a helper it may call.",
             node.lineno,
         )
     if not functions:
         raise MacroRejection(
             "A macro source needs at least one `def`: the one named after the macro."
         )
-    return functions
+    return import_nodes, functions
+
+
+# import 거절 문장이 모두 끝에 다는 말. 받는 모양 하나를 그대로 적어 준다.
+_IMPORT_FORM = (
+    f"The one import a macro takes is `from {IMPORT_MODULE} import a, b`, at the top of "
+    "the source before the first `def`, naming registered macros to call like helpers."
+)
+
+
+def _reject_import_form(node: ast.Import | ast.ImportFrom, after_def: bool) -> None:
+    """`from macros import a, b` 가 아닌 import 를 거절한다. 이름 검사는 따로 한다."""
+    line = node.lineno
+    if isinstance(node, ast.Import):
+        raise MacroRejection(
+            "a plain `import x` is not allowed: a macro calls nothing outside the game "
+            f"tools ({TOOL_NAME_LIST}), the readers ({READER_NAME_LIST}), and registered "
+            f"macros. {_IMPORT_FORM}",
+            line,
+        )
+    if after_def:
+        raise MacroRejection(
+            f"an import after a `def` is not allowed. {_IMPORT_FORM}", line
+        )
+    if node.level != 0:
+        raise MacroRejection(
+            f"a relative import (`from .{node.module or ''} import ...`) is not "
+            f"allowed. {_IMPORT_FORM}",
+            line,
+        )
+    if node.module != IMPORT_MODULE:
+        raise MacroRejection(
+            f"`from {node.module} import ...` is not allowed: registered macros are "
+            f"the only thing a macro imports. {_IMPORT_FORM}",
+            line,
+        )
+    for alias in node.names:
+        if alias.name == "*":
+            raise MacroRejection(
+                f"`from {IMPORT_MODULE} import *` is not allowed; name each macro you "
+                f"call. {_IMPORT_FORM}",
+                line,
+            )
+        if alias.asname is not None:
+            raise MacroRejection(
+                f"`import {alias.name} as {alias.asname}` is not allowed: an imported "
+                "macro keeps its registered name, so the call reads the same as the "
+                f"macro it runs. {_IMPORT_FORM}",
+                line,
+            )
+
+
+def _imported_definitions(
+    name: str,
+    import_nodes: list[ast.ImportFrom],
+    signatures: dict[str, _Signature],
+    imports: Mapping[str, MacroDefinition],
+) -> list[MacroDefinition]:
+    """가져오는 이름을 import 순서대로 정의에 맞춘다.
+
+    `def` 와 같은 이름은 거절한다 — 한 이름이 둘을 가리키면 어느 쪽이 도는지를 읽는 사람이
+    알 수 없다. 자기 자신을 가져오는 것은 재귀이므로 거절한다.
+    """
+    definitions: list[MacroDefinition] = []
+    seen: set[str] = set()
+    for node in import_nodes:
+        for alias in node.names:
+            imported = alias.name
+            if imported in seen:
+                raise MacroRejection(
+                    f"`{imported}` is imported twice. Name each macro once.",
+                    node.lineno,
+                )
+            seen.add(imported)
+            if imported == name:
+                raise MacroRejection(
+                    f"this macro imports itself (`{imported}`). A macro has no "
+                    "recursion; import only other registered macros.",
+                    node.lineno,
+                )
+            if imported in signatures:
+                raise MacroRejection(
+                    f"`{imported}` is both imported and written as a `def` in this "
+                    "source, so a call to it could mean either. Rename the `def`, or "
+                    "remove it from the import.",
+                    node.lineno,
+                )
+            definition = imports.get(imported)
+            if definition is None:
+                raise MacroRejection(
+                    f"`{imported}` is imported but no registered macro has that name. "
+                    "Register it first, or remove it from the import.",
+                    node.lineno,
+                )
+            definitions.append(definition)
+    return definitions
 
 
 def _signatures(name: str, functions: list[ast.FunctionDef]) -> dict[str, _Signature]:
@@ -607,9 +789,16 @@ class _FunctionReader:
     """
 
     def __init__(
-        self, signatures: dict[str, _Signature], name: str, lines: list[str]
+        self,
+        signatures: dict[str, _Signature],
+        name: str,
+        lines: list[str],
+        imported: dict[str, _Signature] | None = None,
     ) -> None:
         self.signatures = signatures
+        # `from macros import ...` 로 가져온 macro 의 entry. helper 처럼 statement 로만
+        # 부른다. predicate 는 가져올 수 없다 — entry 는 언제나 `-> None` 이다.
+        self.imported = imported or {}
         self.name = name
         # 원문의 줄. statement 마다 저자가 쓴 그 줄을 그대로 떠내는 데 쓴다.
         self.lines = lines
@@ -723,13 +912,19 @@ class _FunctionReader:
             self.scopes.pop()
 
     def _statement(self, node: ast.stmt) -> MacroStatement:
-        if self.signatures[self.name].returns == "bool":
+        if self._is_predicate():
             if isinstance(node, ast.Return):
                 return self._return(node)
             if not isinstance(node, (ast.AnnAssign, ast.If)):
+                jev = (
+                    " `match decide(...)` calls Jev, and a predicate is evaluated "
+                    "synchronously."
+                    if isinstance(node, ast.Match)
+                    else ""
+                )
                 raise MacroRejection(
                     "a `-> bool` predicate allows only a typed assignment, `if`, "
-                    "and `return`.",
+                    f"and `return`.{jev}",
                     node.lineno,
                 )
         if isinstance(node, ast.AnnAssign):
@@ -740,9 +935,14 @@ class _FunctionReader:
             return self._for(node)
         if isinstance(node, ast.While):
             return self._while(node)
+        if isinstance(node, ast.Match):
+            return self._match(node)
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
             return self._call_statement(node.value)
         self._reject_statement(node)
+
+    def _is_predicate(self) -> bool:
+        return self.signatures[self.name].returns == "bool"
 
     def _return(self, node: ast.Return) -> MacroReturnStatement:
         if node.value is None:
@@ -798,7 +998,9 @@ class _FunctionReader:
                 line,
             )
         if isinstance(node, (ast.Import, ast.ImportFrom)):
-            raise MacroRejection("`import` is not allowed anywhere in a macro.", line)
+            raise MacroRejection(
+                f"`import` is not allowed inside a `def`. {_IMPORT_FORM}", line
+            )
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
             raise MacroRejection(
                 "a bare string is allowed only as a docstring, which is the first "
@@ -877,6 +1079,9 @@ class _FunctionReader:
                 )
             if node.func.id in READERS_BY_NAME:
                 return self._read_value(node, declared, name), _READ
+            if node.func.id == ASK:
+                raise MacroRejection(_ASK_ONLY_AS_CONDITION, node.lineno)
+            _reject_jev_call(node)
             if node.func.id in (FIND_ALL, RANGE):
                 raise MacroRejection(
                     f"`{name}` is bound to `{node.func.id}(...)`, which hands a loop "
@@ -1013,7 +1218,7 @@ class _FunctionReader:
     # -- `if` --
 
     def _conditional(self, node: ast.If) -> MacroIfStatement:
-        condition = self._condition(node.test)
+        condition = self._condition(node.test, ask_allowed=True)
         body = self.body(node.body, node)
         # `else` 가 없으면 `orelse` 가 비고, `elif` 는 여기 중첩된 `If` 하나로 온다.
         # Python AST 가 `elif` 를 그렇게 표현하므로 `If` 를 허용하면 따라온다.
@@ -1117,12 +1322,176 @@ class _FunctionReader:
                 "it, unindented.",
                 node.lineno,
             )
-        condition = self._condition(node.test)
+        condition = self._condition(node.test, ask_allowed=True)
         body = self.body(node.body, node)
         return MacroWhileStatement(
             source=_written(node, self.lines, header_only=True),
             condition=condition,
             body=body,
+        )
+
+    # -- `match decide(...)` --
+
+    def _match(self, node: ast.Match) -> MacroMatchStatement:
+        """`match decide("<question>", key=value, ...):` 와 가져온 macro 이름의 `case` 들.
+
+        `case` 몸통은 `if` 몸통과 같은 규칙이다. 각자 자기 scope 를 받고, 그 안에서 bind 한
+        이름은 그 `case` 와 함께 끝난다.
+        """
+        subject = node.subject
+        if not (
+            isinstance(subject, ast.Call)
+            and isinstance(subject.func, ast.Name)
+            and subject.func.id == DECIDE
+        ):
+            raise MacroRejection(
+                "a `match` takes exactly one subject: "
+                '`decide("<question>", key=value, ...)`. Each `case` is a string naming '
+                "an imported macro, and Jev picks one.",
+                node.lineno,
+            )
+        question, context = self._jev_call(subject, DECIDE)
+
+        cases: list[MacroMatchCase] = []
+        for case in node.cases:
+            option = self._case_option(case)
+            if any(existing.option == option for existing in cases):
+                raise MacroRejection(
+                    f'`case "{option}"` is written twice. One option is one case.',
+                    case.pattern.lineno,
+                )
+            cases.append(MacroMatchCase(option=option, body=self.body(case.body, case.pattern)))
+
+        if len(cases) < MIN_MATCH_CASES:
+            raise MacroRejection(
+                f"`match decide(...)` needs at least {MIN_MATCH_CASES} cases; with one "
+                "option there is nothing to decide. Call that macro directly instead.",
+                node.lineno,
+            )
+        return MacroMatchStatement(
+            source=_written(node, self.lines, header_only=True),
+            decide=MacroDecideCall(question=question, context=context),
+            cases=tuple(cases),
+        )
+
+    def _case_option(self, case: ast.match_case) -> str:
+        line = case.pattern.lineno
+        imported = ", ".join(self.imported) or "none"
+        if case.guard is not None:
+            raise MacroRejection(
+                "a `case` guard (`case ... if ...`) is not allowed. Jev picks the case; "
+                "put a condition inside the case body as an `if`.",
+                line,
+            )
+        pattern = case.pattern
+        if not (
+            isinstance(pattern, ast.MatchValue)
+            and isinstance(pattern.value, ast.Constant)
+            and isinstance(pattern.value.value, str)
+        ):
+            raise MacroRejection(
+                "each `case` is one string naming an imported macro, e.g. "
+                '`case "end_turn":`. `case _`, a capture name, and any other pattern are '
+                f"not allowed. Imported here: {imported}.",
+                line,
+            )
+        option = pattern.value.value
+        if option == NONE_FITS:
+            raise MacroRejection(
+                f'`case "{NONE_FITS}"` is not allowed: Jev is always offered '
+                f"`{NONE_FITS}`, and when it picks it the macro pauses and hands the "
+                "turn back to you. Name an imported macro.",
+                line,
+            )
+        if option not in self.imported:
+            raise MacroRejection(
+                f'`case "{option}"` does not name an imported macro. The option Jev reads '
+                "is that macro's docstring, so each case names one macro imported with "
+                f"`from {IMPORT_MODULE} import ...`. Imported here: {imported}.",
+                line,
+            )
+        return option
+
+    # -- Jev 에게 묻는 호출 --
+
+    def _jev_call(
+        self, node: ast.Call, called: str
+    ) -> tuple[str, tuple[MacroContextArgument, ...]]:
+        """`decide(...)` 와 `ask(...)` 가 함께 쓰는 모양: 질문 하나와 keyword context."""
+        if len(node.args) != 1:
+            raise MacroRejection(
+                f'`{called}` takes exactly one positional argument, the question as a '
+                f'plain string, then keyword context: `{called}("<question>", '
+                "key=value, ...)`.",
+                node.lineno,
+            )
+        question_node = node.args[0]
+        if isinstance(question_node, ast.JoinedStr):
+            raise MacroRejection(
+                f"the question of `{called}` cannot be an f-string. Write it out, and "
+                "pass the values Jev should read as keyword context.",
+                node.lineno,
+            )
+        question = _string_literal(question_node, f"the question of `{called}`").strip()
+        if not question:
+            raise MacroRejection(
+                f"the question of `{called}` cannot be empty. Ask what Jev should "
+                "judge, in one sentence.",
+                node.lineno,
+            )
+        context = tuple(
+            self._context_argument(keyword, called) for keyword in node.keywords
+        )
+        return question, context
+
+    def _context_argument(
+        self, keyword: ast.keyword, called: str
+    ) -> MacroContextArgument:
+        value = keyword.value
+        line = getattr(value, "lineno", None)
+        if keyword.arg is None:
+            raise MacroRejection(
+                f"`**` is not allowed in `{called}`. Write each context value as its "
+                "own `key=value`.",
+                line,
+            )
+        key = keyword.arg
+        if key in RESERVED_CONTEXT_KEYS:
+            reserved = ", ".join(f"`{one}`" for one in sorted(RESERVED_CONTEXT_KEYS))
+            raise MacroRejection(
+                f"`{key}=` cannot be used in `{called}`: the macro always adds {reserved} "
+                "to what Jev reads. Pick another key.",
+                line,
+            )
+
+        literal = _literal(value)
+        if literal is not None:
+            return MacroContextLiteral(key=key, literal=literal)
+        if isinstance(value, ast.Name):
+            bound = self._require_bound(value)
+            if bound.declared_type is MacroType.object_:
+                return MacroContextTarget(key=key, target=MacroNameTarget(name=value.id))
+            return MacroContextName(
+                key=key, name=value.id, declared_type=bound.declared_type
+            )
+        if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+            if value.func.id == SELECTOR:
+                return MacroContextTarget(
+                    key=key,
+                    target=MacroSelectorTarget(selector=self._selector_string(value)),
+                )
+            if value.func.id == FIND_ALL:
+                return MacroContextFindAll(key=key, find=self._find(value, FIND_ALL))
+        if isinstance(value, ast.JoinedStr):
+            raise MacroRejection(
+                f"`{key}=` in `{called}` is an f-string, which is not allowed. Pass "
+                "each value as its own key instead.",
+                line,
+            )
+        raise MacroRejection(
+            f"`{key}=` in `{called}` is not something Jev can be shown. A context value "
+            f"is one of five things: {_CONTEXT_FORMS}.",
+            line,
         )
 
     def _checkpoint(self, node: ast.Call, written: str) -> MacroCheckpointStatement:
@@ -1144,12 +1513,19 @@ class _FunctionReader:
 
     # -- 조건 --
 
-    def _condition(self, node: ast.expr) -> MacroCondition:
+    def _condition(self, node: ast.expr, ask_allowed: bool = False) -> MacroCondition:
         """`require` 의 첫 인자와 `if` 의 조건이 같은 문법을 쓴다.
 
         평가기가 하나이기 때문이다. 그래서 `and`·`or`·`not` 은 `if` 의 조건에서도
         거절이고, 평가 시점의 연산자 거절도 한 곳에서 난다.
+
+        `ask_allowed` 는 `if`·`elif`·`while`·`require` 세 자리만 켠다. `ask(...)` 는 조건
+        **전체**로만 서므로, 부모 node 를 거슬러 보지 않고 부르는 쪽이 알려 준다.
         """
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id == ASK:
+                return self._ask(node, ask_allowed)
+            _reject_jev_call(node)
         if isinstance(node, ast.BoolOp):
             joiner = "and" if isinstance(node.op, ast.And) else "or"
             raise MacroRejection(
@@ -1193,6 +1569,13 @@ class _FunctionReader:
                         signature.name, _helper_parameters(signature), node
                     ),
                 )
+            if node.func.id in self.imported:
+                raise MacroRejection(
+                    f"`{node.func.id}` is an imported macro: it acts and returns nothing, "
+                    "so it cannot be a condition. Call it on its own line, or call a "
+                    "`-> bool` predicate here.",
+                    node.lineno,
+                )
             if node.func.id in READERS_BY_NAME:
                 spec = READERS_BY_NAME[node.func.id]
                 # 비교 없는 조건은 참거짓으로 도착해야 한다. 그 밖의 모양을 진리값으로
@@ -1219,6 +1602,19 @@ class _FunctionReader:
             f"reader call ({READER_NAME_LIST}) or a `-> bool` predicate call.",
             getattr(node, "lineno", None),
         )
+
+    def _ask(self, node: ast.Call, ask_allowed: bool) -> MacroAskCondition:
+        if self._is_predicate():
+            raise MacroRejection(
+                "`ask(...)` is not allowed inside a `-> bool` predicate, its `return` "
+                "included: predicates are evaluated synchronously and `ask` waits for "
+                f"Jev. {_ASK_ONLY_AS_CONDITION}",
+                node.lineno,
+            )
+        if not ask_allowed:
+            raise MacroRejection(_ASK_ONLY_AS_CONDITION, node.lineno)
+        question, context = self._jev_call(node, ASK)
+        return MacroAskCondition(question=question, context=context)
 
     def _comparison(self, node: ast.Compare) -> MacroComparisonCondition:
         if len(node.ops) != 1 or len(node.comparators) != 1:
@@ -1308,6 +1704,13 @@ class _FunctionReader:
             )
 
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id == ASK:
+                raise MacroRejection(
+                    f"`ask(...)` cannot stand on {side} of a comparison; it is already "
+                    f"true or false. {_ASK_ONLY_AS_CONDITION}",
+                    node.lineno,
+                )
+            _reject_jev_call(node)
             if node.func.id in READERS_BY_NAME:
                 call = self._reader(node)
                 return (
@@ -1471,6 +1874,9 @@ class _FunctionReader:
                 "the things to walk over; on its own line it does nothing.",
                 node.lineno,
             )
+        if name == ASK:
+            raise MacroRejection(_ASK_ONLY_AS_CONDITION, node.lineno)
+        _reject_jev_call(node)
 
         if name in TOOLS_BY_NAME:
             spec = TOOLS_BY_NAME[name]
@@ -1496,6 +1902,18 @@ class _FunctionReader:
                 ),
             )
 
+        if name in self.imported:
+            # 가져온 macro 도 helper 와 같은 statement 다. 인자는 그 macro 의 entry
+            # parameter 에 맞춰 bind 한다.
+            imported = self.imported[name]
+            return MacroHelperCallStatement(
+                source=written,
+                callee=name,
+                arguments=self._arguments(
+                    imported.name, _helper_parameters(imported), node
+                ),
+            )
+
         self._reject_callee(name, node)
 
     def _reject_callee(self, name: str, node: ast.Call) -> None:
@@ -1517,11 +1935,13 @@ class _FunctionReader:
                 node.lineno,
             )
         helpers = ", ".join(sorted(self.signatures)) or "none"
+        imported = ", ".join(self.imported) or "none"
         raise MacroRejection(
             f"`{name}` is not something a macro can call. The game tools are: "
             f"{TOOL_NAME_LIST}. Other statements are `require()`, `wait_until()`, "
             "`flag()`, `ask_verdict()`, and `checkpoint()`. The `def` names in this "
-            f"source are: {helpers}.",
+            f"source are: {helpers}. The macros imported with `from {IMPORT_MODULE} "
+            f"import ...` are: {imported}.",
             node.lineno,
         )
 
@@ -1544,7 +1964,7 @@ class _FunctionReader:
                 "leaves the next agent guessing.",
                 node.lineno,
             )
-        condition = self._condition(node.args[0])
+        condition = self._condition(node.args[0], ask_allowed=True)
         remedy = _string_literal(node.args[1], "the remedy of `require`").strip()
         if not remedy:
             raise MacroRejection(
@@ -1567,6 +1987,14 @@ class _FunctionReader:
             raise MacroRejection(
                 "`wait_until` takes exactly three positional arguments: a condition, "
                 "seconds, and a non-empty remedy string.",
+                node.lineno,
+            )
+        if _is_call_to(node.args[0], ASK):
+            raise MacroRejection(
+                "`ask(...)` is not allowed inside `wait_until`: the condition is read "
+                "again on every pulse, so it would call Jev on every pulse. Use "
+                "`ask(...)` as the condition of an `if`, `while` or `require`, and wait "
+                "for a reader condition here.",
                 node.lineno,
             )
         condition = self._condition(node.args[0])
@@ -1737,6 +2165,20 @@ class _FunctionReader:
         )
 
 
+def _is_call_to(node: ast.expr, called: str) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == called
+    )
+
+
+def _reject_jev_call(node: ast.Call) -> None:
+    """`match` 의 주어가 아닌 자리에 온 `decide(...)` 를 거절한다."""
+    if _is_call_to(node, DECIDE):
+        raise MacroRejection(_DECIDE_ONLY_IN_MATCH, node.lineno)
+
+
 def _reject_name_mismatch(
     wanted: MacroType, given: MacroType, what: str, node: ast.AST
 ) -> None:
@@ -1836,6 +2278,9 @@ def _called_helpers(statements: tuple[MacroStatement, ...]) -> list[str]:
             names.extend(_called_helpers(statement.orelse))
         elif isinstance(statement, (MacroForStatement, MacroWhileStatement)):
             names.extend(_called_helpers(statement.body))
+        elif isinstance(statement, MacroMatchStatement):
+            for case in statement.cases:
+                names.extend(_called_helpers(case.body))
     return names
 
 
@@ -1844,6 +2289,11 @@ class _CallGraph:
 
     답을 전부 memo 한다. 그래프는 저장 시점에 고정이고 질문은 되풀이되므로, 같은 답을
     두 번 세는 것은 그대로 지수가 된다.
+
+    `from macros import ...` 로 가져온 macro 는 이 그래프에서 node 하나다. 그 안쪽은 그
+    macro 자신의 정의로 세운 그래프가 답한다(`_owner`). 그래서 두 macro 의 helper 이름이
+    겹쳐도 섞이지 않고, 가져온 macro 의 깊이·statement 수·카운터가 부르는 쪽에 그대로 더해진다.
+    가져온 정의는 이미 파싱된 것이라 부르는 쪽을 다시 가리킬 수 없다.
     """
 
     def __init__(self, definition: MacroDefinition) -> None:
@@ -1853,9 +2303,23 @@ class _CallGraph:
         }
         for helper in definition.helpers:
             self.calls[helper.name] = _called_helpers(helper.statements)
+        self.imported: dict[str, _CallGraph] = {
+            imported.name: _CallGraph(imported) for imported in definition.imports
+        }
         self._depth: dict[str, int] = {}
         self._statements: dict[str, int] = {}
         self._tally: dict[tuple[str, str], _Tally] = {}
+        self._holding_walked: set[tuple[str, tuple[int, ...]]] = set()
+
+    def _owner(self, name: str) -> "tuple[_CallGraph, str]":
+        """그 이름을 답할 그래프와, 그 그래프 안에서의 이름.
+
+        가져온 macro 면 그 macro 의 그래프와 그 entry 이름이고, 아니면 이 그래프와 그 이름이다.
+        """
+        imported = self.imported.get(name)
+        if imported is not None:
+            return imported, imported.definition.entry.name
+        return self, name
 
     def statements_of(self, name: str) -> tuple[MacroStatement, ...]:
         function = self.definition.function(name)
@@ -1895,6 +2359,9 @@ class _CallGraph:
     # -- 호출 깊이 --
 
     def depth_of(self, name: str) -> int:
+        owner, own_name = self._owner(name)
+        if owner is not self:
+            return owner.depth_of(own_name)
         if name not in self._depth:
             called = self.calls.get(name, ())
             # 먼저 넣어 두지 않는다. 고리는 `reject_recursion` 이 이미 걸렀으므로 여기
@@ -1904,19 +2371,35 @@ class _CallGraph:
             )
         return self._depth[name]
 
+    def deepest_chain(self, name: str) -> list[str]:
+        """`depth_of` 를 낸 가장 깊은 호출 사슬. 거절 문장이 그 사슬을 그대로 적는다."""
+        owner, own_name = self._owner(name)
+        if owner is not self:
+            return owner.deepest_chain(own_name)
+        called = self.calls.get(name, ())
+        if not called:
+            return [name]
+        deepest = max(called, key=self.depth_of)
+        return [name] + self.deepest_chain(deepest)
+
     def reject_over_depth(self) -> None:
         measured = self.depth_of(self.definition.entry.name)
         if measured > MAX_CALL_DEPTH:
+            chain = " → ".join(self.deepest_chain(self.definition.entry.name))
             raise MacroRejection(
-                f"the call chain in this macro is {measured} deep, and the limit is "
-                f"{MAX_CALL_DEPTH} counting the entry point. A failure payload prints "
-                "the chain it happened in, and four links do not read in one payload. "
-                "Flatten a helper into its caller."
+                f"the call chain in this macro is {measured} deep ({chain}), and the "
+                f"limit is {MAX_CALL_DEPTH} counting the entry point. An imported macro "
+                "counts its own depth. A failure payload prints the chain it happened "
+                "in, and four links do not read in one payload. Flatten a helper into "
+                "its caller."
             )
 
     # -- statement 총수 --
 
     def statements_in(self, name: str) -> int:
+        owner, own_name = self._owner(name)
+        if owner is not self:
+            return owner.statements_in(own_name)
         if name not in self._statements:
             self._statements[name] = self._count(self.statements_of(name))
         return self._statements[name]
@@ -1947,6 +2430,8 @@ class _CallGraph:
                 )
             elif isinstance(statement, (MacroForStatement, MacroWhileStatement)):
                 total += 1 + self._count(statement.body)
+            elif isinstance(statement, MacroMatchStatement):
+                total += 1 + max(self._count(case.body) for case in statement.cases)
             elif isinstance(statement, MacroHelperCallStatement):
                 total += 1 + self.statements_in(statement.callee)
             else:
@@ -1965,6 +2450,9 @@ class _CallGraph:
     # -- 눌렀으면 풀어야 하는 tool --
 
     def tally_of(self, name: str, pair: PairedTools) -> "_Tally":
+        owner, own_name = self._owner(name)
+        if owner is not self:
+            return owner.tally_of(own_name, pair)
         if (name, pair.counter) not in self._tally:
             self._tally[(name, pair.counter)] = self._tally_body(
                 self.statements_of(name), pair
@@ -2027,14 +2515,39 @@ class _CallGraph:
                         "without letting go presses once more on every turn."
                     )
                 inner = _Tally(delta=0, lowest=one_pass.lowest)
+            elif isinstance(statement, MacroMatchStatement):
+                inner = self._tally_match(statement, pair)
             else:
                 continue
             lowest = min(lowest, delta + inner.lowest)
             delta += inner.delta
         return _Tally(delta=delta, lowest=lowest)
 
+    def _tally_match(self, statement: MacroMatchStatement, pair: PairedTools) -> "_Tally":
+        """`case` 하나하나를 `else` 없는 `if` 의 몸통처럼 센다.
+
+        어느 `case` 도 돌지 않는 경로가 언제나 있다 — Jev 가 `NONE_FITS` 를 고르고 agent 가
+        `resume_macro(proceed=true)` 로 그 `match` 를 건너뛰는 경로다. 그 경로의 카운터는
+        0 이므로 모든 `case` 가 0 을 남겨야 한다.
+        """
+        lowest = 0
+        for case in statement.cases:
+            one_case = self._tally_body(case.body, pair)
+            if one_case.delta != 0:
+                raise MacroRejection(
+                    f'`case "{case.option}"` of `{statement.source}` leaves '
+                    f"{pair.counter} at {one_case.delta:+d}. Hold and release it inside "
+                    "the same case — Jev may pick another case, or none, and the game "
+                    "would be left holding it."
+                )
+            lowest = min(lowest, one_case.lowest)
+        return _Tally(delta=0, lowest=lowest)
+
     def reject_checkpoint_while_holding(self) -> None:
-        """누름과 뗌 사이의 `checkpoint`, 멈춘 시간 안의 `wait_until` 을 거절한다.
+        """누름과 뗌 사이의 `checkpoint`·`match`, 멈춘 시간 안의 `wait_until` 을 거절한다.
+
+        `match` 는 Jev 가 `NONE_FITS` 를 고르면 `checkpoint` 처럼 멈추므로 같은 자리다.
+        가져온 macro 안은 그 macro 의 그래프가 같은 카운터 값을 들고 걷는다.
 
         거기서 턴이 끝나면 게임이 키를 누른 채로, 또는 시간이 멈춘 채로 턴을 넘긴다.
         `reject_unpaired` 는 macro 전체가 0 인지만 보므로 이것을 못 잡는다. 그리고 이
@@ -2044,55 +2557,86 @@ class _CallGraph:
         statement 앞의 카운터 값이 경로와 상관없이 하나로 정해진다. 그 값을 진입점부터
         내려가며 들고 간다.
         """
-        seen: set[tuple[str, tuple[int, ...]]] = set()
+        self._walk_holding(
+            self.statements_of(self.definition.entry.name), (0,) * len(PAIRED_TOOLS)
+        )
 
-        def walk(
-            statements: tuple[MacroStatement, ...], levels: tuple[int, ...]
-        ) -> tuple[int, ...]:
-            for statement in statements:
-                if isinstance(statement, MacroCheckpointStatement):
-                    for pair, level in zip(PAIRED_TOOLS, levels):
-                        if level != 0:
-                            raise MacroRejection(
-                                f"`{statement.source}` sits while {pair.counter} is "
-                                f"still taken (`{pair.opens}` before it, `{pair.closes}` "
-                                "after). The turn would end with the game in that "
-                                f"state. Move the checkpoint before `{pair.opens}` or "
-                                f"after `{pair.closes}`."
-                            )
-                elif isinstance(statement, MacroWaitUntilStatement):
-                    for pair, level in zip(PAIRED_TOOLS, levels):
-                        if pair.opens == "pause_game_time" and level != 0:
-                            raise MacroRejection(
-                                f"`{statement.source}` runs between `pause_game_time` "
-                                "and `resume_game_time`. Game state cannot change while "
-                                "time is frozen, so this wait would always time out. "
-                                "Move `wait_until` after `resume_game_time`."
-                            )
-                elif isinstance(statement, MacroActionStatement):
-                    levels = tuple(
-                        level
-                        + (1 if statement.callee == pair.opens else 0)
-                        - (1 if statement.callee == pair.closes else 0)
-                        for pair, level in zip(PAIRED_TOOLS, levels)
-                    )
-                elif isinstance(statement, MacroIfStatement):
-                    walk(statement.orelse, levels)
-                    levels = walk(statement.body, levels)
-                elif isinstance(statement, (MacroForStatement, MacroWhileStatement)):
-                    walk(statement.body, levels)
-                elif isinstance(statement, MacroHelperCallStatement):
-                    key = (statement.callee, levels)
-                    if key not in seen:
-                        seen.add(key)
-                        walk(self.statements_of(statement.callee), levels)
-                    levels = tuple(
-                        level + self.tally_of(statement.callee, pair).delta
-                        for pair, level in zip(PAIRED_TOOLS, levels)
-                    )
-            return levels
+    def _walk_holding(
+        self, statements: tuple[MacroStatement, ...], levels: tuple[int, ...]
+    ) -> tuple[int, ...]:
+        for statement in statements:
+            if isinstance(statement, (MacroCheckpointStatement, MacroMatchStatement)):
+                self._reject_pause_while_holding(statement, levels)
+            if isinstance(statement, MacroWaitUntilStatement):
+                for pair, level in zip(PAIRED_TOOLS, levels):
+                    if pair.opens == "pause_game_time" and level != 0:
+                        raise MacroRejection(
+                            f"`{statement.source}` runs between `pause_game_time` "
+                            "and `resume_game_time`. Game state cannot change while "
+                            "time is frozen, so this wait would always time out. "
+                            "Move `wait_until` after `resume_game_time`."
+                        )
+            elif isinstance(statement, MacroActionStatement):
+                levels = tuple(
+                    level
+                    + (1 if statement.callee == pair.opens else 0)
+                    - (1 if statement.callee == pair.closes else 0)
+                    for pair, level in zip(PAIRED_TOOLS, levels)
+                )
+            elif isinstance(statement, MacroIfStatement):
+                self._walk_holding(statement.orelse, levels)
+                levels = self._walk_holding(statement.body, levels)
+            elif isinstance(statement, (MacroForStatement, MacroWhileStatement)):
+                self._walk_holding(statement.body, levels)
+            elif isinstance(statement, MacroMatchStatement):
+                # 모든 `case` 가 0 을 남긴다는 것이 `_tally_match` 에서 이미 판정됐다.
+                for case in statement.cases:
+                    self._walk_holding(case.body, levels)
+            elif isinstance(statement, MacroHelperCallStatement):
+                owner, own_name = self._owner(statement.callee)
+                owner._enter_holding(own_name, levels)
+                levels = tuple(
+                    level + self.tally_of(statement.callee, pair).delta
+                    for pair, level in zip(PAIRED_TOOLS, levels)
+                )
+        return levels
 
-        walk(self.statements_of(self.definition.entry.name), (0,) * len(PAIRED_TOOLS))
+    def _enter_holding(self, name: str, levels: tuple[int, ...]) -> None:
+        """이 그래프의 `def` 하나를 그 카운터 값으로 걷는다. 같은 값이면 한 번만 걷는다."""
+        key = (name, levels)
+        if key in self._holding_walked:
+            return
+        self._holding_walked.add(key)
+        self._walk_holding(self.statements_of(name), levels)
+
+    def _reject_pause_while_holding(
+        self,
+        statement: MacroCheckpointStatement | MacroMatchStatement,
+        levels: tuple[int, ...],
+    ) -> None:
+        """턴을 agent 에게 돌려줄 수 있는 자리에서 카운터가 0 이 아니면 거절한다.
+
+        `match` 도 그런 자리다. Jev 가 `NONE_FITS` 를 고르면 `checkpoint` 와 같은 방식으로
+        멈춘다.
+        """
+        for pair, level in zip(PAIRED_TOOLS, levels):
+            if level == 0:
+                continue
+            if isinstance(statement, MacroMatchStatement):
+                raise MacroRejection(
+                    f"`{statement.source}` sits while {pair.counter} is still taken "
+                    f"(`{pair.opens}` before it, `{pair.closes}` after). When Jev finds "
+                    "no fitting case the macro pauses there, and the turn would end "
+                    f"with the game in that state. Move the `match` before "
+                    f"`{pair.opens}` or after `{pair.closes}`."
+                )
+            raise MacroRejection(
+                f"`{statement.source}` sits while {pair.counter} is "
+                f"still taken (`{pair.opens}` before it, `{pair.closes}` "
+                "after). The turn would end with the game in that "
+                f"state. Move the checkpoint before `{pair.opens}` or "
+                f"after `{pair.closes}`."
+            )
 
     def reject_unpaired(self) -> None:
         """누른 것을 안 푼 macro 를 거절한다.
