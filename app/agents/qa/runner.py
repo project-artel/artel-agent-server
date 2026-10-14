@@ -32,6 +32,7 @@ from app.llm.models import get_model_spec
 from app.prompts import load_prompt, load_skill, skill_descriptions, skill_names
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory
+from app.qa.reach import UnreachedJudge
 from app.qa.relevance import PulseRelevanceJudge
 from app.qa.schemas import QaScenario, QaStep
 from app.qa.run_config import (
@@ -208,6 +209,10 @@ def _step_plan(scenario: QaScenario) -> list[tuple[int | None, bool]]:
     TC 판정 = 그 구간 검증 스텝의 판정(파생)이라 여기 하드코딩되지 않는다.
     """
     steps = scenario.steps
+    if scenario.execution_mode == "FREE":
+        # FREE 시나리오는 스텝 하나가 TC 하나라 모든 보고가 그 TC 의 판정이다. 연속 구간으로
+        # 자르지 않는 것은 보고가 어떤 순서로 와도 같은 표가 나와야 해서다.
+        return [(step.case_id, step.case_id is not None) for step in steps]
     plan: list[tuple[int | None, bool]] = []
     for idx, step in enumerate(steps):
         cid = step.case_id
@@ -226,6 +231,8 @@ def _plan(scenario: QaScenario) -> str:
     (기대결과)가 붙는다. `verify`가 있는 스텝의 passed는 **기대결과가 나왔는가**(그게 그 TC의 최종
     판정), 그 외 스텝의 passed는 **그 행위를 수행/성립했는가**다.
     """
+    if scenario.execution_mode == "FREE":
+        return _free_plan(scenario)
     plan = _step_plan(scenario)
     items: list[dict] = []
     prev_cid: int | None = None
@@ -256,6 +263,64 @@ def _plan(scenario: QaScenario) -> str:
         f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
         "Begin. Observe the screen first."
     )
+
+
+def _free_plan(scenario: QaScenario) -> str:
+    """FREE 시나리오(TC 묶음)의 첫 메시지 (ARTEL-1029).
+
+    스텝 하나가 TC 하나다. 실행 순서, scene 사이의 경로, 조작 방법은 agent 가 정하므로
+    `do` 와 `try:`·`via:` 는 싣지 않고 TC 의 네 칸(scene, precondition, test_step, expected)만
+    싣는다. 보고는 `report_case(case_id, ...)` 로 받고, 순서와 상관없다.
+
+    "아직 도달하지 못했다" 를 판정으로 보고하지 말라는 문장과 시간을 아낄 필요가 없다는
+    문장은 2026-10-14 로컬 run(qa_try 3, Claude Haiku 4.5)에서 넣었다. 압축 뒤 agent 가 "time is
+    limited" 라고 스스로 판단하고 TC 5개를 시도하지 않은 채 실패로 보고했다. 그 run 에는
+    마감도 호출 상한도 걸리지 않았다.
+    """
+    items: list[dict] = []
+    for step in scenario.steps:
+        case = step.case
+        item: dict = {"case_id": step.case_id}
+        if case and case.scene:
+            item["scene"] = case.scene
+        if case and case.precondition:
+            item["precondition"] = case.precondition
+        item["test_step"] = (case.test_step if case and case.test_step else step.action).strip()
+        item["expected"] = case.expected if case else ""
+        items.append(item)
+    total = len(items)
+    return (
+        f"Scenario: {scenario.title} — {scenario.description}\n\n"
+        f"This scenario is a set of {total} test cases, not a script. You choose the order "
+        "and the method: which case to verify first, how to move between scenes, and which "
+        "controls to use. Plan a route before you start — verify the cases that share a "
+        "scene or a precondition together, and revisit a scene whenever a case needs it. "
+        "Some preconditions only hold before other cases change the game state (an "
+        "untouched save, a stage not yet cleared, a node not yet unlocked), so read every "
+        "precondition first and verify those cases before the ones that destroy them.\n"
+        "Call report_case(case_id, passed, message) once for EVERY test case, in whatever "
+        "order you verify them.\n"
+        "- Report a case only after you have carried out its `test_step` with its "
+        "`precondition` holding and watched what happened. `passed` = whether the "
+        "`expected` result occurred.\n"
+        "- Not having reached a case yet is NOT a verdict. A battle still in progress, a "
+        "stage not cleared yet, a scene you are not in yet: go there and finish it, then "
+        "report. Never report a case failed because you have not got to it.\n"
+        "- There is no time or token budget for you to save. The run stops you itself if it "
+        "ever has to; until then, keep playing. A compacted conversation is not a sign that "
+        "time is running out.\n"
+        "- If a `precondition` cannot be reached any more — another case already destroyed "
+        "it and the game offers no way back — report the case passed=false with a message "
+        "beginning 'SETUP-FAILED:' and do NOT report_issue (an unreachable precondition is "
+        "not a defect).\n"
+        "- `test_step` says what to check, not how. Find the way through the game yourself.\n"
+        "- If you later see a case behave differently from the verdict you gave it, report "
+        "it again with `overwrite=true`. Each case can be overwritten once.\n\n"
+        f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
+        "Begin. Observe the screen first, then plan your route through the cases."
+    )
+
+
 def fold_kinds_for(arch: ResolvedArch) -> frozenset[FoldKind]:
     """Which kinds of stale block this structure folds out of what the model reads.
 
@@ -794,7 +859,14 @@ class QaRunner:
             total_steps=len(scenario.steps),
             step_meta=step_meta,
             step_texts=[step.action for step in scenario.steps],
+            execution_mode=scenario.execution_mode,
         )
+        if scenario.execution_mode == "FREE":
+            # FREE run 은 실패 판정이 미도달인지 Jev 에 묻는다(`app/qa/reach.py`).
+            state.step_expected = [
+                step.case.expected if step.case else "" for step in scenario.steps
+            ]
+            state.unreached_judge = UnreachedJudge()
         deadline = self._config.arch.deadline_seconds
         # `pulse_relevance` 가 켜진 run 만 판정기를 단다(ARTEL-958). 이미 도착한 reading 이
         # 있을 수 있어서 한 번 바로 부른다 — 다음 reading 까지 기다리면 첫 화면이 판정 없이
@@ -823,6 +895,10 @@ class QaRunner:
             if judge is not None:
                 channel.pulse_relevance = None
                 await judge.aclose()
+            unreached_judge = state.unreached_judge
+            if isinstance(unreached_judge, UnreachedJudge):
+                state.unreached_judge = None
+                await unreached_judge.aclose()
         if not state.finished:
             return state, "The agent stopped without closing the run."
         return state, None

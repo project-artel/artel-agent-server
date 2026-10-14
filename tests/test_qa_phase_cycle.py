@@ -421,7 +421,9 @@ def test_an_out_of_phase_call_is_refused_and_counted() -> None:
     # nothing is owed there; what stands between here and UPDATE_MEMORY is
     # VERIFY, and `report_step` is how that is answered. Naming `observe_scene`
     # instead would be advice the model can follow and still be refused.
-    assert "VERIFY ends when you call one of: `report_step`" in refusal
+    # `offered` 없이 만든 cycle 이라 표의 이름을 모두 댄다. 실제 run 은 자기 tool 만 댄다 —
+    # ORDERED run 에는 `report_case` 가 없다(`build_tools`).
+    assert "VERIFY ends when you call one of:" in refusal and "`report_step`" in refusal
     assert cycle.refusals == 1
     assert cycle.phase is RunPhase.observe
 
