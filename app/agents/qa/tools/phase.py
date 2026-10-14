@@ -140,6 +140,7 @@ _TOOL_PHASE: dict[str, RunPhase] = {
     "resume_macro": RunPhase.act,
     # VERIFY — 판정 하나.
     "report_step": RunPhase.verify,
+    "report_case": RunPhase.verify,
     # UPDATE_MEMORY — 런을 넘어 남는 것을 적는 자리, 그리고 적을 것이 없다고 답하는 자리.
     "record_capability_verdict": RunPhase.update_memory,
     "record_new_capability": RunPhase.update_memory,

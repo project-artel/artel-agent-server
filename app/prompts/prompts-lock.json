@@ -198,6 +198,8 @@
     "qa_run/v21/tool_release_key": "56746a0e3c0ef7aecf2af242beebef33b73e2a41d4edc024dd8273d6fad6ba35",
     "qa_run/v21/tool_release_mouse_button": "1b412e155c90a4dc496afa30f147e0a6d4626f0187d344323fc7e588cb4f1000",
     "qa_run/v21/tool_reply_to_operator": "83a64d17844c23275e5aa867e7ce44c53b9f558eb601fdab94c19f6a3dd0e9f5",
+    "qa_run/v21/tool_report_case": "1955e41690fe3fcdab6bf8a87e54ccc7e179ad3dc3728b045f690a46c71634e8",
+    "qa_run/v21/tool_report_case_memory": "1ff0a30ea01d5211e0312e7504932fb30617578e92805904ce8b1f1566ae32b7",
     "qa_run/v21/tool_report_issue": "20f8b2f716ceb73fa4f024c09b2e90a9efaff726a9f288acc25d3244d1f1fd3b",
     "qa_run/v21/tool_report_step": "d3adfb496e861bf961b47812a647b0352b7b096f1c151315b19e3c9f6a7b21fd",
     "qa_run/v21/tool_report_step_memory": "ddfb830ab6c695e7ea9ec9695b76203f42be201bb7dd518fde8ea97490620d34",

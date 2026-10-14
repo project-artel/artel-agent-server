@@ -257,18 +257,23 @@ class PulseRelevanceJudge:
         return self._http
 
     async def _post(self, body: dict) -> dict:
-        settings = get_settings()
-        if not settings.llm_api_key:
-            raise RuntimeError("pulse relevance 에 LLM_API_KEY 가 없다")
-        headers = {
-            "Authorization": f"Bearer {settings.llm_api_key}",
-            "Content-Type": "application/json",
-        }
-        if settings.openrouter_site_url:
-            headers["HTTP-Referer"] = settings.openrouter_site_url
-        if settings.openrouter_app_title:
-            headers["X-Title"] = settings.openrouter_app_title
-        base = settings.llm_base_url.rstrip("/").removesuffix("/api/v1")
-        answer = await self._client().post(f"{base}{DECISIONS_PATH}", headers=headers, json=body)
-        answer.raise_for_status()
-        return answer.json()
+        return await post_decision(self._client(), body)
+
+
+async def post_decision(http: Any, body: dict) -> dict:
+    """Jev 결정 API 에 `body` 를 보내고 응답 JSON 을 돌려준다. `app/qa/reach.py` 도 쓴다."""
+    settings = get_settings()
+    if not settings.llm_api_key:
+        raise RuntimeError("Jev 결정 API 에 LLM_API_KEY 가 없다")
+    headers = {
+        "Authorization": f"Bearer {settings.llm_api_key}",
+        "Content-Type": "application/json",
+    }
+    if settings.openrouter_site_url:
+        headers["HTTP-Referer"] = settings.openrouter_site_url
+    if settings.openrouter_app_title:
+        headers["X-Title"] = settings.openrouter_app_title
+    base = settings.llm_base_url.rstrip("/").removesuffix("/api/v1")
+    answer = await http.post(f"{base}{DECISIONS_PATH}", headers=headers, json=body)
+    answer.raise_for_status()
+    return answer.json()

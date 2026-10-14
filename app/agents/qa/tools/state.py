@@ -93,6 +93,16 @@ class QaRunState:
         # 폴백(case_id/is_verification 미상) — 구식 호출자·테스트 호환용.
         self.step_meta: list[tuple[int | None, bool]] = step_meta or []
         self.step_results: list[QaStepResult] = []
+        # FREE 시나리오에서 `report_case(overwrite=True)` 로 판정을 한 번 뒤집은 스텝(ARTEL-1029).
+        # 한 TC 는 한 번만 덮어쓴다.
+        self.overwritten_steps: set[int] = set()
+        # FREE 시나리오에서 스텝마다 TC 의 expected 문장, 1번 스텝이 0번 자리. 미도달 판정기가
+        # agent 의 message 와 함께 읽는다(`app/qa/reach.py`).
+        self.step_expected: list[str] = []
+        # 실패 판정이 미도달인지 묻는 판정기. FREE run 에만 runner 가 단다. None 이면 묻지 않는다.
+        self.unreached_judge: object | None = None
+        # 스텝마다 미도달이라 돌려보낸 횟수.
+        self.unreached_refusals: dict[int, int] = {}
         self.finished = False
         # The observation the agent last saw, so the next look is a diff.
         self.watermark = 0
@@ -295,6 +305,26 @@ class QaRunState:
         """
         reported = {result.step for result in self.step_results}
         return [step for step in range(1, self.total_steps + 1) if step not in reported]
+
+    def step_of_case(self, case_id: int) -> int | None:
+        """FREE 시나리오에서 `case_id` 가 몇 번 스텝인지. 없으면 None."""
+        for index, (step_case_id, _) in enumerate(self.step_meta):
+            if step_case_id == case_id:
+                return index + 1
+        return None
+
+    def case_of_step(self, step: int) -> int | None:
+        """`step` 의 case_id. 표 밖이면 None."""
+        if 0 <= step - 1 < len(self.step_meta):
+            return self.step_meta[step - 1][0]
+        return None
+
+    def verdict_of(self, step: int) -> QaStepResult | None:
+        """`step` 의 마지막 판정. 아직 없으면 None."""
+        for result in reversed(self.step_results):
+            if result.step == step:
+                return result
+        return None
 
     def case_units(self) -> list[dict]:
         """연속 동일 case_id = 한 TC 구간. **TC 판정 = 그 구간의 검증(마지막) 스텝 판정**(2단 판정).

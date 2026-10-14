@@ -21,6 +21,7 @@ from app.qa.envelope import (
     StatusPayload,
     StepStatus,
 )
+from app.qa.reach import MAX_UNREACHED_REFUSALS, UNREACHED_THRESHOLD
 from app.qa.schemas import QaStepResult
 
 
@@ -197,8 +198,12 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         capability_key: str | None = None,
         learned: str | None = None,
         asks_memory: bool = False,
+        replaces: bool = False,
     ) -> str:
-        """두 `report_step` 모양이 함께 쓰는 몸통.
+        """두 `report_step` 모양과 FREE 의 `report_case` 가 함께 쓰는 몸통.
+
+        `replaces` 는 `report_case(overwrite=True)` 가 이 스텝의 앞선 판정을 지우고 새 판정으로
+        바꿀 때다. 지우지 않고 쌓으면 `build_summary` 가 같은 TC 를 두 번 센다.
 
         `asks_memory` 는 `phase_cycle` 이 `in_verdict` 이상인가다. `off` 에서는 아래 두 인자가
         schema 에 아예 없으므로 이 갈래는 한 줄도 안 돈다 — 기존 런 테스트가 왕복을 한 번도
@@ -267,6 +272,8 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         case_id, is_verification = (
             state.step_meta[step - 1] if 0 <= step - 1 < len(state.step_meta) else (None, False)
         )
+        if replaces:
+            state.step_results = [result for result in state.step_results if result.step != step]
         state.step_results.append(
             QaStepResult(
                 step=step,
@@ -341,13 +348,17 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
                 "a verdict — when you are done with the follow-up work below, call "
                 f"`finish_run` yourself:{render_closing_asks(state)}{note}"
             )
-        listed = ", ".join(str(number) for number in unreported)
+        listed = ", ".join(str(state.case_of_step(number)) for number in unreported)
         body = (
-            f"Recorded. {len(unreported)} test case(s) still without a verdict: {listed}. "
-            "Choose which one to verify next."
+            f"Recorded. {len(unreported)} test case(s) still without a verdict "
+            f"(case_id): {listed}. Choose which one to verify next."
         )
         if not passed:
-            body = f"{body} A failed test case is not a reason to stop."
+            body = (
+                f"{body} A failed test case is not a reason to stop. If it failed only "
+                "because you had not reached it yet, that was not a verdict: get there, "
+                "carry out its test_step, and correct it with `overwrite=true`."
+            )
         return _verdict_answer(f"{body}{note}")
 
     def _verdict_answer(body: str) -> str:
@@ -403,6 +414,143 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             # What the agent reads is `qa_run/<version>/tool_report_step.md`.
             return await _record_verdict(step, passed, message, used_knowledge_ids)
 
+
+    async def _unreached_refusal(
+        step: int, case_id: int, passed: bool, message: str
+    ) -> str | None:
+        """실패 판정이 "아직 도달하지 못했다" 이면 기록하지 않고 돌려보낼 답. 아니면 None.
+
+        Jev 가 판단하지 못하면 기록한다(fail open). 같은 TC 를 `MAX_UNREACHED_REFUSALS` 번
+        돌려보냈으면 다음 보고는 기록한다 — 정말 갈 수 없는 TC 에서 런이 멈추면 안 된다.
+        """
+        judge = state.unreached_judge
+        if passed or judge is None:
+            return None
+        if state.unreached_refusals.get(step, 0) >= MAX_UNREACHED_REFUSALS:
+            return None
+        test_step = state.step_texts[step - 1] if step - 1 < len(state.step_texts) else ""
+        expected = state.step_expected[step - 1] if step - 1 < len(state.step_expected) else ""
+        probability = await judge.unreached_probability(test_step, expected, message)
+        if probability is None or probability < UNREACHED_THRESHOLD:
+            return None
+        state.unreached_refusals[step] = state.unreached_refusals.get(step, 0) + 1
+        if state.phase_cycle is not None:
+            state.phase_cycle.hold()
+        return (
+            f"Nothing was recorded — this reads as case {case_id} not reached or not finished "
+            "yet, and that is not a verdict. Go there, carry out its test_step to the end, "
+            "watch the result, then report it. There is no time or token budget to save. "
+            "If the precondition truly cannot be reached any more, say why in a message "
+            "beginning 'SETUP-FAILED:'."
+        )
+
+    async def _report_case(
+        case_id: int,
+        passed: bool,
+        message: str,
+        used_knowledge_ids: list[str],
+        overwrite: bool,
+        **memory: object,
+    ) -> str:
+        """FREE 시나리오의 판정 (ARTEL-1029). `case_id` 를 스텝 번호로 바꿔 `_record_verdict` 로 보낸다.
+
+        이미 판정한 TC 를 다시 보고하면 두 번 부르게 한다. 첫 호출은 아무것도 적지 않고 앞선
+        판정을 보여 주는 경고를 돌려주고, `overwrite=true` 로 다시 불러야 바꾼다. 같은 TC 를
+        실수로 두 번 보고해 판정이 조용히 뒤집히는 일을 막기 위해서다. 한 TC 는 한 번만 바꾼다.
+        """
+        step = state.step_of_case(case_id)
+        if step is None:
+            known = ", ".join(
+                str(cid) for cid, _ in state.step_meta if cid is not None
+            )
+            if state.phase_cycle is not None:
+                state.phase_cycle.hold()
+            return (
+                f"Nothing was recorded — case_id {case_id} is not in this scenario. "
+                f"Use one of: {known}."
+            )
+        previous = state.verdict_of(step)
+        if previous is not None:
+            before = "passed" if previous.passed else "failed"
+            if step in state.overwritten_steps:
+                if state.phase_cycle is not None:
+                    state.phase_cycle.hold()
+                return (
+                    f"Nothing was recorded — case {case_id} was already overwritten once "
+                    f"and its verdict ({before}) stands. A case can be overwritten only once."
+                )
+            if not overwrite:
+                if state.phase_cycle is not None:
+                    state.phase_cycle.hold()
+                return (
+                    f"WARNING: nothing was recorded. Case {case_id} already has a verdict: "
+                    f"{before} — {previous.message}\n"
+                    "Reporting it again replaces that verdict. Do so only if you have now "
+                    "carried out its test_step and saw a different result than before. If "
+                    "so, call `report_case` again with the same case_id and `overwrite=true`. "
+                    "A case can be overwritten only once. Otherwise leave it and verify "
+                    "another case."
+                )
+        refusal = await _unreached_refusal(step, case_id, passed, message)
+        if refusal is not None:
+            return refusal
+        answer = await _record_verdict(
+            step,
+            passed,
+            message,
+            used_knowledge_ids,
+            replaces=previous is not None,
+            **memory,  # type: ignore[arg-type]
+        )
+        if previous is not None and state.verdict_of(step) is not previous:
+            state.overwritten_steps.add(step)
+            before = "passed" if previous.passed else "failed"
+            after = "passed" if passed else "failed"
+            answer = f"Overwrote case {case_id}: {before} → {after}. {answer}"
+        return answer
+
+    verdict_tool = report_step
+    if state.execution_mode == "FREE" and arch.phase_cycle.remembers_in_verdict:
+
+        @tool(description=load_tool_description("report_case_memory").body)
+        async def report_case(
+            case_id: int,
+            passed: bool,
+            message: str,
+            thought: str,
+            used_knowledge_ids: list[str] = [],
+            capability_key: str | None = None,
+            learned: str | None = None,
+            overwrite: bool = False,
+        ) -> str:
+            # What the agent reads is `qa_run/<version>/tool_report_case_memory.md`.
+            return await _report_case(
+                case_id,
+                passed,
+                message,
+                used_knowledge_ids,
+                overwrite,
+                capability_key=capability_key,
+                learned=learned,
+                asks_memory=True,
+            )
+
+        verdict_tool = report_case
+    elif state.execution_mode == "FREE":
+
+        @tool(description=load_tool_description("report_case").body)
+        async def report_case(
+            case_id: int,
+            passed: bool,
+            message: str,
+            thought: str,
+            used_knowledge_ids: list[str] = [],
+            overwrite: bool = False,
+        ) -> str:
+            # What the agent reads is `qa_run/<version>/tool_report_case.md`.
+            return await _report_case(case_id, passed, message, used_knowledge_ids, overwrite)
+
+        verdict_tool = report_case
 
     @tool(
         description=load_tool_description("report_issue").body.format(
@@ -469,6 +617,14 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         # the second call closes whatever the state, because a run the game has
         # abandoned still has to be able to end.
         unreported = state.unreported_steps()
+        if unreported and state.finish_attempts == 1 and state.execution_mode == "FREE":
+            listed = ", ".join(str(state.case_of_step(step)) for step in unreported)
+            return (
+                f"{len(unreported)} test case(s) still have no verdict (case_id): {listed}. "
+                "Go verify them — a case you have not tried may still pass. If the game "
+                "truly cannot reach one, report it failed with the reason, then call "
+                "`finish_run` again."
+            )
         if unreported and state.finish_attempts == 1:
             listed = ", ".join(str(step) for step in unreported)
             return (
@@ -497,7 +653,7 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
 
     return [
         wait_for_operator,
-        report_step,
+        verdict_tool,
         report_issue,
         finish_run,
         reply_to_operator,
