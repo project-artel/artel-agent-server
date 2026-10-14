@@ -9,6 +9,7 @@ from app.agents.qa.arch import DEFAULT_ARCH, QaArchSpec
 from app.agents.qa.reset import DEFAULT_RESET_POLICY, ResetPolicy
 from app.agents.qa.runner import QaRunner
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage
+from app.llm.credentials import LlmKey, bind_llm_key
 from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig
 from app.llm.usage import set_usage_scope
 from app.qa.channel import QaRunChannel
@@ -100,6 +101,7 @@ class QaExecutionService:
         arch: QaArchSpec = DEFAULT_ARCH,
         project_id: int | None = None,
         game_build_id: int | None = None,
+        llm_key: LlmKey | None = None,
     ) -> tuple[str, RunConfig]:
         """Open a run-scoped session and return its id alongside what it will run with.
 
@@ -109,6 +111,8 @@ class QaExecutionService:
         gets an error, instead of failing a run that has already been reported as
         started) and returned because Orchestration records the resolved form, not
         the request.
+
+        `llm_key` 는 세션 기록에만 남고 `run_config` 에는 들어가지 않는다.
         """
         run_config = resolve_run_config(
             model=model,
@@ -125,6 +129,7 @@ class QaExecutionService:
             run_config=run_config,
             project_id=project_id,
             game_build_id=game_build_id,
+            llm_key=llm_key,
         )
         await self._store.save(session_id, record)
         return session_id, run_config
@@ -139,6 +144,17 @@ class QaExecutionService:
         """
         record = await self._load(session_id)
         return record.scenarios[0].qa_try_id
+
+    async def bind_llm_key(self, session_id: str) -> None:
+        """세션의 사용자 key 를 부르는 task 에 묶는다. key 가 없는 세션이면 공용 key 로 둔다.
+
+        socket handler 가 런과 receive loop 를 시작하기 전에 부른다. 그래야 둘 다 이 key 를
+        물려받는다. 런은 agent 와 compaction 의 모델을 만들고, receive loop 는 `deliver` 에서
+        `screen_verdict` 와 `screen_name` 의 task 를 띄우며 그 task 들이 런의 모델로 모델을
+        만든다.
+        """
+        record = await self._load(session_id)
+        bind_llm_key(record.llm_key)
 
     async def close(self, session_id: str) -> None:
         self._channels.pop(session_id, None)

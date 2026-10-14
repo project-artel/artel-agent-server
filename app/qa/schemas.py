@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 
+from app.llm.credentials import LlmKey
 from app.qa.envelope import QaChatTurn
 from app.qa.run_config import RunConfig
 
@@ -89,3 +90,9 @@ class QaSessionRecord(BaseModel):
     # append: the whole record is rewritten to Redis each turn, so it cannot grow
     # without bound, and only the recent turns are what steer the next decision.
     chat: list[QaChatTurn] = Field(default_factory=list)
+    # 런을 시작한 사용자의 LLM API key. 사용자 key 로 도는 런에만 있다.
+    #
+    # `run_config` 에 두지 않는다 — 그것은 orchestration 으로 돌아가 try 에 영구히 남는다.
+    # 여기 있는 동안은 세션 TTL 만큼 Redis 에 있고, 세션이 닫히면 기록과 함께 지워진다.
+    # `repr` 에서 빼서 기록을 찍는 로그에 key 가 남지 않게 한다.
+    llm_key: LlmKey | None = Field(default=None, repr=False)

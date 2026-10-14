@@ -560,5 +560,121 @@
     },
     "enabled": false,
     "sortOrder": 190
+  },
+  {
+    "id": "gpt/gpt-6.1-sol",
+    "label": "GPT-6.1 Sol (OpenAI API)",
+    "provider": "openai",
+    "supportsStrictJson": true,
+    "maxInputTokens": 922000,
+    "inputModalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": null,
+    "enabled": true,
+    "sortOrder": 200
+  },
+  {
+    "id": "gpt/gpt-6-astra",
+    "label": "GPT-6 Astra (OpenAI API)",
+    "provider": "openai",
+    "supportsStrictJson": true,
+    "maxInputTokens": 922000,
+    "inputModalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": null,
+    "enabled": true,
+    "sortOrder": 210
+  },
+  {
+    "id": "gpt/gpt-6-luna",
+    "label": "GPT-6 Luna (OpenAI API)",
+    "provider": "openai",
+    "supportsStrictJson": true,
+    "maxInputTokens": 922000,
+    "inputModalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": null,
+    "enabled": true,
+    "sortOrder": 220
+  },
+  {
+    "id": "gpt/gpt-5.6-terra",
+    "label": "GPT-5.6 Terra (OpenAI API)",
+    "provider": "openai",
+    "supportsStrictJson": true,
+    "maxInputTokens": 922000,
+    "inputModalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": null,
+    "enabled": true,
+    "sortOrder": 230
   }
 ]

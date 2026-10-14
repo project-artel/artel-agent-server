@@ -1,8 +1,11 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from redis.asyncio import from_url as redis_from_url
 
@@ -128,7 +131,41 @@ def create_app() -> FastAPI:
     app.include_router(step_phrasing_router, prefix=INTERNAL_PREFIX)
     app.include_router(llm_cache_router, prefix=INTERNAL_PREFIX)
     app.add_exception_handler(ModelCatalogUnavailableError, _model_catalog_unavailable)
+    app.add_exception_handler(RequestValidationError, _validation_error_without_api_keys)
     return app
+
+
+# 422 응답의 `input` 에서 값을 가리는 field 이름. `POST /internal/qa-sessions` 의
+# `llm_key.api_key` 가 그 하나다.
+_REDACTED_FIELDS = frozenset({"api_key"})
+_REDACTED = "**********"
+
+
+def _without_api_keys(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _REDACTED if key in _REDACTED_FIELDS else _without_api_keys(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_without_api_keys(item) for item in value]
+    return value
+
+
+async def _validation_error_without_api_keys(
+    _request: Request, error: Exception
+) -> JSONResponse:
+    """FastAPI 기본 422 와 같은 모양이되, `input` 에 실린 사용자 API key 를 가린다.
+
+    body 전체를 보는 `model_validator` 가 실패하면 pydantic 은 그 오류의 `input` 에 body
+    전체를 싣고, FastAPI 기본 처리는 그것을 그대로 응답에 넣는다. 그러면 reasoning 하나가
+    틀린 요청의 422 에 사용자 key 가 찍혀 orchestration 으로 돌아간다.
+    """
+    assert isinstance(error, RequestValidationError)
+    return JSONResponse(
+        status_code=422,
+        content={"detail": jsonable_encoder(_without_api_keys(list(error.errors())))},
+    )
 
 
 async def _model_catalog_unavailable(

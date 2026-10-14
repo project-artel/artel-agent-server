@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
@@ -25,9 +26,11 @@ from app.llm.api_key import (
     get_llm_api_key_provider,
     is_key_rejected_by_anthropic,
     is_key_rejected_by_bedrock,
+    is_unauthorized,
 )
 from app.llm.claude_api import ClaudeApiChat
-from app.llm.usage import UsageCallback
+from app.llm.credentials import LlmKeyService, bound_llm_key
+from app.llm.usage import KeySource, UsageCallback
 
 
 # Not a knob, but recorded with every run: a comparison between two models is
@@ -42,6 +45,15 @@ BEDROCK_PREFIX = "bedrock/"
 # 모델 id 가 이것으로 시작하면 Claude API 로 간다. 뒤는 Anthropic model id 다.
 # `anthropic/...` 은 OpenRouter, `bedrock/us.anthropic...` 은 Bedrock 이라 셋이 섞이지 않는다.
 CLAUDE_PREFIX = "claude/"
+
+# 모델 id 가 이것으로 시작하면 OpenAI API 로 간다. 뒤는 OpenAI model id 다.
+# `openai/...` 은 OpenRouter, `bedrock/us.openai...` 은 Bedrock 이라 셋이 섞이지 않는다.
+# 공용 key 가 없는 경로라 세션에 묶인 사용자 key 로만 부른다.
+GPT_PREFIX = "gpt/"
+
+# OpenAI API 주소. 넘기지 않으면 langchain-openai 가 `OPENAI_BASE_URL` 같은 환경 변수를 읽는데,
+# 셸에 남은 값이 사용자 key 를 다른 곳으로 보내지 않게 고정한다.
+OPENAI_API_BASE_URL = "https://api.openai.com/v1"
 
 # Claude API 주소. 넘기지 않으면 langchain-anthropic 이 `ANTHROPIC_BASE_URL` 같은 환경 변수를
 # 읽는데, 셸에 남은 값이 호출을 다른 곳으로 보내지 않게 고정한다.
@@ -91,6 +103,36 @@ class ClaudeApiKeyMissingError(RuntimeError):
     찾거나 인증 실패로 끝나는데, 둘 다 key 를 넣을 곳이 admin page 라는 것을 알려 주지
     않는다.
     """
+
+
+class GptApiKeyMissingError(RuntimeError):
+    """`gpt/` 모델을 부르려는데 세션에 묶인 OpenAI key 가 없다.
+
+    `gpt/` 에는 공용 key 가 없다. 사용자가 등록한 key 로 도는 QA 런만 이 경로를 쓴다.
+    """
+
+
+def key_service_of(model: str) -> LlmKeyService | None:
+    """`model` 의 경로에서 쓸 수 있는 사용자 key 의 서비스. `bedrock/` 은 공용 key 뿐이라 None 이다."""
+    if model.startswith(BEDROCK_PREFIX):
+        return None
+    if model.startswith(CLAUDE_PREFIX):
+        return LlmKeyService.anthropic
+    if model.startswith(GPT_PREFIX):
+        return LlmKeyService.openai
+    return LlmKeyService.openrouter
+
+
+def _bound_key_for(model: str) -> str | None:
+    """세션에 묶인 사용자 key 가 이 모델의 경로와 맞으면 그 key, 아니면 None 이다.
+
+    맞지 않는 key 는 쓰지 않는다. `claude/` 런이라도 compaction 모델이 OpenRouter 에 있으면
+    그 호출은 공용 OpenRouter key 로 간다 — Claude key 를 OpenRouter 에 보내면 401 이다.
+    """
+    bound = bound_llm_key()
+    if bound is None or bound.service is not key_service_of(model):
+        return None
+    return bound.api_key
 
 
 def _is_transient(message: BaseMessage) -> bool:
@@ -262,8 +304,9 @@ def _claude(
     reasoning: ReasoningConfig | None,
     cache_prompt: bool,
     anthropic_api_key: str,
+    key_source: KeySource,
 ) -> ChatAnthropic:
-    """Claude API 경로. key 는 관리자가 admin page 에 넣은 값이다.
+    """Claude API 경로. key 는 세션에 묶인 사용자 key, 없으면 관리자가 admin page 에 넣은 값이다.
 
     `temperature`, `top_p`, `top_k` 는 보내지 않는다. Opus 5.5 와 Fable 5.1 은 sampling
     parameter 를 거절하고, Sonnet 5.5 와 Haiku 5.5 는 기본값이 아닌 값을 거절한다.
@@ -297,11 +340,65 @@ def _claude(
         # 응답의 `model_name` 에는 `claude/` 가 없다. catalog id 로 기록하려고 slug 를 넘긴다.
         # langchain-anthropic 의 `input_tokens` 는 cache write 를 포함한다.
         callbacks=[
-            UsageCallback(slug=model, input_includes_cache_write=True),
-            KeyRefreshOnUnauthorized(
-                get_llm_api_key_provider(), rejected=is_key_rejected_by_anthropic
+            UsageCallback(
+                slug=model, input_includes_cache_write=True, key_source=key_source
             ),
+            *_platform_key_refresh(key_source, rejected=is_key_rejected_by_anthropic),
         ],
+    )
+
+
+def _platform_key_refresh(
+    key_source: KeySource, rejected: Callable[[BaseException], bool]
+) -> list[KeyRefreshOnUnauthorized]:
+    """공용 key 로 만든 client 에만 cache 된 공용 key 를 버리는 callback 을 단다.
+
+    사용자 key 가 거절됐을 때 공용 key 를 다시 읽어 봐야 그 client 의 key 는 바뀌지 않는다.
+    """
+    if key_source == "user":
+        return []
+    return [KeyRefreshOnUnauthorized(get_llm_api_key_provider(), rejected=rejected)]
+
+
+def _gpt(
+    model: LLMModel,
+    reasoning: ReasoningConfig | None,
+    openai_api_key: str,
+) -> ChatOpenAI:
+    """OpenAI API 경로. key 는 세션에 묶인 사용자 key 뿐이다.
+
+    Chat Completions API 를 쓴다. 추론은 `reasoning_effort` 하나로 싣고, 값은 catalog 의 effort
+    를 그대로 보낸다 — OpenAI SDK 의 `ReasoningEffort` 는 `none`, `minimal`, `low`, `medium`,
+    `high`, `xhigh`, `max` 라 catalog 의 다섯 값이 모두 그 안에 있다. 끄라고 했으면 `none`
+    이다. 고르지 않았으면 보내지 않고 model 의 기본값을 따른다.
+
+    `temperature` 는 보내지 않는다. OpenAI 의 추론 model 은 1 이 아닌 값을 거절하고,
+    langchain-openai 가 그 값을 빼 주는 것은 이름이 `gpt-5` 로 시작하는 model 뿐이다.
+    OpenRouter 경로는 OpenRouter 가 지원하지 않는 값을 빼 주므로 `TEMPERATURE` 를 보낸다.
+    Bedrock 의 `openai` 경로와 같은 선택이다.
+
+    prompt cache 는 OpenAI 가 스스로 하므로 `cache_prompt` 를 받지 않는다. 읽은 cache 는
+    `usage_metadata` 의 `cache_read` 로 온다.
+    """
+    settings = get_settings()
+    if reasoning is None:
+        effort: str | None = None
+    elif reasoning.disabled:
+        effort = "none"
+    else:
+        effort = reasoning.effort.value if reasoning.effort is not None else None
+
+    return ChatOpenAI(
+        model=model.removeprefix(GPT_PREFIX),
+        base_url=OPENAI_API_BASE_URL,
+        api_key=openai_api_key,
+        reasoning_effort=effort,
+        # OpenRouter 경로와 같은 timeout 과 재시도 수를 쓴다. 둘 다 같은 OpenAI 호환
+        # client 이고, 이 값을 고른 이유는 `Settings.openrouter_timeout_seconds` 에 있다.
+        timeout=settings.openrouter_timeout_seconds,
+        max_retries=settings.openrouter_max_retries,
+        # 응답의 `model_name` 에는 `gpt/` 가 없다. catalog id 로 기록하려고 slug 를 넘긴다.
+        callbacks=[UsageCallback(slug=model, key_source="user")],
     )
 
 
@@ -381,22 +478,38 @@ def build_chat_model(
 
     `ChatAnthropic` 도 만들어질 때 키를 SDK client 에 고정하므로 같은 방법을 쓴다.
 
-    OpenRouter 모델은 키를 요청마다 읽으므로(`api_key` 에 callable 을 넘긴다) 키가
+    공용 OpenRouter 키는 요청마다 읽으므로(`api_key` 에 callable 을 넘긴다) 키가
     cache key 에 들어가지 않는다.
 
-    `claude/` 모델인데 저장된 Claude API key 가 없으면 `ClaudeApiKeyMissingError` 다.
+    세션에 사용자 key 가 묶여 있고(`app/llm/credentials.py`) 그 서비스가 이 모델의 경로와
+    맞으면 공용 key 대신 그것을 쓴다. 경로와 서비스의 짝은 `key_service_of` 가 정한다. 사용자
+    key 는 언제나 cache key 에 들어간다 — 두 사용자가 client 하나를 나눠 쓰면 한 사람의 key
+    로 다른 사람의 호출이 나간다. 묶인 key 가 없으면 동작은 공용 key 만 있던 때와 같다.
+
+    `claude/` 모델인데 사용자 key 도 저장된 Claude API key 도 없으면
+    `ClaudeApiKeyMissingError`, `gpt/` 모델인데 사용자 key 가 없으면 `GptApiKeyMissingError`
+    다.
     """
-    provider_key: str | None = None
+    user_key = _bound_key_for(model)
+    key_source: KeySource = "user" if user_key is not None else "platform"
+    provider_key: str | None = user_key
     if model.startswith(BEDROCK_PREFIX):
         provider_key = get_llm_api_key_provider().get_bedrock_key()
     elif model.startswith(CLAUDE_PREFIX):
-        provider_key = get_llm_api_key_provider().get_anthropic_key()
+        if provider_key is None:
+            provider_key = get_llm_api_key_provider().get_anthropic_key()
         if provider_key is None:
             raise ClaudeApiKeyMissingError(
                 f"Model '{model}' needs a Claude API key, and none is stored. "
                 "An administrator enters it on the admin page."
             )
-    return _build_chat_model(model, reasoning, cache_prompt, provider_key)
+    elif model.startswith(GPT_PREFIX):
+        if provider_key is None:
+            raise GptApiKeyMissingError(
+                f"Model '{model}' is called with the user's own OpenAI API key, and no "
+                "llm_key with service 'openai' is bound to this session."
+            )
+    return _build_chat_model(model, reasoning, cache_prompt, provider_key, key_source)
 
 
 @lru_cache
@@ -405,11 +518,14 @@ def _build_chat_model(
     reasoning: ReasoningConfig | None,
     cache_prompt: bool,
     provider_key: str | None,
+    key_source: KeySource,
 ) -> BaseChatModel:
     """Build a chat model.
 
     `bedrock/` 로 시작하는 값은 Bedrock 으로, `claude/` 로 시작하는 값은 Claude API 로,
-    나머지는 OpenRouter 로 간다. `provider_key` 는 앞의 둘에서 쓰는 key 다.
+    `gpt/` 로 시작하는 값은 OpenAI API 로, 나머지는 OpenRouter 로 간다. `provider_key` 는
+    그 경로에서 쓰는 key 다. OpenRouter 경로에서는 사용자 key 일 때만 값이 있고, None 이면
+    공용 key 를 요청마다 읽는다.
     OpenRouter 경로의 동작은 그대로다 — credit 이 없으면 그쪽이 실패하는 것도
     포함해서, 이 변경이 손대지 않는다.
 
@@ -435,7 +551,11 @@ def _build_chat_model(
     if model.startswith(CLAUDE_PREFIX):
         # `build_chat_model` 이 key 가 없으면 여기까지 오지 않게 한다.
         assert provider_key is not None
-        return _claude(model, reasoning, cache_prompt, provider_key)
+        return _claude(model, reasoning, cache_prompt, provider_key, key_source)
+    if model.startswith(GPT_PREFIX):
+        # `build_chat_model` 이 key 가 없으면 여기까지 오지 않게 한다.
+        assert provider_key is not None
+        return _gpt(model, reasoning, provider_key)
 
     settings = get_settings()
     headers: dict[str, str] = {}
@@ -468,15 +588,19 @@ def _build_chat_model(
         # Opus 4096) or nothing caches, silently and at no extra charge.
         extra_body["cache_control"] = {"type": "ephemeral"}
 
-    # A callable, not a string: this client is cached for the process, and the key
-    # must be able to change under it (an administrator replacing it) without a
-    # restart. The client calls it on every request.
-    key_provider = get_llm_api_key_provider()
+    # 공용 key 는 문자열이 아니라 callable 로 넘긴다. 이 client 는 프로세스 동안 cache 되고,
+    # 관리자가 key 를 바꾸면 재시작 없이 바뀌어야 한다. client 가 요청마다 부른다.
+    # 사용자 key 는 그 값으로 만든 client 에 고정한다 — cache key 에 key 가 들어 있다.
+    api_key = (
+        provider_key
+        if provider_key is not None
+        else get_llm_api_key_provider().get_openrouter_key_or_placeholder
+    )
 
     return ChatOpenAI(
         model=model,
         base_url=settings.llm_base_url,
-        api_key=key_provider.get_openrouter_key_or_placeholder,
+        api_key=api_key,
         temperature=TEMPERATURE,
         default_headers=headers or None,
         extra_body=extra_body,
@@ -484,7 +608,10 @@ def _build_chat_model(
         # Why these values: see Settings.openrouter_timeout_seconds.
         timeout=settings.openrouter_timeout_seconds,
         max_retries=settings.openrouter_max_retries,
-        callbacks=[UsageCallback(), KeyRefreshOnUnauthorized(key_provider)],
+        callbacks=[
+            UsageCallback(key_source=key_source),
+            *_platform_key_refresh(key_source, rejected=is_unauthorized),
+        ],
     )
 
 
