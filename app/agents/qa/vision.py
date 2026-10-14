@@ -14,14 +14,23 @@ Three separate problems, kept apart because they fail differently:
 import base64
 import logging
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import httpx
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 
 from app.agents.qa.arch import ScreenCaptureMode
-from app.agents.qa.tools.state import PendingCapture, capture_from_action_result
 from app.qa.envelope import JsonRpcAction
+
+if TYPE_CHECKING:
+    # `app.agents.qa.tools.state` 는 module load 에 import 하지 않는다. 그러면 `tools`
+    # 패키지 전체가 따라 올라오고, `app.qa.schemas` 에서 시작한 import 가
+    # `app.qa.run_config` → `app.agents.qa.arch`(`app.agents` 패키지 전체)
+    # → `screen_verdict.capture` → 이 모듈 → `tools` → `app.qa.schemas` 로 돌아와
+    # `QaStepResult` 를 못 찾는 `ImportError` 가 난다. 이 모듈의 download helper 만 쓰는
+    # `screen_verdict`·`screen_name` 이 `tools` 를 끌어오지 않게 하려는 것이다.
+    from app.agents.qa.tools.state import PendingCapture
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +246,7 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
         mode = getattr(self._arch, "screen_capture", None)
         return mode in (ScreenCaptureMode.every_call, ScreenCaptureMode.by_role)
 
-    async def _auto_capture(self) -> PendingCapture | None:
+    async def _auto_capture(self) -> "PendingCapture | None":
         """Ask the game for the screen, for a run that reads it on every call.
 
         Returns `None` for every failure the game can produce — it is busy, its SDK
@@ -268,6 +277,9 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
         if result is None or not result.results:
             logger.warning("[QA] the game did not answer the automatic capture")
             return None
+
+        # 위 `TYPE_CHECKING` 과 같은 이유로 여기서 import 한다.
+        from app.agents.qa.tools.state import capture_from_action_result
 
         capture = capture_from_action_result(result.results[0], "the screen")
         if capture is None:
