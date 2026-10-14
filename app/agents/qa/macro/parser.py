@@ -2426,9 +2426,7 @@ class _CallGraph:
             raise MacroRejection(
                 f"the call chain in this macro is {measured} deep ({chain}), and the "
                 f"limit is {MAX_CALL_DEPTH} counting the entry point. An imported macro "
-                "counts its own depth. A failure payload prints the chain it happened "
-                "in, and four links do not read in one payload. Flatten a helper into "
-                "its caller."
+                "counts its own depth. Flatten a helper into its caller."
             )
 
     # -- statement 총수 --

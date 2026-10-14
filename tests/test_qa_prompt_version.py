@@ -312,8 +312,11 @@ def test_the_default_qa_version_is_v21() -> None:
     sections, a fourth example plays a scene by letting Jev pick an imported macro
     per turn, and the macro memory directive asks for that orchestration macro when
     a scene already has macros.
+
+    v23 raises the macro call depth limit from 3 to 9 (ARTEL-1056): only the
+    macro skill's limits paragraph changes.
     """
-    assert resolve_version("qa_run") == "v22"
+    assert resolve_version("qa_run") == "v23"
 
 
 # v20 이 고쳐 쓴 v19 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
@@ -1047,3 +1050,21 @@ def test_v22_teaches_import_decide_and_ask_and_keeps_the_rest_of_v21() -> None:
             if paragraph.lstrip("\n").startswith(rewrites):
                 continue
             assert paragraph in v22, (role, paragraph[:80])
+
+
+def test_v23_changes_only_the_call_depth_in_the_macro_limits() -> None:
+    """v23 은 macro skill 의 상한 절에서 호출 깊이 하나만 바꾼다. 나머지 파일은 v22 와 같다."""
+    v22_limits = "at most 3 deep counting the entry point and every imported macro."
+    v23_limits = "at most 9 deep counting the entry point and every imported macro."
+    v22_skill = load_prompt("qa_run", "skill_macro", "v22").body
+    v23_skill = load_prompt("qa_run", "skill_macro", "v23").body
+    assert v22_limits in v22_skill
+    assert v23_skill == v22_skill.replace(v22_limits, v23_limits)
+
+    assert roles_in("qa_run", "v23") == roles_in("qa_run", "v22")
+    for role in roles_in("qa_run", "v22"):
+        if role == "skill_macro":
+            continue
+        v22 = load_prompt("qa_run", role, "v22")
+        v23 = load_prompt("qa_run", role, "v23")
+        assert v23.body_sha256 == v22.body_sha256, role
