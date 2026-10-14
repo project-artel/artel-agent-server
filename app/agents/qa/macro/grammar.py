@@ -424,9 +424,14 @@ PAIRED_TOOLS: tuple[PairedTools, ...] = (
 )
 
 
-# 호출 깊이. 진입점을 포함해 센다. payload 가 호출 사슬을 찍는데 네 겹은 한 payload
-# 에서 안 읽힌다.
-MAX_CALL_DEPTH = 3
+# 호출 깊이. 진입점을 포함해 센다. import 한 macro 와 predicate 도 한 단계씩 든다.
+#
+# 9 인 이유: orchestration → stage → pair 만으로 3 이 차서, 3 에서는 pair 가
+# predicate 하나도 부를 수 없었다(ARTEL-1056). payload 의 `chain` 은 `MacroPlace` 를
+# 문자열로 바꾼 목록이라 아홉 줄도 읽힌다. 실행량은 이 수가 아니라
+# `MAX_EXECUTED_STATEMENTS` 와 `MAX_LOOP_PASSES` 가 막고, 순환 호출은
+# `reject_recursion` 이 저장 때 거절한다.
+MAX_CALL_DEPTH = 9
 # 가장 많이 도는 경로의 statement 총수. 32 곱하기 4 다. 전부 action 이면 게임과 128번
 # 왕복하므로 이 수는 천장이지 목표가 아니다.
 #

@@ -1271,16 +1271,19 @@ def test_predicate_recursion_is_refused(predicates: str) -> None:
 
 
 def test_call_depth_counts_predicates() -> None:
-    source = (
-        'def m() -> None:\n    require(first(), "Wait.")\n\n'
-        "def first() -> bool:\n    return second()\n\n"
-        "def second() -> bool:\n    return True\n"
-    )
-    parse(source)
-    reason = rejection(
-        source.replace("return True", "return third()")
-        + "\ndef third() -> bool:\n    return True\n"
-    )
+    def source(predicates: int) -> str:
+        """진입점이 `p0` 을 부르고 `p0` 이 `p1` 을 부르는 식의 사슬.
+
+        깊이는 `predicates` 에 진입점 하나를 더한 수다.
+        """
+        parts = ['def m() -> None:\n    require(p0(), "Wait.")\n']
+        for index in range(predicates):
+            returned = f"p{index + 1}()" if index + 1 < predicates else "True"
+            parts.append(f"def p{index}() -> bool:\n    return {returned}\n")
+        return "\n".join(parts)
+
+    parse(source(MAX_CALL_DEPTH - 1))
+    reason = rejection(source(MAX_CALL_DEPTH))
     assert str(MAX_CALL_DEPTH + 1) in reason
 
 
@@ -1574,31 +1577,39 @@ def rain_pair() -> None:
 
 
 def test_call_depth_runs_through_an_imported_macro() -> None:
-    """가져온 macro 의 깊이는 그 macro 자신의 깊이다. orchestration → fight → rain 은 3 이다."""
+    """가져온 macro 의 깊이는 그 macro 자신의 깊이다. orchestration → fight → rain 은 3 이다.
+
+    그 사이에 helper 를 끼워 상한까지 채우면 통과하고, 하나 더 끼우면 거절된다.
+    """
     rain = registered(rain_pair=RAIN_PAIR)
-    fight = parse_with(
-        "from macros import rain_pair\n\n"
-        'def fight_rain_stage() -> None:\n    """Fight the rain stage."""\n    rain_pair()\n',
-        rain,
-        "fight_rain_stage",
-    )
+
+    def fight(waves: int) -> MacroDefinition:
+        names = [f"wave{index}" for index in range(waves)] + ["rain_pair"]
+        helpers = "".join(
+            f"\ndef {name}() -> None:\n    {names[index + 1]}()\n"
+            for index, name in enumerate(names[:-1])
+        )
+        return parse_with(
+            "from macros import rain_pair\n\n"
+            'def fight_rain_stage() -> None:\n    """Fight the rain stage."""\n'
+            f"    {names[0]}()\n{helpers}",
+            rain,
+            "fight_rain_stage",
+        )
+
     orchestration = (
         "from macros import fight_rain_stage\n\n"
         "def m() -> None:\n    fight_rain_stage()\n"
     )
-    assert MAX_CALL_DEPTH == 3
-    parse_with(orchestration, {"fight_rain_stage": fight})
+    parse_with(orchestration, {"fight_rain_stage": fight(0)})
+    parse_with(orchestration, {"fight_rain_stage": fight(MAX_CALL_DEPTH - 3)})
 
-    deeper = parse_with(
-        "from macros import rain_pair\n\n"
-        'def fight_rain_stage() -> None:\n    """Fight the rain stage."""\n    wave()\n\n'
-        "def wave() -> None:\n    rain_pair()\n",
-        rain,
-        "fight_rain_stage",
+    reason = rejection_with(
+        orchestration, {"fight_rain_stage": fight(MAX_CALL_DEPTH - 2)}
     )
-    reason = rejection_with(orchestration, {"fight_rain_stage": deeper})
-    assert "4 deep" in reason
-    assert "m → fight_rain_stage → wave → rain_pair" in reason
+    assert f"{MAX_CALL_DEPTH + 1} deep" in reason
+    assert "m → fight_rain_stage → wave0 → " in reason
+    assert reason.count(" → ") == MAX_CALL_DEPTH
 
 
 def test_the_statement_count_runs_through_an_imported_macro() -> None:
