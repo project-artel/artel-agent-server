@@ -24,6 +24,7 @@ from app.agents.qa.macro.binding import _live, _segments
 from app.agents.qa.macro.errors import MacroRejection
 from app.agents.qa.macro.grammar import TOOLS_BY_NAME
 from app.agents.qa.macro.parser import macro_definition_from_source
+from app.agents.qa.macro.selector_check import is_unstable_selector
 from app.qa.pulse import PulseMemory
 
 _ID = re.compile(r"^#(\d+)$")
@@ -136,6 +137,8 @@ def lift_target(raw: str, memory: PulseMemory) -> LiftedTarget | str:
     if records:
         return _form(records[0], live, raw)
     # pulse 에 없어도 agent 가 그 경로로 눌렀다. 고정된 경로면 그대로 믿는다.
+    if is_unstable_selector(selector):
+        return f"`{raw}` is an instance id or an empty target, which changes between game launches"
     if _SPAWNED not in selector:
         return LiftedTarget("selector", selector)
     return f"`{raw}` is a spawned object the game has not reported"
