@@ -56,6 +56,11 @@ LOOP_LIMIT = "LOOP_LIMIT"
 # `readings` 가 0 이면 그동안 `pulse` 가 한 장도 안 온 것이라 조건이 틀린 것이 아니다.
 WAIT_TIMEOUT = "WAIT_TIMEOUT"
 
+# `decide` 나 `ask` 에서 Jev 가 답하지 못했다 — 네트워크 오류, API key 없음, 선택지에 없는
+# 답. 게임의 잘못도 macro 의 잘못도 아니라 step 을 실패로 적지 않는다. agent 에게 조용히
+# 넘기지 않고 멈추는 이유는, 넘기면 Jev 가 없는 런과 있는 런이 같은 결과로 보이기 때문이다.
+JEV_FAILED = "JEV_FAILED"
+
 RUNTIME_CODES = (
     REQUIRE_FAILED,
     SCENE_MISMATCH,
@@ -67,6 +72,7 @@ RUNTIME_CODES = (
     SCREEN_UNCHANGED,
     OPERATOR_INTERRUPTED,
     WAIT_TIMEOUT,
+    JEV_FAILED,
 )
 
 

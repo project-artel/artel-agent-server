@@ -1,6 +1,6 @@
 """성공한 action 순서를 macro 로 적어 두고 다시 부르고 찾는 tool.
 
-문구는 `app/prompts/qa_run/v21/tool_<name>.md` 파일에 있고, 문법과 예시와 수명주기
+문구는 `app/prompts/qa_run/v22/tool_<name>.md` 파일에 있고, 문법과 예시와 수명주기
 전체는 `skill_macro.md` 에 있다. 다섯 설명이 각각 500자 상한 아래라 매 호출마다 나가는
 글은 2.5KB 가 안 되고, 13KB 짜리 본문은 모델이 `load_skill("macro")` 를 부를 때만 간다.
 `app/agents/qa/macro/reference.py` 는 그 파일이 `grammar.py` 와 맞는지 재는 기준이다.
@@ -39,6 +39,7 @@ docstring 없이도 쓰고 고칠 수 있다 — 거절은 `register_macro` 에�
 """
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any
@@ -48,11 +49,14 @@ from langchain_core.tools import BaseTool, tool
 from app.agents.qa.macro.binding import LateSelector, MacroMemories
 from app.agents.qa.macro.book import RegisteredMacro
 from app.agents.qa.macro.errors import MacroFailure, MacroRejection
-from app.agents.qa.macro.grammar import DECLARABLE_TYPE_NAMES, MacroType
+from app.agents.qa.macro.grammar import DECLARABLE_TYPE_NAMES, NONE_FITS, MacroType
 from app.agents.qa.macro.model import MacroDefinition, MacroParameter
-from app.agents.qa.macro.parser import macro_definition_from_source
+from app.agents.qa.macro.parser import imported_names, macro_definition_from_source
 from app.agents.qa.macro.session import MacroSession
 from app.agents.qa.macro.runner import (
+    MacroAskRequest,
+    MacroDecideRequest,
+    MacroJevUnavailable,
     MacroPlace,
     MacroPulseWait,
     MacroRunResult,
@@ -65,6 +69,7 @@ from app.agents.qa.tools.tool_context import ToolContext
 from app.prompts import load_tool_description
 from app.qa.acting import ActionOutcome
 from app.qa.channel import KnowledgeRequestFailed, QaCancelled, with_operator_messages
+from app.qa.jev import JevClient, JevError
 from app.qa.envelope import (
     MacroReadPayload,
     MacroRegisterPayload,
@@ -157,6 +162,30 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
             # 턴을 돌려주는 자리다. `run_macro` 나 `resume_macro` 가 `settle` 로 이것을
             # 알아채고 답을 돌려준 뒤, agent 가 `resume_macro` 를 부를 때까지 여기 선다.
             return await self.session.pause(result)
+
+        async def decide(self, request: MacroDecideRequest) -> str:
+            options = {option.name: option.description for option in request.options}
+            try:
+                return await _jev().choose(request.question, options, request.state)
+            except JevError as error:
+                raise MacroJevUnavailable(str(error)) from error
+
+        async def ask(self, request: MacroAskRequest) -> float:
+            try:
+                return await _jev().probability(
+                    request.question,
+                    request.state,
+                    true_means="The answer to the question is yes.",
+                    false_means="The answer to the question is no.",
+                )
+            except JevError as error:
+                raise MacroJevUnavailable(str(error)) from error
+
+    def _jev() -> JevClient:
+        """런 하나에 client 하나. 연결을 다시 쓰고, 런이 끝날 때 `QaRunner` 가 닫는다."""
+        if state.jev is None:
+            state.jev = JevClient()
+        return state.jev
 
     async def _drive(session: MacroSession) -> str:
         """macro 가 멈춰 서거나 끝날 때까지 기다리고, 그 자리를 글로 낸다.
@@ -265,7 +294,9 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
             f"{where}."
         )
 
-    async def _stored(macro_name: str) -> tuple[RegisteredMacro | None, str]:
+    async def _stored(
+        macro_name: str, importing: tuple[str, ...] = ()
+    ) -> tuple[RegisteredMacro | None, str]:
         """이 런이 모르는 이름을 `content_map` 에 묻고, 찾으면 이 런의 책에 들인다.
 
         `read_macro` 와 `run_macro` 가 같은 이 경로를 쓴다. 지난 런이 등록한 macro 를
@@ -295,7 +326,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
                 "is unknown here."
             )
 
-        definition, problem = _parsed(answer.name or macro_name, answer.source)
+        definition, problem = await _parsed(answer.name or macro_name, answer.source, importing)
         if definition is None:
             return None, (
                 f"The content map has a macro called {macro_name}, but it no longer "
@@ -303,10 +334,36 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
             )
         return state.macros.adopt(definition, tuple(answer.screen_ids)), ""
 
-    def _parsed(name: str, source: str) -> tuple[MacroDefinition | None, str]:
-        """파싱해 보고 결과를 말한다. 등록하지도, 실행하지도 않는다."""
+    async def _parsed(
+        name: str, source: str, importing: tuple[str, ...] = ()
+    ) -> tuple[MacroDefinition | None, str]:
+        """파싱해 보고 결과를 말한다. 등록하지도, 실행하지도 않는다.
+
+        `from macros import ...` 로 가져온 이름은 파싱 **전에** 찾는다. parser 는 순수 함수라
+        `content_map` 에 물을 수 없다. 이 런에 등록된 것이 먼저이고, 없으면 `_stored` 로
+        지난 런이 등록한 것을 가져온다. 가져온 macro 도 자기 import 가 있으면 같은 길로
+        파싱하므로, `importing` 이 지금 풀고 있는 이름들을 들고 가서 `a` 가 `b` 를, `b` 가
+        `a` 를 가져오는 순환을 끊는다.
+        """
+        imports: dict[str, MacroDefinition] = {}
+        for imported in imported_names(source):
+            if imported == name or imported in importing:
+                chain = " → ".join((*importing, name, imported))
+                return None, MacroRejection(
+                    f"`{imported}` cannot be imported here, because the imports go round in "
+                    f"a circle: {chain}. Call it directly instead of importing it."
+                ).render()
+            registered = state.macros.registered(imported)
+            if registered is None:
+                registered, problem = await _stored(imported, (*importing, name))
+                if registered is None:
+                    return None, MacroRejection(
+                        f"`{imported}` is imported but cannot be found. {problem} "
+                        "Register it first, or remove it from the import."
+                    ).render()
+            imports[imported] = registered.definition
         try:
-            return macro_definition_from_source(name, source), ""
+            return macro_definition_from_source(name, source, imports=imports), ""
         except MacroRejection as rejection:
             return None, rejection.render()
 
@@ -322,7 +379,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         if not macro_name:
             return "`name` must say what to call this macro, so nothing was written."
 
-        definition, problem = _parsed(macro_name, source or "")
+        definition, problem = await _parsed(macro_name, source or "")
         if definition is None:
             # 거절된 초안도 저장하지 않는다. 저장하면 `read_macro` 가 부를 수 없는 글을
             # 초안이라고 돌려주고, agent 는 그것을 고치면 된다고 읽는다.
@@ -387,7 +444,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
             )
 
         changed = draft.replace(old_text, new_text, 1)
-        definition, problem = _parsed(macro_name, changed)
+        definition, problem = await _parsed(macro_name, changed)
         if definition is None:
             return (
                 f"{macro_name} was not changed, because the result does not parse: "
@@ -472,7 +529,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
                 "`write_macro` is where a draft starts."
             )
 
-        definition, problem = _parsed(macro_name, draft)
+        definition, problem = await _parsed(macro_name, draft)
         if definition is None:
             _review_stays_open()
             # 아무것도 등록하지 않는다. 저장된 뒤에 허용 목록이 좁아진 정의가 실행
@@ -902,7 +959,24 @@ def _mismatch(where: str, declared: MacroType, value: Any) -> str:
 def _render(result: MacroRunResult) -> str:
     """단계별 결과. 어디까지 갔는지가 이 글의 중심이다."""
     lines: list[str] = []
-    if result.paused_at is not None:
+    if result.paused_at is not None and result.paused_decision is not None:
+        # `decide` 가 `NONE_FITS` 를 받았다. 실패가 아니다 — 가져온 macro 중에 지금 상태에
+        # 맞는 것이 없다는 Jev 의 답이고, 빠진 macro 를 만드는 것은 agent 의 일이다.
+        decision = result.paused_decision
+        offered = ", ".join(
+            option.name for option in decision.options if option.name != NONE_FITS
+        )
+        lines.append(
+            f"{result.name} PAUSED at {result.paused_at}: Jev found that none of the "
+            f"imported macros fits — {decision.question} This is not a failure. Options it "
+            f"had: {offered}. What it read: "
+            f"{json.dumps(decision.state, ensure_ascii=False, sort_keys=True)}. Play this "
+            "part by hand and call `resume_macro` with `proceed: true` to go on after this "
+            "`match`, or `proceed: false` to stop here — then write and register the "
+            "macro that was missing, import it, add a `case` for it, and run this macro "
+            "again."
+        )
+    elif result.paused_at is not None:
         # 실패가 아니다. 저자가 "여기서 한 번 보고 가라" 고 찍은 자리다.
         reason = f" — {result.paused_reason}" if result.paused_reason else ""
         lines.append(
@@ -957,7 +1031,9 @@ def _render(result: MacroRunResult) -> str:
     lines.append(_places("Reached the game", result.applied))
     not_yet = "Not sent yet" if result.paused_at is not None else "Did NOT reach the game"
     lines.append(_places(not_yet, result.pending))
-    lines.append(_places("Skipped by an `if` or a loop that ran no passes", result.skipped))
+    lines.append(
+        _places("Skipped by an `if`, a `match` or a loop that ran no passes", result.skipped)
+    )
     if any(place.passes for place in result.applied + result.pending):
         # 반복이 있으면 번호는 적힌 줄이고, 몇 회째인지는 괄호에 있다. `pending` 은 적힌
         # 줄을 한 번씩만 든다 — 반복의 남은 회는 거기 따로 안 적힌다.
@@ -966,6 +1042,10 @@ def _render(result: MacroRunResult) -> str:
             "line; `(pass N)` says which turn of the loop around it. A loop's remaining "
             "passes are not listed one by one."
         )
+
+    if result.decisions:
+        lines.append("Decisions:")
+        lines.extend(result.decisions)
 
     if result.waits:
         lines.append("Waits:")

@@ -11,6 +11,7 @@ from typing import Any
 from app.agents.qa.macro.book import MacroBook
 from app.agents.qa.macro.lift import DispatchRecord
 from app.agents.qa.macro.session import MacroSession
+from app.qa.jev import JevClient
 from app.qa.envelope import ActionResultItem, JsonRpcAction
 from app.qa.schemas import QaStepResult
 
@@ -195,6 +196,9 @@ class QaRunState:
         # 하나뿐이다 — 게임을 모는 쪽이 둘이 되면 안 되므로, 멈춘 것이 있는 동안
         # `run_macro` 는 새 macro 를 안 부른다.
         self.paused_macro: MacroSession | None = None
+        # macro 의 `decide` 와 `ask` 가 쓰는 Jev client. 처음 쓸 때 만들고, 연결을 런 끝까지
+        # 다시 쓴다. 닫는 것은 `QaRunner` 의 `finally` 다.
+        self.jev: JevClient | None = None
         # agent 가 손으로 부른 action tool, 부른 순서대로(ARTEL-915). `dispatched_action_params`
         # 는 method 마다 마지막 한 벌만 남겨 순서도 tool 도 없다 — 그쪽은 capability 의 재현
         # 칸이 쓰는 것이라 뜻을 안 바꾸고, 이 기록을 옆에 둔다. macro 초안이 여기서 나온다.
