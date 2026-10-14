@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.llm.chat_model import build_chat_model
-from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig
+from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig, get_model_spec
 from app.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
@@ -56,7 +56,13 @@ def router_model() -> LLMModel:
     is used only when an operator sets it.
     """
     configured = get_settings().router_model
-    return LLMModel(configured) if configured else DEFAULT_MODEL
+    if not configured:
+        return DEFAULT_MODEL
+    try:
+        get_model_spec(configured)
+    except ValueError as error:
+        raise ValueError(f"router_model (ROUTER_MODEL): {error}") from error
+    return configured
 
 RouterCall = Callable[[str], Awaitable[RouteVerdict]]
 

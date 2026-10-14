@@ -63,7 +63,8 @@ def build_embedding_model(
         # provider answers on every request, so a key replaced by an administrator
         # reaches embeddings too without a restart.
         openai_api_key=(
-            settings.embedding_api_key or get_llm_api_key_provider().get_or_placeholder
+            settings.embedding_api_key
+            or get_llm_api_key_provider().get_openrouter_key_or_placeholder
         ),
         default_headers=headers or None,
         # Left on, LangChain re-encodes every input with tiktoken, splits it at

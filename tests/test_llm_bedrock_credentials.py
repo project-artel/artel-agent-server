@@ -8,11 +8,9 @@ import os
 
 import pytest
 
-from app.config import Settings
 from app.llm.chat_model import build_chat_model
-from app.llm.models import LLMModel
 
-BEDROCK_MODEL = LLMModel.claude_haiku_4_5_bedrock
+BEDROCK_MODEL = "bedrock/us.anthropic.claude-haiku-5-5"
 BEARER_ENV = "AWS_BEARER_TOKEN_BEDROCK"
 
 
@@ -38,16 +36,26 @@ def _no_bearer_token_leaks():
         os.environ[BEARER_ENV] = before
 
 
-def test_the_key_travels_from_settings_to_the_client(monkeypatch) -> None:
-    """`.env` 의 `BEDROCK_API_KEY` 가 `ChatBedrockConverse` 까지 가야 한다.
+class _FixedKeys:
+    """Stands in for `LlmApiKeyProvider`: holds a Bedrock key a test can change."""
 
-    `boto3` 가 읽는 `AWS_BEARER_TOKEN_BEDROCK` 을 `.env` 로 줄 수 없어서 생긴 경로다.
-    `SettingsConfigDict(env_file=".env")` 는 그 파일을 `Settings` 로만 읽고
-    `os.environ` 에는 넣지 않는데 그 변수를 보는 것은 `boto3` 다 — `.env` 에 그 이름으로
-    적으면 아무 말 없이 무시된다.
-    """
-    settings = Settings(_env_file=None, bedrock_api_key="test-key")
-    monkeypatch.setattr("app.llm.chat_model.get_settings", lambda: settings)
+    def __init__(self, bedrock: str | None) -> None:
+        self.bedrock = bedrock
+
+    def get_bedrock_key(self) -> str | None:
+        return self.bedrock
+
+    def invalidate(self) -> None:
+        return None
+
+
+def _use_keys(monkeypatch, keys: _FixedKeys) -> None:
+    monkeypatch.setattr("app.llm.chat_model.get_llm_api_key_provider", lambda: keys)
+
+
+def test_the_stored_key_travels_to_the_client(monkeypatch) -> None:
+    """관리자가 admin page 에 넣은 Bedrock key 가 `ChatBedrockConverse` 까지 가야 한다."""
+    _use_keys(monkeypatch, _FixedKeys("test-key"))
 
     model = build_chat_model(BEDROCK_MODEL)
 
@@ -55,20 +63,34 @@ def test_the_key_travels_from_settings_to_the_client(monkeypatch) -> None:
     assert model.bedrock_api_key.get_secret_value() == "test-key"
 
 
+def test_a_changed_key_reaches_a_new_client_without_a_restart(monkeypatch) -> None:
+    """`build_chat_model` 은 client 를 cache 하지만, Bedrock key 가 바뀌면 새 client 를 준다."""
+    keys = _FixedKeys("old-key")
+    _use_keys(monkeypatch, keys)
+
+    first = build_chat_model(BEDROCK_MODEL)
+    assert build_chat_model(BEDROCK_MODEL) is first
+
+    keys.bedrock = "new-key"
+    second = build_chat_model(BEDROCK_MODEL)
+
+    assert second is not first
+    assert second.bedrock_api_key.get_secret_value() == "new-key"
+
+
 def test_no_key_leaves_the_standard_aws_chain_alone(monkeypatch) -> None:
-    """키를 안 쥔 배포는 종전과 똑같이 돌아야 한다.
+    """키가 저장되지 않은 배포는 표준 AWS 자격증명 사슬(IAM role 등)로 간다.
 
-    `None` 을 넘기면 `ChatBedrockConverse` 가 제 기본값(`AWS_BEARER_TOKEN_BEDROCK`
-    환경변수, 그다음 표준 AWS 자격증명 사슬)으로 간다. 빈 문자열을 넘기는 것과 다르다 —
-    그쪽은 키를 쥐었다고 주장하면서 아무것도 인증하지 못한다.
+    예전 설정인 `BEDROCK_API_KEY` 는 세워 둔 채로 검사한다. 그 값이 client 에 실리면
+    키가 database 가 아닌 곳에서 온 것이다.
 
-    `_env_file=None` 으로 짓는다. 그러지 않으면 이 기계의 `.env` 가 답을 정한다 —
-    `InitSettingsSource` 가 `None` 인 인자를 "안 준 것" 으로 보고 넘겨서, 키를 쥔
-    개발 기계에서만 이 테스트가 깨진다.
+    `AWS_BEARER_TOKEN_BEDROCK` 은 지운다. 그것은 AWS 자신의 표준 자격증명이라 사슬의
+    일부이고, langchain-aws 1.8 은 `bedrock_api_key=None` 을 받아도 그 변수를 읽는다.
+    셸에 남은 값에 이 테스트가 흔들리지 않게 하려고 지운다.
     """
-    settings = Settings(_env_file=None)
     monkeypatch.delenv(BEARER_ENV, raising=False)
-    monkeypatch.setattr("app.llm.chat_model.get_settings", lambda: settings)
+    monkeypatch.setenv("BEDROCK_API_KEY", "env-key")
+    _use_keys(monkeypatch, _FixedKeys(None))
 
     model = build_chat_model(BEDROCK_MODEL)
 

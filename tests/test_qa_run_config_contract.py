@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.agents.qa.arch import QA_ARCH_LABEL, RUN_DEADLINE_SECONDS, TOOL_CALLS_PER_STEP
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.models import DEFAULT_MODEL
 from app.main import app
 from app.prompts import load_prompt, resolve_version
 from app.qa.service import QaExecutionService
@@ -44,7 +44,7 @@ def test_the_response_carries_what_the_run_will_use() -> None:
     config = body["run_config"]
 
     assert body["session_id"]
-    assert config["model"] == DEFAULT_MODEL.value
+    assert config["model"] == DEFAULT_MODEL
     assert config["provider"] == "openai"
     assert config["agent_arch"] == QA_ARCH_LABEL
     assert len(config["agent_fingerprint"]) == 12
@@ -76,7 +76,7 @@ def test_a_model_without_reasoning_says_so_rather_than_going_quiet() -> None:
     """`reasoning: null` alone has two meanings — not asked for, and not
     offered. A comparison that cannot tell them apart reads a model's missing
     capability as a choice nobody made."""
-    config = open_session(model=LLMModel.qwen3_7_max.value)["run_config"]
+    config = open_session(model="qwen/qwen3.7-max")["run_config"]
 
     assert config["reasoning"] is None
     assert config["reasoning_supported"] is False
@@ -84,7 +84,7 @@ def test_a_model_without_reasoning_says_so_rather_than_going_quiet() -> None:
 
 def test_a_reasoning_model_reports_what_it_was_given() -> None:
     config = open_session(
-        model=LLMModel.claude_sonnet_5_5.value, reasoning={"effort": "high"}
+        model="anthropic/claude-sonnet-5.5", reasoning={"effort": "high"}
     )["run_config"]
 
     # Nulls are kept rather than stripped: the record's shape stays the same

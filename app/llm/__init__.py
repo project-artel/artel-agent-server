@@ -11,21 +11,20 @@ from app.llm.embedding_model import (
 )
 from app.llm.models import (
     DEFAULT_MODEL,
-    MODEL_SPECS,
+    EnabledLLMModel,
     LLMModel,
     LLMProvider,
     ModelSpec,
     get_model_spec,
-    list_models,
 )
 
 __all__ = [
     "DEFAULT_MODEL",
-    "MODEL_SPECS",
     "EmbeddingBatchTooLargeError",
     "EmbeddingClient",
     "EmbeddingResult",
     "EmptyEmbeddingBatchError",
+    "EnabledLLMModel",
     "LLMModel",
     "LLMProvider",
     "ModelSpec",
@@ -33,7 +32,6 @@ __all__ = [
     "build_embedding_client",
     "build_embedding_model",
     "get_model_spec",
-    "list_models",
     "select_structured_method",
     "structured",
 ]

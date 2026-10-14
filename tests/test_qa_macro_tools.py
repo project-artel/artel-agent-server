@@ -57,7 +57,7 @@ def make(total_steps: int = 3, timeout: float = 0.05):
     # 어느 phase 에서 불릴 수 있는지는 `tests/test_qa_phase_cycle.py` 가 잰다. 켜 두면
     # `register_macro`(UPDATE_MEMORY)가 첫 phase 에서 거절당해 여기서 재려던 것이 안 돈다.
     without_phases = resolve_arch(
-        QaArchSpec(vision=VisionMode.on, phase_cycle=PhaseCycleMode.off), LLMModel.gpt_6_luna
+        QaArchSpec(vision=VisionMode.on, phase_cycle=PhaseCycleMode.off), "openai/gpt-6-luna"
     )
     tools = {one.name: one for one in build_tools(channel, state, without_phases)}
     return channel, state, tools, sent
@@ -996,7 +996,7 @@ def test_every_macro_tool_body_is_guarded_against_a_leaking_exception() -> None:
     # 보이고 그 안의 이 guard 는 안 보인다. 재려는 것은 macro 본문의 guard 다.
     channel = QaRunChannel(qa_try_id=9, send=_discard, action_timeout=0.05, write_timeout=0.05)
     without_phases = resolve_arch(
-        QaArchSpec(vision=VisionMode.on, phase_cycle=PhaseCycleMode.off), LLMModel.gpt_6_luna
+        QaArchSpec(vision=VisionMode.on, phase_cycle=PhaseCycleMode.off), "openai/gpt-6-luna"
     )
     tools = {
         one.name: one

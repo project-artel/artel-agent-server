@@ -31,13 +31,10 @@ from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.outputs import LLMResult
 
 from app.config import get_settings
-from app.llm.models import MODEL_SPECS, LLMModel
+from app.llm.catalog import get_model_catalog
+from app.llm.models import ModelPricing
 
 logger = logging.getLogger(__name__)
-
-# `LLMModel(model)` 은 모르는 값에 ValueError 를 던진다. 사용량 기록이 예외를 내면
-# 안 되므로(이 모듈 전체가 그 규율이다) 던지기 전에 걸러 낸다.
-_MODEL_VALUES = frozenset(item.value for item in LLMModel)
 
 USAGE_PATH = "/internal/llm-usage"
 
@@ -73,6 +70,20 @@ def _isoformat(moment: datetime) -> str:
     )
 
 
+def _catalog_pricing(model: str) -> ModelPricing | None:
+    """catalog 에 적힌 `model` 의 단가. 모르는 id 거나 catalog 를 못 읽으면 None 이다.
+
+    사용량 기록이 예외를 내면 안 되므로(이 모듈 전체가 그 규율이다) catalog 의 어떤
+    실패도 여기서 None 으로 바꾼다. 꺼진 row 의 단가도 그대로 쓴다.
+    """
+    try:
+        spec = get_model_catalog().get(model)
+    except Exception:  # noqa: BLE001 - 사용량 기록은 어떤 이유로도 실패하면 안 된다.
+        logger.debug("[llm-usage] model catalog unavailable; cost left empty")
+        return None
+    return spec.pricing if spec is not None else None
+
+
 def _estimate_cost(
     model: str,
     *,
@@ -93,16 +104,36 @@ def _estimate_cost(
     before the full-price rate is applied — the same containment rule the
     receiving side documents. `cache_write_tokens` is not, and is priced whole.
     """
-    spec = MODEL_SPECS.get(LLMModel(model)) if model in _MODEL_VALUES else None
-    pricing = spec.pricing if spec else None
+    pricing = _catalog_pricing(model)
     if pricing is None:
         return None
     full_input = max(input_tokens - cached_input_tokens, 0)
+    # Anthropic 의 장문 요금은 prompt 가 임계를 넘으면 요청 전체에 적용된다.
+    # Bedrock usage 에서 cache write 는 `input_tokens` 밖에 따로 오므로 함께 세야 실제
+    # prompt 길이가 된다.
+    long_context = (
+        pricing.long_context_threshold_tokens is not None
+        and input_tokens + cache_write_tokens > pricing.long_context_threshold_tokens
+    )
+    if long_context:
+        assert pricing.long_context_input_per_mtok is not None
+        assert pricing.long_context_output_per_mtok is not None
+        assert pricing.long_context_cache_write_per_mtok is not None
+        assert pricing.long_context_cache_read_per_mtok is not None
+        input_rate = pricing.long_context_input_per_mtok
+        output_rate = pricing.long_context_output_per_mtok
+        cache_write_rate = pricing.long_context_cache_write_per_mtok
+        cache_read_rate = pricing.long_context_cache_read_per_mtok
+    else:
+        input_rate = pricing.input_per_mtok
+        output_rate = pricing.output_per_mtok
+        cache_write_rate = pricing.cache_write_per_mtok
+        cache_read_rate = pricing.cache_read_per_mtok
     return (
-        full_input * pricing.input_per_mtok
-        + cached_input_tokens * pricing.cache_read_per_mtok
-        + cache_write_tokens * pricing.cache_write_per_mtok
-        + output_tokens * pricing.output_per_mtok
+        full_input * input_rate
+        + cached_input_tokens * cache_read_rate
+        + cache_write_tokens * cache_write_rate
+        + output_tokens * output_rate
     ) / 1_000_000
 
 
@@ -317,7 +348,12 @@ class UsageCallback(AsyncCallbackHandler):
     accounting gap; an exception would be a failed QA run.
     """
 
-    def __init__(self, buffer: UsageBuffer | None = None, slug: str | None = None) -> None:
+    def __init__(
+        self,
+        buffer: UsageBuffer | None = None,
+        slug: str | None = None,
+        input_includes_cache_write: bool = False,
+    ) -> None:
         self._buffer = buffer
         # 카탈로그가 쓰는 이름. 응답이 vendor 접두를 잃고 돌아올 때 이것으로 되살린다.
         # Bedrock 이 그렇다 — 클라이언트에는 `bedrock/` 을 뗀 profile ID 만 넘기므로
@@ -325,6 +361,11 @@ class UsageCallback(AsyncCallbackHandler):
         # 전체가 되어 `provider VARCHAR(40)` 을 넘긴다. 같은 함정을 embedding 쪽이
         # 먼저 밟았고(`_record_from_embedding`), 거기서 쓴 처방과 같다.
         self._slug = slug
+        # langchain-anthropic 은 `input_tokens` 에 `cache_read` 와 `cache_creation` 을 모두
+        # 더해 준다. 받는 쪽 규칙은 cache write 를 `inputTokens` 밖에 두는 것이라(Bedrock 이
+        # 그렇게 온다) True 이면 그 몫을 뺀다. 빼지 않으면 cache write 가 입력 단가와 쓰기
+        # 단가로 두 번 계산된다.
+        self._input_includes_cache_write = input_includes_cache_write
         # ponytail: a run that ends without either end or error callback leaves
         # its entry here. Bound it (TTL or deque) if that ever adds up — one
         # abandoned run costs a timestamp pair.
@@ -346,7 +387,9 @@ class UsageCallback(AsyncCallbackHandler):
     async def on_llm_end(self, response: LLMResult, *, run_id: UUID, **kwargs: Any) -> None:
         started = self._started.pop(run_id, None)
         try:
-            record = _record_from_response(response, started, self._slug)
+            record = _record_from_response(
+                response, started, self._slug, self._input_includes_cache_write
+            )
             if record is not None:
                 await self._target.add(record)
         except Exception:  # noqa: BLE001 - accounting never propagates
@@ -358,6 +401,7 @@ def _record_from_response(
     response: LLMResult,
     started: tuple[float, datetime] | None,
     slug: str | None = None,
+    input_includes_cache_write: bool = False,
 ) -> dict[str, Any] | None:
     generations = response.generations[0] if response.generations else []
     message = getattr(generations[0], "message", None) if generations else None
@@ -379,15 +423,19 @@ def _record_from_response(
         model = slug
     cost = raw_usage.get("cost")
     now = time.monotonic()
+    cache_write_tokens = _cache_write_of(usage)
+    input_tokens = usage.get("input_tokens", 0)
+    if input_includes_cache_write:
+        input_tokens = max(input_tokens - cache_write_tokens, 0)
 
     return _build_record(
         model,
-        input_tokens=usage.get("input_tokens", 0),
+        input_tokens=input_tokens,
         output_tokens=usage.get("output_tokens", 0),
         cached_input_tokens=(usage.get("input_token_details") or {}).get(
             "cache_read", 0
         ),
-        cache_write_tokens=_cache_write_of(usage),
+        cache_write_tokens=cache_write_tokens,
         reasoning_tokens=(usage.get("output_token_details") or {}).get("reasoning", 0),
         cost_usd=float(cost) if isinstance(cost, (int, float)) else None,
         started_at=started[1] if started else datetime.now(UTC),

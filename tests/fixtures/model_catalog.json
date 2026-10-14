@@ -1,0 +1,564 @@
+[
+  {
+    "id": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "label": "Claude Haiku 4.5 (AWS Bedrock)",
+    "provider": "anthropic",
+    "supportsStrictJson": true,
+    "maxInputTokens": 183616,
+    "inputModalities": [
+      "text",
+      "image"
+    ],
+    "reasoning": {
+      "kind": "max_tokens",
+      "efforts": null,
+      "minTokens": 1024,
+      "maxTokens": 32000,
+      "step": null,
+      "defaultTokens": 4096
+    },
+    "pricing": {
+      "inputPerMtok": 1.0,
+      "outputPerMtok": 5.0,
+      "cacheWritePerMtok": 1.25,
+      "cacheReadPerMtok": 0.1,
+      "asOf": "2026-09-03",
+      "source": "AWS 콘솔, Claude Haiku 4.5 / us-west-2 / on-demand"
+    },
+    "enabled": true,
+    "sortOrder": 10
+  },
+  {
+    "id": "openai/gpt-6.1-sol",
+    "label": "GPT-6.1 Sol",
+    "provider": "openai",
+    "supportsStrictJson": true,
+    "maxInputTokens": 922000,
+    "inputModalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": null,
+    "enabled": true,
+    "sortOrder": 20
+  },
+  {
+    "id": "openai/gpt-6-astra",
+    "label": "GPT-6 Astra",
+    "provider": "openai",
+    "supportsStrictJson": true,
+    "maxInputTokens": 922000,
+    "inputModalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": null,
+    "enabled": true,
+    "sortOrder": 30
+  },
+  {
+    "id": "openai/gpt-6-luna",
+    "label": "GPT-6 Luna",
+    "provider": "openai",
+    "supportsStrictJson": true,
+    "maxInputTokens": 922000,
+    "inputModalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": null,
+    "enabled": true,
+    "sortOrder": 40
+  },
+  {
+    "id": "openai/gpt-5.6-terra",
+    "label": "GPT-5.6 Terra",
+    "provider": "openai",
+    "supportsStrictJson": true,
+    "maxInputTokens": 922000,
+    "inputModalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": null,
+    "enabled": true,
+    "sortOrder": 50
+  },
+  {
+    "id": "anthropic/claude-opus-5.5",
+    "label": "Claude Opus 5.5",
+    "provider": "anthropic",
+    "supportsStrictJson": true,
+    "maxInputTokens": 872000,
+    "inputModalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": null,
+    "enabled": true,
+    "sortOrder": 60
+  },
+  {
+    "id": "anthropic/claude-sonnet-5.5",
+    "label": "Claude Sonnet 5.5",
+    "provider": "anthropic",
+    "supportsStrictJson": true,
+    "maxInputTokens": 872000,
+    "inputModalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": null,
+    "enabled": true,
+    "sortOrder": 70
+  },
+  {
+    "id": "google/gemini-3.8-flash",
+    "label": "Gemini 3.8 Flash",
+    "provider": "google",
+    "supportsStrictJson": true,
+    "maxInputTokens": 983040,
+    "inputModalities": [
+      "text",
+      "image",
+      "file",
+      "audio",
+      "video"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": null,
+    "enabled": true,
+    "sortOrder": 80
+  },
+  {
+    "id": "google/gemma-4-31b-it:free",
+    "label": "Gemma 4 (free)",
+    "provider": "google",
+    "supportsStrictJson": false,
+    "maxInputTokens": 229376,
+    "inputModalities": [
+      "text",
+      "image",
+      "video"
+    ],
+    "reasoning": null,
+    "pricing": null,
+    "enabled": true,
+    "sortOrder": 90
+  },
+  {
+    "id": "x-ai/grok-4.7",
+    "label": "Grok 4.7",
+    "provider": "x-ai",
+    "supportsStrictJson": true,
+    "maxInputTokens": 50000,
+    "inputModalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": null,
+    "enabled": true,
+    "sortOrder": 100
+  },
+  {
+    "id": "moonshotai/kimi-k3",
+    "label": "Kimi K3",
+    "provider": "moonshotai",
+    "supportsStrictJson": true,
+    "maxInputTokens": 104858,
+    "inputModalities": [
+      "text",
+      "image",
+      "video"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "high",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": null,
+    "enabled": true,
+    "sortOrder": 110
+  },
+  {
+    "id": "z-ai/glm-5.3-flash",
+    "label": "GLM-5.3 Flash",
+    "provider": "z-ai",
+    "supportsStrictJson": true,
+    "maxInputTokens": 104859,
+    "inputModalities": [
+      "text",
+      "image",
+      "video"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "high",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": null,
+    "enabled": true,
+    "sortOrder": 120
+  },
+  {
+    "id": "qwen/qwen3.7-max",
+    "label": "Qwen3.7 Max",
+    "provider": "qwen",
+    "supportsStrictJson": true,
+    "maxInputTokens": 868928,
+    "inputModalities": [
+      "text"
+    ],
+    "reasoning": null,
+    "pricing": null,
+    "enabled": true,
+    "sortOrder": 130
+  },
+  {
+    "id": "bedrock/us.anthropic.claude-haiku-5-5",
+    "label": "Claude Haiku 5.5 (AWS Bedrock)",
+    "provider": "anthropic",
+    "supportsStrictJson": false,
+    "maxInputTokens": 872000,
+    "inputModalities": [
+      "text",
+      "image"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": {
+      "inputPerMtok": 0.1,
+      "outputPerMtok": 0.5,
+      "cacheWritePerMtok": 0.125,
+      "cacheReadPerMtok": 0.01,
+      "asOf": "2026-10-13",
+      "source": "Anthropic Claude Haiku 5.5 overview",
+      "longContextThresholdTokens": 100000,
+      "longContextInputPerMtok": 0.5,
+      "longContextOutputPerMtok": 2.5,
+      "longContextCacheWritePerMtok": 0.625,
+      "longContextCacheReadPerMtok": 0.05
+    },
+    "enabled": false,
+    "sortOrder": 140
+  },
+  {
+    "id": "bedrock/us.openai.gpt-6.1-sol",
+    "label": "GPT-6.1 Sol (AWS Bedrock)",
+    "provider": "openai",
+    "supportsStrictJson": false,
+    "maxInputTokens": 922000,
+    "inputModalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": null,
+    "enabled": false,
+    "sortOrder": 150
+  },
+  {
+    "id": "claude/claude-opus-5-5",
+    "label": "Claude Opus 5.5 (Claude API)",
+    "provider": "anthropic",
+    "supportsStrictJson": true,
+    "maxInputTokens": 872000,
+    "inputModalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": {
+      "inputPerMtok": 4.0,
+      "outputPerMtok": 20.0,
+      "cacheWritePerMtok": 5.0,
+      "cacheReadPerMtok": 0.2,
+      "asOf": "2026-10-14",
+      "source": "Anthropic model table (claude-api skill, cached 2026-10-06)"
+    },
+    "enabled": false,
+    "sortOrder": 160
+  },
+  {
+    "id": "claude/claude-sonnet-5-5",
+    "label": "Claude Sonnet 5.5 (Claude API)",
+    "provider": "anthropic",
+    "supportsStrictJson": true,
+    "maxInputTokens": 872000,
+    "inputModalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": {
+      "inputPerMtok": 2.0,
+      "outputPerMtok": 10.0,
+      "cacheWritePerMtok": 2.5,
+      "cacheReadPerMtok": 0.2,
+      "asOf": "2026-10-14",
+      "source": "Anthropic model table (claude-api skill, cached 2026-10-06)"
+    },
+    "enabled": false,
+    "sortOrder": 170
+  },
+  {
+    "id": "claude/claude-haiku-5-5",
+    "label": "Claude Haiku 5.5 (Claude API)",
+    "provider": "anthropic",
+    "supportsStrictJson": true,
+    "maxInputTokens": 872000,
+    "inputModalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": {
+      "inputPerMtok": 0.1,
+      "outputPerMtok": 0.5,
+      "cacheWritePerMtok": 0.125,
+      "cacheReadPerMtok": 0.01,
+      "asOf": "2026-10-14",
+      "source": "Anthropic model table (claude-api skill, cached 2026-10-06)",
+      "longContextThresholdTokens": 100000,
+      "longContextInputPerMtok": 0.5,
+      "longContextOutputPerMtok": 2.5,
+      "longContextCacheWritePerMtok": 0.625,
+      "longContextCacheReadPerMtok": 0.05
+    },
+    "enabled": false,
+    "sortOrder": 180
+  },
+  {
+    "id": "claude/claude-fable-5-1",
+    "label": "Claude Fable 5.1 (Claude API)",
+    "provider": "anthropic",
+    "supportsStrictJson": true,
+    "maxInputTokens": 872000,
+    "inputModalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": {
+      "inputPerMtok": 10.0,
+      "outputPerMtok": 50.0,
+      "cacheWritePerMtok": 12.5,
+      "cacheReadPerMtok": 0.25,
+      "asOf": "2026-10-14",
+      "source": "Anthropic model table (claude-api skill, cached 2026-10-06)"
+    },
+    "enabled": false,
+    "sortOrder": 190
+  }
+]

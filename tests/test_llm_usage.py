@@ -237,6 +237,24 @@ def test_an_unpriced_model_leaves_the_cost_empty_rather_than_guessing() -> None:
     assert record["cacheWriteTokens"] == 512
 
 
+def test_haiku_long_context_price_applies_to_the_whole_request() -> None:
+    """cache write 를 더해 100K를 넘으면 요청 전체가 long-context 단가다."""
+    from app.llm.usage import _estimate_cost
+
+    cost = _estimate_cost(
+        "bedrock/us.anthropic.claude-haiku-5-5",
+        input_tokens=99_500,
+        output_tokens=1_000,
+        cached_input_tokens=10_000,
+        cache_write_tokens=501,
+    )
+
+    expected = (
+        89_500 * 0.50 + 10_000 * 0.05 + 501 * 0.625 + 1_000 * 2.50
+    ) / 1_000_000
+    assert cost == pytest.approx(expected)
+
+
 # --- embedding hook ----------------------------------------------------------
 
 

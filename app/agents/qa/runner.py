@@ -28,7 +28,7 @@ from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.vision import QaCaptureVisionMiddleware
 from app.llm.chat_model import build_chat_model
-from app.llm.models import LLMModel, get_model_spec
+from app.llm.models import get_model_spec
 from app.prompts import load_prompt, load_skill, skill_descriptions, skill_names
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory
@@ -331,7 +331,7 @@ def build_middleware(
             # Not the run's model, and not `cache_prompt`: summarizing is one
             # call over a prefix nothing will send again, so caching it would pay
             # the write premium for a read that never happens.
-            model=build_chat_model(LLMModel(config.compaction_model)),
+            model=build_chat_model(config.compaction_model),
             summary_prompt=load_prompt(
                 COMPACTION_PROMPT_AGENT, COMPACTION_ROLE, config.compaction_prompt_version
             ).body,
@@ -379,6 +379,12 @@ def _fold_context_for(
         if FoldKind.scene_view in fold.newly_folded_kinds:
             channel.scene.pulse.redraw_all_values_next()
         state.folded_blocks = fold.folded_keys
+        # `claude/` 모델에서는 앞의 도구 결과를 `placeholder` 로 고쳐 쓰는 순간, 그 뒤 assistant
+        # turn 의 thinking block 이 무효가 된다.
+        # Claude API 는 block 앞의 메시지가 바뀐 채로 그 block 을 다시 받으면 400 을 돌려준다
+        # (2026-08-31 이후 만든 계정). `ClaudeApiChat`(`app/llm/claude_api.py`)이 그런 block 을
+        # 그 요청에서 빼므로 400 은 나지 않지만, 바뀐 지점 뒤 turn 들의 추론은 다음 호출에 넘어가지
+        # 않는다.
         return await handler(request.override(messages=fold.messages))
 
     return fold_context_middleware
@@ -615,7 +621,7 @@ class QaRunner:
                 # prompt change from a structural one.
                 "metadata": {
                     "qa_try_id": channel.qa_try_id,
-                    "model": config.model.value,
+                    "model": config.model,
                     "language": config.language.value,
                     "prompt_version": config.prompt_version,
                     "agent_arch": config.agent_arch,

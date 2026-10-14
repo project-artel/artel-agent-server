@@ -232,7 +232,7 @@ def test_macros_off_removes_search_macros() -> None:
     for macros, offered in (("on", True), ("off", False)):
         arch = resolve_arch(
             QaArchSpec(vision=VisionMode.on, phase_cycle=PhaseCycleMode.lite, macros=macros),
-            LLMModel.gpt_6_luna,
+            "openai/gpt-6-luna",
         )
         names = {one.name for one in build_tools(channel, QaRunState(total_steps=1), arch)}
         assert ("search_macros" in names) is offered

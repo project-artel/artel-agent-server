@@ -1,16 +1,10 @@
-"""구조화 출력이 provider 마다 다른 인자를 받는다.
-
-`supports_strict_json` 은 **모델이 엄격한 스키마를 아는가**를 적어 둔 칸이고, 그것과
-**클라이언트가 `strict` 인자를 받는가**는 다른 질문이다. Bedrock 에서 그 둘이 갈라진다
-(ARTEL-806).
-"""
+"""구조화 출력 방식이 model capability 와 provider client 에 맞게 갈린다."""
 
 from unittest.mock import MagicMock
 
 import pytest
 
 from app.llm.chat_model import select_structured_method, structured
-from app.llm.models import LLMModel
 
 
 class _Schema:
@@ -24,26 +18,31 @@ def _capture(monkeypatch) -> MagicMock:
     return chat
 
 
-BEDROCK = LLMModel.claude_haiku_4_5_bedrock
-OPENROUTER = LLMModel.gpt_6_luna
+BEDROCK = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+BEDROCK_WITHOUT_STRICT = "bedrock/us.anthropic.claude-haiku-5-5"
+OPENROUTER = "openai/gpt-6-luna"
 
 
 def test_bedrock_gets_json_schema_without_strict(monkeypatch) -> None:
-    """**`strict` 를 빼는 것이 이 티켓의 전부다.**
-
-    `ChatBedrockConverse._converse_params()` 가 그 인자를 안 받아
-    `got an unexpected keyword argument 'strict'` 로 죽었다. 예외를 삼키는 호출부라
-    런은 정상 종료로 보였고 화면 판정만 조용히 사라졌다.
-
-    `json_schema` 자체는 Bedrock 도 받는다. 그래서 `json_mode` 로 물러서지 않는다 —
-    물러서면 스키마를 아는 모델에게 덜 엄격한 요청을 보내게 된다.
-    """
+    """`ChatBedrockConverse._converse_params()` 가 `strict` 인자를 받지 않는다
+    (ARTEL-806). `json_schema` 자체는 Bedrock 도 받으므로 `json_mode` 로 내리지 않는다."""
     chat = _capture(monkeypatch)
 
     structured(BEDROCK, _Schema)
 
     chat.with_structured_output.assert_called_once_with(_Schema, method="json_schema")
     assert "strict" not in chat.with_structured_output.call_args.kwargs
+
+
+def test_bedrock_without_structured_outputs_uses_function_calling(monkeypatch) -> None:
+    """Haiku 5.5 Bedrock 은 structured outputs 미지원이라 tool schema 로 받는다."""
+    chat = _capture(monkeypatch)
+
+    structured(BEDROCK_WITHOUT_STRICT, _Schema)
+
+    chat.with_structured_output.assert_called_once_with(
+        _Schema, method="function_calling"
+    )
 
 
 def test_openrouter_still_gets_strict(monkeypatch) -> None:
@@ -57,17 +56,12 @@ def test_openrouter_still_gets_strict(monkeypatch) -> None:
     )
 
 
-def test_bedrock_still_declares_that_it_knows_strict_schemas() -> None:
-    """`supports_strict_json` 을 거짓으로 바꿔 때우지 않았다.
-
-    그 칸의 뜻은 "모델이 엄격한 스키마를 안다" 이고 그것은 참이다. 거짓으로 적으면
-    다음 사람이 그 값을 믿고 다른 판단을 한다 — 갈라야 하는 것은 모델의 능력이 아니라
-    클라이언트가 받는 인자다.
-    """
+def test_bedrock_catalog_reports_strict_schema_support_per_row() -> None:
     assert select_structured_method(BEDROCK) == "json_schema"
+    assert select_structured_method(BEDROCK_WITHOUT_STRICT) == "json_mode"
 
 
-@pytest.mark.parametrize("model", [BEDROCK, OPENROUTER])
+@pytest.mark.parametrize("model", [BEDROCK, BEDROCK_WITHOUT_STRICT, OPENROUTER])
 def test_no_call_site_decides_this_for_itself(model) -> None:
     """네 agent 가 각자 고르지 않고 이 함수를 지난다.
 

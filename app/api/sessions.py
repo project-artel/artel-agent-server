@@ -17,7 +17,8 @@ from app.agents import (
     SceneEdge,
     TestCaseListItem,
 )
-from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig, validate_reasoning
+from app.llm.catalog import ModelCatalogUnavailableError
+from app.llm.models import DEFAULT_MODEL, EnabledLLMModel, ReasoningConfig, validate_reasoning
 from app.sessions.channel import ScenarioChannel
 from app.sessions.service import SessionService
 from app.sessions.store import SessionExpired
@@ -45,7 +46,8 @@ class OpenSessionRequest(BaseModel):
     scene_edges: list[SceneEdge] = Field(default_factory=list)
     starting_values: dict[str, str] = Field(default_factory=dict)
     user_input: str
-    model: LLMModel = DEFAULT_MODEL
+    # 관리자가 끈 모델은 422 로 거절한다(`EnabledLLMModel`).
+    model: EnabledLLMModel = DEFAULT_MODEL
     # 추론 예산. 안 보내면 안 켠다 — 지금까지의 저작이 그랬다. 모델이 그 설정을 못 받으면
     # `validate_reasoning` 이 거절한다(조용히 낮추지 않는다, QA 런과 같은 규칙이다).
     reasoning: ReasoningConfig | None = None
@@ -80,7 +82,8 @@ class TurnMessage(BaseModel):
     type: str = "turn"
     user_input: str
     draft: ScenarioDraft | None = None
-    model: LLMModel | None = None
+    # 턴 도중 모델을 바꾸는 값도 사용자가 고른 것이라 꺼진 모델을 거절한다.
+    model: EnabledLLMModel | None = None
     # Optional mid-session locale switch; None keeps the session's locale.
     locale: OutputLanguage | None = None
     # The run's current scenarios at this turn (ARTEL-206 Step 6), refreshed by
@@ -301,6 +304,9 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     turn = TurnMessage.model_validate(raw)
                 except ValidationError as error:
                     await send(_error_event("bad_request", str(error)))
+                    continue
+                except ModelCatalogUnavailableError as error:
+                    await send(_error_event("model_catalog_unavailable", str(error)))
                     continue
                 current = asyncio.create_task(
                     service.run_turn(
