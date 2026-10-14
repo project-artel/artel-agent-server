@@ -641,14 +641,10 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 # And from `e7d85ceb94cd`, when `search_macros` joined the macro tools (ARTEL-984, v20).
 # The default is `macros=on`, so the default tool set moved with it.
 #
-# And once more, from `1024ec5d29c8`, when `stage_draft`, `macro_hint` and
-# `fold_stale_macro_results` (ARTEL-1026) joined `QaArchSpec` at `False`. At `False` the
-# default run's tools, middleware and answers are where they were, so the label stays.
-#
-# And from `fdf1038bbff9`, when those three knobs turned on and the label moved to
-# `v25-macro-push`: the default run now offers stage drafts, adds the macro hint line, and
-# folds old macro results.
-_EXPECTED_DEFAULT_FINGERPRINT = "26c613ecaaaf"
+# And once more, from `1024ec5d29c8`, when `macro_hint` and `fold_stale_macro_results`
+# (ARTEL-1026) joined `QaArchSpec` on, and the label moved to `v25-macro-push`: the default
+# run now adds the macro hint line and folds old macro results.
+_EXPECTED_DEFAULT_FINGERPRINT = "da5f196cb060"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:

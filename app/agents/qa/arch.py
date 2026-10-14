@@ -391,17 +391,14 @@ from app.llm.models import LLMModel, get_model_spec
 # v24 because the v22 change above landed on develop after v23 did, so the merged structure is
 # both: macros that can wait on top of `search_macros` and docstrings.
 #
-# v25 pushes the agent to use macros (ARTEL-1026). Three `QaArchSpec` knobs turn on together:
-# `stage_draft` offers, when the agent leaves a scene where it made two or more `run_macro` calls,
-# one draft that loops those macros over that scene in place of the step draft; `macro_hint` asks the Jev
-# decision model on a step's third hand action which registered macro fits, and puts that one
-# line in the action's result; `fold_stale_macro_results` shortens a clean `run_macro` result to
-# one line and folds an older one once its step is reported. `write_macro`, `edit_macro` and
-# `register_macro` also refuse a `#id`, `-` or empty `selector`. The tool set is unchanged, but
-# what the model reads after an action, a macro call and a `report_step` moved, so the label moves.
-# Stage macros so far were written only when the user asked for them, and on `gpt-6.1-sol` macros
-# halved hand actions without lowering model calls; this is the shape measured against v24 to see
-# whether run 2 reuses a whole-battle macro and costs less.
+# v25 pushes the agent to use macros (ARTEL-1026). Two `QaArchSpec` knobs turn on together:
+# `macro_hint` asks the Jev decision model on a step's third hand action which registered macro
+# fits, and puts that one line in the action's result; `fold_stale_macro_results` shortens a clean
+# `run_macro` result to one line and folds an older one once its step is reported.
+# `write_macro`, `edit_macro` and `register_macro` also refuse a `#id`, `-` or empty `selector`.
+# The tool set is unchanged, but what the model reads after an action and a macro call moved, so
+# the label moves. On `gpt-6.1-sol` macros halved hand actions without lowering model calls; this
+# is the shape measured against v24 to see whether run 2 reuses run 1's macros and costs less.
 QA_ARCH_LABEL = "v25-macro-push"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
@@ -653,16 +650,13 @@ class QaArchSpec(BaseModel):
     # 기본값이 `True` 인 이유는 `pulse_relevance` 와 같다. 기본 run 의 view 가 그대로라
     # `QA_ARCH_LABEL` 이 안 움직인다.
     report_step_view: bool = True
-    # macro 를 더 쓰게 하는 세 가지(ARTEL-1026). 셋 다 기본값이 `True` 이고 `QA_ARCH_LABEL`
+    # macro 를 더 쓰게 하는 두 가지(ARTEL-1026). 둘 다 기본값이 `True` 이고 `QA_ARCH_LABEL`
     # 이 `v25-macro-push` 로 올랐다. 끄면 그 기능만 빠지므로 측정에서 하나씩 끌 수 있다.
     #
-    # - `stage_draft`: 전투 `scene` visit 이 끝났을 때 그 visit 에서 부른 macro 를 엮은 초안을
-    #   `report_step` 답에 싣는다.
     # - `macro_hint`: 한 step 의 세 번째 손 조작에서 Jev decision model 이 고른 등록된 macro
     #   한 줄을 그 조작의 결과에 싣는다.
     # - `fold_stale_macro_results`: 호출한 step 이 보고된 뒤 오래된 `run_macro` 결과를 한 줄로
     #   `fold` 한다.
-    stage_draft: bool = True
     macro_hint: bool = True
     fold_stale_macro_results: bool = True
     # `fold_context` 가 오래된 block 을 한 번에 `fold` 하는 기준. 낮추면 prompt 를 자주 다시 써서
@@ -764,7 +758,6 @@ class ResolvedArch(BaseModel):
     fold_stale_skills: bool
     pulse_relevance: bool
     report_step_view: bool
-    stage_draft: bool
     macro_hint: bool
     fold_stale_macro_results: bool
     fold_threshold_chars: int

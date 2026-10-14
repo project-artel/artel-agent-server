@@ -309,8 +309,8 @@ def test_the_default_qa_version_is_v22() -> None:
 
     v22 pushes the agent to use macros (ARTEL-1026): the macro skill gains a fourth
     example that plays a whole battle in one macro, and the macro memory directive
-    asks for a battle macro before a battle and after one is cleared by hand, and
-    describes the stage draft and the macro hint line.
+    asks for a macro for a whole stretch of work before it starts and after one is
+    finished by hand, and describes the macro hint line.
     """
     assert resolve_version("qa_run") == "v22"
 
@@ -1029,7 +1029,7 @@ def test_v22_pushes_macro_use_and_keeps_the_rest_of_v21() -> None:
     skill = load_prompt("qa_run", "skill_macro", "v22").body
     assert "def clear_forest_battle(element_label: string) -> None:" in skill
     directive = load_prompt("qa_run", "macro_memory_directive", "v22").body
-    assert "look first for a macro that plays the whole battle" in directive
+    assert "look first for a macro that does the whole stretch" in directive
     assert "ask three questions, not one" in directive
 
     for role in ("skill_macro", "macro_memory_directive"):

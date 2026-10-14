@@ -520,13 +520,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
             return problem
 
         standing = _standing_screen()
-        # stage draft 는 그 `scene` 을 떠난 뒤에 등록되므로 서 있는 `screen` 이 아니라 그
-        # visit 에서 macro 를 부를 때 서 있던 `screen` 에 맺는다(ARTEL-1026).
-        drafted_on = state.stage_draft_screens.get(macro_name)
-        if drafted_on is not None:
-            relations = tuple(drafted_on) + tuple(named)
-        else:
-            relations = tuple([standing] if standing else []) + tuple(named)
+        relations = tuple([standing] if standing else []) + tuple(named)
         # **저쪽에 보내기 전에 이 런의 책에 넣는다.** 저쪽이 거절하든 답이 없든
         # `run_macro` 는 이번 런 안에서 이 macro 를 부를 수 있어야 한다.
         registered = book.register(definition, relations)
@@ -605,10 +599,9 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
 
         session = MacroSession(macro_name, step)
         scene = _standing_scene()
-        screen = _standing_screen()
         session.start(execute_macro(_Host(session), definition, bound, step))
         answer, result, paused = await _settle(session)
-        # stage draft, macro hint, macro result `fold` 가 읽는 기록(ARTEL-1026).
+        # macro hint 가 읽는 기록(ARTEL-1026).
         state.macro_calls.record_call(
             step=step,
             name=macro_name,
@@ -617,7 +610,6 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
             scene_after=_standing_scene(),
             passed=result.passed,
             paused=paused,
-            screen=screen,
         )
         if state.macro_hint_steps.get(step):
             # hint 를 받은 step 에서 `run_macro` 를 불렀다. 마지막 hint 를 따른 호출도 log 에
