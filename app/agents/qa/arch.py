@@ -901,7 +901,9 @@ def arch_fingerprint(
 
 
 @lru_cache(maxsize=32)
-def structure_of(arch: ResolvedArch) -> tuple[tuple[str, ...], tuple[str, ...], str]:
+def structure_of(
+    arch: ResolvedArch, execution_mode: str = "ORDERED"
+) -> tuple[tuple[str, ...], tuple[str, ...], str]:
     """Tool names, middleware names and the fingerprint for one structure.
 
     The fingerprint has to be known when the session opens, before any channel
@@ -920,7 +922,9 @@ def structure_of(arch: ResolvedArch) -> tuple[tuple[str, ...], tuple[str, ...], 
     from app.agents.qa.runner import middleware_names_for
     from app.agents.qa.tools import QaRunState, build_tools
 
-    state = QaRunState(total_steps=0)
+    # FREE 시나리오는 `report_step` 대신 `report_case` 를 받으므로(ARTEL-1029) 같은 arch 라도
+    # tool 목록과 fingerprint 가 다르다. 기록이 실제로 준 tool 을 말하도록 mode 로 만든다.
+    state = QaRunState(total_steps=0, execution_mode=execution_mode)
     tools = build_tools(_ThrowawayChannel(), state, arch)
     # The compaction middleware carries its own tool rather than registering it in
     # `build_tools` — a `compact_context` that sets a flag nothing reads is worse

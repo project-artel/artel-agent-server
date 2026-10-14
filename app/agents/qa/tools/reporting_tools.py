@@ -225,9 +225,13 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
                 # 안 적혔는데 다음 phase 로 가면 `UPDATE_MEMORY` 가 없는 판정을 두고 묻는다.
                 if state.phase_cycle is not None:
                     state.phase_cycle.hold()
+                # FREE run 에는 `report_step` 이 없다 — 다시 부를 tool 이름을 run 이 가진 것으로 댄다.
+                verdict_tool_name = (
+                    "report_case" if state.execution_mode == "FREE" else "report_step"
+                )
                 return (
                     "Nothing was recorded — this report has no `learned`. Call "
-                    "`report_step` again with the same verdict and add it: one line a "
+                    f"`{verdict_tool_name}` again with the same verdict and add it: one line a "
                     'later run would otherwise work out again, or `learned: ""` to say '
                     "this step left nothing worth keeping. The empty string is a real "
                     "answer; leaving the argument out is not."

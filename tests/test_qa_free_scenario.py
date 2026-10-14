@@ -413,3 +413,36 @@ def test_ordered_phase_refusal_does_not_name_report_case() -> None:
     build_tools(channel, state, arch=arch)
     refusal = state.phase_cycle.refusal_for("record_knowledge")
     assert "`report_step`" in refusal and "report_case" not in refusal
+
+
+def test_free_run_config_records_report_case_and_its_own_fingerprint() -> None:
+    from app.qa.run_config import resolve_run_config
+
+    ordered = resolve_run_config()
+    free = resolve_run_config(execution_mode="FREE")
+    assert "report_step" in ordered.tools and "report_case" not in ordered.tools
+    assert "report_case" in free.tools and "report_step" not in free.tools
+    assert free.agent_fingerprint != ordered.agent_fingerprint
+    assert free.agent_arch == ordered.agent_arch
+
+
+def test_learned_refusal_names_report_case_in_a_free_run() -> None:
+    from app.agents.qa.arch import PhaseCycleMode as Mode
+
+    arch = default_resolved_arch().model_copy(update={"phase_cycle": Mode.remember_in_verdict})
+    channel = QaRunChannel(qa_try_id=7, send=lambda frame: None, action_timeout=0.05, write_timeout=0.05)
+    scenario = free_scenario()
+    state = QaRunState(
+        total_steps=len(scenario.steps),
+        step_meta=_step_plan(scenario),
+        step_texts=[step.action for step in scenario.steps],
+        execution_mode="FREE",
+    )
+    tools = {tool.name: tool for tool in build_tools(channel, state, arch=arch)}
+    answer = asyncio.run(
+        tools["report_case"].ainvoke(
+            {"case_id": 21, "passed": True, "message": "줄었다", "thought": "판정한다"}
+        )
+    )
+    assert "Call `report_case` again" in answer
+    assert state.step_results == []
