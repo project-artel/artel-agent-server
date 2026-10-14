@@ -29,7 +29,7 @@ from app.llm.api_key import (
     is_unauthorized,
 )
 from app.llm.claude_api import ClaudeApiChat
-from app.llm.credentials import LlmKeyService, bound_llm_key
+from app.llm.credentials import LlmKeyService, bound_llm_key, session_chat_models
 from app.llm.usage import KeySource, UsageCallback
 
 
@@ -367,10 +367,20 @@ def _gpt(
 ) -> ChatOpenAI:
     """OpenAI API 경로. key 는 세션에 묶인 사용자 key 뿐이다.
 
-    Chat Completions API 를 쓴다. 추론은 `reasoning_effort` 하나로 싣고, 값은 catalog 의 effort
-    를 그대로 보낸다 — OpenAI SDK 의 `ReasoningEffort` 는 `none`, `minimal`, `low`, `medium`,
-    `high`, `xhigh`, `max` 라 catalog 의 다섯 값이 모두 그 안에 있다. 끄라고 했으면 `none`
-    이다. 고르지 않았으면 보내지 않고 model 의 기본값을 따른다.
+    Chat Completions 가 아니라 Responses API 를 쓴다. Chat Completions 는 한 답의 reasoning 을
+    그 답과 함께 버려, QA loop 의 다음 turn 은 앞 turn 이 왜 그렇게 했는지 모른 채 다시 생각한다.
+    Responses API 는 reasoning item 을 돌려주고 다음 요청에 다시 실을 수 있다.
+
+    - `store=False`: OpenAI 에 응답을 남기지 않는다. 사용자 key 로 도는 런의 대화를 그쪽 서버에
+      두지 않고, QA loop 가 앞 메시지를 접고 요약하므로 서버에 쌓인 대화를 이어 쓸 수도 없다.
+    - `include=["reasoning.encrypted_content"]`: 저장하지 않는 대신 reasoning 을 암호문으로 받아
+      AIMessage 에 둔다. langchain-openai 는 `store=False` 일 때 이 암호문이 있는 reasoning 만 다음
+      요청에 다시 싣는다.
+
+    추론 강도는 `reasoning={"effort": ...}` 로 보낸다. 값은 catalog 의 effort 그대로다 — OpenAI
+    SDK 의 `ReasoningEffort` 는 `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` 라
+    catalog 의 다섯 값이 모두 그 안에 있다. 끄라고 했으면 `none` 이다. 고르지 않았으면 보내지
+    않고 model 의 기본값을 따른다.
 
     `temperature` 는 보내지 않는다. OpenAI 의 추론 model 은 1 이 아닌 값을 거절하고,
     langchain-openai 가 그 값을 빼 주는 것은 이름이 `gpt-5` 로 시작하는 model 뿐이다.
@@ -392,7 +402,10 @@ def _gpt(
         model=model.removeprefix(GPT_PREFIX),
         base_url=OPENAI_API_BASE_URL,
         api_key=openai_api_key,
-        reasoning_effort=effort,
+        use_responses_api=True,
+        store=False,
+        include=["reasoning.encrypted_content"],
+        reasoning={"effort": effort} if effort is not None else None,
         # OpenRouter 경로와 같은 timeout 과 재시도 수를 쓴다. 둘 다 같은 OpenAI 호환
         # client 이고, 이 값을 고른 이유는 `Settings.openrouter_timeout_seconds` 에 있다.
         timeout=settings.openrouter_timeout_seconds,
@@ -483,8 +496,9 @@ def build_chat_model(
 
     세션에 사용자 key 가 묶여 있고(`app/llm/credentials.py`) 그 서비스가 이 모델의 경로와
     맞으면 공용 key 대신 그것을 쓴다. 경로와 서비스의 짝은 `key_service_of` 가 정한다. 사용자
-    key 는 언제나 cache key 에 들어간다 — 두 사용자가 client 하나를 나눠 쓰면 한 사람의 key
-    로 다른 사람의 호출이 나간다. 묶인 key 가 없으면 동작은 공용 key 만 있던 때와 같다.
+    key 로 만든 model 은 프로세스 cache 가 아니라 그 세션의 cache 에 둔다. 다른 세션과 나눠 쓰지
+    않고, 세션이 끝나면 key 와 함께 사라진다. 묶인 key 가 없으면 동작은 공용 key 만 있던 때와
+    같다.
 
     `claude/` 모델인데 사용자 key 도 저장된 Claude API key 도 없으면
     `ClaudeApiKeyMissingError`, `gpt/` 모델인데 사용자 key 가 없으면 `GptApiKeyMissingError`
@@ -509,6 +523,18 @@ def build_chat_model(
                 f"Model '{model}' is called with the user's own OpenAI API key, and no "
                 "llm_key with service 'openai' is bound to this session."
             )
+    if key_source == "user":
+        cache = session_chat_models()
+        built_key = (model, reasoning, cache_prompt, provider_key)
+        if cache is None:
+            # `bind_llm_key` 가 key 와 cache 를 함께 묶으므로 오지 않는 자리다. 오더라도 프로세스
+            # cache 에는 넣지 않는다.
+            return _build_chat_model.__wrapped__(model, reasoning, cache_prompt, provider_key, key_source)
+        if built_key not in cache:
+            cache[built_key] = _build_chat_model.__wrapped__(
+                model, reasoning, cache_prompt, provider_key, key_source
+            )
+        return cache[built_key]
     return _build_chat_model(model, reasoning, cache_prompt, provider_key, key_source)
 
 

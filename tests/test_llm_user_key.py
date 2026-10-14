@@ -183,8 +183,47 @@ def test_clients_are_not_shared_across_keys() -> None:
     assert _openrouter_key(first_user) == "sk-or-user"
     assert _openrouter_key(second_user) == "sk-or-other-user"
 
+
+
+def test_a_session_reuses_its_clients_and_a_new_session_gets_its_own() -> None:
     bind_llm_key(USER_OPENROUTER)
-    assert build_chat_model(OPENROUTER_MODEL) is first_user
+    first = build_chat_model(OPENROUTER_MODEL)
+    assert build_chat_model(OPENROUTER_MODEL) is first
+
+    # The same user's next session — same key — still starts from nothing.
+    bind_llm_key(USER_OPENROUTER)
+    assert build_chat_model(OPENROUTER_MODEL) is not first
+
+
+def test_user_key_clients_never_enter_the_process_cache() -> None:
+    from app.llm.chat_model import _build_chat_model
+
+    build_chat_model.cache_clear()
+    bind_llm_key(USER_ANTHROPIC)
+    build_chat_model(CLAUDE_MODEL)
+    bind_llm_key(USER_OPENAI)
+    build_chat_model(GPT_MODEL)
+    bind_llm_key(USER_OPENROUTER)
+    build_chat_model(OPENROUTER_MODEL)
+
+    assert _build_chat_model.cache_info().currsize == 0
+
+
+def test_a_sessions_clients_go_when_the_session_does() -> None:
+    import gc
+    import weakref
+
+    async def session() -> weakref.ref:
+        bind_llm_key(USER_ANTHROPIC)
+        return weakref.ref(build_chat_model(CLAUDE_MODEL))
+
+    # A session's run lives in its own task; when that task ends, nothing holds its clients.
+    async def run() -> weakref.ref:
+        return await asyncio.create_task(session())
+
+    client = asyncio.run(run())
+    gc.collect()
+    assert client() is None
 
 
 def test_claude_clients_are_not_shared_across_keys() -> None:
@@ -239,9 +278,12 @@ def test_gpt_payload_carries_openai_reasoning_effort(reasoning, expected) -> Non
     payload = build_chat_model(GPT_MODEL, reasoning)._get_request_payload([HumanMessage("hi")])
 
     assert payload["model"] == "gpt-6.1-sol"
-    assert payload["reasoning_effort"] == expected
-    # Chat Completions, not the Responses API, and none of OpenRouter's request fields.
-    assert "reasoning" not in payload
+    # Responses API: `input`, not `messages`, and the effort inside `reasoning`.
+    assert "input" in payload
+    assert "messages" not in payload
+    assert payload["reasoning"] == {"effort": expected}
+    assert "reasoning_effort" not in payload
+    # none of OpenRouter's request fields.
     assert "extra_body" not in payload
     assert "temperature" not in payload
 
@@ -251,9 +293,43 @@ def test_gpt_payload_without_reasoning_leaves_the_effort_to_the_model() -> None:
 
     payload = build_chat_model(GPT_MODEL)._get_request_payload([HumanMessage("hi")])
 
+    assert "reasoning" not in payload
     assert "reasoning_effort" not in payload
     assert "temperature" not in payload
     assert "extra_body" not in payload
+
+
+def test_gpt_keeps_nothing_on_openai_and_asks_for_reasoning_it_can_send_back() -> None:
+    bind_llm_key(USER_OPENAI)
+
+    payload = build_chat_model(GPT_MODEL)._get_request_payload([HumanMessage("hi")])
+
+    assert payload["store"] is False
+    assert payload["include"] == ["reasoning.encrypted_content"]
+
+
+def test_gpt_sends_the_previous_turns_encrypted_reasoning_back() -> None:
+    """The point of the Responses API here: a turn's reasoning reaches the next turn."""
+    bind_llm_key(USER_OPENAI)
+    earlier = AIMessage(
+        content=[
+            {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "gAAAA-sealed"},
+            {"type": "text", "text": "Clicking the start button."},
+        ]
+    )
+    dropped = AIMessage(
+        content=[
+            {"type": "reasoning", "id": "rs_2", "summary": []},
+            {"type": "text", "text": "No sealed reasoning on this one."},
+        ]
+    )
+
+    payload = build_chat_model(GPT_MODEL)._get_request_payload(
+        [HumanMessage("start"), earlier, HumanMessage("next"), dropped, HumanMessage("again")]
+    )
+
+    reasoning_items = [item for item in payload["input"] if item.get("type") == "reasoning"]
+    assert [item.get("encrypted_content") for item in reasoning_items] == ["gAAAA-sealed"]
 
 
 def test_gpt_payload_is_not_sent_to_openrouter() -> None:
@@ -278,9 +354,10 @@ def test_gpt_structured_output_uses_strict_json_schema() -> None:
         [HumanMessage("hi")], **bound.kwargs
     )
 
-    # A pydantic schema rides as the class; langchain-openai turns it into a strict
-    # `json_schema` `response_format` when it calls the SDK's `parse`.
-    assert payload["response_format"] is _Answer
+    # A pydantic schema rides as the class; on the Responses API langchain-openai sends it
+    # as `text_format`, which the SDK's `responses.parse` turns into a strict `json_schema`.
+    assert payload["text_format"] is _Answer
+    assert "response_format" not in payload
     assert payload["ls_structured_output_format"]["kwargs"] == {
         "method": "json_schema",
         "strict": True,
