@@ -515,7 +515,7 @@ def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v24-macro-wait-until"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v25-macro-push"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -644,7 +644,11 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 # And once more, from `1024ec5d29c8`, when `stage_draft`, `macro_hint` and
 # `fold_stale_macro_results` (ARTEL-1026) joined `QaArchSpec` at `False`. At `False` the
 # default run's tools, middleware and answers are where they were, so the label stays.
-_EXPECTED_DEFAULT_FINGERPRINT = "fdf1038bbff9"
+#
+# And from `fdf1038bbff9`, when those three knobs turned on and the label moved to
+# `v25-macro-push`: the default run now offers stage drafts, adds the macro hint line, and
+# folds old macro results.
+_EXPECTED_DEFAULT_FINGERPRINT = "26c613ecaaaf"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:

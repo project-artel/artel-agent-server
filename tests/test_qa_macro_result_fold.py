@@ -148,8 +148,8 @@ def test_the_fold_waits_for_the_batch_threshold() -> None:
 
 
 def test_the_knob_turns_the_fold_kind_on() -> None:
-    off = default_resolved_arch()
-    on = resolve_arch(QaArchSpec(fold_stale_macro_results=True), LLMModel.gpt_6_luna)
+    off = resolve_arch(QaArchSpec(fold_stale_macro_results=False), LLMModel.gpt_6_luna)
+    on = default_resolved_arch()
 
     assert FoldKind.macro_result not in fold_kinds_for(off)
     assert FoldKind.macro_result in fold_kinds_for(on)
