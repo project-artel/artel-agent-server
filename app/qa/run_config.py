@@ -189,8 +189,12 @@ def resolve_run_config(
     prompt_version: str | None = None,
     reasoning: ReasoningConfig | None = None,
     arch: QaArchSpec = DEFAULT_ARCH,
+    execution_mode: str = "ORDERED",
 ) -> RunConfig:
     """Settle every axis of one run, or refuse the request.
+
+    `execution_mode` 는 이 session 의 시나리오가 모두 FREE 일 때 "FREE" 다. FREE run 은
+    `report_case` 를 받으므로 tool 목록과 fingerprint 가 그것으로 기록된다(ARTEL-1029).
 
     Raises ``ValueError`` (``QaArchError`` is one) when the request cannot be
     honoured as asked — a reasoning budget the model has no setting for, a
@@ -205,7 +209,7 @@ def resolve_run_config(
     reasoning = validate_reasoning(model, reasoning)
     spec = get_model_spec(model)
     resolved_arch = resolve_arch(arch, model)
-    tools, _middleware, fingerprint = structure_of(resolved_arch)
+    tools, _middleware, fingerprint = structure_of(resolved_arch, execution_mode)
 
     prompt = load_prompt(PROMPT_AGENT, SYSTEM_ROLE, prompt_version)
     hashes = {SYSTEM_ROLE: prompt.body_sha256}

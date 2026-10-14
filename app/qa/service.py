@@ -114,12 +114,21 @@ class QaExecutionService:
 
         `llm_key` 는 세션 기록에만 남고 `run_config` 에는 들어가지 않는다.
         """
+        # run_config 는 session 에 하나다. 시나리오가 모두 FREE 일 때만 FREE 의 tool 목록으로
+        # 기록한다. ORDERED 와 FREE 가 섞인 session 은 ORDERED 로 기록되고, FREE 시나리오의
+        # `report_case` 는 그 기록에 빠진다.
+        execution_mode = (
+            "FREE"
+            if scenarios and all(item.scenario.execution_mode == "FREE" for item in scenarios)
+            else "ORDERED"
+        )
         run_config = resolve_run_config(
             model=model,
             language=language,
             prompt_version=prompt_version,
             reasoning=reasoning,
             arch=arch,
+            execution_mode=execution_mode,
         )
         session_id = uuid.uuid4().hex
         record = QaSessionRecord(

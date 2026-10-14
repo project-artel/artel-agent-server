@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, Field, field_validator
 
 from app.llm.credentials import LlmKey
 from app.qa.envelope import QaChatTurn
@@ -36,6 +38,16 @@ class QaScenario(BaseModel):
     title: str = ""
     description: str = ""
     steps: list[QaStep] = Field(default_factory=list)
+    # `ORDERED` 는 위 스텝을 순서대로 실행한다. `FREE` 는 스텝 하나가 TC 하나이고 `case_id` 가
+    # 겹치지 않는 TC 묶음이라, 순서와 방법을 agent 가 정한다(ARTEL-1029). 이 필드를 모르는
+    # orchestration 은 보내지 않으므로 없으면 `ORDERED` 다.
+    execution_mode: Literal["ORDERED", "FREE"] = "ORDERED"
+
+    @field_validator("execution_mode", mode="before")
+    @classmethod
+    def _null_is_ordered(cls, value: object) -> object:
+        # Jackson 이 빈 값을 생략하지 않고 `null` 로 보내는 경우도 없는 것과 같게 읽는다.
+        return "ORDERED" if value is None else value
 
 
 class QaStepResult(BaseModel):
