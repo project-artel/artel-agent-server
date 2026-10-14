@@ -267,7 +267,7 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v21() -> None:
+def test_the_default_qa_version_is_v22() -> None:
     """A run that names no version has to get the newest prompt.
 
     This is also the trap in adding a version: `resolve_version` returns the
@@ -306,8 +306,13 @@ def test_the_default_qa_version_is_v21() -> None:
     v21 ships with `wait_until` and the `-> bool` predicate (ARTEL-988): the macro
     skill's grammar gains the Waiting and Predicates sections, and its third example
     writes an `or` as a predicate and waits for the victory banner.
+
+    v22 pushes the agent to use macros (ARTEL-1026): the macro skill gains a fourth
+    example that plays a whole battle in one macro, and the macro memory directive
+    asks for a battle macro before a battle and after one is cleared by hand, and
+    describes the stage draft and the macro hint line.
     """
-    assert resolve_version("qa_run") == "v21"
+    assert resolve_version("qa_run") == "v22"
 
 
 # v20 이 고쳐 쓴 v19 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
@@ -1003,3 +1008,35 @@ def test_v21_teaches_wait_until_and_predicates_and_keeps_the_rest_of_v20() -> No
             if paragraph.lstrip("\n").startswith(rewrites):
                 continue
             assert paragraph in v21, (role, paragraph[:80])
+
+
+# v22 가 고쳐 쓴 v21 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
+V22_REWRITES_FROM_V21 = {
+    "skill_macro": (
+        "## Three macros that pass",
+        "- a `checkpoint` sits only where",
+    ),
+    "macro_memory_directive": (
+        "In this run, macros are how you operate the game.",
+        "Macros live inside the phase order too.",
+        "So when UPDATE_MEMORY comes",
+    ),
+}
+
+
+def test_v22_pushes_macro_use_and_keeps_the_rest_of_v21() -> None:
+    """v22 는 macro skill 과 macro memory directive 의 문단 몇 개만 고친다 (ARTEL-1026)."""
+    skill = load_prompt("qa_run", "skill_macro", "v22").body
+    assert "def clear_forest_battle(element_label: string) -> None:" in skill
+    directive = load_prompt("qa_run", "macro_memory_directive", "v22").body
+    assert "look first for a macro that plays the whole battle" in directive
+    assert "ask three questions, not one" in directive
+
+    for role in ("skill_macro", "macro_memory_directive"):
+        rewrites = V22_REWRITES_FROM_V21.get(role, ())
+        v21 = load_prompt("qa_run", role, "v21").body
+        v22 = load_prompt("qa_run", role, "v22").body
+        for paragraph in v21.split("\n\n"):
+            if rewrites and paragraph.lstrip("\n").startswith(rewrites):
+                continue
+            assert paragraph in v22, (role, paragraph[:80])
