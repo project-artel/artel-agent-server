@@ -2,7 +2,7 @@
 
 - Date: 2026-10-13
 - Jira: not filed yet
-- Status: Draft
+- Status: Implemented, not measured
 - Base: `origin/develop` at 3a7a666 (ARTEL-984 and ARTEL-988 merged)
 
 ## Goal
@@ -176,25 +176,31 @@ headers and URL as `relevance._post`, one `httpx.AsyncClient` per run, closed in
 ## Approach (Checklist)
 
 - [x] **Step 0: Recon**
-- [ ] **Step 1: Contract** (serial) — `model.py` (`MacroImport` via `MacroDefinition.imports`,
+- [x] **Step 1: Contract** (serial) — `model.py` (`MacroImport` via `MacroDefinition.imports`,
   `MacroMatchStatement`, `MacroMatchCase`, `MacroDecideCall`, `MacroAskCondition`,
   `MacroContextArgument`), `grammar.py` (`DECIDE`, `ASK`, `IMPORT_MODULE = "macros"`,
   `NONE_FITS`, `MAX_DECIDE_STATE_CHARS`), `errors.py` (`MACRO_IMPORT_NOT_FOUND`,
   `MACRO_IMPORT_CYCLE`, `DECIDE_FAILED`, `ASK_FAILED`), the `MacroHost` additions and
   `MacroDecideRequest`/`MacroAskRequest`. Model tests.
-- [ ] **Step 2a: parser track** — `parser.py`, `tests/test_qa_macro_parser.py`.
-- [ ] **Step 2b: runner track** — `runner.py`, new `app/agents/qa/macro/context.py` (state
+- [x] **Step 2a: parser track** — `parser.py`, `tests/test_qa_macro_parser.py`.
+- [x] **Step 2b: runner track** — `runner.py`, new `app/agents/qa/macro/context.py` (state
   builder), `tests/test_qa_macro_runner.py`, `tests/test_qa_macro_context.py`.
-- [ ] **Step 2c: Jev client track** — `app/qa/jev.py`, `tests/test_qa_jev.py`.
-- [ ] **Step 3: tools** (after 2a–2c) — `macro_tools.py` (import resolution, `_Host.decide/ask`,
+- [x] **Step 2c: Jev client track** — `app/qa/jev.py`, `tests/test_qa_jev.py`.
+- [x] **Step 3: tools** (after 2a–2c) — `macro_tools.py` (import resolution, `_Host.decide/ask`,
   `_render` for decisions and `NO FITTING MACRO`), `app/agents/qa/runner.py` (client lifetime),
   `tests/test_qa_macro_tools.py`.
-- [ ] **Step 4: prompt and label** — `qa_run/v22`, `reference.py`, lock, `arch.py`, tests.
-- [ ] **Step 5: full test suite.**
+- [x] **Step 4: prompt and label** — `qa_run/v22`, `reference.py`, lock, `arch.py`, tests.
+- [x] **Step 5: full test suite.**
 - [ ] **Step 6: measurement** — `qa-run-local`, WordVenture, before (v21 prompt, v24 label) and
   after (v22, v25), same model.
 
 ## Validation
+
+- 2026-10-14: full suite 2120 passed (baseline at 3a7a666: 1989). Errors are refused at store
+  time as `MACRO_NODE_REJECTED`, so `MACRO_IMPORT_NOT_FOUND`/`MACRO_IMPORT_CYCLE` from Step 1 were
+  not added; the one runtime code is `JEV_FAILED`. Two parser rules beyond this plan: every `case`
+  must leave hold/release counters at 0 (the `none_fits` path skips all cases), and a `match`
+  between a hold and its release is refused like a `checkpoint`.
 
 - **Commands:** `LANGSMITH_TRACING=false .venv/bin/python -m pytest -q`
 - New tests: import resolution (found, missing, cycle, collision, depth through imports,
