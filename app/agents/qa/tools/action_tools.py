@@ -11,10 +11,11 @@ from typing import Any
 from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.macro.lift import DispatchRecord, lift_call
-from app.agents.qa.tools.tool_context import ToolContext
+from app.agents.qa.tools.tool_context import PENDING_MACRO_HINT, ToolContext
 from app.qa.acting import PressLanding
 from app.prompts import load_tool_description
 from app.qa.envelope import JsonRpcAction
+from app.qa.macro_hint import hint_line, log_hint_counts
 
 # `parse_target` 이 판별하는 두 엄격한 모양. 나머지 전부는 selector 로 읽는다.
 _SCREEN_POINT_RE = re.compile(r"^(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)$")
@@ -283,7 +284,17 @@ def _recorded(tool: BaseTool, ctx: ToolContext) -> BaseTool:
         targets, unliftable = lift_call(name, arguments, pulse)
         scene = (ctx.channel.scene.scene or pulse.scene or "").strip()
         ctx.state.last_outcome = None
-        result = await inner(*args, **kwargs)
+        # hint 는 이 조작의 결과에 실려야 하므로 보내기 전에 정한다. `answer` 가 화면 앞에 붙인다.
+        hint = await _macro_hint(ctx, arguments.get("step"), scene)
+        token = PENDING_MACRO_HINT.set(hint)
+        try:
+            result = await inner(*args, **kwargs)
+        finally:
+            consumed = PENDING_MACRO_HINT.get() is None
+            PENDING_MACRO_HINT.reset(token)
+        if hint and consumed and isinstance(arguments.get("step"), int):
+            ctx.state.macro_hint_steps[arguments["step"]] = True
+            log_hint_counts(ctx.state)
         outcome = ctx.state.last_outcome
         # 돌아온 뒤의 scene. 키 연타가 scene 을 바꿨는지는 이 값으로 안다(`lift._fold`).
         scene_after = (ctx.channel.scene.scene or ctx.channel.scene.pulse.scene or "").strip()
@@ -310,6 +321,36 @@ def _recorded(tool: BaseTool, ctx: ToolContext) -> BaseTool:
         return result
 
     return tool.model_copy(update={"coroutine": recorded})
+
+
+# 한 step 에서 hint 를 묻기 전에 이미 나간 손 조작 수. 이번 조작이 세 번째다.
+_HAND_ACTIONS_BEFORE_HINT = 2
+
+
+async def _macro_hint(ctx: ToolContext, step: object, scene: str) -> str | None:
+    """이 조작의 결과에 실을 macro hint. 묻지 않거나 맞는 macro 가 없으면 `None`.
+
+    한 step 에 한 번만 묻는다. Jev 가 무엇을 답했든 같은 step 에서 다시 묻지 않는다.
+    `run_macro` 를 이미 부른 step 과 문장이 빈 step 에는 묻지 않는다.
+    """
+    state = ctx.state
+    if not ctx.arch.macro_hint or not isinstance(step, int) or step in state.macro_hint_steps:
+        return None
+    if state.macro_calls.hand_actions.get(step, 0) < _HAND_ACTIONS_BEFORE_HINT:
+        return None
+    if state.macro_calls.calls_in_step(step):
+        return None
+    texts = state.step_texts
+    if not 1 <= step <= len(texts) or not texts[step - 1].strip():
+        return None
+    state.macro_hint_steps[step] = False
+    context = ctx.channel.scene.scene_context
+    return await hint_line(
+        texts[step - 1],
+        scene,
+        state.macros.registrations,
+        context.macros if context is not None else [],
+    )
 
 
 def _landed(outcome) -> bool:
