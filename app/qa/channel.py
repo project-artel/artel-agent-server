@@ -10,13 +10,15 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.qa.envelope import (
     ActionPayload,
     ActionResultPayload,
     CapabilityWriteResultPayload,
     ChatPayload,
+    ContextUsage,
+    ContextUsagePayload,
     GameState,
     JsonRpcAction,
     KnowledgeExpandPayload,
@@ -26,7 +28,14 @@ from app.qa.envelope import (
     KnowledgeWriteResultPayload,
     LogCategory,
     LogPayload,
+    MacroReadPayload,
+    MacroReadResultPayload,
+    MacroSearchPayload,
+    MacroSearchResultPayload,
+    MacroRegisterPayload,
+    MacroWriteResultPayload,
     MessageType,
+    ScreenNamePayload,
     ScreenSelectorProposalPayload,
     ScreenSelectorResultPayload,
     ScreenSelectorRulePayload,
@@ -37,6 +46,9 @@ from app.qa.envelope import (
 )
 from app.qa.pulse import PulseReading
 from app.qa.scene import SceneMemory
+
+if TYPE_CHECKING:
+    from app.qa.relevance import PulseRelevanceJudge
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +202,9 @@ class QaRunChannel:
         # 타임아웃과 취소 규칙이 붙지만, 이쪽은 기억해 두었다가 꺼내 쓰는 것이 전부다.
         self._tool_frames: dict[str, str] = {}
         self.scene = SceneMemory()
+        # `pulse_relevance` 가 켜진 run 에서만 runner 가 채운다(ARTEL-958). 비어 있으면
+        # `PulseMemory.relevance` 도 비고, `pulse` view 는 아무것도 숨기지 않는다.
+        self.pulse_relevance: "PulseRelevanceJudge | None" = None
         self.cancelled = False
         # Operator messages that arrived since the agent last looked. Delivered
         # by appending to the next tool result rather than interrupting the graph:
@@ -238,6 +253,21 @@ class QaRunChannel:
         """Put a line on the timeline. Nothing waits for it."""
         await self._send(
             self._frame(MessageType.LOG, LogPayload(category=category, message=message, step=step))
+        )
+
+    async def context_usage(self, used_tokens: int, max_tokens: int) -> None:
+        """Report how much of the model's input window the last call filled."""
+        percent = 100 * used_tokens // max_tokens
+        message = f"context {used_tokens // 1000}k / {max_tokens // 1000}k ({percent}%)"
+        await self._send(
+            self._frame(
+                MessageType.LOG,
+                ContextUsagePayload(
+                    category=LogCategory.SYSTEM,
+                    message=message,
+                    context=ContextUsage(used_tokens=used_tokens, max_tokens=max_tokens),
+                ),
+            )
         )
 
     async def say(self, message: str, step: int | None = None) -> None:
@@ -355,7 +385,11 @@ class QaRunChannel:
         return result, arrived
 
     async def _await_reading(
-        self, after: int, timeout: float, frame: int | None = None
+        self,
+        after: int,
+        timeout: float,
+        frame: int | None = None,
+        interrupt: asyncio.Event | None = None,
     ) -> bool:
         """액션 이후의 판독이 올 때까지 기다린다. 최대 `timeout` 초.
 
@@ -381,18 +415,43 @@ class QaRunChannel:
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
-        while not arrived():
+        while True:
+            if interrupt is not None and interrupt.is_set():
+                return False
+            if arrived():
+                return True
             remaining = deadline - loop.time()
             if remaining <= 0:
                 return False
             # `on_pulse` 는 같은 이벤트 루프의 동기 콜백이라, 이 clear 와 위의 검사
             # 사이에 판독이 끼어들 수 없다.
             self._reading_arrived.clear()
+            waiters = [asyncio.create_task(self._reading_arrived.wait())]
+            if interrupt is not None:
+                waiters.append(asyncio.create_task(interrupt.wait()))
             try:
-                await asyncio.wait_for(self._reading_arrived.wait(), remaining)
-            except asyncio.TimeoutError:
-                return False
-        return True
+                done, _ = await asyncio.wait(
+                    waiters, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+                )
+                if not done:
+                    return False
+            finally:
+                for waiter in waiters:
+                    if not waiter.done():
+                        waiter.cancel()
+                await asyncio.gather(*waiters, return_exceptions=True)
+
+    async def wait_for_reading(self, timeout: float) -> int:
+        """호출 뒤의 새 `pulse` 를 기다리고, 그동안 늘어난 개수를 낸다.
+
+        operator 의 말도 대기를 끝낸다. 깨어난 횟수가 아니라 개수를 내는 이유는, 대기
+        task 가 돌기 전에 `pulse` 여럿이 도착하면 한 번 깨어나도 여럿이기 때문이다.
+        """
+        after = self.scene.pulse.readings
+        self._raise_if_cancelled()
+        await self._await_reading(after, timeout, interrupt=self._operator_arrived)
+        self._raise_if_cancelled()
+        return max(self.scene.pulse.readings - after, 0)
 
     async def dispatch_actions(
         self,
@@ -545,6 +604,63 @@ class QaRunChannel:
         """
         return await self._request(message_type, payload, self._write_timeout)
 
+    async def register_macro(
+        self, payload: MacroRegisterPayload
+    ) -> MacroWriteResultPayload | KnowledgeRequestFailed | None:
+        """등록된 macro 정의 하나를 지도에 적는다 (ARTEL-921). 결과 셋이다.
+
+        - payload — 저쪽이 적었다. 런을 넘어 산다
+        - `KnowledgeRequestFailed` — 거절당했다. **안 적혔다**
+        - `None` — 답이 안 왔다. 적혔는지 아닌지 이쪽에서 알 수 없다
+
+        `None` 을 실패로 옮겨 적으면 안 된다. 이 프레임을 모르는 orchestration 은
+        라우터에서 프레임을 통째로 떨어뜨리고 그 거절이 이 소켓으로 안 돌아오는데, 그때
+        모델에게 "안 됐다" 고 하면 같은 정의를 계속 다시 보낸다 —
+        `write_capability` 와 같은 자리이고 같은 이유다.
+
+        타임아웃이 반드시 이쪽에 있어야 한다. 저쪽 라우터 앞의 검사 둘 — `messageId` 가
+        UUID 가 아니다, `qaTryId` 가 모르는 try 다 — 은 아무 답도 없이 프레임을 버린다.
+        """
+        return await self._request(
+            MessageType.MACRO_REGISTER, payload, self._write_timeout
+        )
+
+    async def read_macro(
+        self, payload: MacroReadPayload
+    ) -> MacroReadResultPayload | KnowledgeRequestFailed | None:
+        """저장된 macro 정의 하나를 이름으로 읽는다 (ARTEL-921). 결과 셋이다.
+
+        - payload — 이 build 의 `content_map` 에 그 이름의 정의가 있다
+        - `KnowledgeRequestFailed` — 없거나, 조회 자체가 못 돌았다. 저쪽은 모르는 이름을
+          `MACRO_READ references an unknown macro: <name>` 로 답한다
+        - `None` — 답이 안 왔다
+
+        쓰기와 달리 `None` 과 거절이 부르는 쪽에 같은 일을 시킨다. 둘 다 "이 이름으로
+        부를 수 있는 것이 없다" 로 끝나고, 읽기는 다시 물어도 아무것도 두 번 적히지
+        않기 때문이다. 그래도 둘을 가르는 이유는 모델에게 읽어 줄 문장이 다르기
+        때문이다 — 없는 것과 못 물어본 것은 다음에 할 일이 다르다.
+        """
+        return await self._request(
+            MessageType.MACRO_READ, payload, self._write_timeout
+        )
+
+    async def search_macros(
+        self, payload: MacroSearchPayload
+    ) -> MacroSearchResultPayload | KnowledgeRequestFailed | None:
+        """이 build 의 등록된 macro 를 글로 찾는다 (ARTEL-984). 결과 셋이다.
+
+        - payload — 찾은 것. 빈 `items` 도 정상 답이다
+        - `KnowledgeRequestFailed` — 저쪽이 거절했다. 범위 밖의 요청, `content_map` 이
+          없는 런, 이 frame 을 모르는 구버전 orchestration 이 여기로 온다
+        - `None` — 답이 안 왔다
+
+        타임아웃은 `search_knowledge` 의 20초다. 저쪽 일이 같은 모양이다 — keyword 조회
+        하나와 embedding 하나, 벡터 조회 하나.
+        """
+        return await self._request(
+            MessageType.MACRO_SEARCH, payload, KNOWLEDGE_SEARCH_TIMEOUT_SECONDS
+        )
+
     async def answer_screen_selector_proposal(
         self, payload: ScreenSelectorVerdictPayload, correlation_id: str
     ) -> None:
@@ -567,6 +683,28 @@ class QaRunChannel:
             self._frame(
                 MessageType.SCREEN_SELECTOR_VERDICT, payload, correlation_id=correlation_id
             )
+        )
+
+    async def answer_screen_name_request(
+        self, payload: ScreenNamePayload, correlation_id: str
+    ) -> None:
+        """이름 요청 하나에 대한 답을 실어 보낸다 (ARTEL-909). 아무것도 기다리지 않는다.
+
+        `answer_screen_selector_proposal` 과 같은 자리다 — future 도 타임아웃도 없고,
+        저쪽은 이 답에 아무것도 돌려주지 않는다. 답을 부른 것이 tool 이 아니라 frame 이고,
+        그 frame 은 이미 지나갔다.
+
+        **부르는 쪽이 QA 런이 아니다.** 이름 짓기는 런과 떨어진 task 에서 나고, 이
+        메서드는 그 task 가 소켓에 닿는 유일한 지점이다. 여기를 지나게 하는 이유는 봉투의
+        `sequence` 다 — 한 세션의 frame 번호는 한 곳에서 나야 하고, 이름 짓는 쪽이 제
+        카운터를 들면 같은 번호가 두 번 나간다.
+
+        `_raise_if_cancelled` 를 안 부른다. 취소는 QA 런의 사정이고 이 답은 런의 일이
+        아니다 — 다만 소켓이 이미 닫히는 중이면 보낼 곳이 없으므로, 부르는 쪽이
+        `cancelled` 를 보고 건너뛴다(`app/qa/screen_name.py`).
+        """
+        await self._send(
+            self._frame(MessageType.SCREEN_NAME, payload, correlation_id=correlation_id)
         )
 
     async def _request(self, message_type: MessageType, payload, timeout: float) -> Any:
@@ -612,6 +750,10 @@ class QaRunChannel:
         아니라 게임이 도는 동안 계속 도착하는 관측이고, 도구가 그것을 기다리지 않는다.
         """
         self.scene.pulse.apply(PulseReading.model_validate(raw.get("payload") or {}))
+        # 새 member 타입이 왔으면 판정을 띄운다. 기다리지 않는다 — 판정이 도착하기 전의 view 는
+        # 아무것도 숨기지 않으므로, 늦어도 잃는 것은 줄 몇 개다.
+        if self.pulse_relevance is not None:
+            self.pulse_relevance.notice(self.scene.pulse)
         # 액션 뒤에 다음 배치를 기다리는 쪽을 깨운다(ARTEL-516).
         self._reading_arrived.set()
 
@@ -659,15 +801,7 @@ class QaRunChannel:
         The tool times out into "cannot confirm", which is what the situation is.
         """
         payload = KnowledgeWriteResultPayload.model_validate(raw.get("payload") or {})
-        correlation = raw.get("correlationId")
-        pending = self._pending.get(correlation) if isinstance(correlation, str) else None
-        if pending is not None and payload.type and payload.type != pending.request_type:
-            logger.warning(
-                "[QA] a %s answer arrived for a %s request (correlation %s); dropped",
-                payload.type,
-                pending.request_type,
-                correlation,
-            )
+        if self._answers_another_request(raw, payload.type):
             return
         self._resolve(raw, payload)
 
@@ -715,15 +849,7 @@ class QaRunChannel:
         거절 사유를 모델에게 읽어 준다.
         """
         payload = ScreenSelectorResultPayload.model_validate(raw.get("payload") or {})
-        correlation = raw.get("correlationId")
-        pending = self._pending.get(correlation) if isinstance(correlation, str) else None
-        if pending is not None and payload.type and payload.type != pending.request_type:
-            logger.warning(
-                "[QA] a %s answer arrived for a %s request (correlation %s); dropped",
-                payload.type,
-                pending.request_type,
-                correlation,
-            )
+        if self._answers_another_request(raw, payload.type):
             return
         if self._resolve(raw, payload):
             return
@@ -756,17 +882,60 @@ class QaRunChannel:
         타임아웃으로 "확인할 수 없다" 에 도달하는데, 그것이 실제 상황이다.
         """
         payload = CapabilityWriteResultPayload.model_validate(raw.get("payload") or {})
-        correlation = raw.get("correlationId")
-        pending = self._pending.get(correlation) if isinstance(correlation, str) else None
-        if pending is not None and payload.type and payload.type != pending.request_type:
-            logger.warning(
-                "[QA] a %s answer arrived for a %s request (correlation %s); dropped",
-                payload.type,
-                pending.request_type,
-                correlation,
-            )
+        if self._answers_another_request(raw, payload.type):
             return
         self._resolve(raw, payload)
+
+    def on_macro_write_result(self, raw: dict) -> None:
+        """macro 등록의 답을, 무엇을 물었는지와 맞대 보고 넘긴다 (ARTEL-921)."""
+        payload = MacroWriteResultPayload.model_validate(raw.get("payload") or {})
+        if self._answers_another_request(raw, payload.type):
+            return
+        self._resolve(raw, payload)
+
+    def on_macro_read_result(self, raw: dict) -> None:
+        """저장된 macro 정의를, 무엇을 물었는지와 맞대 보고 넘긴다 (ARTEL-921)."""
+        payload = MacroReadResultPayload.model_validate(raw.get("payload") or {})
+        if self._answers_another_request(raw, payload.type):
+            return
+        self._resolve(raw, payload)
+
+    def on_macro_search_result(self, raw: dict) -> None:
+        """macro 검색의 답. 응답 타입이 요청 하나에만 답하므로 `type` 을 맞대지 않는다."""
+        self._resolve(raw, MacroSearchResultPayload.model_validate(raw.get("payload") or {}))
+
+    def _answers_another_request(self, raw: dict, answered_type: str) -> bool:
+        """이 답이 실은 **다른** 요청의 답인가. 맞으면 부르는 쪽이 버린다.
+
+        저쪽은 응답마다 무엇의 답인지를 payload 의 `type` 에 echo 한다. correlation
+        하나로는 못 잡는 것을 이 비교가 잡는다 — 둘이 어긋나면 믿는 대신 버린다.
+        한 응답 타입이 요청 여러 개에 답하는 자리마다 필요하고
+        (`KNOWLEDGE_WRITE_RESULT` 가 쓰기 다섯에, `SCREEN_SELECTOR_RESULT` 가
+        `SCREEN_SELECTOR_RULE` 과 `SCREEN_SELECTOR_VERDICT` 둘에,
+        `CAPABILITY_WRITE_RESULT` 가 쓰기 둘에), macro 는 쓰기와 읽기의 응답 타입이
+        갈려 있어 지금은 어긋날 길이 없지만 저쪽이 macro 쓰기 타입을 하나 더하면 그때
+        조용히 틀리는 자리가 여기다.
+
+        **어긋난 답은 실패로 옮기지 않고 버린다.** 저쪽의 프로토콜 오류이지 런이 할 수
+        있는 일이 아니고, 실패로 옮기면 모델이 이미 적혔을지도 모르는 것을 다시 쓴다.
+        tool 은 타임아웃으로 "확인할 수 없다" 에 도달하는데, 그것이 실제 상황이다.
+
+        `type` 이 비어 있으면 안 가른다. 그 칸을 안 싣는 구버전 orchestration 의 답을
+        전부 버리게 된다.
+        """
+        correlation = raw.get("correlationId")
+        pending = self._pending.get(correlation) if isinstance(correlation, str) else None
+        if pending is None or not answered_type:
+            return False
+        if answered_type == pending.request_type:
+            return False
+        logger.warning(
+            "[QA] a %s answer arrived for a %s request (correlation %s); dropped",
+            answered_type,
+            pending.request_type,
+            correlation,
+        )
+        return True
 
     def on_error(self, raw: dict) -> bool:
         """An inbound ERROR. True when it was the answer to something we asked.
@@ -827,6 +996,10 @@ class QaRunChannel:
         self._operator_arrived.set()
 
     # --- operator ------------------------------------------------------------
+
+    def pending_operator_messages(self) -> tuple[str, ...]:
+        """다음 tool 결과에 붙일 operator 의 말을 비우지 않고 복사한다."""
+        return tuple(self._operator_messages)
 
     def drain_operator_messages(self) -> list[str]:
         messages = self._operator_messages

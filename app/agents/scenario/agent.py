@@ -34,6 +34,7 @@ from app.agents.scenario.progress import ProgressCallback
 from app.agents.scenario.prompt import build_messages, build_system_prompt
 from app.agents.scenario.ordering import UnreachableClimb, unreachable_climbs
 from app.agents.scenario import trace
+from app.agents.scenario.replier import ASK_WHICH, ScenarioReplier
 from app.agents.scenario.router import Route, ScenarioRouter
 from app.agents.scenario.workflow import run_authoring_workflow, run_modify_workflow
 from app.agents.scenario.schemas import (
@@ -126,11 +127,10 @@ def limit_middleware() -> list:
 # 라우터가 문구를 못 만들었을 때의 기본 응답 — v8 의 인사·가드레일 규칙과 같은 내용이다.
 _CANNED = {
     Route.GREETING: (
-        "안녕하세요! 저는 Artel 의 QA 저작 도우미예요. 설명해 주신 게임 흐름을 순서 있는 "
-        "테스트 시나리오로 만들고, 이 런의 케이스에 매핑해 드려요. 어떤 흐름을 테스트하고 "
-        "싶은지 말씀해 주세요."
+        "안녕하세요! 게임 흐름을 말씀해 주시면 스텝 순서가 있는 테스트 시나리오로 만들고 "
+        "이 런의 TC에 연결해 드려요. 어떤 흐름을 테스트할까요?"
     ),
-    Route.OFFTOPIC: "그 주제는 제가 도와드리기 어려워요. 이 런의 시나리오 저작이나 케이스에 대해 물어봐 주세요!",
+    Route.OFFTOPIC: "그건 제가 도와드리기 어려워요. 테스트 시나리오를 만들거나 이 런의 TC에 대해 물어봐 주세요.",
 }
 
 
@@ -168,9 +168,16 @@ class ScenarioAgent:
         # 그 갈래는 아래 루프 그대로라 오분류가 무동작이 되지 않는다.
         if self._router is not None and request.current_route is None:
             verdict = await self._router.route(request.user_input, context_hint=_hint(request))
+            if verdict.route is Route.ASK:
+                # **되묻는다.** 결정 모델 라우터가 갈래와 대상이 어긋났다고 말한 자리다.
+                # 모델을 부르지 않는다 — 물어볼 것이 언제나 같은 하나다.
+                return ScenarioAgentResult(message=ASK_WHICH, scenarios=[])
             if verdict.route in (Route.GREETING, Route.OFFTOPIC):
-                # 모델 없이 끝난다 — 라우터가 문구까지 만들었다.
-                return ScenarioAgentResult(message=verdict.reply or _CANNED[verdict.route], scenarios=[])
+                # 저작 없이 끝나지만 문구는 필요하다. 라우터가 문구까지 만들던 구조는 라우터가
+                # 자유 텍스트를 낼 수 있을 때만 서므로(결정 모델은 못 쓴다), 문구를 못 받았으면
+                # 문구 노드에 맡기고 그마저 실패하면 고정 문구로 떨어진다.
+                message = verdict.reply or await ScenarioReplier().write(verdict.route, request.user_input)
+                return ScenarioAgentResult(message=message or _CANNED[verdict.route], scenarios=[])
             if verdict.route is Route.AUTHORING and get_settings().scenario_workflow_enabled:
                 # **본선 워크플로**(Step 2): B 묶기·순서(전량 1회) → C 병렬 문장(묶음만)
                 # → D 코드 제출. "제출 N번 = 전체 재읽기 N번"이 여기서 사라진다.
@@ -201,9 +208,9 @@ class ScenarioAgent:
                 )
                 if request.locale.value == "ko":
                     message = (
-                        "이 요청은 기존 시나리오 수정 갈래로 분류되었어요. 지금은 실험 "
-                        "중이라 이 갈래를 잠시 꺼 두어 저작을 진행하지 않았습니다 — "
-                        "요청 내용은 기록해 두었어요."
+                        "기존 시나리오를 고치는 요청으로 봤는데, 지금은 실험 중이라 이 "
+                        "기능을 잠시 꺼 두었어요. 아무것도 바꾸지 않았고 요청 내용은 "
+                        "기록해 두었어요."
                     )
                 else:
                     message = (

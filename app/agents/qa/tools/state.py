@@ -8,6 +8,9 @@
 from dataclasses import dataclass
 from typing import Any
 
+from app.agents.qa.macro.book import MacroBook
+from app.agents.qa.macro.lift import DispatchRecord
+from app.agents.qa.macro.session import MacroSession
 from app.qa.envelope import ActionResultItem, JsonRpcAction
 from app.qa.schemas import QaStepResult
 
@@ -74,8 +77,12 @@ class QaRunState:
         self,
         total_steps: int,
         step_meta: list[tuple[int | None, bool]] | None = None,
+        step_texts: list[str] | None = None,
     ) -> None:
         self.total_steps = total_steps
+        # 시나리오가 각 스텝에 적은 행위 문장, 1번 스텝이 0번 자리. macro 초안의 docstring 이
+        # 이것을 싣는다(`draft_for_step`). 비면 문장을 모르는 것이고 초안은 번호만 적는다.
+        self.step_texts: list[str] = step_texts or []
         # 스텝별 (case_id, is_verification). report_step이 각 판정에 이를 붙이고, TC 판정(파생)은
         # `case_units`가 이 표로 구간을 잘라 그 구간 검증 스텝의 판정으로 정한다. 비면 단일-계층
         # 폴백(case_id/is_verification 미상) — 구식 호출자·테스트 호환용.
@@ -88,6 +95,10 @@ class QaRunState:
         # 행위가 경계다(ARTEL-621). `None` 은 아직 아무 행위도 없었거나, 그 필드를 모르는
         # 옛 SDK 다.
         self.last_action_frame: int | None = None
+        # 지난 모델 호출까지 `fold_context` 가 `fold` 한 block 의 `key`. 다음 호출이 같은 block 을
+        # 다시 `fold` 해야 프롬프트 앞이 그대로라 `cache` 가 맞는다
+        # (`app/agents/qa/runner.py` 의 `_fold_context_for`).
+        self.folded_blocks: frozenset[str] = frozenset()
         # How many times `finish_run` was reached. The first attempt made with
         # steps still unreported is pushed back on; a second one closes the run
         # regardless, so a game that genuinely cannot go on is never trapped.
@@ -145,6 +156,24 @@ class QaRunState:
         # observation 이 아니면 거절한다. 그래서 이 표가 없으면 모델이 지어낸 id 를 싣고 왕복
         # 하나를 거절로 쓴다 — `knowledge_seen` 이 있는 이유와 같다.
         self.capability_observations: dict[str, str] = {}
+        # 이 런에게 실제로 줄로 찍힌 content map 행의 `capability_key` → 그 요약.
+        #
+        # `report_step` 의 `capability_key` 가 이 표와 씬 맥락 블록을 함께 본다. 없는 키는
+        # 떨군다 — `knowledge_seen` 이 있는 이유와 같고, 여기서 안 하면 아무 데서도 안 된다.
+        # 이 런이 무엇을 받았는지 아는 곳이 여기뿐이기 때문이다.
+        #
+        # `list_scene_capabilities` 가 낸 페이지의 줄만 들어온다. 씬 맥락 블록 쪽은 여기 안
+        # 쌓는다 — 그 블록은 `SceneMemory.render` 가 그리고 그 자리에 런 상태가 없어서, 대신
+        # `report_step` 이 지금 서 있는 씬의 조회 결과를 직접 본다.
+        self.capability_keys_listed: dict[str, str] = {}
+        # `report_step` 이 `learned` 를 안 받아 연속으로 되돌려 보낸 횟수.
+        #
+        # 상한이 필요한 이유가 phase 거절과 같다(`app/agents/qa/tools/phase.py` 의
+        # `MAX_CONSECUTIVE_REFUSALS`). 되돌려 보낸 뒤 모델이 또 빠뜨리면 왕복만 탄다.
+        self.verdict_memory_refusals = 0
+        # 이 런의 phase 상태 기계, 또는 `None`. `build_tools` 가 `arch.phase_cycle` 을 보고
+        # 채운다 — `off` 와 `in_verdict` 에서는 끝까지 `None` 이다.
+        self.phase_cycle = None
         # 이 런이 `record_new_capability` 로 만든 행의 id → 그 요약.
         #
         # 그 행들은 `capability_key` 가 NULL 이라(키의 산식에 넣을 `entry_id` 가 없다) 나중에
@@ -156,6 +185,31 @@ class QaRunState:
         # 받아 적으면 안 된다 — JSON-RPC 인자는 모델이 지어내기 쉬운 모양이고 저쪽은 그것을
         # 읽지 않고 그대로 저장한다. 모델은 "무엇으로 눌렀나" 만 말하고 인자는 이 표가 낸다.
         self.dispatched_action_params: dict[str, list[Any]] = {}
+        # 이 런의 macro 초안과 등록된 정의, 그리고 무엇을 읽었나 (ARTEL-925).
+        #
+        # 사전 셋을 여기 흩뿌리지 않는 이유는 초안의 수명주기 — 쓰고·읽고·고치고·
+        # 등록한다 — 가 규칙을 들고 있기 때문이다. 그 규칙이 `MacroBook` 에 있으면 tool
+        # 없이 단위 테스트가 되고, 여기 흩어 놓으면 tool 을 통해서만 재어진다.
+        self.macros = MacroBook()
+        # `checkpoint` 에서 멈춰 선 macro 호출. `resume_macro` 가 이것을 잇거나 버린다.
+        # 하나뿐이다 — 게임을 모는 쪽이 둘이 되면 안 되므로, 멈춘 것이 있는 동안
+        # `run_macro` 는 새 macro 를 안 부른다.
+        self.paused_macro: MacroSession | None = None
+        # agent 가 손으로 부른 action tool, 부른 순서대로(ARTEL-915). `dispatched_action_params`
+        # 는 method 마다 마지막 한 벌만 남겨 순서도 tool 도 없다 — 그쪽은 capability 의 재현
+        # 칸이 쓰는 것이라 뜻을 안 바꾸고, 이 기록을 옆에 둔다. macro 초안이 여기서 나온다.
+        self.dispatches: list[DispatchRecord] = []
+        # macro 초안을 이미 내민 step. 같은 step 을 다시 판정해도 초안을 또 만들지 않는다.
+        self.drafted_steps: set[int] = set()
+        # step 마다 내민 초안의 이름. 통과한 판정에만 초안이 붙으므로 `drafted_steps` 의
+        # 부분집합이다. `decline_macro_draft` 가 받은 `name` 이 그 step 에 내민 `draft` 인지
+        # 여기서 본다.
+        self.offered_drafts: dict[int, str] = {}
+        # `decline_macro_draft` 로 거절한 `draft` 이름 → 그 `reason`. 등록한 것은 `macros` 에
+        # 남고, 거절한 것은 여기 남는다 — 둘 다 없는 `draft` 가 답을 못 받은 것이다.
+        self.declined_drafts: dict[str, str] = {}
+        # 마지막 action 의 결과 데이터. 기록하는 쪽이 그 action 이 게임에 닿았는지 본다.
+        self.last_outcome = None
         # Handed to the vision middleware on the next model call. The tool cannot
         # return the image itself — an image block on a tool result is rejected by
         # the chat/completions API every model here is reached through.
@@ -195,6 +249,24 @@ class QaRunState:
     def knows_of(self, knowledge_id: str) -> bool:
         """Whether this run has been shown this entry at all, in full or as a line."""
         return knowledge_id in self.knowledge_seen or knowledge_id in self.knowledge_glimpsed
+
+    def remember_listed_capabilities(self, capabilities) -> None:
+        """`list_scene_capabilities` 가 방금 찍어 준 줄의 키를 기억한다.
+
+        키 없는 행은 건너뛴다. 그 행은 agent 가 만든 것이고 `capability_key` 가 NULL 이라
+        지목할 값이 애초에 없다 — id 없는 이웃을 빈 문자열 아래 안 쌓는 것과 같다.
+        """
+        for capability in capabilities:
+            if capability.capability_key:
+                self.capability_keys_listed[capability.capability_key] = capability.summary
+
+    def was_shown_capability_key(self, capability_key: str) -> bool:
+        """이 런이 이 키를 줄로 받은 적이 있나.
+
+        `list_scene_capabilities` 결과만 본다. 씬 맥락 블록은 `report_step` 이 지금 서 있는
+        씬의 조회 결과로 따로 본다 — 블록을 그리는 자리에 런 상태가 없기 때문이다.
+        """
+        return capability_key in self.capability_keys_listed
 
     @property
     def knowledge_writes_attempted(self) -> int:

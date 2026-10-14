@@ -2,7 +2,7 @@ import uuid
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
-from app.agents.scenario.router import ScenarioRouter
+from app.agents.scenario.router import JevScenarioRouter, ScenarioRouter
 from app.config import get_settings
 from app.agents import (
     DEFAULT_LANGUAGE,
@@ -24,6 +24,15 @@ from app.sessions.schemas import HistoryTurn, SessionRecord
 from app.sessions.store import SessionExpired, SessionStore
 
 
+def _build_router() -> ScenarioRouter | None:
+    """입구 라우터를 설정대로 짓는다. 안 켜면 `None` 이고 그때는 모든 입력이 종전 루프로 간다."""
+    settings = get_settings()
+    if not settings.scenario_router_enabled:
+        return None
+    if settings.scenario_router_engine == "jev":
+        return JevScenarioRouter()
+    return ScenarioRouter()
+
 class SessionService:
     def __init__(
         self,
@@ -33,7 +42,7 @@ class SessionService:
     ) -> None:
         self._store = store
         self._agent = agent or ScenarioAgent(
-            router=ScenarioRouter() if get_settings().scenario_router_enabled else None,
+            router=_build_router(),
         )
         # One turn == one user message + one assistant message.
         self._history_max_messages = history_max_turns * 2

@@ -1,6 +1,6 @@
 """Folding the neighbour blocks a search volunteered — and nothing else.
 
-The line this pins is the whole design. `fold_stale_scenes` folds a scene
+The line this pins is the whole design. a scene view fold
 because the game moved on and `observe_scene` gets it back for nothing. A
 knowledge description is not stale, and getting it back costs a search out of a
 budget of six — folding it would tell the agent to spend a scarce resource
@@ -15,9 +15,9 @@ below name what has to survive.
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.agents.qa.arch import default_resolved_arch
-from app.agents.qa.context import fold_stale_knowledge
+from app.agents.qa.context import FoldKind, fold_every_stale_block
 from app.agents.qa.knowledge import render_results
-from app.agents.qa.runner import middleware_names_for
+from app.agents.qa.runner import fold_kinds_for, middleware_names_for
 from app.qa.envelope import (
     KnowledgeNeighbour,
     KnowledgeSearchHit,
@@ -74,7 +74,7 @@ def test_the_older_block_folds_and_the_newest_survives() -> None:
         tool_message(search_result("2", "새 히트", "20"), "b"),
     ]
 
-    folded = fold_stale_knowledge(messages)
+    folded = fold_every_stale_block(messages, [FoldKind.knowledge_neighbours])
 
     assert "이웃 요약" not in folded[0].content
     assert "expand_knowledge on 1" in folded[0].content
@@ -88,7 +88,7 @@ def test_the_hit_itself_is_never_touched() -> None:
         tool_message(search_result("2", "새 히트", "20"), "b"),
     ]
 
-    folded = fold_stale_knowledge(messages)
+    folded = fold_every_stale_block(messages, [FoldKind.knowledge_neighbours])
 
     assert "옛 히트" in folded[0].content
     assert "히트의 본문 설명" in folded[0].content
@@ -102,7 +102,7 @@ def test_the_placeholder_names_the_entry_to_expand() -> None:
         tool_message(search_result("2", "새", "20"), "b"),
     ]
 
-    folded = fold_stale_knowledge(messages)
+    folded = fold_every_stale_block(messages, [FoldKind.knowledge_neighbours])
 
     assert "neighbours of 77 folded" in folded[0].content
     assert "expand_knowledge on 77" in folded[0].content
@@ -116,7 +116,7 @@ def test_folding_is_pure_and_leaves_untouched_messages_identical() -> None:
     messages = [human, ai, first, second]
     before = [message.content for message in messages]
 
-    folded = fold_stale_knowledge(messages)
+    folded = fold_every_stale_block(messages, [FoldKind.knowledge_neighbours])
 
     # The input list and its messages are untouched.
     assert [message.content for message in messages] == before
@@ -134,8 +134,8 @@ def test_folding_twice_changes_nothing_further() -> None:
         tool_message(search_result("2", "새", "20"), "b"),
     ]
 
-    once = fold_stale_knowledge(messages)
-    twice = fold_stale_knowledge(once)
+    once = fold_every_stale_block(messages, [FoldKind.knowledge_neighbours])
+    twice = fold_every_stale_block(once, [FoldKind.knowledge_neighbours])
 
     assert [message.content for message in once] == [message.content for message in twice]
 
@@ -155,32 +155,31 @@ def test_messages_without_neighbours_are_left_alone() -> None:
         "b",
     )
 
-    folded = fold_stale_knowledge([plain, empty_hit, tool_message(search_result("9", "새", "90"), "c")])
+    folded = fold_every_stale_block(
+        [plain, empty_hit, tool_message(search_result("9", "새", "90"), "c")],
+        [FoldKind.knowledge_neighbours],
+    )
 
     assert folded[0] is plain
     assert folded[1] is empty_hit
 
 
-def test_keep_zero_folds_everything() -> None:
-    messages = [tool_message(search_result("1", "히트", "10"), "a")]
-    folded = fold_stale_knowledge(messages, keep=0)
-    assert "이웃 요약" not in folded[0].content
-    assert "히트" in folded[0].content
-
-
-def test_the_two_folds_are_separate_middleware_in_a_fixed_order() -> None:
-    """Independently switchable, and the fingerprint hashes this list's order."""
+def test_the_folds_are_one_middleware_and_the_kinds_are_what_switches() -> None:
+    """One `fold_context` middleware, and the fingerprint hashes the list's order."""
     arch = default_resolved_arch()
     names = middleware_names_for(arch)
 
-    assert "fold_scene_views" in names
-    assert "fold_knowledge_neighbours" in names
-    assert names.index("fold_knowledge_neighbours") == names.index("fold_scene_views") + 1
+    assert names.count("fold_context") == 1
+    assert "fold_scene_views" not in names
+    assert "fold_knowledge_neighbours" not in names
+    assert FoldKind.scene_view in fold_kinds_for(arch)
+    assert FoldKind.knowledge_neighbours in fold_kinds_for(arch)
 
 
 def test_turning_the_knowledge_fold_off_leaves_the_scene_fold_alone() -> None:
     arch = default_resolved_arch().model_copy(update={"fold_stale_knowledge": False})
-    names = middleware_names_for(arch)
+    kinds = fold_kinds_for(arch)
 
-    assert "fold_knowledge_neighbours" not in names
-    assert "fold_scene_views" in names
+    assert FoldKind.knowledge_neighbours not in kinds
+    assert FoldKind.scene_view in kinds
+    assert "fold_context" in middleware_names_for(arch)

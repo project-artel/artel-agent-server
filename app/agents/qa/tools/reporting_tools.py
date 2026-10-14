@@ -6,8 +6,12 @@
 
 from langchain_core.tools import BaseTool, tool
 
+from app.agents.qa.macro.for_step import macros_for_step, render_step_macro_hint
+from app.agents.qa.macro.lift import draft_for_step, offer
+from app.agents.qa.tools.phase import MAX_CONSECUTIVE_REFUSALS
 from app.agents.qa.tools.state import QaRunState
 from app.agents.qa.tools.tool_context import ToolContext
+from app.prompts import load_tool_description
 from app.qa.channel import bounded_operator_wait
 from app.qa.envelope import (
     IssuePayload,
@@ -18,32 +22,6 @@ from app.qa.envelope import (
     StepStatus,
 )
 from app.qa.schemas import QaStepResult
-
-
-# Interpolated for the same reason as CAPTURE_SCREEN_DESCRIPTION in
-# app/agents/qa/tools/observation_tools.py: the cap is the part the agent has to
-# ration, and a docstring cannot name it.
-REPORT_ISSUE_DESCRIPTION = """File a defect you found in the GAME, with the evidence for it.
-
-This is not the step verdict — `report_step` is. Use this when what you saw is
-wrong regardless of the scenario: a crash, a button that does nothing, a value
-that goes the wrong way, text that overflows its box. A step can fail without
-being a defect (the scenario may describe the game wrongly), and a step can pass
-while you notice one in passing.
-
-`severity` is one of {severities}, worst first:
-- BLOCKER: the game cannot be played past this point.
-- CRITICAL: a core feature is broken and nothing works around it.
-- MAJOR: an important feature is broken but there is a way around it.
-- MINOR: small or local damage.
-- TRIVIAL: cosmetic — wording, alignment, a wrong colour.
-
-`expected` and `actual` are what should have happened and what did. `reproduction`
-is the shortest list of steps that shows it again, oldest first; write it for
-someone who was not here.
-
-You may file {limit} of these in one run. One defect, one call — do not file the
-same broken screen again on the next step."""
 
 
 def render_closing_asks(state: QaRunState) -> str:
@@ -119,23 +97,10 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
     channel, state, arch = ctx.channel, ctx.state, ctx.arch
     _answer = ctx.answer
 
-    @tool
+    @tool(description=load_tool_description("wait_for_operator").body)
     async def wait_for_operator(
         thought: str, timeout_seconds: float = 60.0, step: int | None = None
     ) -> str:
-        """Stop and wait until the operator says something.
-
-        For when you cannot go on without a person: the step is ambiguous, the
-        game is in a state the scenario does not cover, or you asked them
-        something with `reply_to_operator` and the answer decides what you do
-        next. The run makes no progress while you are here, so ask the question
-        first and only then wait for it.
-
-        Returns what they said, or tells you nobody answered in time — silence is
-        not a failure, and you decide what to do with it. But do not settle in on
-        it: waiting is capped per call, and a couple of full waits is the whole
-        run's clock, spent on nothing.
-        """
         waited = bounded_operator_wait(timeout_seconds)
         messages = await channel.wait_for_operator(timeout_seconds)
         if not messages:
@@ -146,28 +111,138 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             )
         return _answer("The operator answered.", messages)
 
-    @tool
-    async def report_step(
+    def _capability_key_problem(capability_key: str) -> str | None:
+        """이 런이 이 키를 받은 적이 있나. 없으면 무엇이 잘못됐는지 한 줄.
+
+        보는 곳이 둘이다 — `list_scene_capabilities` 가 찍어 준 줄(`state`), 그리고 지금 서
+        있는 씬의 맥락 block 이 찍은 줄. `used_knowledge_ids` 가 `state.knows_of` 로 하는 것과
+        같은 검사이고, 이유도 같다: 지어낸 키도 저쪽에서는 진짜 행을 가리키고, 저쪽은 그것이
+        이 런이 본 행인지 알 방법이 없다.
+
+        서 있지 않은 씬의 키는 여기서 통과하지 못한다. `record_capability_verdict` 가 이미
+        같은 선을 긋고 있고(저쪽이 서 있지 않은 씬의 verdict 를 거절한다), 서 있지 않은 씬은
+        이 런이 지금 보고 있지 않은 씬이다.
+        """
+        if state.was_shown_capability_key(capability_key):
+            return None
+        context = channel.scene.scene_context
+        scene = (channel.scene.scene or channel.scene.pulse.scene or "").strip()
+        entry = context.entry_for(scene) if context is not None else None
+        printed = entry.printed_capabilities() if entry is not None else []
+        if any(item.capability_key == capability_key for item in printed):
+            return None
+        return (
+            f"`capability_key` {capability_key!r} is not a row this run has been shown, "
+            "so it was not recorded against this step. The verdict stands. Keys come "
+            "from the square brackets on a capability line in your scene context block "
+            "or in a `list_scene_capabilities` result — call that tool to find the row "
+            "you mean."
+        )
+
+    def _macro_draft(step: int, passed: bool) -> str:
+        """이 step 에 손으로 보낸 것을 macro 초안으로 만들어 내민다. macro 를 켠 런에만.
+
+        판정이 받아들여진 응답에 붙는다. 초안은 `MacroBook` 에 써 두므로 agent 가 할 일은
+        `register_macro` 한 번이다. 만들지 못했으면 아무 말도 안 붙인다
+        (`app/agents/qa/macro/lift.py`).
+
+        phase 를 강제하는 런이면 `expect_draft_review` 로 알린다. 이 함수는 `report_step` 본문
+        안에서 돌고 gate 의 `advance` 는 본문이 돌아온 뒤에 돌므로, 같은 호출의 `advance` 가
+        `UPDATE_MEMORY` 대신 `REVIEW_DRAFT` 로 보낸다. 초안을 못 만든 판정은 알리지 않으므로
+        그 step 은 종전대로 `UPDATE_MEMORY` 로 간다.
+
+        **통과한 판정에만 붙는다.** 실패한 step 에 보낸 것은 게임이 받아 주지 않은 순서라
+        macro 가 되면 안 된다. 실패 판정은 `drafted_steps` 에도 올리지 않는다 — 같은 step 을
+        나중에 통과로 다시 판정하면 그때 초안을 낼 수 있어야 한다.
+
+        내민 초안은 읽은 것으로 친다. 초안 원문이 응답에 그대로 실렸으므로 `edit_macro` 가
+        `read_macro` 를 또 요구하면 고쳐서 등록할 길이 막힌다.
+        """
+        if arch.macros != "on" or not passed or step in state.drafted_steps:
+            return ""
+        state.drafted_steps.add(step)
+        taken = set(state.macros.drafts) | set(state.macros.registrations)
+        # 시나리오 밖의 번호(모델이 지어낸 step)는 문장이 없다. 범위를 보고 빈 문자열로 둔다.
+        in_range = 1 <= step <= len(state.step_texts)
+        draft, _why = draft_for_step(
+            state.dispatches, step, taken, state.step_texts[step - 1] if in_range else ""
+        )
+        if draft is None:
+            return ""
+        state.macros.write(draft.name, draft.source)
+        state.macros.remember_read(draft.name)
+        state.offered_drafts[step] = draft.name
+        if state.phase_cycle is not None:
+            state.phase_cycle.expect_draft_review()
+        return offer(draft)
+
+    def _next_step_macro(next_step: int) -> str:
+        """다음 step 에 맞는 등록된 macro 이름을 대는 문장. macro 를 켠 런에만.
+
+        목록은 첫 메시지에 한 번 실리고 멀어지므로, 다음 step 번호가 적히는 이 답에서 한 번 더
+        말한다. 이 런의 등록을 지난 런의 것보다 앞에 둔다(`macro/for_step.py`).
+        """
+        if arch.macros != "on":
+            return ""
+        context = channel.scene.scene_context
+        scene_macros = context.macros if context is not None else []
+        found = macros_for_step(next_step, state.macros.registrations, scene_macros)
+        return render_step_macro_hint(next_step, found)
+
+    async def _record_verdict(
         step: int,
         passed: bool,
         message: str,
-        thought: str,
-        used_knowledge_ids: list[str] = [],
+        used_knowledge_ids: list[str],
+        capability_key: str | None = None,
+        learned: str | None = None,
+        asks_memory: bool = False,
     ) -> str:
-        """Record the verdict for one scenario step, with the evidence for it.
+        """두 `report_step` 모양이 함께 쓰는 몸통.
 
-        Call this once per step, right after you have observed the result of that
-        step's action. For a step that verifies an expected result, `passed` is
-        whether that result occurred (this is also its test case's verdict); for
-        any other step, `passed` is whether you carried the action out. `message`
-        should cite what you saw, and `thought` is how you reached the verdict.
-
-        `used_knowledge_ids` is for knowledge base entries that actually bore on
-        THIS verdict — ones you read and then judged differently because of. Give
-        the ids as they were printed to you, whether by a search or as a neighbour
-        line. Leave it empty when the step was decided by what you could see;
-        that is the ordinary case and nothing is lost by saying so.
+        `asks_memory` 는 `phase_cycle` 이 `in_verdict` 이상인가다. `off` 에서는 아래 두 인자가
+        schema 에 아예 없으므로 이 갈래는 한 줄도 안 돈다 — 기존 런 테스트가 왕복을 한 번도
+        더 치르지 않아야 한다는 것이 이 축의 조건이다(ARTEL-667).
         """
+        notes: list[str] = []
+
+        # `learned` 를 안 받았으면 되돌려 보낸다. 판정을 적기 **전**이다 — 뒤에 두면 다시
+        # 부른 호출이 같은 스텝의 판정을 두 번 쌓는다.
+        #
+        # 되돌려 보내는 것은 인자를 진짜 질문으로 만드는 유일한 방법이다. 빠뜨린 것을 말만
+        # 하고 지나가면 v16 이 문장으로 부탁하고 0 을 받은 그 실패를 그대로 재현한다. 대신
+        # 연속 상한을 둔다 — phase 거절과 같은 산수이고(`phase.py` 의
+        # `MAX_CONSECUTIVE_REFUSALS`), 상한에 닿으면 통과시키고 답이 없었다고 적는다.
+        if asks_memory and learned is None:
+            if state.verdict_memory_refusals < MAX_CONSECUTIVE_REFUSALS:
+                state.verdict_memory_refusals += 1
+                # `lite`·`full` 에서는 이 호출로 `VERIFY` 가 끝나면 안 된다. 판정이 하나도
+                # 안 적혔는데 다음 phase 로 가면 `UPDATE_MEMORY` 가 없는 판정을 두고 묻는다.
+                if state.phase_cycle is not None:
+                    state.phase_cycle.hold()
+                return (
+                    "Nothing was recorded — this report has no `learned`. Call "
+                    "`report_step` again with the same verdict and add it: one line a "
+                    'later run would otherwise work out again, or `learned: ""` to say '
+                    "this step left nothing worth keeping. The empty string is a real "
+                    "answer; leaving the argument out is not."
+                )
+            state.verdict_memory_refusals = 0
+            notes.append(
+                f"You have now left `learned` out {MAX_CONSECUTIVE_REFUSALS} times in a "
+                "row, so this verdict was recorded without it and the run is going on. "
+                "It stands on the record as unanswered, which is not the same as "
+                "nothing to write."
+            )
+        else:
+            state.verdict_memory_refusals = 0
+
+        key = (capability_key or "").strip()
+        if asks_memory and key:
+            problem = _capability_key_problem(key)
+            if problem is not None:
+                notes.append(problem)
+
         # The empty list default is never mutated — the ids are read once, below.
         # It is spelled as a literal rather than as `None` because this is a tool
         # schema the model fills in: an optional array is something it can simply
@@ -206,6 +281,9 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         # along here rather than in a frame of their own precisely so they cannot
         # change that — a second frame type would be a second thing to get wrong
         # about ending the run.
+        #
+        # `capability_key` 와 `learned` 도 같은 이유로 프레임에 안 실린다. 둘은 모델이 쓴
+        # 인자 그대로 `qa_log` 의 tool 호출 행에 남고, 파일럿이 세는 자리가 거기다.
         await channel.emit(
             MessageType.STATUS,
             StatusPayload(
@@ -223,24 +301,21 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         # this is not a refusal — but an agent told nothing would carry on
         # believing the entry was credited, and the ids it invents are exactly
         # what nobody would otherwise notice.
-        note = (
-            ""
-            if not rejected
-            else (
-                f"\n\n{len(rejected)} of the ids you cited are not entries this run "
+        if rejected:
+            notes.append(
+                f"{len(rejected)} of the ids you cited are not entries this run "
                 f"has been shown, so they were not recorded: {rejected}. The verdict "
                 "stands. Cite only ids printed to you by a search or a neighbour line."
             )
-        )
+        note = "".join(f"\n\n{line}" for line in notes) + _macro_draft(step, passed)
         if remaining <= 0:
             # 무엇을 남길지 묻는 자리이자 이유는 `render_closing_asks` 가 들고 있다. 여기서
             # 말하는 것은 그 자리가 여기라는 것뿐이다 — 매 스텝마다 붙이면 표가 뜻을 잃고,
             # `finish_run` 은 이미 닫는 쪽으로 기운 뒤다.
-            return _answer(
+            return _verdict_answer(
                 "Recorded. This step report does not close the run. That was the "
                 "last step — when you are done with the follow-up work below, "
-                f"call `finish_run` yourself:{render_closing_asks(state)}{note}",
-                channel.drain_operator_messages(),
+                f"call `finish_run` yourself:{render_closing_asks(state)}{note}"
             )
         # The verdict is recorded either way; what differs is the pull to keep
         # going. A failure is where the loop is most tempted to call it a day, so
@@ -248,10 +323,64 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         body = f"Recorded. {remaining} step(s) left — continue with step {step + 1}."
         if not passed:
             body = f"{body} A failed step is not a reason to stop."
-        return _answer(f"{body}{note}", channel.drain_operator_messages())
+        return _verdict_answer(f"{body}{note}{_next_step_macro(step + 1)}")
+
+    def _verdict_answer(body: str) -> str:
+        """`report_step` 의 답. `report_step_view` 가 꺼져 있으면 view 대신 한 줄을 붙인다(ARTEL-960).
+
+        `report_step` 은 게임을 조작하지 않고 답은 판정 뒤에 온다. 여기 실리는 view 는 그
+        판정에 쓰일 수 없고, 그 사이 움직인 것은 다음 action 결과가 이어서 싣는다.
+        """
+        messages = channel.drain_operator_messages()
+        if arch.report_step_view:
+            return _answer(body, messages)
+        deferred = channel.scene.pulse.defer_view()
+        if deferred:
+            body = f"{body}\n\n{deferred}"
+        return _answer(body, messages, screen=False)
+
+    # 두 모양을 `if` 로 가른다. 인자 하나를 `None` 기본값으로 늘 달아 두는 길도 있지만, 그러면
+    # `off` 런의 tool schema 가 움직이고 `arch_fingerprint` 가 그것을 tool 의 `args` 로 잡는다
+    # — 아무것도 안 켠 런이 다른 구조로 기록되는 것이 이 축이 피해야 할 첫 번째 일이다.
+    if arch.phase_cycle.remembers_in_verdict:
+
+        @tool(description=load_tool_description("report_step_memory").body)
+        async def report_step(
+            step: int,
+            passed: bool,
+            message: str,
+            thought: str,
+            used_knowledge_ids: list[str] = [],
+            capability_key: str | None = None,
+            learned: str | None = None,
+        ) -> str:
+            # What the agent reads is `qa_run/<version>/tool_report_step_memory.md`.
+            return await _record_verdict(
+                step,
+                passed,
+                message,
+                used_knowledge_ids,
+                capability_key=capability_key,
+                learned=learned,
+                asks_memory=True,
+            )
+
+    else:
+
+        @tool(description=load_tool_description("report_step").body)
+        async def report_step(
+            step: int,
+            passed: bool,
+            message: str,
+            thought: str,
+            used_knowledge_ids: list[str] = [],
+        ) -> str:
+            # What the agent reads is `qa_run/<version>/tool_report_step.md`.
+            return await _record_verdict(step, passed, message, used_knowledge_ids)
+
 
     @tool(
-        description=REPORT_ISSUE_DESCRIPTION.format(
+        description=load_tool_description("report_issue").body.format(
             severities="/".join(s.value for s in IssueSeverity),
             limit=arch.max_issues_per_run,
         )
@@ -306,16 +435,8 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             channel.drain_operator_messages(),
         )
 
-    @tool
+    @tool(description=load_tool_description("finish_run").body)
     async def finish_run(passed: bool, summary: str, thought: str) -> str:
-        """End the run. Call this once, after the last step has been reported.
-
-        A step with no verdict yet is worth attempting before you close: the run
-        was opened to find out about all of them. Calling this with steps still
-        unreported sends you back to them once.
-
-        `thought` is how you reached the overall verdict; it goes on the timeline.
-        """
         state.finish_attempts += 1
 
         # A step the agent never attempted is the failure this whole change is
@@ -344,13 +465,8 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         )
         return "The run is closed."
 
-    @tool
+    @tool(description=load_tool_description("reply_to_operator").body)
     async def reply_to_operator(message: str, thought: str, step: int | None = None) -> str:
-        """Answer the operator. Use when they asked something, not for progress.
-
-        `thought` is why you are answering this way; it goes on the timeline so a
-        reviewer can see the reasoning behind what the operator was told.
-        """
         await channel.say(message, step)
         return _answer("Sent.", channel.drain_operator_messages())
 

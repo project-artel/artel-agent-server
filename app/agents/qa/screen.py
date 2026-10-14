@@ -19,6 +19,7 @@ selector 는 화면 판정에 안 들어가고, 목록은 `capability.control_se
 짐작을 가르는 선.
 """
 
+from app.prompts import load_tool_description
 from app.qa.envelope import ScreenSelectorResultPayload
 
 # 목록에 앉힐 항목이 무엇을 가리키는가. orchestration 의 `ScreenSelectorMatch` 와 같은 셋이고,
@@ -33,81 +34,10 @@ SCREEN_SELECTOR_MATCHES = (SELECTOR_MATCH, PATH_MATCH, SUBTREE_MATCH)
 # 왕복을 하나 아끼려고 여기서도 본다.
 MAX_PATTERN_LENGTH = 512
 
-# 두 설명이 공유하는 부분. 인자의 뜻은 두 tool 에서 글자 그대로 같고, 같은 것을 두 번 적으면
-# 언젠가 한쪽만 고쳐진다.
-_HOW_TO_NAME_IT = """`pattern` is an EXACT string, never a regular expression. There is no wildcard
-here: it is compared literally, character for character, so `.*` matches no
-selector at all and comes back refused. The pattern is also checked against what
-this scene has actually been seen holding, so a typo is refused and told to you
-rather than stored as an entry that silently matches nothing. Copy the string out
-of the pulse view in front of you.
+def screen_tool_description(tool_name: str) -> str:
+    """What the model reads for one screen selector tool, from `qa_run/<version>/tool_<tool_name>.md`."""
+    return load_tool_description(tool_name).body
 
-`match` says what the pattern is:
-
-- `selector` — one exact selector, sibling indices and all, as the pulse view
-  prints it: `CombineSystem[7]/CombineZone[1]/Zone1[0]`. Use it when that exact
-  object is the thing that differs.
-- `path` — the same selector with every sibling index stripped:
-  `CombineSystem/CombineZone/Zone1`. Use it when the indices move between
-  observations, which they do whenever the game spawns and destroys things, and
-  the object is the same object each time.
-- `subtree` — that path and everything below it, matched at node boundaries.
-  Use it only when the whole branch appears and disappears as one.
-
-`reason` is what you saw, in one sentence, written for someone who was not here.
-It is required. An entry nobody can retrace is an entry nobody can ever decide to
-remove, and this list is meant to be maintained rather than accumulated.
-
-The scene is the one you are standing on right now. You do not name it and you
-cannot reach another scene's list from here — a scene you are not standing on is
-one you have not observed, so you have no grounds about it."""
-
-INCLUDE_SCREEN_SELECTOR_DESCRIPTION = f"""Tell the content map that this selector is one of the things that tells screens apart in this scene.
-
-Call this when the game is plainly showing you a DIFFERENT screen — a panel
-opened over the board, a menu replaced what was there, a result overlay came up —
-and the `content map:` line in your scene view still names the same screen id it
-named before. That mismatch means this scene's list is missing the selector that
-would have told the two apart, and you are standing in the only place from which
-it can be seen.
-
-Do not call it on a hunch. Every selector added is one more axis along which this
-scene's screens can split, and a map split into dozens of near-identical screens
-is worse than one that merged two — nobody can read it and nothing can be built
-on it. The bar is a difference you can SEE: something appeared, disappeared, or
-changed at the same moment the map stayed put. A selector that merely looks
-important, or that you think might matter later, does not clear it.
-
-**This does not un-merge the screens that already merged.** Those rows were
-written without this selector's value in them, so there is nothing to restore and
-the map cannot go back and split them — that value is gone for good. What you
-change here takes effect from your NEXT observation onward, and from the first
-observation of every run after this one. So make the call once, when you see the
-mismatch, and carry on with the step: calling it again will not recover the past,
-and the screen you are on now will keep the id it has.
-
-{_HOW_TO_NAME_IT}"""
-
-EXCLUDE_SCREEN_SELECTOR_DESCRIPTION = f"""Tell the content map that this selector does NOT tell screens apart in this scene.
-
-Call this when the map has split one screen into several that are the same screen
-to a player: the `content map:` line keeps naming a new screen id while the game
-in front of you has not changed in any way you could describe to someone else.
-Look at what the line says it is telling screens apart by — a counter, a timer, a
-spawned object, anything whose value moves on its own — and name that one here.
-
-This is the direction that repairs the past. Excluding a selector rewrites the
-screens this scene has already recorded, folds the ones that become identical
-onto a single row, and the result tells you how many disappeared. That is worth
-doing when the scene is genuinely over-split, and worth being careful about for
-the same reason: the folded rows do not come back, and a later entry putting the
-selector back cannot restore the value the fold erased.
-
-The bar is the mirror of the other tool's. Do not exclude a selector because it
-looks noisy — exclude it because you have watched the screen NOT change while
-the map said it did.
-
-{_HOW_TO_NAME_IT}"""
 
 # 답이 안 온 경우에 붙이는 말. 지식 쓰기의 `UNCONFIRMED_WRITE` 와 같은 판단이다 — 침묵을
 # 실패로 옮겨 적으면 모델이 같은 항목을 다시 보낸다.
