@@ -203,6 +203,18 @@ class MacroPredicateCondition(_Frozen):
     arguments: tuple[MacroArgument, ...] = ()
 
 
+# `find(...)` 의 모양. 대입의 오른쪽이 주로 쓰지만, 아래 `MacroContextFindAll` 이 먼저
+# 참조하므로 여기 둔다. Python 3.13 이하(CI image 는 3.12)에서는 class 본문의 annotation 이
+# 정의되는 순간 평가되어, 뒤에 두면 import 할 때 `NameError` 가 난다.
+class MacroFindValue(_Frozen):
+    """`find(label=..., name=..., under=...)`. keyword 만 받는다."""
+
+    kind: Literal["find"] = "find"
+    label: MacroStringRef | None = None
+    name: MacroStringRef | None = None
+    under: MacroStringRef | None = None
+
+
 # --- Jev 에게 넘기는 context ----------------------------------------------------
 #
 # `decide(...)` 와 `ask(...)` 의 keyword 인자 하나가 Jev 요청 `state` 의 key 하나다. key 는
@@ -298,15 +310,6 @@ MacroCondition = Annotated[
 
 
 # --- 대입의 오른쪽 -------------------------------------------------------------
-
-
-class MacroFindValue(_Frozen):
-    """`find(label=..., name=..., under=...)`. keyword 만 받는다."""
-
-    kind: Literal["find"] = "find"
-    label: MacroStringRef | None = None
-    name: MacroStringRef | None = None
-    under: MacroStringRef | None = None
 
 
 class MacroSelectorValue(_Frozen):
