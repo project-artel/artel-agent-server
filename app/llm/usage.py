@@ -31,13 +31,10 @@ from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.outputs import LLMResult
 
 from app.config import get_settings
-from app.llm.models import MODEL_SPECS, LLMModel
+from app.llm.catalog import get_model_catalog
+from app.llm.models import ModelPricing
 
 logger = logging.getLogger(__name__)
-
-# `LLMModel(model)` 은 모르는 값에 ValueError 를 던진다. 사용량 기록이 예외를 내면
-# 안 되므로(이 모듈 전체가 그 규율이다) 던지기 전에 걸러 낸다.
-_MODEL_VALUES = frozenset(item.value for item in LLMModel)
 
 USAGE_PATH = "/internal/llm-usage"
 
@@ -73,6 +70,20 @@ def _isoformat(moment: datetime) -> str:
     )
 
 
+def _catalog_pricing(model: str) -> ModelPricing | None:
+    """catalog 에 적힌 `model` 의 단가. 모르는 id 거나 catalog 를 못 읽으면 None 이다.
+
+    사용량 기록이 예외를 내면 안 되므로(이 모듈 전체가 그 규율이다) catalog 의 어떤
+    실패도 여기서 None 으로 바꾼다. 꺼진 row 의 단가도 그대로 쓴다.
+    """
+    try:
+        spec = get_model_catalog().get(model)
+    except Exception:  # noqa: BLE001 - 사용량 기록은 어떤 이유로도 실패하면 안 된다.
+        logger.debug("[llm-usage] model catalog unavailable; cost left empty")
+        return None
+    return spec.pricing if spec is not None else None
+
+
 def _estimate_cost(
     model: str,
     *,
@@ -93,16 +104,36 @@ def _estimate_cost(
     before the full-price rate is applied — the same containment rule the
     receiving side documents. `cache_write_tokens` is not, and is priced whole.
     """
-    spec = MODEL_SPECS.get(LLMModel(model)) if model in _MODEL_VALUES else None
-    pricing = spec.pricing if spec else None
+    pricing = _catalog_pricing(model)
     if pricing is None:
         return None
     full_input = max(input_tokens - cached_input_tokens, 0)
+    # Anthropic 의 장문 요금은 prompt 가 임계를 넘으면 요청 전체에 적용된다.
+    # Bedrock usage 에서 cache write 는 `input_tokens` 밖에 따로 오므로 함께 세야 실제
+    # prompt 길이가 된다.
+    long_context = (
+        pricing.long_context_threshold_tokens is not None
+        and input_tokens + cache_write_tokens > pricing.long_context_threshold_tokens
+    )
+    if long_context:
+        assert pricing.long_context_input_per_mtok is not None
+        assert pricing.long_context_output_per_mtok is not None
+        assert pricing.long_context_cache_write_per_mtok is not None
+        assert pricing.long_context_cache_read_per_mtok is not None
+        input_rate = pricing.long_context_input_per_mtok
+        output_rate = pricing.long_context_output_per_mtok
+        cache_write_rate = pricing.long_context_cache_write_per_mtok
+        cache_read_rate = pricing.long_context_cache_read_per_mtok
+    else:
+        input_rate = pricing.input_per_mtok
+        output_rate = pricing.output_per_mtok
+        cache_write_rate = pricing.cache_write_per_mtok
+        cache_read_rate = pricing.cache_read_per_mtok
     return (
-        full_input * pricing.input_per_mtok
-        + cached_input_tokens * pricing.cache_read_per_mtok
-        + cache_write_tokens * pricing.cache_write_per_mtok
-        + output_tokens * pricing.output_per_mtok
+        full_input * input_rate
+        + cached_input_tokens * cache_read_rate
+        + cache_write_tokens * cache_write_rate
+        + output_tokens * output_rate
     ) / 1_000_000
 
 

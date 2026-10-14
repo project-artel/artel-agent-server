@@ -26,7 +26,7 @@ from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.vision import QaCaptureVisionMiddleware
 from app.llm.chat_model import build_chat_model
-from app.llm.models import LLMModel, get_model_spec
+from app.llm.models import get_model_spec
 from app.prompts import load_prompt
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory
@@ -185,7 +185,7 @@ def build_middleware(
             # Not the run's model, and not `cache_prompt`: summarizing is one
             # call over a prefix nothing will send again, so caching it would pay
             # the write premium for a read that never happens.
-            model=build_chat_model(LLMModel(config.compaction_model)),
+            model=build_chat_model(config.compaction_model),
             summary_prompt=load_prompt(
                 COMPACTION_PROMPT_AGENT, COMPACTION_ROLE, config.compaction_prompt_version
             ).body,
@@ -428,7 +428,7 @@ class QaRunner:
                 # prompt change from a structural one.
                 "metadata": {
                     "qa_try_id": channel.qa_try_id,
-                    "model": config.model.value,
+                    "model": config.model,
                     "language": config.language.value,
                     "prompt_version": config.prompt_version,
                     "agent_arch": config.agent_arch,

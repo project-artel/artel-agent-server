@@ -29,7 +29,7 @@ from app.agents.scenario.prompt import (
 )
 from app.llm.chat_model import select_structured_method
 from app.prompts import load_prompt
-from app.llm.models import LLMModel, ReasoningConfig
+from app.llm.models import ReasoningConfig
 from app.sessions.channel import ScenarioChannel
 
 
@@ -280,8 +280,8 @@ def test_language_directives_cover_every_language() -> None:
 
 
 def test_select_structured_method_by_model() -> None:
-    assert select_structured_method(LLMModel.gpt_6_luna) == "json_schema"
-    assert select_structured_method(LLMModel.gemma_4_free) == "json_mode"
+    assert select_structured_method("openai/gpt-5.6-luna") == "json_schema"
+    assert select_structured_method("google/gemma-4-31b-it:free") == "json_mode"
 
 
 # ── The test case list (ARTEL-319) ─────────────────────────────────────────────

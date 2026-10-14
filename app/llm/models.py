@@ -1,16 +1,16 @@
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 
 class LLMProvider(StrEnum):
     """Values are the author segment of an OpenRouter slug.
 
-    Kept identical to the slug prefix so a spec's provider can be checked
-    against the slug sitting next to it in `MODEL_SPECS` by reading, and so
-    `build_chat_model`'s Anthropic-only cache branch cannot drift.
+    Kept identical to the slug prefix so a catalog row's provider can be checked
+    against its id by reading, and so `build_chat_model`'s Anthropic-only cache
+    branch and `_bedrock`'s provider branch cannot drift.
     """
 
     openai = "openai"
@@ -20,38 +20,6 @@ class LLMProvider(StrEnum):
     moonshotai = "moonshotai"
     zai = "z-ai"
     qwen = "qwen"
-
-
-class LLMModel(StrEnum):
-    """Selectable models. Values are OpenRouter model slugs, except where noted.
-
-    Slugs and the capability flags below reflect the live
-    ``GET https://openrouter.ai/api/v1/models`` catalog: a model advertises
-    strict json_schema support via ``structured_outputs`` in its
-    ``supported_parameters`` (``response_format`` alone means json_object mode
-    only), image input via ``image`` in ``architecture.input_modalities``, and
-    its window as ``context_length`` with ``top_provider.max_completion_tokens``.
-    Re-verify all three against that endpoint before adding or renaming entries.
-    """
-
-    gpt_6_1_sol = "openai/gpt-6.1-sol"
-    gpt_6_astra = "openai/gpt-6-astra"
-    gpt_6_luna = "openai/gpt-6-luna"
-    gpt_5_6_terra = "openai/gpt-5.6-terra"
-    claude_opus_5_5 = "anthropic/claude-opus-5.5"
-    claude_sonnet_5_5 = "anthropic/claude-sonnet-5.5"
-    gemini_3_8_flash = "google/gemini-3.8-flash"
-    gemma_4_free = "google/gemma-4-31b-it:free"
-    grok_4_7 = "x-ai/grok-4.7"
-    kimi_k3 = "moonshotai/kimi-k3"
-    glm_5_3_flash = "z-ai/glm-5.3-flash"
-    qwen3_7_max = "qwen/qwen3.7-max"
-
-    # 여기부터는 OpenRouter slug 가 아니다. `bedrock/` 접두를 뗀 나머지가 그대로
-    # Bedrock 의 inference profile ID 이고, `build_chat_model` 이 그 접두를 보고
-    # `ChatBedrockConverse` 로 간다. 리전 접두(`us.`)와 판(`-v1:0`)까지 적는 것은
-    # 어느 프로파일로 청구되는지가 이 문자열 하나로 정해지기 때문이다.
-    claude_haiku_4_5_bedrock = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
 class ReasoningKind(StrEnum):
@@ -111,10 +79,26 @@ class ModelPricing:
     # 이 단가를 확인한 날과 어디서 봤는지. 숫자만 있으면 언제 것인지 알 수 없다.
     as_of: str
     source: str
+    # `long_context_threshold_tokens` 를 넘는 prompt 전체에 적용되는 두 번째 단가다.
+    # None 이면 context 길이와 무관하게 위 단가 하나만 쓴다.
+    long_context_threshold_tokens: int | None = None
+    long_context_input_per_mtok: float | None = None
+    long_context_output_per_mtok: float | None = None
+    long_context_cache_write_per_mtok: float | None = None
+    long_context_cache_read_per_mtok: float | None = None
 
 
 @dataclass(frozen=True)
 class ModelSpec:
+    """orchestration server 의 `llm_model` 테이블 row 하나.
+
+    `app/llm/catalog.py` 가 `GET /internal/llm-models` 응답으로 만든다. 값은 row 를
+    추가하는 migration 에서 serving provider 의 catalog 와 대조한다 — OpenRouter 의
+    `GET /api/v1/models`, `bedrock/` row 는 AWS model card.
+    """
+
+    # OpenRouter slug, 또는 `bedrock/` 뒤에 Bedrock inference profile ID.
+    id: str
     provider: LLMProvider
     # True when the model advertises `structured_outputs` (strict json_schema).
     # Models with only `response_format` fall back to json_object mode.
@@ -139,10 +123,8 @@ class ModelSpec:
     #
     # A model without vision is not a failure: the QA run drops to text-only rather
     # than refusing to start, and the capture tool is left out of its toolset so it
-    # cannot ask for a picture nothing can read. `qwen3_7_max` is the one entry
-    # that takes this path — it advertises `text` alone — so a vision arm cannot
-    # be run on it and a measurement that compares it against a seeing model is
-    # comparing two things at once.
+    # cannot ask for a picture nothing can read. Every model in the catalog
+    # currently sees, so that path is covered by tests rather than by a live model.
     input_modalities: tuple[str, ...] = ("text", "image")
     # Verified against the live catalog's `reasoning` object. None means the
     # model must not receive OpenRouter's reasoning parameter.
@@ -157,8 +139,8 @@ class ModelSpec:
     reasoning_min_tokens: int | None = None
     reasoning_max_tokens: int | None = None
     # 지금 이 값을 채우는 항목은 없다. Gemini 2.5 Pro 가 유일했고 그것을 카탈로그에서
-    # 뺐다. 필드는 남긴다 — `list_models` 가 `step` 을 계속 싣고, 예산을 단위로 받는
-    # 모델이 다시 들어오면 그 자리다.
+    # 뺐다. 필드는 남긴다 — catalog 의 `reasoning.step` 이 계속 실리고, 예산을 단위로
+    # 받는 모델이 다시 들어오면 그 자리다.
     reasoning_step: int | None = None
     # 백만 토큰당 달러. **provider 가 청구액을 안 알려주는 모델에만 채운다.**
     #
@@ -173,255 +155,56 @@ class ModelSpec:
     # `cache_write` 는 캐시에 처음 실을 때, `cache_read` 는 캐시에서 읽어 올 때의 단가다.
     # 셋 다 input 계열이지만 배수가 달라 따로 적는다.
     pricing: ModelPricing | None = None
-    # 사용자가 고르지 않았을 때 켤 예산. **provider 기본값이 없는 모델에만 쓴다.**
-    #
-    # OpenRouter 의 GPT-5.6 은 파라미터를 생략하면 자기 기본값(medium)으로 추론한다.
-    # Bedrock 의 Anthropic 은 생략하면 아예 안 한다 — `budget_tokens` 가 필수이고
-    # 그것을 안 주면 `thinking` 을 켤 수 없다. 그래서 같은 "안 골랐다"가 두 모델에서
-    # 정반대로 작동했고, 한쪽만 추론하는 상태로 둘을 비교하고 있었다.
-    #
-    # 여기에 값이 있으면 고르지 않은 런도 그 예산으로 켠다. 없으면 provider 에게
-    # 맡긴다 — OpenRouter 쪽이 그 경우다.
-    reasoning_default_tokens: int | None = None
+    # 관리자가 끈 모델은 False 다. 사용자가 고르는 요청(`EnabledLLMModel`)만 이 값을 보고
+    # 거절한다. router·compaction·사용량 단가처럼 내부에서 쓰는 쪽은 꺼진 row 도 그대로 쓴다.
+    enabled: bool = True
 
     @property
     def supports_vision(self) -> bool:
         return "image" in self.input_modalities
 
 
-MODEL_SPECS: dict[LLMModel, ModelSpec] = {
-    LLMModel.claude_haiku_4_5_bedrock: ModelSpec(
-        provider=LLMProvider.anthropic,
-        supports_strict_json=True,
-        label="Claude Haiku 4.5 (AWS Bedrock)",
-        # 실측한 창은 200,000 이다(195,011 통과, 그 위 `prompt is too long`). 거기서
-        # 출력 예약 16,384 를 뺀다 — `chat_model` 의 `max_tokens` 계산(예산×여유 +
-        # `OUTPUT_RESERVE`)과 같은 수여야 한다. 예산은 상한이 아니라 목표치라(실측:
-        # 목표 4,096 에 8,188 을 생각하고 잘렸다) 목표 바로 위에 상한을 두면 무거운
-        # 과제에서 답도 도구 호출도 없이 끝난다.
-        #
-        # 앞서 136,000 으로 적었던 것은 근거 없는 수였다. 그 값이 압축 임계를 정하므로
-        # 200k 창을 68% 만 쓰고 있었다.
-        max_input_tokens=183_616,
-        input_modalities=("text", "image"),
-        # Anthropic 은 `effort` 를 안 받는다. 토큰 예산으로만 켠다.
-        reasoning=ReasoningKind.max_tokens,
-        # Anthropic 최소치. 이보다 작으면 `thinking` 이 거절된다.
-        reasoning_min_tokens=1_024,
-        reasoning_max_tokens=32_000,
-        # Luna 의 medium 이 런당 1,500~5,000 추론 토큰을 썼다(실측 3,300 호출).
-        # 그 중간이다 — 두 모델을 나란히 재려면 이 축이 비슷해야 한다.
-        reasoning_default_tokens=4_096,
-        # Bedrock 은 응답에 청구액을 안 싣는다. 계정 단위 CloudWatch 로만 보이고 그것은
-        # 런에 안 붙어서, 이 표가 없으면 런 하나가 얼마였는지 영영 못 본다.
-        #
-        # **캐시 쓰기는 TTL 에 따라 단가가 다르다** — 5 분 $1.25, 1 시간 $2.00. 여기 값이
-        # 5 분인 것은 우리가 그 TTL 로 쓰고 있어서다(응답의 `ephemeral_5m_input_tokens`).
-        # 캐시 TTL 을 바꾸면 이 수도 함께 바꿔야 하고, 안 바꾸면 계산이 조용히 낮게 나온다.
-        #
-        # 배치 추론은 절반이다($0.50 / $2.50). 우리는 안 쓰므로 안 적는다 — 쓰게 되면
-        # 같은 호출에 단가가 둘이 되므로 이 자리가 아니라 호출 쪽이 골라야 한다.
-        pricing=ModelPricing(
-            input_per_mtok=1.00,
-            output_per_mtok=5.00,
-            cache_write_per_mtok=1.25,
-            cache_read_per_mtok=0.10,
-            as_of="2026-09-03",
-            source="AWS 콘솔, Claude Haiku 4.5 / us-west-2 / on-demand",
-        ),
-    ),
-    # The four below share one window, one modality set and one effort set —
-    # 1,050,000 less the 128,000 the top provider reserves for the completion,
-    # `text,image,file`, and all five modelled efforts with `medium` as the
-    # provider's default. They differ only in which checkpoint OpenRouter is
-    # serving, which is the axis a QA run measures.
-    #
-    # `6.1` exists for Sol and not for the other three; `6` exists for Astra and
-    # Luna and not for Terra. These are the newest of each family the catalog
-    # carries, re-read on 2026-10-06. Terra at `5.6` is not an oversight — there
-    # is no `gpt-6-terra`.
-    LLMModel.gpt_6_1_sol: ModelSpec(
-        provider=LLMProvider.openai,
-        supports_strict_json=True,
-        label="GPT-6.1 Sol",
-        max_input_tokens=922_000,
-        input_modalities=("text", "image", "file"),
-        # `reasoning.mandatory` is true here and false for Luna and Terra, so
-        # this one reasons whatever the request says. `ReasoningEffort` models
-        # all five it advertises; there is no sixth `none` to leave out.
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=tuple(ReasoningEffort),
-    ),
-    LLMModel.gpt_6_astra: ModelSpec(
-        provider=LLMProvider.openai,
-        supports_strict_json=True,
-        label="GPT-6 Astra",
-        max_input_tokens=922_000,
-        input_modalities=("text", "image", "file"),
-        # Mandatory reasoning, five efforts, like 6.1 Sol.
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=tuple(ReasoningEffort),
-    ),
-    LLMModel.gpt_6_luna: ModelSpec(
-        provider=LLMProvider.openai,
-        supports_strict_json=True,
-        label="GPT-6 Luna",
-        max_input_tokens=922_000,
-        input_modalities=("text", "image", "file"),
-        # Six advertised efforts, the unmodelled `none` included, and reasoning
-        # is optional rather than mandatory — same as 5.6 Luna below.
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=tuple(ReasoningEffort),
-    ),
-    LLMModel.gpt_5_6_terra: ModelSpec(
-        provider=LLMProvider.openai,
-        supports_strict_json=True,
-        label="GPT-5.6 Terra",
-        max_input_tokens=922_000,
-        input_modalities=("text", "image", "file"),
-        # Optional reasoning and six advertised efforts, like 6 Luna.
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=tuple(ReasoningEffort),
-    ),
-    # Both carry the same 1,000,000 window less the 128,000 completion reserve,
-    # `text,image,file`, and five efforts. The difference from Opus 5 and
-    # Sonnet 5 below is that reasoning is `mandatory` here and the provider's
-    # default effort is `high` rather than `medium` — so an arm that omits
-    # effort is not comparing the same thing across the two generations.
-    LLMModel.claude_opus_5_5: ModelSpec(
-        provider=LLMProvider.anthropic,
-        supports_strict_json=True,
-        label="Claude Opus 5.5",
-        max_input_tokens=872_000,
-        input_modalities=("text", "image", "file"),
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=tuple(ReasoningEffort),
-    ),
-    LLMModel.claude_sonnet_5_5: ModelSpec(
-        provider=LLMProvider.anthropic,
-        supports_strict_json=True,
-        label="Claude Sonnet 5.5",
-        max_input_tokens=872_000,
-        input_modalities=("text", "image", "file"),
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=tuple(ReasoningEffort),
-    ),
-    LLMModel.gemini_3_8_flash: ModelSpec(
-        provider=LLMProvider.google,
-        supports_strict_json=True,
-        label="Gemini 3.8 Flash",
-        max_input_tokens=983_040,
-        input_modalities=("text", "image", "file", "audio", "video"),
-        # `reasoning_effort` 를 받고 세 개만 advertise 하며, 추론이 mandatory 라
-        # 요청이 빼면 provider 의 `medium` 으로 돈다. 남은 둘(`max`·`xhigh`)을
-        # 요청하면 런 중간에 provider 400 이고, 가까운 effort 로 내려가지 않는다.
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=(
-            ReasoningEffort.high,
-            ReasoningEffort.medium,
-            ReasoningEffort.low,
-        ),
-    ),
-    # json_object-only (no `structured_outputs`): exercises the strict fallback.
-    LLMModel.gemma_4_free: ModelSpec(
-        provider=LLMProvider.google,
-        supports_strict_json=False,
-        label="Gemma 4 (free)",
-        max_input_tokens=229_376,
-        input_modalities=("text", "image", "video"),
-    ),
-    LLMModel.grok_4_7: ModelSpec(
-        provider=LLMProvider.xai,
-        supports_strict_json=True,
-        label="Grok 4.7",
-        # 50k out of a 500k window, because the top provider reserves 450k of
-        # it for the completion. That is by far the smallest budget in the
-        # catalog — an eighteenth of Sol's — so a QA run on this model compacts
-        # many times where the others never trigger. Four efforts, no `max`.
-        max_input_tokens=50_000,
-        input_modalities=("text", "image", "file"),
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=(
-            ReasoningEffort.xhigh,
-            ReasoningEffort.high,
-            ReasoningEffort.medium,
-            ReasoningEffort.low,
-        ),
-    ),
-    LLMModel.kimi_k3: ModelSpec(
-        provider=LLMProvider.moonshotai,
-        supports_strict_json=True,
-        label="Kimi K3",
-        # The same reservation story as Grok: a 1,048,576 window with 943,718
-        # of it held for the completion.
-        max_input_tokens=104_858,
-        input_modalities=("text", "image", "video"),
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=(
-            ReasoningEffort.max,
-            ReasoningEffort.high,
-            ReasoningEffort.low,
-        ),
-    ),
-    LLMModel.glm_5_3_flash: ModelSpec(
-        provider=LLMProvider.zai,
-        supports_strict_json=True,
-        label="GLM-5.3 Flash",
-        # The same reservation story as Kimi K3 above, and nearly the same
-        # numbers: a 1,048,576 window with 943,717 held for the completion.
-        # This read 1_179_648 until 2026-10-06 — larger than the whole window,
-        # so `QaCompactionMiddleware` could never reach its trigger fraction and
-        # a long run on this model was refused by the provider instead of
-        # compacting. That is the failure `max_input_tokens` exists to prevent.
-        max_input_tokens=104_859,
-        input_modalities=("text", "image", "video"),
-        reasoning=ReasoningKind.effort,
-        reasoning_efforts=(
-            ReasoningEffort.max,
-            ReasoningEffort.high,
-            ReasoningEffort.low,
-        ),
-    ),
-    # 3.8 Max is **gone from the catalog** as of 2026-10-06 — picking it got a
-    # provider refusal, not a degradation — so it is replaced rather than kept
-    # beside the newer slug the way Grok and Gemini are. 3.7 Max is what Qwen
-    # serves now, and it is a different model in two ways that matter:
-    #
-    # * **Text only.** 3.8 was carried here as `text,image,video`; 3.7
-    #   advertises `text` alone, so a QA run on it has no capture tool. That is
-    #   a supported shape (see `input_modalities`), not a defect, but it makes
-    #   this the one catalog entry a vision arm cannot use.
-    # * **No effort axis.** Its `reasoning` object carries no
-    #   `supported_efforts` and `reasoning_effort` is absent from
-    #   `supported_parameters`, so `reasoning` is left None here: a request must
-    #   not send OpenRouter's reasoning parameter at all. Turning reasoning off
-    #   still works — `ReasoningConfig.disabled` is valid for every model.
-    LLMModel.qwen3_7_max: ModelSpec(
-        provider=LLMProvider.qwen,
-        supports_strict_json=True,
-        label="Qwen3.7 Max",
-        max_input_tokens=868_928,
-        input_modalities=("text",),
-    ),
-}
+def get_model_spec(model: str) -> ModelSpec:
+    """`model` 의 catalog row. catalog 에 없으면 `ValueError` 다.
+
+    `enabled` 는 보지 않는다. 꺼진 모델을 거절하는 것은 `EnabledLLMModel` 의 일이다.
+    catalog 를 한 번도 못 받았으면 `ModelCatalogUnavailableError` 가 그대로 나간다 —
+    `ValueError` 가 아니므로 요청 검증에서 422 로 바뀌지 않는다.
+    """
+    from app.llm.catalog import get_model_catalog
+
+    catalog = get_model_catalog()
+    spec = catalog.get(model)
+    if spec is None:
+        known = ", ".join(catalog)
+        raise ValueError(f"Model '{model}' is not in the catalog. Known: {known}.")
+    return spec
 
 
-# Moved off `gpt-5.6-luna` on 2026-10-06 when that slug left the catalog along
-# with `gpt-5.6-sol` and `gpt-chat-latest`. `gpt-6-luna` is the same family's
-# newest entry, so a deployment that never set `DEFAULT_MODEL` keeps reasoning
-# at the provider's `medium` with the same window and modalities as before.
-#
-# This is still a behaviour change for anyone relying on the constant: runs that
-# do not name a model now go to a different checkpoint, and a comparison that
-# straddles the change is not about one model.
-DEFAULT_MODEL: LLMModel = LLMModel.gpt_6_luna
+def require_known_model(model: str) -> str:
+    """catalog 에 있는 id 면 그대로 돌려준다. `enabled` 는 보지 않는다."""
+    get_model_spec(model)
+    return model
 
 
-def get_model_spec(model: LLMModel) -> ModelSpec:
-    try:
-        return MODEL_SPECS[model]
-    except KeyError as exc:
-        raise ValueError(f"No spec registered for model '{model}'.") from exc
+def require_enabled_model(model: str) -> str:
+    """catalog 에 있고 관리자가 끄지 않은 id 면 그대로 돌려준다."""
+    if not get_model_spec(model).enabled:
+        raise ValueError(f"Model '{model}' is disabled by an administrator.")
+    return model
+
+
+# 모델 id. OpenRouter slug 이거나 `bedrock/` 뒤에 Bedrock inference profile ID 를 붙인
+# 문자열이다. id 목록은 orchestration server 의 `llm_model` 테이블에 있으므로 enum 이
+# 아니라, pydantic 이 값을 읽을 때 catalog 와 대조하는 문자열이다. 꺼진 row 도 통과한다.
+LLMModel = Annotated[str, AfterValidator(require_known_model)]
+
+# 사용자가 고른 모델을 싣는 요청 필드의 타입. 관리자가 끈 row 도 거절해서 요청이 422 로
+# 끝난다.
+EnabledLLMModel = Annotated[str, AfterValidator(require_enabled_model)]
+
+
+DEFAULT_MODEL: str = "openai/gpt-5.6-luna"
 
 
 def validate_reasoning(
@@ -467,49 +250,3 @@ def validate_reasoning(
                 f"Model '{model}' requires reasoning.max_tokens <= {maximum}."
             )
     return reasoning
-
-
-def list_models() -> list[dict[str, Any]]:
-    """Model catalog for frontend selection UIs."""
-    return [
-        {
-            "id": model.value,
-            "label": spec.label,
-            "provider": spec.provider.value,
-            "supports_strict_json": spec.supports_strict_json,
-            "max_input_tokens": spec.max_input_tokens,
-            "supports_vision": spec.supports_vision,
-            "input_modalities": list(spec.input_modalities),
-            "multimodal": len(spec.input_modalities) > 1,
-            "reasoning": (
-                {
-                    "kind": spec.reasoning.value,
-                    "efforts": (
-                        [effort.value for effort in spec.reasoning_efforts]
-                        if spec.reasoning_efforts
-                        else None
-                    ),
-                    "min_tokens": spec.reasoning_min_tokens,
-                    "max_tokens": spec.reasoning_max_tokens,
-                    "step": spec.reasoning_step,
-                }
-                if spec.reasoning
-                else None
-            ),
-        }
-        for model, spec in MODEL_SPECS.items()
-    ]
-
-
-def required_openrouter_slugs(embedding_model: str) -> list[str]:
-    """OpenRouter slugs one API key must be able to reach.
-
-    Every catalog entry served through OpenRouter, plus the embedding model.
-    Bedrock entries are left out: they authenticate with AWS, not with the key.
-    Documentation and the administrator page read this so they cannot drift from
-    the catalog.
-    """
-    slugs = [model.value for model in MODEL_SPECS if not model.value.startswith("bedrock/")]
-    if embedding_model not in slugs:
-        slugs.append(embedding_model)
-    return slugs

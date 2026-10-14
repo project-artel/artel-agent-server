@@ -20,7 +20,7 @@ To read it as a spreadsheet:
 
     python -m app.affordance.csv output/wv-editor-ALL-AB-latest.json
 
-`SPEC_MODEL` overrides the model by `LLMModel` member name.
+`SPEC_MODEL` overrides the model by catalog id (for example `openai/gpt-5.6-luna`).
 `LANGSMITH_TRACING=false` silences the tracing client when its quota is spent.
 """
 
@@ -38,7 +38,7 @@ from app.agents.spec.prompt import POLISH_AGENT, PROMPT_AGENT
 from app.agents.spec.schemas import SPEC_MODEL
 from app.prompts import resolve_version
 from app.agents.spec.validation import validate_document
-from app.llm.models import LLMModel
+from app.llm.models import require_known_model
 from tests.affordance_fixtures import preprocessed, report
 
 OUTPUT = pathlib.Path("output")
@@ -74,7 +74,7 @@ def main(argv: list[str]) -> int:
     name = argv[1]
     wanted = set(argv[2].split(",")) if argv[2] != "ALL" else None
     grades = set(argv[3]) if len(argv) > 3 else {"A", "B"}
-    model = LLMModel[os.environ["SPEC_MODEL"]] if os.environ.get("SPEC_MODEL") else SPEC_MODEL
+    model = require_known_model(os.environ.get("SPEC_MODEL") or SPEC_MODEL)
 
     parsed = report(name)
     specs = [
@@ -82,7 +82,7 @@ def main(argv: list[str]) -> int:
         for spec in preprocessed(name).specs
         if (wanted is None or spec.trigger.scene in wanted) and spec.grade in grades
     ]
-    print(f"{name} / {argv[2]} / 등급 {sorted(grades)} / 모델 {model.name} → 명세 {len(specs)}건")
+    print(f"{name} / {argv[2]} / 등급 {sorted(grades)} / 모델 {model} → 명세 {len(specs)}건")
     if (provenance := preprocessed(name).provenance) and provenance.build:
         print(
             f"  출처: {provenance.capture} · {provenance.build.platform} · "
@@ -118,7 +118,7 @@ def main(argv: list[str]) -> int:
             f"spec.{resolve_version(PROMPT_AGENT)}"
             + (f"+polish.{resolve_version(POLISH_AGENT)}" if POLISH_BY_DEFAULT else "")
         ),
-        llm_model=model.value,
+        llm_model=model,
     )
 
     OUTPUT.mkdir(exist_ok=True)

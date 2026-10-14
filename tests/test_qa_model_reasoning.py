@@ -14,8 +14,8 @@ from app.config import get_settings
 from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState
 from app.llm import chat_model
+from app.llm.catalog import get_model_catalog
 from app.llm.models import (
-    LLMModel,
     ReasoningConfig,
     ReasoningEffort,
     ReasoningKind,
@@ -26,98 +26,76 @@ from app.qa.run_config import resolve_run_config
 from app.qa.schemas import QaRunScenario
 from app.qa.service import QaExecutionService
 from app.qa.store import InMemoryQaSessionStore
+from tests.conftest import install_catalog_with_enabled
 from tests.test_qa_prompt_version import StubChatModel, make_scenario, open_request
 
 
-def test_models_api_exposes_reasoning_selection_capabilities() -> None:
-    catalog = {
-        item["id"]: item for item in TestClient(app).get("/internal/models").json()
-    }
+def test_catalog_carries_reasoning_selection_capabilities() -> None:
+    catalog = get_model_catalog()
 
-    assert set(catalog) == {model.value for model in LLMModel}
-    assert catalog[LLMModel.claude_sonnet_5_5]["reasoning"] == {
-        "kind": "effort",
-        "efforts": ["max", "xhigh", "high", "medium", "low"],
-        "min_tokens": None,
-        "max_tokens": None,
-        "step": None,
-    }
-    # The one entry left that takes a token budget instead of an effort.
-    assert catalog[LLMModel.claude_haiku_4_5_bedrock]["reasoning"] == {
-        "kind": "max_tokens",
-        "efforts": None,
-        "min_tokens": 1_024,
-        "max_tokens": 32_000,
-        "step": None,
-    }
-    assert catalog[LLMModel.gemini_3_8_flash]["input_modalities"] == [
+    every_effort = tuple(ReasoningEffort)
+    assert catalog["anthropic/claude-sonnet-5"].reasoning is ReasoningKind.effort
+    assert catalog["anthropic/claude-sonnet-5"].reasoning_efforts == every_effort
+    assert catalog["anthropic/claude-haiku-5.5"].reasoning_efforts == every_effort
+    assert catalog["anthropic/claude-haiku-5.5"].input_modalities == (
+        "text",
+        "image",
+        "file",
+    )
+    assert catalog["anthropic/claude-haiku-5.5"].supports_strict_json is True
+    assert catalog["bedrock/us.anthropic.claude-haiku-5-5"].reasoning_efforts == every_effort
+    assert catalog["bedrock/us.openai.gpt-6.1-sol"].reasoning_efforts == every_effort
+    assert catalog["google/gemini-3.8-flash"].input_modalities == (
         "text",
         "image",
         "file",
         "audio",
         "video",
-    ]
-    assert catalog[LLMModel.gemini_3_8_flash]["multimodal"] is True
-    assert catalog[LLMModel.gpt_6_luna]["reasoning"] == {
-        "kind": "effort",
-        "efforts": ["max", "xhigh", "high", "medium", "low"],
-        "min_tokens": None,
-        "max_tokens": None,
-        "step": None,
-    }
-    assert catalog[LLMModel.gemini_3_8_flash]["reasoning"] == {
-        "kind": "effort",
-        # Three, not five. The picker has to offer what the model takes: an
-        # effort it never advertised is a 400 the user only sees mid-run.
-        "efforts": ["high", "medium", "low"],
-        "min_tokens": None,
-        "max_tokens": None,
-        "step": None,
-    }
+    )
+    assert catalog["openai/gpt-5.6-luna"].reasoning_efforts == every_effort
+    # Three, not five. The picker has to offer what the model takes: an
+    # effort it never advertised is a 400 the user only sees mid-run.
+    three = (ReasoningEffort.high, ReasoningEffort.medium, ReasoningEffort.low)
+    assert catalog["google/gemini-3.7-flash"].reasoning_efforts == three
     # 3.8 Flash carries the same three efforts as 3.7. Pinned separately so a
-    # copied spec that widened them fails here rather than at the provider.
-    assert catalog[LLMModel.gemini_3_8_flash]["reasoning"] == {
-        "kind": "effort",
-        "efforts": ["high", "medium", "low"],
-        "min_tokens": None,
-        "max_tokens": None,
-        "step": None,
-    }
-    assert catalog[LLMModel.qwen3_7_max]["reasoning"] is None
+    # copied row that widened them fails here rather than at the provider.
+    assert catalog["google/gemini-3.8-flash"].reasoning_efforts == three
+    assert catalog["openai/gpt-chat-latest"].reasoning is None
 
 
-def test_request_accepts_each_supported_reasoning_shape() -> None:
+def test_request_accepts_effort_reasoning_for_openrouter_and_bedrock() -> None:
+    install_catalog_with_enabled("bedrock/us.anthropic.claude-haiku-5-5")
     effort = OpenQaSessionRequest.model_validate(
         open_request(
-            model=LLMModel.claude_sonnet_5_5,
+            model="anthropic/claude-haiku-5.5",
             reasoning={"effort": "high"},
         )
     )
-    budget = OpenQaSessionRequest.model_validate(
+    haiku_effort = OpenQaSessionRequest.model_validate(
         open_request(
-            model=LLMModel.claude_haiku_4_5_bedrock,
-            reasoning={"max_tokens": 2048},
+            model="bedrock/us.anthropic.claude-haiku-5-5",
+            reasoning={"effort": "medium"},
         )
     )
 
     assert effort.reasoning == ReasoningConfig(effort=ReasoningEffort.high)
-    assert budget.reasoning == ReasoningConfig(max_tokens=2048)
+    assert haiku_effort.reasoning == ReasoningConfig(effort=ReasoningEffort.medium)
 
 
 @pytest.mark.parametrize(
     ("model", "reasoning"),
     [
-        (LLMModel.qwen3_7_max, {"effort": "low"}),
-        (LLMModel.claude_sonnet_5_5, {"max_tokens": 2048}),
-        (LLMModel.claude_haiku_4_5_bedrock, {"effort": "high"}),
+        ("openai/gpt-chat-latest", {"effort": "low"}),
+        ("anthropic/claude-sonnet-5", {"max_tokens": 2048}),
+        ("bedrock/us.anthropic.claude-haiku-5-5", {"max_tokens": 2048}),
         # The right kind, an effort the model does not offer.
-        (LLMModel.gemini_3_8_flash, {"effort": "max"}),
-        (LLMModel.gemini_3_8_flash, {"effort": "xhigh"}),
-        (LLMModel.kimi_k3, {"effort": "medium"}),
+        ("google/gemini-3.7-flash", {"effort": "max"}),
+        ("google/gemini-3.8-flash", {"effort": "xhigh"}),
+        ("moonshotai/kimi-k3", {"effort": "medium"}),
     ],
 )
 def test_request_rejects_unsupported_model_reasoning_combinations(
-    model: LLMModel, reasoning: dict
+    model: str, reasoning: dict
 ) -> None:
     with pytest.raises(ValidationError):
         OpenQaSessionRequest.model_validate(
@@ -132,19 +110,12 @@ def test_reasoning_budget_requires_exactly_one_setting() -> None:
         ReasoningConfig(effort=ReasoningEffort.low, max_tokens=1024)
 
 
-def test_request_rejects_unknown_or_out_of_range_reasoning_fields() -> None:
+def test_request_rejects_unknown_reasoning_fields() -> None:
     with pytest.raises(ValidationError):
         OpenQaSessionRequest.model_validate(
             open_request(
-                model=LLMModel.claude_sonnet_5_5,
+                model="anthropic/claude-sonnet-5",
                 reasoning={"effort": "high", "max_token": 2048},
-            )
-        )
-    with pytest.raises(ValidationError, match="max_tokens >= 1024"):
-        OpenQaSessionRequest.model_validate(
-            open_request(
-                model=LLMModel.claude_haiku_4_5_bedrock,
-                reasoning={"max_tokens": 1023},
             )
         )
 
@@ -170,7 +141,7 @@ def test_service_persists_reasoning_and_passes_it_to_runner() -> None:
             scenarios=[
                 QaRunScenario(qa_try_id=7, test_scenario_id=1, scenario=make_scenario())
             ],
-            model=LLMModel.claude_sonnet_5_5,
+            model="anthropic/claude-sonnet-5",
             reasoning=reasoning,
         )
 
@@ -203,7 +174,7 @@ def test_service_rejects_invalid_reasoning_before_saving() -> None:
                 ],
                 # Named rather than left to DEFAULT_MODEL: the default now
                 # reasons, and this case needs a model that does not.
-                model=LLMModel.qwen3_7_max,
+                model="openai/gpt-chat-latest",
                 reasoning=ReasoningConfig(effort=ReasoningEffort.low),
             )
 
@@ -248,7 +219,7 @@ def test_langchain_sends_reasoning_in_openrouter_request(monkeypatch) -> None:
     chat_model.build_chat_model.cache_clear()
     try:
         chat_model.build_chat_model(
-            LLMModel.claude_sonnet_5_5,
+            "anthropic/claude-sonnet-5",
             ReasoningConfig(effort=ReasoningEffort.high),
         ).invoke("test")
     finally:
@@ -269,9 +240,9 @@ def test_omitted_reasoning_is_not_sent_and_uses_a_distinct_cache_entry(
     monkeypatch.setattr(chat_model, "ChatOpenAI", FakeChat)
     chat_model.build_chat_model.cache_clear()
     try:
-        plain = chat_model.build_chat_model(LLMModel.claude_sonnet_5_5)
+        plain = chat_model.build_chat_model("anthropic/claude-sonnet-5")
         reasoned = chat_model.build_chat_model(
-            LLMModel.claude_sonnet_5_5,
+            "anthropic/claude-sonnet-5",
             ReasoningConfig(effort=ReasoningEffort.low),
         )
         assert plain is not reasoned
@@ -304,9 +275,9 @@ def test_caching_is_opt_in_and_only_for_anthropic(monkeypatch) -> None:
     monkeypatch.setattr(chat_model, "ChatOpenAI", FakeChat)
     chat_model.build_chat_model.cache_clear()
     try:
-        chat_model.build_chat_model(LLMModel.claude_opus_5_5, cache_prompt=True)
-        chat_model.build_chat_model(LLMModel.claude_opus_5_5)
-        chat_model.build_chat_model(LLMModel.gpt_6_luna, cache_prompt=True)
+        chat_model.build_chat_model("anthropic/claude-opus-5", cache_prompt=True)
+        chat_model.build_chat_model("anthropic/claude-opus-5")
+        chat_model.build_chat_model("openai/gpt-chat-latest", cache_prompt=True)
     finally:
         chat_model.build_chat_model.cache_clear()
 
@@ -340,7 +311,7 @@ def test_run_start_log_names_reasoning(monkeypatch, caplog) -> None:
 
         runner = QaRunner(
             resolve_run_config(
-                model=LLMModel.claude_sonnet_5_5,
+                model="anthropic/claude-sonnet-5",
                 reasoning=ReasoningConfig(effort=ReasoningEffort.high),
             )
         )
@@ -359,7 +330,7 @@ def test_run_start_log_names_reasoning(monkeypatch, caplog) -> None:
         if "[QA] run starting" in record.getMessage()
     ]
     assert len(starting) == 1
-    assert "'model': 'anthropic/claude-sonnet-5.5'" in starting[0]
+    assert "'model': 'anthropic/claude-sonnet-5'" in starting[0]
     assert "'reasoning': {'effort': 'high'}" in starting[0]
 
 
@@ -381,7 +352,7 @@ def test_a_model_call_carries_a_request_timeout_and_bounded_retries(
     monkeypatch.setattr(chat_model, "ChatOpenAI", FakeChat)
     chat_model.build_chat_model.cache_clear()
     try:
-        chat_model.build_chat_model(LLMModel.claude_sonnet_5_5)
+        chat_model.build_chat_model("anthropic/claude-sonnet-5")
     finally:
         chat_model.build_chat_model.cache_clear()
 
@@ -395,18 +366,29 @@ def test_a_model_call_carries_a_request_timeout_and_bounded_retries(
 
 
 def test_zero_budget_disables_reasoning_on_both_paths() -> None:
-    """max_tokens=0 = 추론 끔 — None(미지정→기본 예산으로 켬)과 다르다. 라우터가
+    """max_tokens=0 = 추론 끔 — None(미지정→provider 기본값)과 다르다. 라우터가
     쓴다: 669토큰 분류에 추론이 지연 13초를 먹던 실측이 이 값의 이유다."""
     from app.llm.chat_model import build_chat_model
-    from app.llm.models import LLMModel, ReasoningConfig
+    from app.llm.models import ReasoningConfig
 
     off = ReasoningConfig(max_tokens=0)
 
-    bedrock = build_chat_model(LLMModel.claude_haiku_4_5_bedrock, off)
-    assert "thinking" not in (bedrock.additional_model_request_fields or {})
+    bedrock = build_chat_model("bedrock/us.anthropic.claude-haiku-5-5", off)
+    assert bedrock.additional_model_request_fields == {"thinking": {"type": "disabled"}}
+    assert bedrock.temperature is None
+    assert bedrock.max_tokens == 128_000
 
-    default_on = build_chat_model(LLMModel.claude_haiku_4_5_bedrock)
-    assert "thinking" in default_on.additional_model_request_fields
+    default_on = build_chat_model("bedrock/us.anthropic.claude-haiku-5-5")
+    assert default_on.additional_model_request_fields is None
 
-    openrouter = build_chat_model(LLMModel.gemini_3_8_flash, off)
+    high = build_chat_model(
+        "bedrock/us.anthropic.claude-haiku-5-5",
+        ReasoningConfig(effort=ReasoningEffort.high),
+    )
+    assert high.additional_model_request_fields == {
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": "high"},
+    }
+
+    openrouter = build_chat_model("google/gemini-3.8-flash", off)
     assert "reasoning" not in openrouter.extra_body

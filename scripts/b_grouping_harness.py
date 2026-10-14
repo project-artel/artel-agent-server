@@ -25,7 +25,6 @@ from pydantic import BaseModel, Field
 from app.agents.scenario.cases import render_game_shape, render_test_case_list
 from app.agents.scenario.schemas import SceneEdge, TestCaseListItem
 from app.llm.chat_model import BEDROCK_PREFIX, build_chat_model
-from app.llm.models import LLMModel
 
 PROMPTS = {
     "narrow": "첫 전투가 제대로 도는지 보고 싶어",
@@ -33,7 +32,7 @@ PROMPTS = {
     "full": "전부 커버해줘",
 }
 
-MODEL = LLMModel.claude_haiku_4_5_bedrock
+MODEL = "bedrock/us.anthropic.claude-haiku-5-5"
 
 
 class Group(BaseModel):
@@ -69,7 +68,7 @@ def b_prompt(session: dict, user_request: str) -> str:
 
 def call_b(prompt: str):
     chat = build_chat_model(MODEL, None, cache_prompt=True)
-    assert MODEL.value.startswith(BEDROCK_PREFIX)
+    assert MODEL.startswith(BEDROCK_PREFIX)
     chain = chat.with_structured_output(GroupingPlan, method="json_schema")
     started = time.time()
     plan = chain.invoke(prompt)

@@ -129,7 +129,7 @@ def test_cache_writes_survive_the_ephemeral_ttl_shape() -> None:
     )
     result = LLMResult(
         generations=[[ChatGeneration(message=message)]],
-        llm_output={"model_name": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"},
+        llm_output={"model_name": "bedrock/us.anthropic.claude-haiku-5-5"},
     )
 
     async def scenario() -> None:
@@ -194,7 +194,7 @@ def test_a_bedrock_call_is_priced_from_the_catalog_when_nobody_billed_it() -> No
             UsageCallback(buffer),
             _chat_result(
                 cost=None,
-                model="bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                model="bedrock/us.anthropic.claude-haiku-5-5",
             ),
         )
 
@@ -203,7 +203,7 @@ def test_a_bedrock_call_is_priced_from_the_catalog_when_nobody_billed_it() -> No
     (record,) = sender.payloads[0]["records"]
     # input 12,043 중 10,240 이 캐시 읽기, 정가 대상은 1,803. 캐시 쓰기 512, 출력 318.
     expected = (
-        1_803 * 1.00 + 10_240 * 0.10 + 512 * 1.25 + 318 * 5.00
+        1_803 * 0.10 + 10_240 * 0.01 + 512 * 0.125 + 318 * 0.50
     ) / 1_000_000
     assert record["costUsd"] == pytest.approx(expected)
     # 우리가 계산한 값이다. provider 가 청구한 값과 한 칸에 섞이면 안 된다.
@@ -235,6 +235,24 @@ def test_an_unpriced_model_leaves_the_cost_empty_rather_than_guessing() -> None:
     # 토큰은 그대로 남는다 — 값을 못 매긴 것이지 못 잰 것이 아니다.
     assert record["inputTokens"] == 12043
     assert record["cacheWriteTokens"] == 512
+
+
+def test_haiku_long_context_price_applies_to_the_whole_request() -> None:
+    """cache write 를 더해 100K를 넘으면 요청 전체가 long-context 단가다."""
+    from app.llm.usage import _estimate_cost
+
+    cost = _estimate_cost(
+        "bedrock/us.anthropic.claude-haiku-5-5",
+        input_tokens=99_500,
+        output_tokens=1_000,
+        cached_input_tokens=10_000,
+        cache_write_tokens=501,
+    )
+
+    expected = (
+        89_500 * 0.50 + 10_000 * 0.05 + 501 * 0.625 + 1_000 * 2.50
+    ) / 1_000_000
+    assert cost == pytest.approx(expected)
 
 
 # --- embedding hook ----------------------------------------------------------
@@ -447,7 +465,7 @@ def test_a_bedrock_model_keeps_its_vendor_in_provider() -> None:
     """
     sender = RecordingSender()
     buffer = _buffer(sender, flush_size=1)
-    profile = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    profile = "us.anthropic.claude-haiku-5-5"
 
     async def scenario() -> None:
         set_usage_scope("QA_RUN", 7)

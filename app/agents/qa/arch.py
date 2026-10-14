@@ -398,7 +398,7 @@ def resolve_arch(spec: QaArchSpec, model: LLMModel) -> ResolvedArch:
     supports_vision = get_model_spec(model).supports_vision
     if spec.vision is VisionMode.on and not supports_vision:
         raise QaArchError(
-            f"Model '{model.value}' cannot read images, so vision='on' cannot be "
+            f"Model '{model}' cannot read images, so vision='on' cannot be "
             f"honoured. Use 'auto' to follow the model, or 'off' to state it."
         )
     vision = supports_vision if spec.vision is VisionMode.auto else spec.vision is VisionMode.on
@@ -414,7 +414,7 @@ def resolve_arch(spec: QaArchSpec, model: LLMModel) -> ResolvedArch:
     if spec.screen_capture is not ScreenCaptureMode.on_demand and not vision:
         raise QaArchError(
             f"screen_capture='{spec.screen_capture.value}' needs vision, and this run "
-            f"resolved to vision off (model '{model.value}', "
+            f"resolved to vision off (model '{model}', "
             f"vision='{spec.vision.value}'). Use screen_capture='on_demand', or a "
             f"model that reads images."
         )

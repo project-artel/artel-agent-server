@@ -5,13 +5,13 @@
   screen selector 판정, 스텝 문구 다듬기
 - QA 런은 tool 37 개와 middleware 5 개를 두른 tool loop. 게임을 직접 만지지 않고
   artel-orchestration-server 를 거쳐 artel-sdk 가 붙은 Unity 빌드를 조작함
-- 사람이 부르는 API 가 아님. 라우트 15 개 중 14 개가 `/internal` 아래 있고 인증이 없음
+- 사람이 부르는 API 가 아님. 라우트 14 개 중 13 개가 `/internal` 아래 있고 인증이 없음
 - 결정론적 명세 발견기 `app/specs_v2` 도 여기 삶. 그쪽은 모델을 한 번도 부르지 않음
 
 | 무엇 | 수 | 어디 |
 | --- | --- | --- |
 | agent | 6 | `app/agents/` |
-| HTTP 라우트 | 13 | `app/api/` |
+| HTTP 라우트 | 12 | `app/api/` |
 | WebSocket 라우트 | 2 | `/internal/sessions/{id}`, `/internal/qa-sessions/{id}` |
 | QA tool | 37 | `app/agents/qa/tools/` |
 | QA middleware | 5 | `app/agents/qa/runner.py` |
@@ -28,6 +28,8 @@ python -m pytest
 ```
 
 - `.env` 는 `app.config.Settings` 가 직접 읽음. 설정 53 개가 전부 `.env.example` 에 있음
+- **`ORCHESTRATION_BASE_URL` 이 필요함** — provider key 와 model catalog 를 orchestration 에서 읽음.
+  비어 있으면 catalog 가 없어서 모델을 지정한 요청은 전부 503 이 됨
 - **Redis 가 필요함** — `lifespan` 이 `REDIS_URL` 로 조건 없이 client 를 만들고,
   시나리오 세션 저장소와 QA 세션 저장소가 그 뒤에 삶.
   `REDIS_URL` 은 `.env.example` 에 없었음
@@ -36,37 +38,56 @@ python -m pytest
   `/health` 를 Redis 감시로 쓰면 안 됨
 - 모델 호출은 두 길. `LLM_BASE_URL` 로 가는 OpenAI 호환 경로가 기본이고,
   모델 값이 `bedrock/` 로 시작하면 `ChatBedrockConverse` 로 감
-  (`app/llm/chat_model.py:178`). `DEFAULT_MODEL` 은 코드 상수라 `.env` 로 못 바꿈
-- LLM 사용량 수집은 `ORCHESTRATION_BASE_URL` 이 비면 통째로 꺼짐. 로컬 실행이 원하는 상태
-- 테스트는 트레이싱을 끄고 돌리는 편이 나음 — LangSmith 429 로그가 요약을 덮음
+  (`app/llm/chat_model.py`). `DEFAULT_MODEL` 은 코드 상수라 `.env` 로 못 바꿈
+- LLM 사용량 수집은 `ORCHESTRATION_BASE_URL` 이 비면 통째로 꺼짐
+- 테스트는 트레이싱을 끄고 돌리는 편이 나음 — LangSmith 429 로그가 요약을 덮음.
+  테스트는 orchestration 대신 `tests/fixtures/model_catalog.json` 을 catalog 로 읽음
 
 ```bash
 LANGSMITH_TRACING=false python -m pytest -q
 ```
 
-### LLM key 출처
+### provider key
 
-chat 과 embedding 호출의 key 는 이 순서로 정해짐.
+OpenRouter key 와 AWS Bedrock API key 는 admin 페이지에서 입력함. orchestration 이 암호화해서 저장하고,
+이 서버는 `GET {ORCHESTRATION_BASE_URL}/internal/settings/llm` 에서 둘을 읽음
+(`{ "openrouterApiKey": ..., "bedrockApiKey": ... }`). `.env` 와 셸의 `OPENROUTER_API_KEY`,
+`LLM_API_KEY`, `BEDROCK_API_KEY` 는 읽지 않음
 
-1. orchestration 의 admin 이 저장한 key. `GET {ORCHESTRATION_BASE_URL}/internal/settings/llm` 로 가져와
-   `LLM_KEY_CACHE_TTL_SECONDS` (기본 30) 동안 캐시함. provider 가 401 을 주면 캐시를 버리므로
-   key 를 바꿔도 다음 호출부터 적용됨
-2. 환경 변수 `LLM_API_KEY` (`OPENROUTER_API_KEY` 도 읽음)
+- 가져온 key 는 `LLM_KEY_CACHE_TTL_SECONDS` (기본 30) 동안 캐시함. OpenRouter 의 401, Bedrock 의
+  401 · 403 이 오면 캐시를 버림. `POST /internal/llm-cache/invalidate` 도 캐시를 버리고 model catalog 도
+  다시 읽게 함. orchestration 이 key 를 저장 · 삭제한 뒤와 모델을 켜고 끈 뒤에 부름.
+  replica 가 여럿이면 응답한 replica 하나만 캐시를 버림
+- 갱신이 실패하면 마지막으로 읽은 key 를 계속 씀
+- OpenRouter key 가 없으면 OpenRouter 가 401 을 돌려줌
+- Bedrock key 가 없으면 AWS 기본 자격 증명 (IAM role 등) 을 씀
+- 새 Bedrock key 는 다음에 만드는 chat model 부터 적용됨. 이미 시작한 런은 시작할 때의 key 를 씀
 
-orchestration 에 닿지 못하거나 key 가 아닌 응답이 오면 환경 변수를 씀. `EMBEDDING_API_KEY` 가 있으면
-embedding 만 그 key 를 씀. key 는 로그에 남기지 않음
+`EMBEDDING_API_KEY` 가 있으면 embedding 만 그 key 를 씀. key 는 로그에 남기지 않음
 
-### key 가 접근해야 하는 모델
+### model catalog
 
-`GET /internal/models/required` 가 `{ "slugs": [...] }` 를 돌려줌. OpenRouter 로 가는 catalog 모델 전부와
-embedding 모델(`EMBEDDING_MODEL`) 이고, `app/llm/models.py` 의 catalog 에서 만들어서 문서와 admin 페이지가
-사본 없이 읽을 수 있음
+모델 목록은 orchestration 의 `llm_model` 테이블에 있음. 이 서버는
+`GET {ORCHESTRATION_BASE_URL}/internal/llm-models` 로 읽고 (`app/llm/catalog.py`),
+`MODEL_CATALOG_TTL_SECONDS` (기본 30) 동안 캐시하며, 한 번 읽는 데 `MODEL_CATALOG_FETCH_TIMEOUT_SECONDS`
+(기본 3) 초까지 기다림. 갱신이 실패하면 마지막으로 읽은 catalog 를 계속 씀. 한 번도 읽지 못했으면
+모델을 지정한 요청은 503 이 됨
+
+- admin 이 모델을 끌 수 있음. 꺼진 모델을 지정한 QA 세션 시작과 시나리오 세션 생성 · 갱신은 422 로 거절함
+- router, compaction, 사용량 가격 계산은 켜짐 여부와 상관없이 catalog 의 모든 row 를 씀
+- key 가 접근해야 하는 OpenRouter 모델은 orchestration 이 정함. `GET /internal/models` 와
+  `GET /internal/models/required` 는 없어짐
 
 ### Bedrock 은 선택
 
 기본 설치는 Bedrock 을 부르지 않고 `BEDROCK_*` 값이 하나도 없어도 기동함. 시나리오 router 는
 `ROUTER_MODEL` 을 쓰고, 비우면 catalog 의 `DEFAULT_MODEL` 을 씀. Bedrock 자격이 있으면 `ROUTER_MODEL` 에
-`bedrock/...` catalog 값을 넣고 `BEDROCK_REGION`, `BEDROCK_API_KEY` (또는 AWS 기본 자격 증명) 를 설정함
+`bedrock/...` catalog 값을 넣고 `BEDROCK_REGION` 을 설정한 뒤 admin 페이지에서 Bedrock API key 를 입력함
+(또는 AWS 기본 자격 증명을 씀)
+
+Bedrock 호출은 catalog row 의 provider 로 나뉨. `anthropic` 은 adaptive `thinking` 과
+`output_config.effort` 를 보내고, prompt cache 를 쓰는 호출에는 `cachePoint` 를 붙임. `openai` 는 `reasoning_effort` 만 보내고
+`thinking` 과 `cachePoint` 를 보내지 않음
 
 ## 신뢰 경계
 

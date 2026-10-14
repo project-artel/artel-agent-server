@@ -44,8 +44,8 @@ MOVED_HTTP_ROUTES = [
     ("post", "/extract"),
     ("post", "/embed"),
     ("post", "/knowledge-queries"),
-    ("get", "/models"),
     ("post", "/specs/v2/generate"),
+    ("post", "/llm-cache/invalidate"),
 ]
 
 # WebSocket routes never appear in the OpenAPI schema, so they are covered by

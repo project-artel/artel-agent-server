@@ -16,7 +16,11 @@ from app.llm.models import (
     get_model_spec,
     validate_reasoning,
 )
-from app.llm.api_key import KeyRefreshOnUnauthorized, get_llm_api_key_provider
+from app.llm.api_key import (
+    KeyRefreshOnUnauthorized,
+    get_llm_api_key_provider,
+    is_key_rejected_by_bedrock,
+)
 from app.llm.usage import UsageCallback
 
 
@@ -25,35 +29,16 @@ from app.llm.usage import UsageCallback
 # in this call is one nobody can check afterwards.
 TEMPERATURE = 0.2
 
-# `LLMModel` 값이 이것으로 시작하면 Bedrock 으로 간다. OpenRouter slug 에는 이
+# 모델 id 가 이것으로 시작하면 Bedrock 으로 간다. OpenRouter slug 에는 이
 # 접두가 없으므로 둘이 섞이지 않는다.
 BEDROCK_PREFIX = "bedrock/"
 
 # Converse API 가 캐시 경계를 읽는 표기. 이 block 까지가 되읽을 수 있는 prefix 다.
 CACHE_POINT: dict[str, Any] = {"cachePoint": {"type": "default"}}
 
-# Anthropic 은 thinking 이 켜진 호출의 temperature 를 1 로만 받는다. 실측:
-# `temperature may only be set to 1 when thinking is enabled`.
-#
-# 그래서 추론을 켜면 `TEMPERATURE` 를 못 쓴다. 그 값이 "두 모델의 비교가 비교이려면
-# 샘플링이 같아야 한다"는 이유로 고정돼 있으므로, 바꾸는 것이 아니라 **추론을 켠 호출은
-# 다른 샘플링이었다**는 사실로 남긴다. 비교할 때 이 축이 함께 움직인 것을 알아야 한다.
-THINKING_TEMPERATURE = 1.0
-
-# 추론 예산 위에 답이 설 자리. `max_tokens` 는 예산보다 커야 하고, 그 합이
-# `ModelSpec.max_input_tokens` 이 창에서 빼 둔 출력 예약분과 같아야 한다 — 두 수가
-# 어긋나면 압축이 도는 임계와 provider 가 거절하는 지점이 어긋난다.
-#
-# 4,096 은 스트리밍 주석 자신이 적어 둔 실측과 어긋나 있었다 — 시나리오 서른 스텝짜리
-# 답 하나가 8,000 token 이다. 그 값으로 맞춘다.
-OUTPUT_RESERVE = 8_192
-
-# 예산은 상한이 아니라 **목표치**다(Anthropic 문서). 작은 과제에선 지켜지지만
-# (실측: 목표 1,024 에 사용 949), 88건 저작처럼 무거운 과제에선 넘는다 — 실측
-# (2026-09-08): 목표 4,096 에 8,188 token 을 생각하고도 문장 중간에서 잘렸다.
-# `max_tokens` 가 목표 바로 위에 있으면 생각이 창을 다 먹고 답도 도구 호출도 없이
-# 끝난다. 그래서 생각 자리는 목표의 두 배로 잡는다 — 그 실측이 정한 배수다.
-THINKING_HEADROOM = 2
+# Bedrock 모델(Haiku 5.5, GPT-6.1 Sol)이 허용하는 최대 출력이다. 추론 token 도 이 안에
+# 들어가므로 낮게 고정하면 답을 쓰기 전에 `max_tokens` 로 끝날 수 있다.
+BEDROCK_MAX_OUTPUT_TOKENS = 128_000
 
 
 def _is_transient(message: BaseMessage) -> bool:
@@ -116,54 +101,70 @@ class _CachingChatBedrockConverse(ChatBedrockConverse):
         yield from super()._stream(self._with_cache_point(messages), stop, run_manager, **kwargs)
 
 
+def _bedrock_request_fields(
+    provider: LLMProvider, reasoning: ReasoningConfig | None
+) -> dict[str, Any] | None:
+    """Converse 요청의 `additionalModelRequestFields`. 추론을 싣는 표기가 provider 마다 다르다.
+
+    `anthropic` 은 adaptive `thinking` 과 `output_config.effort` 를 받는다. Haiku 5.5 는
+    고정 `budget_tokens` 를 거절한다. 아무 값도 고르지 않으면 provider 기본값인 medium
+    으로 생각한다.
+
+    `openai` 는 `reasoning_effort` 하나를 받고 `thinking` 을 모른다. 추론을 끄는 값이
+    없으므로, 끄라고 했거나 고르지 않았으면 아무것도 싣지 않는다 — 그때는 provider
+    기본값으로 추론한다.
+    """
+    if provider is LLMProvider.openai:
+        if reasoning is None or reasoning.disabled or reasoning.effort is None:
+            return None
+        return {"reasoning_effort": reasoning.effort.value}
+
+    extra: dict[str, Any] = {}
+    if reasoning is not None and reasoning.disabled:
+        extra["thinking"] = {"type": "disabled"}
+    elif reasoning is not None and reasoning.effort is not None:
+        extra["thinking"] = {"type": "adaptive"}
+        extra["output_config"] = {"effort": reasoning.effort.value}
+    return extra or None
+
+
 def _bedrock(
-    model: LLMModel, reasoning: ReasoningConfig | None, cache_prompt: bool
+    model: LLMModel,
+    reasoning: ReasoningConfig | None,
+    cache_prompt: bool,
+    bedrock_api_key: str | None,
 ) -> ChatBedrockConverse:
     """Bedrock 경로.
 
-    인증은 `bedrock_api_key` 를 쥐고 있으면 그것으로, 아니면 표준 AWS 자격증명 사슬로
-    간다. 그 키를 `Settings` 로 받는 이유는 `boto3` 가 읽는 `AWS_BEARER_TOKEN_BEDROCK`
-    을 `.env` 로 줄 수 없기 때문이다 — `env_file` 은 `Settings` 만 채우고 `os.environ`
-    에는 안 넣는데, 그 변수를 보는 것은 `boto3` 다.
+    인증은 `bedrock_api_key` 가 있으면 그것으로, None 이면 표준 AWS 자격증명 사슬(IAM
+    role 등)로 간다. 키는 관리자가 admin page 에 넣고 orchestration server 가 암호화해
+    저장한 값이다. `.env` 에서는 읽지 않는다.
 
-    `LLMModel` 값에서 `bedrock/` 접두만 떼면 inference profile ID 가 된다. 그
-    문자열이 리전 접두와 판을 담고 있어 어느 요율로 청구되는지까지 정한다.
+    모델 id 에서 `bedrock/` 접두만 떼면 inference profile ID 가 된다. 그 문자열이 리전
+    접두와 판을 담고 있어 어느 요율로 청구되는지까지 정한다.
 
-    추론은 OpenRouter 와 다른 이름으로 켠다. 거기서는 요청에 `reasoning` 을 싣지만
-    Bedrock 은 `additional_model_request_fields` 안의 `thinking` 을 받고, 예산도
-    `effort` 가 아니라 토큰 수다.
+    추론 설정은 `_bedrock_request_fields` 가 provider 에 맞춰 싣는다. `cachePoint` 는
+    `anthropic` 모델에만 찍는다. OpenAI 모델이 Converse 에서 `cachePoint` block 을
+    받는지는 확인하지 못했다.
     """
     settings = get_settings()
-    spec = get_model_spec(model)
-    factory = _CachingChatBedrockConverse if cache_prompt else ChatBedrockConverse
-    extra: dict[str, Any] = {}
-    temperature = TEMPERATURE
-    max_tokens = None
-
-    # 고르지 않았으면 카탈로그의 기본 예산으로 켠다. Bedrock 은 provider 기본값이
-    # 없어서, 안 정하면 추론이 아예 일어나지 않는다.
-    budget = (
-        reasoning.max_tokens
-        if reasoning is not None and reasoning.max_tokens is not None
-        else spec.reasoning_default_tokens
-    )
-    # 0 은 "끈다" — None(미지정→기본 예산)과 다르다. `ReasoningConfig.disabled` 참조.
-    if budget:
-        extra["thinking"] = {"type": "enabled", "budget_tokens": budget}
-        # `max_tokens` 가 예산보다 커야 한다(실측: `max_tokens must be greater than
-        # thinking.budget_tokens`). 예산에 답할 자리를 더해 잡는다 — 이 값이 곧
-        # `max_input_tokens` 이 빼 둔 출력 예약분이다.
-        max_tokens = budget * THINKING_HEADROOM + OUTPUT_RESERVE
-        temperature = THINKING_TEMPERATURE
+    provider = get_model_spec(model).provider
+    caches_prompt = cache_prompt and provider is LLMProvider.anthropic
+    factory = _CachingChatBedrockConverse if caches_prompt else ChatBedrockConverse
+    extra = _bedrock_request_fields(provider, reasoning)
 
     return factory(
-        model=model.value.removeprefix(BEDROCK_PREFIX),
+        model=model.removeprefix(BEDROCK_PREFIX),
         region_name=settings.bedrock_region,
-        # 안 쥐고 있으면 `None` 이고, 그러면 표준 AWS 자격증명 사슬이 그대로 답한다.
-        bedrock_api_key=settings.bedrock_api_key,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        additional_model_request_fields=extra or None,
+        # None 을 **명시해서** 넘긴다. 인자를 빼면 `ChatBedrockConverse` 가
+        # `AWS_BEARER_TOKEN_BEDROCK` 환경 변수를 읽는데, 키는 database 에만 있어야 한다.
+        # None 이면 표준 AWS 자격증명 사슬이 답한다.
+        bedrock_api_key=bedrock_api_key,
+        # Haiku 5.5 는 sampling parameter 를 보내면 400을 돌려준다. 추론 모델인 GPT-6.1 Sol
+        # 도 같은 이유로 보내지 않는다.
+        temperature=None,
+        max_tokens=BEDROCK_MAX_OUTPUT_TOKENS,
+        additional_model_request_fields=extra,
         # **답을 토막으로 받는다.** 통째로 받으면 다 쓸 때까지 연결에 아무것도 안 오고, 그
         # 조용한 시간이 곧 답의 길이다 — 실측으로 출력 token 당 5.3ms 라 8,000 token 짜리
         # 답 하나가 42초다. 시나리오 하나가 서른 스텝을 넘는 것은 정상이므로, 기다림 한도를
@@ -178,15 +179,48 @@ def _bedrock(
         ),
         # 카탈로그 값을 그대로 넘긴다. 응답은 `bedrock/` 을 뗀 이름으로 돌아오고,
         # 그대로 두면 `provider` 가 모델 이름 전체가 된다.
-        callbacks=[UsageCallback(slug=model.value)],
+        #
+        # 키가 거절되면(401, 403) cache 된 키를 버린다. 다음 `build_chat_model` 이 새 키를
+        # 읽어 새 client 를 만든다.
+        callbacks=[
+            UsageCallback(slug=model),
+            KeyRefreshOnUnauthorized(
+                get_llm_api_key_provider(), rejected=is_key_rejected_by_bedrock
+            ),
+        ],
     )
 
 
-@lru_cache
 def build_chat_model(
     model: LLMModel,
     reasoning: ReasoningConfig | None = None,
     cache_prompt: bool = False,
+) -> BaseChatModel:
+    """Build a chat model, or return the cached one built from the same inputs.
+
+    Bedrock 모델은 지금의 Bedrock key 까지 cache key 에 들어간다. `ChatBedrockConverse`
+    는 만들어질 때 키를 한 번 받아 boto3 client 에 고정하므로, 키가 바뀌면 같은 client 를
+    다시 쓸 수 없다. 키를 cache key 에 넣으면 관리자가 키를 바꾼 뒤 처음 부르는 호출이 새
+    client 를 받고, 재시작이 필요 없다. 이미 client 를 받아 간 run 은 끝날 때까지 그
+    client 의 키를 쓴다.
+
+    OpenRouter 모델은 키를 요청마다 읽으므로(`api_key` 에 callable 을 넘긴다) 키가
+    cache key 에 들어가지 않는다.
+    """
+    bedrock_api_key = (
+        get_llm_api_key_provider().get_bedrock_key()
+        if model.startswith(BEDROCK_PREFIX)
+        else None
+    )
+    return _build_chat_model(model, reasoning, cache_prompt, bedrock_api_key)
+
+
+@lru_cache
+def _build_chat_model(
+    model: LLMModel,
+    reasoning: ReasoningConfig | None,
+    cache_prompt: bool,
+    bedrock_api_key: str | None,
 ) -> BaseChatModel:
     """Build a chat model.
 
@@ -209,10 +243,10 @@ def build_chat_model(
     # 호출이 그 경로에서만 조용히 통과한다.
     reasoning = validate_reasoning(model, reasoning)
 
-    if model.value.startswith(BEDROCK_PREFIX):
+    if model.startswith(BEDROCK_PREFIX):
         # Bedrock 은 OpenAI 호환이 아니다(SigV4 + Converse). 아래 `extra_body` 는
         # 전부 OpenRouter 표기라 여기서 갈라지는 편이 옮기는 것보다 정직하다.
-        return _bedrock(model, reasoning, cache_prompt)
+        return _bedrock(model, reasoning, cache_prompt, bedrock_api_key)
 
     settings = get_settings()
     headers: dict[str, str] = {}
@@ -251,9 +285,9 @@ def build_chat_model(
     key_provider = get_llm_api_key_provider()
 
     return ChatOpenAI(
-        model=model.value,
+        model=model,
         base_url=settings.llm_base_url,
-        api_key=key_provider.get_or_placeholder,
+        api_key=key_provider.get_openrouter_key_or_placeholder,
         temperature=TEMPERATURE,
         default_headers=headers or None,
         extra_body=extra_body,
@@ -265,6 +299,10 @@ def build_chat_model(
     )
 
 
+# Tests and scripts clear the client cache through the public name.
+build_chat_model.cache_clear = _build_chat_model.cache_clear  # type: ignore[attr-defined]
+
+
 def select_structured_method(model: LLMModel) -> str:
     """Strict json_schema for capable models, json_mode as the fallback."""
     return "json_schema" if get_model_spec(model).supports_strict_json else "json_mode"
@@ -273,27 +311,18 @@ def select_structured_method(model: LLMModel) -> str:
 def structured(model: LLMModel, schema: Any) -> Runnable:
     """`schema` 모양으로 답하는 chain. 부르는 쪽은 provider 를 몰라도 된다.
 
-    **`strict` 를 넘길지는 모델이 아니라 클라이언트가 정한다.** 종전에는 부르는 쪽 셋이
-    각자 `select_structured_method` 를 보고 `strict=True` 를 붙였는데, 그 값은
-    `supports_strict_json` 에서 오고 그 칸은 OpenRouter 의 `structured_outputs` 능력을
-    적어 둔 것이다. Bedrock 항목이 그것을 참으로 물려받았고, 그 아래 클래스인
-    `ChatBedrockConverse` 는 그 인자를 안 받는다.
-
-        ChatBedrockConverse._converse_params() got an unexpected keyword argument 'strict'
-
-    stage 에서 화면 판정·게임 문맥·지식 질의가 전부 이 자리에서 죽었다. 예외를 삼키는
-    호출부라 런은 정상 종료로 보였고, 로그를 읽어야만 알 수 있었다(ARTEL-806).
-
-    **`supports_strict_json` 을 Bedrock 에서 거짓으로 바꾸지 않는다.** 그 칸의 뜻은
-    "모델이 엄격한 스키마를 안다" 이고 그것은 참이다. 거짓으로 적으면 다음 사람이 그
-    값을 믿고 다른 판단을 한다. 갈라야 하는 것은 모델의 능력이 아니라 **클라이언트가
-    받는 인자**이고, 그것을 아는 자리가 여기다.
-
-    Bedrock 은 `json_schema` 자체는 받는다. 빼는 것은 `strict` 하나다.
+    OpenRouter 에서 strict schema 를 지원하면 `json_schema + strict`, 지원하지 않으면
+    `json_mode` 를 쓴다. Bedrock model card 가 structured outputs 를 지원하지 않는다고
+    하면 `function_calling` 으로 내린다. 이 분기를 호출부마다 복사하면 provider 가
+    바뀔 때 일부 stage 만 조용히 실패하므로 이 한 곳이 결정한다(ARTEL-806).
     """
     chat = build_chat_model(model)
+    if select_structured_method(model) != "json_schema" and model.startswith(
+        BEDROCK_PREFIX
+    ):
+        return chat.with_structured_output(schema, method="function_calling")
     if select_structured_method(model) != "json_schema":
         return chat.with_structured_output(schema, method="json_mode")
-    if model.value.startswith(BEDROCK_PREFIX):
+    if model.startswith(BEDROCK_PREFIX):
         return chat.with_structured_output(schema, method="json_schema")
     return chat.with_structured_output(schema, method="json_schema", strict=True)

@@ -44,7 +44,6 @@ from app.agents.screen_verdict.prompt import (
     build_screen_verdict_prompt,
 )
 from app.agents.screen_verdict.validate import usable_entries
-from app.llm.models import LLMModel
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import MessageType, ScreenSelectorProposalPayload
 from app.qa.screen_verdict import ScreenSelectorAdjudicator
@@ -520,7 +519,7 @@ def test_a_model_that_cannot_see_is_not_sent_a_capture(monkeypatch) -> None:
 
     asyncio.run(
         agent.run(
-            ScreenVerdictRequest(proposal=_payload(proposal), model=LLMModel.gpt_6_luna),
+            ScreenVerdictRequest(proposal=_payload(proposal), model="openai/gpt-chat-latest"),
             _CTX,
         )
     )

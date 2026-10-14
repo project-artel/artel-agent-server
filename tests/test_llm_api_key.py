@@ -1,11 +1,16 @@
-"""Where the LLM key comes from: administrator value, then environment, with a TTL."""
+"""Where the provider keys come from: the orchestration server only, with a TTL."""
 
 import asyncio
 
 import httpx
 import pytest
 
-from app.llm.api_key import KeyRefreshOnUnauthorized, LlmApiKeyProvider
+from app.config import Settings
+from app.llm.api_key import (
+    KeyRefreshOnUnauthorized,
+    LlmApiKeyProvider,
+    is_key_rejected_by_bedrock,
+)
 
 BASE_URL = "http://orchestration:8081"
 
@@ -18,7 +23,7 @@ class FakeClock:
         return self.now
 
 
-def build_provider(handler, *, environment_key="env-key", ttl=30.0, clock=None, base_url=BASE_URL):
+def build_provider(handler, *, ttl=30.0, clock=None, base_url=BASE_URL):
     calls: list[httpx.Request] = []
 
     def recording(request: httpx.Request) -> httpx.Response:
@@ -27,7 +32,6 @@ def build_provider(handler, *, environment_key="env-key", ttl=30.0, clock=None, 
 
     provider = LlmApiKeyProvider(
         orchestration_base_url=base_url,
-        environment_key=environment_key,
         ttl_seconds=ttl,
         transport=httpx.MockTransport(recording),
         clock=clock or FakeClock(),
@@ -35,55 +39,90 @@ def build_provider(handler, *, environment_key="env-key", ttl=30.0, clock=None, 
     return provider, calls
 
 
-def answer(key, source="admin"):
-    return lambda request: httpx.Response(200, json={"apiKey": key, "source": source})
+def answer(openrouter=None, bedrock=None):
+    return lambda request: httpx.Response(
+        200, json={"openrouterApiKey": openrouter, "bedrockApiKey": bedrock}
+    )
 
 
-def test_admin_key_wins_over_environment_key():
-    provider, calls = build_provider(answer("admin-key"))
+def test_both_keys_are_read_from_the_settings_endpoint():
+    provider, calls = build_provider(answer("or-key", "br-key"))
 
-    assert provider.get() == "admin-key"
+    assert provider.get_openrouter_key() == "or-key"
+    assert provider.get_bedrock_key() == "br-key"
     assert calls[0].url.path == "/internal/settings/llm"
+    # One response carries both keys, so reading both costs one request.
+    assert len(calls) == 1
 
 
-def test_environment_key_answers_when_admin_has_no_key():
-    provider, _ = build_provider(answer(None, source="none"))
+def test_either_key_may_be_null():
+    provider, _ = build_provider(answer("or-key", None))
 
-    assert provider.get() == "env-key"
+    assert provider.get_openrouter_key() == "or-key"
+    assert provider.get_bedrock_key() is None
 
 
-def test_blank_admin_key_counts_as_no_key():
-    provider, _ = build_provider(answer("   "))
+def test_blank_keys_count_as_no_key():
+    provider, _ = build_provider(answer("   ", ""))
 
-    assert provider.get() == "env-key"
+    assert provider.get_openrouter_key() is None
+    assert provider.get_bedrock_key() is None
+
+
+def test_the_old_response_shape_gives_no_key():
+    provider, _ = build_provider(lambda request: httpx.Response(200, json={"apiKey": "old"}))
+
+    assert provider.get_openrouter_key() is None
+
+
+def test_environment_keys_are_not_read(monkeypatch):
+    """The keys live only in the database. A key exported by the shell must not leak in."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "env-or-key")
+    monkeypatch.setenv("LLM_API_KEY", "env-llm-key")
+    monkeypatch.setenv("BEDROCK_API_KEY", "env-br-key")
+    provider, _ = build_provider(answer(None, None))
+
+    assert provider.get_openrouter_key() is None
+    assert provider.get_bedrock_key() is None
+    assert provider.get_openrouter_key_or_placeholder() == "missing"
+    settings = Settings(_env_file=None)
+    assert not hasattr(settings, "llm_api_key")
+    assert not hasattr(settings, "bedrock_api_key")
 
 
 def test_cache_holds_until_ttl_then_refetches():
     clock = FakeClock()
     keys = iter(["first", "second"])
     provider, calls = build_provider(
-        lambda request: httpx.Response(200, json={"apiKey": next(keys)}), clock=clock
+        lambda request: httpx.Response(200, json={"openrouterApiKey": next(keys)}),
+        clock=clock,
     )
 
-    assert provider.get() == "first"
+    assert provider.get_openrouter_key() == "first"
     clock.now += 29
-    assert provider.get() == "first"
+    assert provider.get_openrouter_key() == "first"
     assert len(calls) == 1
 
     clock.now += 2
-    assert provider.get() == "second"
+    assert provider.get_openrouter_key() == "second"
     assert len(calls) == 2
 
 
-def test_invalidate_forces_a_refetch_before_the_ttl():
-    keys = iter(["old", "new"])
-    provider, calls = build_provider(
-        lambda request: httpx.Response(200, json={"apiKey": next(keys)})
-    )
+def test_invalidate_forces_a_refetch_of_both_keys_before_the_ttl():
+    answers = iter([("old-or", "old-br"), ("new-or", "new-br")])
 
-    assert provider.get() == "old"
+    def handler(request):
+        openrouter, bedrock = next(answers)
+        return httpx.Response(
+            200, json={"openrouterApiKey": openrouter, "bedrockApiKey": bedrock}
+        )
+
+    provider, calls = build_provider(handler)
+
+    assert provider.get_bedrock_key() == "old-br"
     provider.invalidate()
-    assert provider.get() == "new"
+    assert provider.get_bedrock_key() == "new-br"
+    assert provider.get_openrouter_key() == "new-or"
     assert len(calls) == 2
 
 
@@ -97,66 +136,94 @@ def test_invalidate_forces_a_refetch_before_the_ttl():
     ],
     ids=["server-error", "unauthorized", "non-json", "wrong-shape"],
 )
-def test_unexpected_answers_fall_back_to_environment_key(handler):
+def test_unexpected_answers_before_any_load_give_no_key(handler):
     provider, _ = build_provider(handler)
 
-    assert provider.get() == "env-key"
+    assert provider.get_openrouter_key() is None
+    assert provider.get_bedrock_key() is None
 
 
-def test_orchestration_down_falls_back_and_is_asked_once_per_ttl():
+def test_a_failed_refresh_keeps_the_last_keys():
+    clock = FakeClock()
+    state = {"down": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if state["down"]:
+            raise httpx.ConnectError("refused", request=request)
+        return httpx.Response(200, json={"openrouterApiKey": "or", "bedrockApiKey": "br"})
+
+    provider, _ = build_provider(handler, clock=clock)
+    assert provider.get_bedrock_key() == "br"
+
+    state["down"] = True
+    clock.now += 31
+    assert provider.get_openrouter_key() == "or"
+    assert provider.get_bedrock_key() == "br"
+
+
+def test_orchestration_down_is_asked_once_per_ttl():
     def refuse(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused", request=request)
 
     clock = FakeClock()
     provider, calls = build_provider(refuse, clock=clock)
 
-    assert provider.get() == "env-key"
-    assert provider.get() == "env-key"
+    assert provider.get_openrouter_key() is None
+    assert provider.get_bedrock_key() is None
     assert len(calls) == 1
 
     clock.now += 31
-    assert provider.get() == "env-key"
+    assert provider.get_openrouter_key() is None
     assert len(calls) == 2
 
 
-def test_recovery_after_an_outage_picks_up_the_admin_key():
+def test_recovery_after_an_outage_picks_up_the_keys():
     clock = FakeClock()
     outage = {"down": True}
 
     def handler(request: httpx.Request) -> httpx.Response:
         if outage["down"]:
             raise httpx.ConnectError("refused", request=request)
-        return httpx.Response(200, json={"apiKey": "admin-key"})
+        return httpx.Response(200, json={"openrouterApiKey": "admin-key"})
 
     provider, _ = build_provider(handler, clock=clock)
-    assert provider.get() == "env-key"
+    assert provider.get_openrouter_key() is None
 
     outage["down"] = False
     clock.now += 31
-    assert provider.get() == "admin-key"
+    assert provider.get_openrouter_key() == "admin-key"
 
 
-def test_no_orchestration_url_means_environment_only_and_no_request():
-    provider, calls = build_provider(answer("admin-key"), base_url=None)
+def test_no_orchestration_url_means_no_key_and_no_request():
+    provider, calls = build_provider(answer("or", "br"), base_url=None)
 
-    assert provider.get() == "env-key"
+    assert provider.get_openrouter_key() is None
+    assert provider.get_bedrock_key() is None
     assert calls == []
 
 
-def test_no_key_anywhere_gives_none_and_a_placeholder():
-    provider, _ = build_provider(answer(None), environment_key=None)
+def test_no_openrouter_key_gives_a_placeholder():
+    provider, _ = build_provider(answer(None, None))
 
-    assert provider.get() is None
-    assert provider.get_or_placeholder() == "missing"
+    assert provider.get_openrouter_key_or_placeholder() == "missing"
 
 
-def test_key_is_never_logged(caplog):
+def test_keys_are_never_logged_or_printed(caplog):
     caplog.set_level("DEBUG")
-    provider, _ = build_provider(lambda request: httpx.Response(500, text="secret-admin-key"))
-    provider.get()
+    provider, _ = build_provider(answer("secret-or-key", "secret-br-key"))
+    provider.get_openrouter_key()
 
-    assert "secret-admin-key" not in caplog.text
-    assert "env-key" not in caplog.text
+    # pydantic quotes the offending input in its error, and here that input is a key.
+    bad_body, _ = build_provider(
+        lambda request: httpx.Response(200, json={"openrouterApiKey": ["secret-in-list"]})
+    )
+    bad_body.get_openrouter_key()
+
+    failing, _ = build_provider(lambda request: httpx.Response(500, text="secret-in-body"))
+    failing.get_openrouter_key()
+
+    assert "secret" not in caplog.text
+    assert "secret" not in repr(provider._keys)
 
 
 def test_unauthorized_chat_error_invalidates_the_cache():
@@ -168,15 +235,44 @@ def test_unauthorized_chat_error_invalidates_the_cache():
 
     keys = iter(["old", "new", "newer"])
     provider, calls = build_provider(
-        lambda request: httpx.Response(200, json={"apiKey": next(keys)})
+        lambda request: httpx.Response(200, json={"openrouterApiKey": next(keys)})
     )
     callback = KeyRefreshOnUnauthorized(provider)
 
-    assert provider.get() == "old"
+    assert provider.get_openrouter_key() == "old"
     asyncio.run(callback.on_llm_error(ServerError()))
-    assert provider.get() == "old"
+    assert provider.get_openrouter_key() == "old"
     asyncio.run(callback.on_llm_error(Unauthorized()))
-    assert provider.get() == "new"
+    assert provider.get_openrouter_key() == "new"
+
+
+def _botocore_error(status: int) -> Exception:
+    from botocore.exceptions import ClientError
+
+    return ClientError(
+        {
+            "Error": {"Code": "UnrecognizedClientException", "Message": "bad token"},
+            "ResponseMetadata": {"HTTPStatusCode": status},
+        },
+        "ConverseStream",
+    )
+
+
+@pytest.mark.parametrize(("status", "rejected"), [(401, True), (403, True), (400, False), (500, False)])
+def test_bedrock_rejection_is_read_off_botocore_errors(status, rejected):
+    assert is_key_rejected_by_bedrock(_botocore_error(status)) is rejected
+
+
+def test_bedrock_rejection_invalidates_the_cache():
+    keys = iter(["old", "new"])
+    provider, _ = build_provider(
+        lambda request: httpx.Response(200, json={"bedrockApiKey": next(keys)})
+    )
+    callback = KeyRefreshOnUnauthorized(provider, rejected=is_key_rejected_by_bedrock)
+
+    assert provider.get_bedrock_key() == "old"
+    asyncio.run(callback.on_llm_error(_botocore_error(403)))
+    assert provider.get_bedrock_key() == "new"
 
 
 def test_chat_client_sends_the_key_the_provider_currently_holds(monkeypatch):
@@ -187,7 +283,9 @@ def test_chat_client_sends_the_key_the_provider_currently_holds(monkeypatch):
     from app.llm.models import DEFAULT_MODEL
 
     keys = iter(["first-key", "second-key"])
-    provider, _ = build_provider(lambda request: httpx.Response(200, json={"apiKey": next(keys)}))
+    provider, _ = build_provider(
+        lambda request: httpx.Response(200, json={"openrouterApiKey": next(keys)})
+    )
     monkeypatch.setattr(api_key_module, "get_llm_api_key_provider", lambda: provider)
     monkeypatch.setattr("app.llm.chat_model.get_llm_api_key_provider", lambda: provider)
     get_settings.cache_clear()
