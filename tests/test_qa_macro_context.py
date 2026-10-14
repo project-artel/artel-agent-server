@@ -18,6 +18,7 @@ from app.agents.qa.macro.model import (
     MacroContextLiteral,
     MacroContextName,
     MacroContextTarget,
+    MacroContextUnder,
     MacroFindValue,
     MacroLiteral,
     MacroNameTarget,
@@ -222,3 +223,65 @@ def test_the_last_list_is_emptied_before_the_one_before_it() -> None:
     assert clipped == 120 - len(state["first"]) - len(state["second"])
     assert state["second"] == []
     assert 0 < len(state["first"]) < 60
+
+
+# --- `under(...)` --------------------------------------------------------------
+
+
+def hand_and_hint() -> MacroMemories:
+    return memories(
+        thing("Root[0]/Hand[2]", text="Hand"),
+        thing("Root[0]/Hand[2]/Card(Clone)[1]", text="Fire"),
+        thing("Root[0]/Hand[2]/Card(Clone)[1]/Glow[0]"),
+        thing("Root[0]/HandHint[3]", text="Drag a card"),
+        thing(BOSS, text="Undead"),
+    )
+
+
+def test_under_a_path_lists_the_object_and_everything_below_it_in_path_order() -> None:
+    argument = MacroContextUnder(key="hand", root=MacroSelectorTarget(selector="Root[0]/Hand[2]"))
+
+    state, clipped = build_context_state(hand_and_hint(), MacroScope(), (argument,))
+
+    assert clipped == 0
+    # `HandHint` 는 경로가 `Root[0]/Hand` 로 시작하지만 `Hand[2]` 아래가 아니다.
+    assert [one["path"] for one in state["hand"]] == [
+        "Root[0]/Hand[2]",
+        "Root[0]/Hand[2]/Card(Clone)[1]",
+        "Root[0]/Hand[2]/Card(Clone)[1]/Glow[0]",
+    ]
+
+
+def test_under_an_object_name_uses_that_object_s_path() -> None:
+    held = hand_and_hint()
+    scope = MacroScope()
+    scope.bind(
+        "hand",
+        resolve_find(held, scope, MacroFindValue(label=MacroStringLiteral(value="Hand"))),
+    )
+    argument = MacroContextUnder(key="cards", root=MacroNameTarget(name="hand"))
+
+    state, _ = build_context_state(held, scope, (argument,))
+
+    assert len(state["cards"]) == 3
+
+
+def test_under_a_path_with_nothing_below_is_an_empty_list() -> None:
+    argument = MacroContextUnder(key="shop", root=MacroSelectorTarget(selector="Root[0]/Shop[9]"))
+
+    state, _ = build_context_state(hand_and_hint(), MacroScope(), (argument,))
+
+    assert state["shop"] == []
+
+
+def test_under_is_clipped_from_the_end_like_find_all() -> None:
+    many = [
+        thing(f"Root[0]/Hand[2]/Card(Clone)[{index}]", text="x" * 70) for index in range(200)
+    ]
+    argument = MacroContextUnder(key="hand", root=MacroSelectorTarget(selector="Root[0]/Hand[2]"))
+
+    state, clipped = build_context_state(memories(*many), MacroScope(), (argument,))
+
+    assert clipped > 0
+    assert len(state["hand"]) == 200 - clipped
+    assert len(json.dumps(state, ensure_ascii=False)) <= MAX_DECIDE_STATE_CHARS

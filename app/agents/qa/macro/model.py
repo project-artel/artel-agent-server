@@ -230,6 +230,19 @@ class MacroContextFindAll(_Frozen):
     find: MacroFindValue
 
 
+class MacroContextUnder(_Frozen):
+    """`hand=under("DebugCanvas[4]/Hand[1]")` 나 `hud=under(panel)`. 그 object 와 그 아래 전부.
+
+    `pulse` 가 들고 있는 live object 중 경로가 `root` 의 경로와 같거나 그 아래인 것 전부의
+    목록이 들어간다. `find_all` 과 달리 이름을 몰라도 되므로, 패널 하나를 통째로 보여 줄
+    자리다. 경로 문자열은 `MacroSelectorTarget` 으로, object 이름은 `MacroNameTarget` 으로 든다.
+    """
+
+    kind: Literal["under"] = "under"
+    key: str
+    root: MacroTarget
+
+
 class MacroContextName(_Frozen):
     """`hp=hp`. 앞에서 reader 로 bind 한 값이 bind 된 그대로 들어간다."""
 
@@ -248,7 +261,13 @@ class MacroContextLiteral(_Frozen):
 
 
 MacroContextArgument = Annotated[
-    Union[MacroContextTarget, MacroContextFindAll, MacroContextName, MacroContextLiteral],
+    Union[
+        MacroContextTarget,
+        MacroContextFindAll,
+        MacroContextUnder,
+        MacroContextName,
+        MacroContextLiteral,
+    ],
     Field(discriminator="kind"),
 ]
 

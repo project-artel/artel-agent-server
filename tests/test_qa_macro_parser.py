@@ -1823,8 +1823,8 @@ _TWO_CASES = (
         ),
         ('match decide("What now?", **hp):', _TWO_CASES, "`**`"),
         ('match decide("What now?", scene="Battle"):', _TWO_CASES, "`scene=`"),
-        ('match decide("What now?", total=hp + 1):', _TWO_CASES, "five things"),
-        ('match decide("What now?", boss=find(name="Boss")):', _TWO_CASES, "five things"),
+        ('match decide("What now?", total=hp + 1):', _TWO_CASES, "six things"),
+        ('match decide("What now?", boss=find(name="Boss")):', _TWO_CASES, "six things"),
         ('match decide("What now?", note=f"{hp}"):', _TWO_CASES, "f-string"),
         ('match decide("What now?", mana=mana):', _TWO_CASES, "`mana` is not bound"),
     ],
@@ -1854,11 +1854,11 @@ def test_a_wrong_match_is_refused(match_line: str, cases: str, said: str) -> Non
     assert said in rejection_with(decide_source(match_line, cases), battle_macros())
 
 
-def test_a_wrong_context_value_names_the_five_accepted_forms() -> None:
+def test_a_wrong_context_value_names_the_six_accepted_forms() -> None:
     reason = rejection_with(
         decide_source('match decide("What now?", total=hp + 1):'), battle_macros()
     )
-    for form in ("`object`", "selector(", "find_all(", "`int`", "literal"):
+    for form in ("`object`", "selector(", "find_all(", "under(", "`int`", "literal"):
         assert form in reason
 
 
@@ -2013,3 +2013,60 @@ def test_ask_is_refused_inside_a_predicate(body: str) -> None:
         "def ready() -> bool:\n" + body
     )
     assert "synchronously" in reason
+
+
+# --- `under(...)`: object 하나와 그 아래 전부 -------------------------------------
+
+
+def test_under_takes_a_path_or_an_object_name() -> None:
+    from app.agents.qa.macro.model import MacroContextUnder
+
+    definition = parse_with(
+        decide_source(
+            'match decide("What now?", hand=under("/Root[0]/Hand[2]/"), around=under(boss)):'
+        ),
+        battle_macros(),
+    )
+    match = definition.entry.statements[2]
+    context = {argument.key: argument for argument in match.decide.context}
+
+    assert context["hand"] == MacroContextUnder(
+        key="hand", root=MacroSelectorTarget(selector="Root[0]/Hand[2]")
+    )
+    assert context["around"] == MacroContextUnder(
+        key="around", root=MacroNameTarget(name="boss")
+    )
+
+
+def test_under_works_in_ask_too() -> None:
+    source = (
+        "def m() -> None:\n"
+        '    if ask("Is the hand empty?", hand=under("Root[0]/Hand[2]")):\n'
+        '        flag("empty")\n'
+    )
+    definition = macro_definition_from_source("m", source)
+    condition = definition.entry.statements[0].condition
+
+    assert condition.context[0].kind == "under"
+
+
+@pytest.mark.parametrize(
+    ("argument", "expected"),
+    [
+        ("under()", "takes one thing"),
+        ('under("A", "B")', "takes one thing"),
+        ('under(path="A")', "takes one thing"),
+        ('under("  /  ")', "takes one thing"),
+        ("under(3)", "takes one thing"),
+        ("under(hp)", "declared `float`, not `object`"),
+        ("under(mana)", "`mana` is not bound"),
+        ('under(selector("A"))', "takes one thing"),
+    ],
+    ids=["nothing", "two", "keyword", "empty path", "number", "reading", "unbound", "selector call"],
+)
+def test_under_refuses_anything_but_one_path_or_object(argument: str, expected: str) -> None:
+    reason = rejection_with(
+        decide_source(f'match decide("What now?", hand={argument}):'), battle_macros()
+    )
+
+    assert expected in reason

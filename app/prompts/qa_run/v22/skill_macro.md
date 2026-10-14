@@ -136,8 +136,9 @@ value you can read: they cost nothing and never guess.
 **What Jev reads.** The keywords of `decide` and `ask` are what Jev sees, under
 the names you give them, together with the `scene`. An object name or
 `selector(...)` gives that object's path, text and members; `find_all(...)`
-gives every match; a name bound to a reading gives its value; a literal gives
-itself. With no keyword, Jev reads every object on the screen. Each value is cut
+gives every match; `under("<path>")` or `under(<object>)` gives that object and
+every object below it, without naming them — a whole panel or hand at once; a
+name bound to a reading gives its value; a literal gives itself. With no keyword, Jev reads every object on the screen. Each value is cut
 at 80 characters and the whole at 6000;
 objects past that are left out, and the decision line says how many. Give Jev
 what a person would look at to answer the question, not everything. `scene` is

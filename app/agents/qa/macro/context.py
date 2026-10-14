@@ -28,7 +28,9 @@ from app.agents.qa.macro.model import (
     MacroContextLiteral,
     MacroContextName,
     MacroContextTarget,
+    MacroContextUnder,
     MacroNameTarget,
+    MacroSelectorTarget,
 )
 
 # object 목록을 따로 적지 않은 `decide`·`ask` 에서 live object 전부가 들어가는 key.
@@ -64,6 +66,8 @@ def _argument_value(
             render_object(memories, found)
             for found in resolve_find_all(memories, scope, argument.find)
         ]
+    if isinstance(argument, MacroContextUnder):
+        return _objects_under(memories, scope, argument)
     if isinstance(argument, MacroContextName):
         bound = scope.value(argument.name)
         if isinstance(bound, (FoundObject, LateSelector)):
@@ -74,6 +78,32 @@ def _argument_value(
         return clip_value(bound)
     assert isinstance(argument, MacroContextLiteral)
     return clip_value(argument.literal.value)
+
+
+def _objects_under(
+    memories: MacroMemories, scope: MacroScope, argument: MacroContextUnder
+) -> list[dict[str, Any]]:
+    """경로가 `root` 와 같거나 `root/` 로 시작하는 live object 전부. 경로 순서다.
+
+    경로 문자열이면 그대로 쓰고, object 이름이면 reader 와 같은 길로 지금의 기록을 읽어 그
+    경로를 쓴다. 경로 문자열은 그 자리에 object 가 없어도 거절하지 않는다 — 아래에 아무것도
+    없으면 빈 목록이고, 그것도 Jev 가 읽을 사실이다.
+    """
+    if isinstance(argument.root, MacroSelectorTarget):
+        root = argument.root.selector
+    else:
+        found = resolve_target(memories, scope, argument.root)
+        root = (found.record.selector or found.record.path or "").strip("/")
+    memory = memories.pulse
+    below: list[dict[str, Any]] = []
+    for key in sorted(memory.held):
+        record = memory.held[key]
+        if not record.live:
+            continue
+        path = (record.selector or record.path or "").strip("/")
+        if path == root or path.startswith(root + "/"):
+            below.append(render_object(memories, FoundObject(key=key, record=record)))
+    return below
 
 
 def _every_live_object(memories: MacroMemories) -> list[dict[str, Any]]:
@@ -130,7 +160,7 @@ def _length(state: dict[str, Any]) -> int:
 def _fit(state: dict[str, Any]) -> int:
     """전체가 `MAX_DECIDE_STATE_CHARS` 안에 들 때까지 object 를 뒤에서부터 뺀다.
 
-    빼는 것은 목록 안의 object 뿐이다(`find_all` 의 결과와 `objects`). 하나를 가리킨
+    빼는 것은 목록 안의 object 뿐이다(`find_all` 과 `under` 의 결과, 그리고 `objects`). 하나를 가리킨
     keyword 와 이름에 bind 된 값은 agent 가 직접 적은 것이라 남긴다. 맨 뒤 key 의 목록부터
     비우고, 비면 그 앞 key 의 목록으로 간다. 목록을 다 비워도 넘으면 그대로 둔다.
     """

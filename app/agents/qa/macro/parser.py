@@ -59,6 +59,7 @@ from app.agents.qa.macro.grammar import (
     SELECTOR,
     TOOL_NAME_LIST,
     TOOLS_BY_NAME,
+    UNDER,
     MacroOperator,
     MacroShape,
     MacroType,
@@ -83,6 +84,7 @@ from app.agents.qa.macro.model import (
     MacroContextLiteral,
     MacroContextName,
     MacroContextTarget,
+    MacroContextUnder,
     MacroDecideCall,
     MacroDefinition,
     MacroFindAllIterable,
@@ -182,7 +184,8 @@ _STATEMENT_KINDS = (
 # `decide`·`ask` 의 keyword 인자 하나가 받는 다섯 모양. 거절 문장 세 곳이 같은 말을 한다.
 _CONTEXT_FORMS = (
     "a name declared `object` (a parameter, a `find(...)` or `selector(...)` name, or a "
-    "`for` name), `selector(\"<path>\")`, `find_all(label=..., name=..., under=...)`, a "
+    "`for` name), `selector(\"<path>\")`, `find_all(label=..., name=..., under=...)`, "
+    "`under(\"<path>\")` or `under(<object name>)` for an object and everything below it, a "
     "name bound earlier to an `int`, `float`, `string` or `bool`, or one literal (an int, "
     "a float, a string or a bool)"
 )
@@ -1482,6 +1485,8 @@ class _FunctionReader:
                 )
             if value.func.id == FIND_ALL:
                 return MacroContextFindAll(key=key, find=self._find(value, FIND_ALL))
+            if value.func.id == UNDER:
+                return MacroContextUnder(key=key, root=self._under_root(value, key, called))
         if isinstance(value, ast.JoinedStr):
             raise MacroRejection(
                 f"`{key}=` in `{called}` is an f-string, which is not allowed. Pass "
@@ -1490,9 +1495,41 @@ class _FunctionReader:
             )
         raise MacroRejection(
             f"`{key}=` in `{called}` is not something Jev can be shown. A context value "
-            f"is one of five things: {_CONTEXT_FORMS}.",
+            f"is one of six things: {_CONTEXT_FORMS}.",
             line,
         )
+
+    def _under_root(self, node: ast.Call, key: str, called: str) -> MacroTarget:
+        """`under(...)` 의 인자 하나. 경로 문자열이거나 `object` 로 선언된 이름이다.
+
+        경로는 앞뒤의 `/` 를 떼고 든다. runner 가 그 경로와 같거나 `<경로>/` 로 시작하는
+        object 를 고르므로, `Hand` 가 `HandHint` 까지 잡지 않는다.
+        """
+        usage = (
+            f'`under` in `{key}=` of `{called}` takes one thing: a path string such as '
+            '`under("DebugCanvas[4]/Hand[1]")`, or a name declared `object`.'
+        )
+        if node.keywords or len(node.args) != 1:
+            raise MacroRejection(usage, node.lineno)
+        argument = node.args[0]
+        literal = _literal(argument)
+        if literal is not None:
+            path = ""
+            if literal.shape is MacroShape.string:
+                path = str(literal.value).strip().strip("/")
+            if not path:
+                raise MacroRejection(usage, node.lineno)
+            return MacroSelectorTarget(selector=path)
+        if isinstance(argument, ast.Name):
+            bound = self._require_bound(argument)
+            if bound.declared_type is not MacroType.object_:
+                raise MacroRejection(
+                    f"`{argument.id}` is declared `{bound.declared_type.value}`, not "
+                    f"`object`. {usage}",
+                    node.lineno,
+                )
+            return MacroNameTarget(name=argument.id)
+        raise MacroRejection(usage, node.lineno)
 
     def _checkpoint(self, node: ast.Call, written: str) -> MacroCheckpointStatement:
         if node.keywords or len(node.args) > 1:

@@ -467,6 +467,8 @@ MAX_WAIT_PER_CALL_SECONDS = 60
 IMPORT_MODULE = "macros"
 DECIDE = "decide"
 ASK = "ask"
+# `decide`·`ask` 의 context 값으로만 쓰는 호출. object 하나와 그 아래 전부를 넘긴다.
+UNDER = "under"
 # runner 가 `decide` 의 선택지에 언제나 덧붙이는 것. Jev 가 이것을 고르면 macro 가 멈추고
 # agent 가 그 회를 직접 하거나 빠진 macro 를 만든다. `case` 에 이 이름을 쓸 수 없다.
 NONE_FITS = "none_fits"

@@ -150,6 +150,7 @@ Keyword arguments to `decide`/`ask` become keys of the Jev `state`. `scene` is a
 | `boss=boss` — an `object` name (parameter, `find`, `for`) | `{"path", "text", members...}`: every member of that object that the `pulse` holds, minus those judged cosmetic when `pulse_relevance` is on |
 | `hp=hp` — a reading bound earlier | the value as it was bound |
 | `goal="beat the boss"` — a string/int/float/bool literal | the literal |
+| `hand=under("Root[0]/Hand[2]")` or `hud=under(panel)` — added 2026-10-14 | a list of every live object whose path is that path or below it, in path order, same member rule; clipped from the end like `find_all` |
 | no keyword at all | `{"objects": ...}`: every live held object, same member rule, capped |
 
 - Values are clipped to 80 characters each (`relevance._render_value`) and the whole `state` to
