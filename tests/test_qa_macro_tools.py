@@ -953,7 +953,7 @@ def test_an_operator_ending_the_run_is_not_turned_into_a_sentence(monkeypatch) -
     call(tools["write_macro"], name="judge_the_card", source=COMPARED)
     call(tools["register_macro"], name="judge_the_card")
 
-    def give_up(_result):
+    def give_up(*_arguments, **_keywords):
         raise QaCancelled()
 
     monkeypatch.setattr(macro_tools, "_render", give_up)

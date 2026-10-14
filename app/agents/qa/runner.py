@@ -272,6 +272,8 @@ def fold_kinds_for(arch: ResolvedArch) -> frozenset[FoldKind]:
         kinds.add(FoldKind.knowledge_neighbours)
     if arch.skills == "on_demand" and arch.fold_stale_skills:
         kinds.add(FoldKind.skill)
+    if arch.fold_stale_macro_results:
+        kinds.add(FoldKind.macro_result)
     if arch.vision:
         kinds.add(FoldKind.image)
     return frozenset(kinds)
