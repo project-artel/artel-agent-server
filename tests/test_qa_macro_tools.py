@@ -214,6 +214,21 @@ def test_write_macro_reports_the_parameters_run_macro_will_ask_for() -> None:
     assert "card: object" in answer
 
 
+def test_write_macro_refuses_an_instance_id_selector() -> None:
+    """`#id` 는 게임을 다시 띄우면 바뀐다. 쓰는 길에서 거절한다 (ARTEL-1026)."""
+    _, state, tools, _ = make()
+    source = (
+        "def tap_it() -> None:\n"
+        '    """Tap one thing."""\n'
+        '    click(selector("#-64624"))\n'
+    )
+
+    answer = call(tools["write_macro"], name="tap_it", source=source)
+
+    assert "changes between game launches" in answer
+    assert state.macros.draft("tap_it") is None
+
+
 # --- read ----------------------------------------------------------------------
 
 
