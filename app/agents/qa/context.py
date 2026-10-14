@@ -48,13 +48,18 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 
-from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from app.agents.qa.arch import DEFAULT_FOLD_THRESHOLD_CHARS
 from app.agents.qa.knowledge import (
     NEIGHBOUR_BLOCK_END,
     NEIGHBOUR_BLOCK_START_PREFIX,
     NEIGHBOUR_BLOCK_START_SUFFIX,
+)
+from app.agents.qa.tools.macro_tools import (
+    MACRO_RESULT_END,
+    MACRO_RESULT_START_PREFIX,
+    MACRO_RESULT_START_SUFFIX,
 )
 from app.agents.qa.tools.skill_tools import (
     SKILL_BLOCK_END_PREFIX,
@@ -74,6 +79,8 @@ class FoldKind(StrEnum):
     knowledge_neighbours = "knowledge_neighbours"
     skill = "skill"
     image = "image"
+    # 호출한 step 이 보고된 뒤의 `run_macro` / `resume_macro` 결과 목록 (ARTEL-1026).
+    macro_result = "macro_result"
 
 
 # How many of the newest scene views survive folding, in full — counted across
@@ -107,7 +114,14 @@ _KEEP_BY_KIND = {
     FoldKind.knowledge_neighbours: DEFAULT_KEEP_NEIGHBOUR_BLOCKS,
     FoldKind.skill: DEFAULT_KEEP_SKILLS,
     FoldKind.image: DEFAULT_KEEP_IMAGES,
+    # 새것을 남기지 않는다. 낡았는지는 순서가 아니라 "호출한 step 이 보고됐나" 로 정해지고,
+    # 보고된 step 의 결과는 가장 새것이어도 이미 판정에 쓰인 뒤다 (`_reported_macro_calls`).
+    FoldKind.macro_result: 0,
 }
+
+# macro 결과를 내는 두 tool 의 이름과, 그 호출이 속한 step 을 보고하는 tool.
+_MACRO_RESULT_TOOLS = frozenset({"run_macro", "resume_macro"})
+_REPORT_TOOL = "report_step"
 
 
 # 그림 한 장의 점수. 그림은 글자 수가 없으므로 token 으로 어림해 글자로 바꾼다: 화면 한 장이
@@ -167,6 +181,17 @@ _SKILL_PATTERN = re.compile(
     + re.escape(SKILL_BLOCK_END_PREFIX)
     + r"(?P=name)"
     + re.escape(SKILL_BLOCK_END_SUFFIX),
+    re.DOTALL,
+)
+
+
+# 시작 marker 가 한 줄 요약을 싣는다(`macro_tools._render`). 한 줄에는 `>>` 가 없다.
+_MACRO_RESULT_PATTERN = re.compile(
+    re.escape(MACRO_RESULT_START_PREFIX)
+    + r"(?P<line>[^\n]*?)"
+    + re.escape(MACRO_RESULT_START_SUFFIX)
+    + r"\n.*?"
+    + re.escape(MACRO_RESULT_END),
     re.DOTALL,
 )
 
@@ -231,12 +256,23 @@ def _skill_placeholder(match: re.Match[str]) -> str:
     )
 
 
+def _macro_result_placeholder(match: re.Match[str]) -> str:
+    # 마커 문법을 안 쓰는 이유는 `_placeholder` 와 같다. 한 줄은 결과가 낼 때 이미 만든 것이라
+    # 여기서는 옮기기만 한다. 목록이 사라졌다는 것과 되살리는 길을 말해 둔다 — 안 그러면 agent 가
+    # 기억에 있는 목록을 아직 보고 있는 것처럼 군다.
+    return (
+        f"[macro result folded — {match.group('line')} Its step was reported, so the "
+        "per-action listing is gone. Call observe_scene to see where you are.]"
+    )
+
+
 # 도구 결과 안의 block 을 찾는 패턴과, 찾은 block 을 바꿀 `placeholder`. 그림은 도구 결과가
 # 아니라 따로 실린 메시지라 여기 없다.
 _TEXT_BLOCKS = {
     FoldKind.scene_view: (_VIEW_PATTERN, _view_placeholder),
     FoldKind.knowledge_neighbours: (_NEIGHBOUR_PATTERN, _neighbour_placeholder),
     FoldKind.skill: (_SKILL_PATTERN, _skill_placeholder),
+    FoldKind.macro_result: (_MACRO_RESULT_PATTERN, _macro_result_placeholder),
 }
 
 
@@ -299,8 +335,11 @@ def fold_context(
     content.
     """
     enabled = frozenset(kinds)
+    reported = _reported_macro_calls(messages) if FoldKind.macro_result in enabled else frozenset()
     candidates = [
-        candidate for message in messages for candidate in _candidates_in(message, enabled)
+        candidate
+        for message in messages
+        for candidate in _candidates_in(message, enabled, reported)
     ]
     stale = _stale(candidates)
 
@@ -325,7 +364,39 @@ def fold_every_stale_block(
     return fold_context(messages, kinds, threshold_chars=0).messages
 
 
-def _candidates_in(message: BaseMessage, kinds: frozenset[FoldKind]) -> list[FoldCandidate]:
+def _reported_macro_calls(messages: list[BaseMessage]) -> frozenset[str]:
+    """호출한 step 이 그 뒤에 `report_step` 으로 보고된 macro 결과의 `tool_call_id`.
+
+    결과 메시지에는 step 이 없어서 그 결과를 부른 `AIMessage` 의 호출 인자에서 읽는다. 보고는
+    결과보다 **뒤에** 나온 `report_step` 호출만 센다 — 앞에서 같은 step 을 한 번 보고하고 다시
+    macro 를 불렀다면 이 결과는 아직 판정 전이다. 메시지 목록의 앞이 압축으로 요약되어 호출한
+    `AIMessage` 가 사라지면 그 결과도 같이 없으므로 짝이 안 맞는 일은 없다.
+    """
+    step_of_call: dict[str, int] = {}
+    reported_at: dict[int, int] = {}
+    position_of_call: dict[str, int] = {}
+    for position, message in enumerate(messages):
+        if not isinstance(message, AIMessage):
+            continue
+        for tool_call in message.tool_calls:
+            step = tool_call["args"].get("step")
+            if not isinstance(step, int):
+                continue
+            if tool_call["name"] in _MACRO_RESULT_TOOLS:
+                step_of_call[tool_call["id"]] = step
+                position_of_call[tool_call["id"]] = position
+            elif tool_call["name"] == _REPORT_TOOL:
+                reported_at[step] = position
+    return frozenset(
+        call_id
+        for call_id, step in step_of_call.items()
+        if reported_at.get(step, -1) > position_of_call[call_id]
+    )
+
+
+def _candidates_in(
+    message: BaseMessage, kinds: frozenset[FoldKind], reported_macro_calls: frozenset[str]
+) -> list[FoldCandidate]:
     if FoldKind.image in kinds and is_capture_message(message) and _has_image(message):
         capture_id = message.additional_kwargs[CAPTURE_MESSAGE_KEY]
         return [FoldCandidate(FoldKind.image, f"image:{capture_id}", IMAGE_SCORE_CHARS)]
@@ -334,6 +405,8 @@ def _candidates_in(message: BaseMessage, kinds: frozenset[FoldKind]) -> list[Fol
     candidates = []
     for kind, (pattern, _) in _TEXT_BLOCKS.items():
         if kind not in kinds:
+            continue
+        if kind is FoldKind.macro_result and message.tool_call_id not in reported_macro_calls:
             continue
         for ordinal, match in enumerate(pattern.finditer(message.content)):
             key = f"{kind}:{message.tool_call_id}:{ordinal}"

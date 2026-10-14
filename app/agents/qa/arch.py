@@ -401,7 +401,17 @@ from app.llm.models import LLMModel, get_model_spec
 # schema are unchanged, so `arch_fingerprint` does not move; the label moves because an agent whose
 # macros pick their own next macro plays a scene with far fewer model turns than one that picks
 # every macro itself, and one bucket would mix the two.
-QA_ARCH_LABEL = "v25-macro-decide"
+#
+# v26 shortens and folds macro results (ARTEL-1026). With `fold_stale_macro_results` on, a
+# `run_macro` or `resume_macro` that ran to the end with no flag, no verdict request and no failed
+# action answers in one line — the macro, the actions that reached the game, the decisions Jev
+# made, and the scene it ended on — instead of a line per action; any other result is wrapped in
+# markers, and once the step that called it is reported the `fold_context` middleware replaces it
+# with that one line. An orchestration macro from v25 runs many turns in one call, so its listing
+# is the longest a run carries. `write_macro`, `edit_macro` and `register_macro` also refuse a
+# `#id`, `-` or empty `selector`, which goes stale between game launches. The tool set is
+# unchanged; the label moves because what the model reads after every macro call moved.
+QA_ARCH_LABEL = "v26-macro-result-fold"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
@@ -652,6 +662,10 @@ class QaArchSpec(BaseModel):
     # 기본값이 `True` 인 이유는 `pulse_relevance` 와 같다. 기본 run 의 view 가 그대로라
     # `QA_ARCH_LABEL` 이 안 움직인다.
     report_step_view: bool = True
+    # 끝까지 간 `run_macro` 결과를 한 줄로 내고, 호출한 step 이 보고된 뒤 오래된 결과를 한 줄로
+    # `fold` 한다(ARTEL-1026). 기본값이 `True` 이고 `QA_ARCH_LABEL` 이 `v26-macro-result-fold` 로
+    # 올랐다. 끄면 결과 문장과 `fold` 종류가 v25 그대로다.
+    fold_stale_macro_results: bool = True
     # `fold_context` 가 오래된 block 을 한 번에 `fold` 하는 기준. 낮추면 prompt 를 자주 다시 써서
     # `cache` 를 덜 읽고, 높이면 오래된 block 이 오래 남아 `cache` 에서 읽는 양이 는다. 어느 쪽이
     # 싼지는 재 봐야 해서 실험 축으로 둔다. `0` 은 오래된 block 을 매 호출 `fold` 한다.
@@ -751,6 +765,7 @@ class ResolvedArch(BaseModel):
     fold_stale_skills: bool
     pulse_relevance: bool
     report_step_view: bool
+    fold_stale_macro_results: bool
     fold_threshold_chars: int
     compaction: bool
     compaction_trigger_fraction: float

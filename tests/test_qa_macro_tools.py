@@ -214,6 +214,21 @@ def test_write_macro_reports_the_parameters_run_macro_will_ask_for() -> None:
     assert "card: object" in answer
 
 
+def test_write_macro_refuses_an_instance_id_selector() -> None:
+    """`#id` 는 게임을 다시 띄우면 바뀐다. 쓰는 길에서 거절한다 (ARTEL-1026)."""
+    _, state, tools, _ = make()
+    source = (
+        "def tap_it() -> None:\n"
+        '    """Tap one thing."""\n'
+        '    click(selector("#-64624"))\n'
+    )
+
+    answer = call(tools["write_macro"], name="tap_it", source=source)
+
+    assert "changes between game launches" in answer
+    assert state.macros.draft("tap_it") is None
+
+
 # --- read ----------------------------------------------------------------------
 
 
@@ -609,11 +624,12 @@ def test_a_macro_answer_carries_one_pulse_view_however_many_actions_it_sent() ->
 
     answer = asyncio.run(drive())
 
-    assert "ran to the end. 2 action(s) reached the game." in answer
+    # `fold_stale_macro_results` 가 켜진 기본 run 은 끝까지 간 결과를 한 줄로 낸다(ARTEL-1026).
+    assert "two_presses ran to the end; 2 action(s) reached the game" in answer
     assert len(actions(sent)) == 2
     assert answer.count(PULSE_VIEW_START) == 1
-    # view 는 답의 끝, action 줄들 뒤에 있다.
-    assert answer.index("What the game said:") < answer.index(PULSE_VIEW_START)
+    # view 는 답의 끝, macro 결과 줄 뒤에 있다.
+    assert answer.index("ran to the end") < answer.index(PULSE_VIEW_START)
 
 
 def test_a_hand_sent_action_still_answers_with_the_screen() -> None:
@@ -953,7 +969,7 @@ def test_an_operator_ending_the_run_is_not_turned_into_a_sentence(monkeypatch) -
     call(tools["write_macro"], name="judge_the_card", source=COMPARED)
     call(tools["register_macro"], name="judge_the_card")
 
-    def give_up(_result):
+    def give_up(*_arguments, **_keywords):
         raise QaCancelled()
 
     monkeypatch.setattr(macro_tools, "_render", give_up)

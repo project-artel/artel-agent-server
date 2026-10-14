@@ -52,6 +52,7 @@ from app.agents.qa.macro.errors import MacroFailure, MacroRejection
 from app.agents.qa.macro.grammar import DECLARABLE_TYPE_NAMES, NONE_FITS, MacroType
 from app.agents.qa.macro.model import MacroDefinition, MacroParameter
 from app.agents.qa.macro.parser import imported_names, macro_definition_from_source
+from app.agents.qa.macro.selector_check import reject_unstable_selectors
 from app.agents.qa.macro.session import MacroSession
 from app.agents.qa.macro.runner import (
     MacroAskRequest,
@@ -194,7 +195,14 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         """
         result, paused = await session.settle()
         state.paused_macro = session if paused else None
-        return ctx.answer(_render(result), channel.drain_operator_messages())
+        macro_part = _render(
+            result, _standing_scene(), fold_stale=ctx.arch.fold_stale_macro_results
+        )
+        return ctx.answer(macro_part, channel.drain_operator_messages())
+
+    def _standing_scene() -> str:
+        """지금 서 있는 `scene` 이름. 모르면 빈 문자열."""
+        return (channel.scene.scene or channel.scene.pulse.scene or "").strip()
 
     def _standing_screen() -> str:
         """등록하는 순간 agent 가 서 있는 `screen.id`. 모르면 빈 문자열.
@@ -335,7 +343,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         return state.macros.adopt(definition, tuple(answer.screen_ids)), ""
 
     async def _parsed(
-        name: str, source: str, importing: tuple[str, ...] = ()
+        name: str, source: str, importing: tuple[str, ...] = (), *, writing: bool = False
     ) -> tuple[MacroDefinition | None, str]:
         """파싱해 보고 결과를 말한다. 등록하지도, 실행하지도 않는다.
 
@@ -344,6 +352,10 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         지난 런이 등록한 것을 가져온다. 가져온 macro 도 자기 import 가 있으면 같은 길로
         파싱하므로, `importing` 이 지금 풀고 있는 이름들을 들고 가서 `a` 가 `b` 를, `b` 가
         `a` 를 가져오는 순환을 끊는다.
+
+        `writing` 은 쓰는 길(`write_macro`, `edit_macro`, `register_macro`)만 켠다. 그때는
+        `#id`, `-`, 빈 문자열을 겨누는 `selector` 도 거절한다(ARTEL-1026). 저장된 macro 와
+        가져온 macro 를 읽는 길은 켜지 않으므로 이미 저장된 row 는 계속 parse 된다.
         """
         imports: dict[str, MacroDefinition] = {}
         for imported in imported_names(source):
@@ -363,7 +375,10 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
                     ).render()
             imports[imported] = registered.definition
         try:
-            return macro_definition_from_source(name, source, imports=imports), ""
+            definition = macro_definition_from_source(name, source, imports=imports)
+            if writing:
+                reject_unstable_selectors(source)
+            return definition, ""
         except MacroRejection as rejection:
             return None, rejection.render()
 
@@ -379,7 +394,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         if not macro_name:
             return "`name` must say what to call this macro, so nothing was written."
 
-        definition, problem = await _parsed(macro_name, source or "")
+        definition, problem = await _parsed(macro_name, source or "", writing=True)
         if definition is None:
             # 거절된 초안도 저장하지 않는다. 저장하면 `read_macro` 가 부를 수 없는 글을
             # 초안이라고 돌려주고, agent 는 그것을 고치면 된다고 읽는다.
@@ -444,7 +459,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
             )
 
         changed = draft.replace(old_text, new_text, 1)
-        definition, problem = await _parsed(macro_name, changed)
+        definition, problem = await _parsed(macro_name, changed, writing=True)
         if definition is None:
             return (
                 f"{macro_name} was not changed, because the result does not parse: "
@@ -529,7 +544,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
                 "`write_macro` is where a draft starts."
             )
 
-        definition, problem = await _parsed(macro_name, draft)
+        definition, problem = await _parsed(macro_name, draft, writing=True)
         if definition is None:
             _review_stays_open()
             # 아무것도 등록하지 않는다. 저장된 뒤에 허용 목록이 좁아진 정의가 실행
@@ -956,7 +971,83 @@ def _mismatch(where: str, declared: MacroType, value: Any) -> str:
 # --- 결과 ---------------------------------------------------------------------
 
 
-def _render(result: MacroRunResult) -> str:
+# `run_macro` / `resume_macro` 결과에서 macro 부분(목록)을 감싸는 marker. 시작 marker 가 한 줄
+# 요약을 싣는다. `fold` 가 이 block 을 통째로 그 한 줄로 바꾸므로(`app/agents/qa/context.py`),
+# 요약이 결과 안에 이미 있어야 `fold` 가 `MacroRunResult` 없이도 자리표를 만든다. 화면(scene view,
+# `pulse` view)은 marker 밖이라 다른 종류의 `fold` 가 따로 다룬다.
+MACRO_RESULT_START_PREFIX = "<<macro result: "
+MACRO_RESULT_START_SUFFIX = ">>"
+MACRO_RESULT_END = "<<end macro result>>"
+
+
+def _render(
+    result: MacroRunResult, scene_after: str = "", *, fold_stale: bool = False
+) -> str:
+    """`run_macro` 와 `resume_macro` 가 모델에 돌려주는 macro 부분.
+
+    `fold_stale` 이 꺼져 있으면 항상 전체 목록이다(기본 run 의 문장이 그대로다). 켜져 있으면:
+
+    - 끝까지 갔고 flag 도 verdict 요청도 없으면 한 줄만 낸다. 목록은 "어디까지 갔나" 를 말하는
+      글인데 끝까지 갔으면 그 답이 "끝까지" 한 마디다.
+    - 그 밖에는 전체 목록을 marker 로 감싸 낸다. 호출한 step 이 보고된 뒤 `fold` 가 이 block 을
+      시작 marker 의 한 줄로 바꾼다.
+    """
+    if not fold_stale:
+        return _render_listing(result)
+    line = one_line_result(result, scene_after)
+    if _is_plain_success(result):
+        return line
+    listing = _render_listing(result)
+    return (
+        f"{MACRO_RESULT_START_PREFIX}{line.replace('>>', '> >')}{MACRO_RESULT_START_SUFFIX}\n"
+        f"{listing}\n{MACRO_RESULT_END}"
+    )
+
+
+def _is_plain_success(result: MacroRunResult) -> bool:
+    """한 줄로 줄여도 잃는 것이 없는 결과인가.
+
+    끝까지 갔고 멈추지 않았고, flag 도 verdict 요청도 없고, 게임이 실패로 답한 action 도 없다.
+    action 이 `FAILED` 로 답해도 macro 는 끝까지 갈 수 있어서(`ActionOutcome` 의 `landings` 에 안
+    든다) 마지막 조건이 따로 필요하다.
+    """
+    return (
+        result.passed
+        and result.paused_at is None
+        and not result.flags
+        and not result.verdict_requests
+        and not any("FAILED" in outcome for outcome in result.outcomes)
+    )
+
+
+def one_line_result(result: MacroRunResult, scene_after: str = "") -> str:
+    """결과 하나를 한 줄로. macro 이름, 게임에 닿은 action 수, 끝난 자리의 scene."""
+    if result.paused_decision is not None:
+        head = f"{result.name} paused, no imported macro fits, {result.paused_at}"
+    elif result.paused_at is not None:
+        head = f"{result.name} paused at a checkpoint, {result.paused_at}"
+    elif result.abandoned_at is not None:
+        head = f"{result.name} stopped at the checkpoint {result.abandoned_at} as asked"
+    elif result.failure is not None:
+        head = f"{result.name} stopped — {result.failure.code}"
+    else:
+        head = f"{result.name} ran to the end"
+    line = f"{head}; {len(result.applied)} action(s) reached the game"
+    if result.flags:
+        line += f"; {len(result.flags)} flag(s)"
+    if result.verdict_requests:
+        line += "; a verdict was asked"
+    if result.decisions:
+        # v25 의 `match decide` 가 고른 횟수. 무엇을 골랐는지는 목록에 있고, 끝까지 간 결과에서는
+        # 고른 macro 들이 이미 게임에 닿았다.
+        line += f"; {len(result.decisions)} decision(s) by Jev"
+    scene = scene_after.strip()
+    if scene:
+        line += f"; on scene {scene} at the end"
+    return line + "."
+
+
+def _render_listing(result: MacroRunResult) -> str:
     """단계별 결과. 어디까지 갔는지가 이 글의 중심이다."""
     lines: list[str] = []
     if result.paused_at is not None and result.paused_decision is not None:
