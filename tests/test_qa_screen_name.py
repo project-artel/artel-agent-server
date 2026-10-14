@@ -245,7 +245,9 @@ def _agent(answer) -> ScreenNameAgent:
             raise answer
         return answer
 
-    return ScreenNameAgent(structured_factory=lambda model: RunnableLambda(respond))
+    return ScreenNameAgent(
+        structured_factory=lambda model: RunnableLambda(respond), retry_backoff=False
+    )
 
 
 def test_the_agent_answers_with_the_name_the_model_gave() -> None:
@@ -263,6 +265,12 @@ def test_a_malformed_reply_is_a_failure_and_not_an_invention() -> None:
 
     with pytest.raises(ScreenNameError):
         asyncio.run(agent.run(_agent_request(_request()), _CTX))
+
+
+def test_the_production_agent_waits_between_retries() -> None:
+    # `app/qa/screen_name.py` 가 세우는 모양 그대로다. `_agent` 가 끄는 backoff 가
+    # 운영에서는 켜져 있다.
+    assert ScreenNameAgent().retry_backoff is True
 
 
 def test_a_model_that_will_not_name_the_screen_is_a_complete_answer() -> None:

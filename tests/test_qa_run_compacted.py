@@ -101,7 +101,10 @@ def make_channel() -> tuple[QaRunChannel, list[dict]]:
             }
         )
 
-    channel = QaRunChannel(qa_try_id=1, send=send)
+    # 이 런은 `observe_scene` 만 부르고, 그것은 액션을 안 보내므로 `pulse` 가 오지 않는다.
+    # 볼 것이 없는 `look` 은 `reading_wait` 를 다 기다리고, 그 대기는 이 파일이 재는 것이
+    # 아니다.
+    channel = QaRunChannel(qa_try_id=1, send=send, reading_wait=0.05)
     return channel, sent
 
 

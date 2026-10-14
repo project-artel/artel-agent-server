@@ -439,7 +439,9 @@ def _agent(answer) -> ScreenVerdictAgent:
             raise answer
         return answer
 
-    return ScreenVerdictAgent(structured_factory=lambda model: RunnableLambda(respond))
+    return ScreenVerdictAgent(
+        structured_factory=lambda model: RunnableLambda(respond), retry_backoff=False
+    )
 
 
 def test_a_malformed_reply_is_a_failure_and_not_an_invention() -> None:
@@ -451,6 +453,12 @@ def test_a_malformed_reply_is_a_failure_and_not_an_invention() -> None:
                 ScreenVerdictRequest(proposal=_payload(counters_in_names())), _CTX
             )
         )
+
+
+def test_the_production_agent_waits_between_retries() -> None:
+    # `app/qa/screen_verdict.py` 가 세우는 모양 그대로다. `_agent` 가 끄는 backoff 가
+    # 운영에서는 켜져 있다.
+    assert ScreenVerdictAgent().retry_backoff is True
 
 
 def test_an_empty_answer_is_a_complete_answer() -> None:

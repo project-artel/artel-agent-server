@@ -16,6 +16,7 @@ one path here that loses knowledge outright, and it has its own section below.
 """
 
 import asyncio
+from collections.abc import Callable
 
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -37,7 +38,7 @@ from app.qa.run_config import resolve_run_config
 from app.agents.qa.arch import PhaseCycleMode, QaArchSpec, default_resolved_arch
 from app.agents.qa.tools import QaRunState, build_tools
 from app.qa.schemas import QaCaseRef, QaScenario, QaStep
-from app.qa.channel import QaRunChannel
+from app.qa.channel import KNOWLEDGE_SEARCH_TIMEOUT_SECONDS, QaRunChannel
 from app.qa.envelope import KnowledgeSearchHit, LogCategory, MessageType
 from app.qa.scene import SCENE_VIEW_START_PREFIX
 
@@ -53,14 +54,35 @@ def _run_config_without_the_gate():
     """같은 것을 런 전체에 대해. `build_tools` 가 아니라 `QaRunner` 가 받는 자리다."""
     return resolve_run_config(arch=QaArchSpec(phase_cycle=PhaseCycleMode.off))
 
-def make(timeout: float = 0.05):
-    """A channel whose knowledge search times out fast unless a test answers it."""
+def make(
+    timeout: float = 0.05,
+    search_timeout: float = KNOWLEDGE_SEARCH_TIMEOUT_SECONDS,
+    on_send: Callable[[QaRunChannel, dict], None] | None = None,
+):
+    """A channel whose actions and writes time out fast unless a test answers them.
+
+    검색은 기본값 그대로 기다린다. 검색에 답하는 테스트는 답을 별도 task 로 보내므로,
+    짧게 줄이면 그 답과 `timeout` 이 경주한다. 아무도 답하지 않는 검색을 재는 테스트만
+    `search_timeout` 을 줄인다.
+
+    `on_send` 는 frame 이 나가는 그 자리에서 동기로 불린다. 요청이 `_pending` 에 올라간
+    뒤이고 `timeout` 이 돌기 전이므로, 거기서 넣은 답은 그 요청이 아직 떠 있을 때 도착한다는
+    것이 순서로 보장된다.
+    """
     sent: list[dict] = []
 
     async def send(frame: dict) -> None:
         sent.append(frame)
+        if on_send is not None:
+            on_send(channel, frame)
 
-    channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=timeout, write_timeout=timeout)
+    channel = QaRunChannel(
+        qa_try_id=7,
+        send=send,
+        action_timeout=timeout,
+        write_timeout=timeout,
+        search_timeout=search_timeout,
+    )
     state = QaRunState(total_steps=1)
     tools = {tool.name: tool for tool in build_tools(channel, state, arch=_NO_PHASE_GATE)}
     return channel, state, tools, sent
@@ -387,18 +409,15 @@ def test_an_empty_result_is_answered_as_an_answer() -> None:
     asyncio.run(run())
 
 
-def test_a_search_nobody_answers_gives_up_and_says_what_to_do(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_search_nobody_answers_gives_up_and_says_what_to_do() -> None:
     """The run must not sit on a knowledge lookup; nothing answers here at all.
 
     The timeout is shortened rather than waited out — what is under test is what
     the agent is told afterwards, not how long the wait is.
     """
-    monkeypatch.setattr("app.qa.channel.KNOWLEDGE_SEARCH_TIMEOUT_SECONDS", 0.01)
 
     async def run() -> None:
-        _, _, tools, _ = make()
+        _, _, tools, _ = make(search_timeout=0.01)
 
         result = await tools["search_knowledge"].ainvoke(
             {"step": 1, "thought": "확인", "query": "구매 규칙"}
@@ -489,22 +508,26 @@ def test_an_unknown_tag_costs_neither_a_round_trip_nor_a_search() -> None:
     asyncio.run(run())
 
 
-def test_a_reply_to_a_foreign_request_does_not_resolve_this_search(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_reply_to_a_foreign_request_does_not_resolve_this_search() -> None:
     """A reply that arrives after its own search gave up must not be handed to
     whatever asked next — the agent would read one question's answer as another's."""
-    monkeypatch.setattr("app.qa.channel.KNOWLEDGE_SEARCH_TIMEOUT_SECONDS", 0.05)
+
+    def reply_to_someone_else(channel: QaRunChannel, frame: dict) -> None:
+        # 이 검색이 나가는 그 자리에서 남의 답을 넣는다. 검색이 떠 있는 동안 도착한다는
+        # 것이 `timeout` 길이가 아니라 순서로 정해진다.
+        if frame["type"] != MessageType.KNOWLEDGE_SEARCH.value:
+            return
+        channel.on_knowledge_search_result(
+            {
+                "type": MessageType.KNOWLEDGE_SEARCH_RESULT.value,
+                "correlationId": "a-request-we-already-gave-up-on",
+                "payload": {"query": "q", "model": "e5", "results": [hit()]},
+            }
+        )
 
     async def run() -> None:
-        channel, _, tools, sent = make()
+        _, _, tools, _ = make(search_timeout=0.05, on_send=reply_to_someone_else)
 
-        answer(
-            channel,
-            sent,
-            {"query": "q", "model": "e5", "results": [hit()]},
-            correlation="a-request-we-already-gave-up-on",
-        )
         result = await tools["search_knowledge"].ainvoke(
             {"step": 1, "thought": "확인", "query": "구매 규칙"}
         )
@@ -1057,27 +1080,28 @@ def test_a_late_write_answer_does_not_resolve_the_next_request() -> None:
     across kinds rather than within each one.
     """
 
+    stale: list[str] = []
+
+    def answer_the_abandoned_write(channel: QaRunChannel, frame: dict) -> None:
+        # 버려진 쓰기의 답이 검색이 떠 있는 동안 도착한다. 검색 frame 이 나가는 그 자리에서
+        # 넣으므로 검색의 `timeout` 이 먼저 끝날 수 없다.
+        if frame["type"] != MessageType.KNOWLEDGE_SEARCH.value:
+            return
+        channel.on_knowledge_write_result(
+            {
+                "type": MessageType.KNOWLEDGE_WRITE_RESULT.value,
+                "correlationId": stale[0],
+                "payload": {"type": "KNOWLEDGE_CREATE", "knowledge_id": "77"},
+            }
+        )
+
     async def run() -> None:
-        channel, _, tools, sent = make()
+        _, _, tools, sent = make(search_timeout=0.05, on_send=answer_the_abandoned_write)
 
+        # 쓰기가 제 `timeout` 으로 끝난 것을 먼저 기다린다. 늦은 답은 그 뒤에만 나간다.
         await asyncio.wait_for(record(tools), timeout=1.0)
-        stale = creates(sent)[-1]["messageId"]
+        stale.append(creates(sent)[-1]["messageId"])
 
-        async def late() -> None:
-            # The abandoned write's answer arrives while a search is in flight.
-            for _ in range(50):
-                if searches(sent):
-                    break
-                await asyncio.sleep(0)
-            channel.on_knowledge_write_result(
-                {
-                    "type": MessageType.KNOWLEDGE_WRITE_RESULT.value,
-                    "correlationId": stale,
-                    "payload": {"type": "KNOWLEDGE_CREATE", "knowledge_id": "77"},
-                }
-            )
-
-        asyncio.create_task(late())
         result = await tools["search_knowledge"].ainvoke(
             {"step": 2, "thought": "확인한다", "query": "골드"}
         )
@@ -1845,7 +1869,9 @@ def test_a_run_searches_knowledge_and_carries_on_to_its_verdict(
             }
         )
 
-    channel = QaRunChannel(qa_try_id=1, send=send)
+    # `observe_scene` 은 액션을 안 보내므로 이 가짜 게임에서는 `pulse` 가 오지 않는다. 그
+    # 대기는 이 테스트가 재는 것이 아니므로 짧게 준다.
+    channel = QaRunChannel(qa_try_id=1, send=send, reading_wait=0.05)
     state = QaRunState(total_steps=1)
     scenario = QaScenario(
         title="구매 실패 확인",
@@ -2001,7 +2027,9 @@ def test_a_run_corrects_an_entry_by_deleting_it_and_recording_the_new_one(
                 }
             )
 
-    channel = QaRunChannel(qa_try_id=1, send=send)
+    # 쓰기에는 아무도 답하지 않는다 — 이 테스트가 정한 상황이다. 그 `timeout` 을 운영값대로
+    # 기다리면 쓰기 하나에 5초가 들고, 답 없는 쓰기가 무엇을 돌려주는지는 같다.
+    channel = QaRunChannel(qa_try_id=1, send=send, write_timeout=0.05)
     state = QaRunState(total_steps=1)
     scenario = QaScenario(
         title="구매 규칙 확인",
@@ -2126,7 +2154,9 @@ def test_a_run_corrects_an_entry_in_place_with_the_update_tool(
                 }
             )
 
-    channel = QaRunChannel(qa_try_id=1, send=send)
+    # 쓰기에는 아무도 답하지 않는다 — 이 테스트가 정한 상황이다. 그 `timeout` 을 운영값대로
+    # 기다리면 쓰기 하나에 5초가 들고, 답 없는 쓰기가 무엇을 돌려주는지는 같다.
+    channel = QaRunChannel(qa_try_id=1, send=send, write_timeout=0.05)
     state = QaRunState(total_steps=1)
     scenario = QaScenario(
         title="구매 규칙 확인",

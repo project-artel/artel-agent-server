@@ -162,6 +162,8 @@ class QaRunChannel:
         action_timeout: float = ACTION_TIMEOUT_SECONDS,
         write_timeout: float = KNOWLEDGE_WRITE_TIMEOUT_SECONDS,
         screen_selector_timeout: float = SCREEN_SELECTOR_TIMEOUT_SECONDS,
+        reading_wait: float = READING_WAIT_SECONDS,
+        search_timeout: float = KNOWLEDGE_SEARCH_TIMEOUT_SECONDS,
     ) -> None:
         self._qa_try_id = qa_try_id
         self._send = send
@@ -170,6 +172,12 @@ class QaRunChannel:
         # out the real one would pay it on every write it exercises.
         self._write_timeout = write_timeout
         self._screen_selector_timeout = screen_selector_timeout
+        # 같은 이유로 주입받는다(ARTEL-1039). 가짜 게임은 `pulse` 를 안 보내므로 액션
+        # 하나마다 `reading_wait` 를 다 기다리고, 아무도 답하지 않는 검색은
+        # `search_timeout` 을 다 기다린다. 런이 이 채널을 세우는 자리
+        # (`app/qa/service.py`)는 둘 다 넘기지 않고 위의 상수를 쓴다.
+        self._reading_wait = reading_wait
+        self._search_timeout = search_timeout
         self._sequence = 0
         # 나간 ACTION `frame` 의 messageId → 그 답을 기다리는 `future` (ARTEL-664).
         #
@@ -340,7 +348,7 @@ class QaRunChannel:
         if self._something_to_show():
             return True
 
-        await self._await_reading(self.scene.pulse.readings, READING_WAIT_SECONDS)
+        await self._await_reading(self.scene.pulse.readings, self._reading_wait)
         return self._something_to_show()
 
     def _something_to_show(self) -> bool:
@@ -376,7 +384,9 @@ class QaRunChannel:
         before_readings = self.scene.pulse.readings
 
         result = await self.dispatch_actions(actions, message, step)
-        await self._await_reading(before_readings, READING_WAIT_SECONDS, getattr(result, "frame", None))
+        await self._await_reading(
+            before_readings, self._reading_wait, getattr(result, "frame", None)
+        )
 
         arrived = (
             self.scene.frames > before_frames
@@ -514,7 +524,7 @@ class QaRunChannel:
         return await self._request(
             MessageType.KNOWLEDGE_SEARCH,
             KnowledgeSearchPayload(query=query, tag=tag, limit=limit, step=step),
-            KNOWLEDGE_SEARCH_TIMEOUT_SECONDS,
+            self._search_timeout,
         )
 
     async def expand_knowledge(
@@ -534,7 +544,7 @@ class QaRunChannel:
                 include_similar=include_similar,
                 step=step,
             ),
-            KNOWLEDGE_SEARCH_TIMEOUT_SECONDS,
+            self._search_timeout,
         )
 
     async def write_knowledge(
@@ -658,7 +668,7 @@ class QaRunChannel:
         하나와 embedding 하나, 벡터 조회 하나.
         """
         return await self._request(
-            MessageType.MACRO_SEARCH, payload, KNOWLEDGE_SEARCH_TIMEOUT_SECONDS
+            MessageType.MACRO_SEARCH, payload, self._search_timeout
         )
 
     async def answer_screen_selector_proposal(
