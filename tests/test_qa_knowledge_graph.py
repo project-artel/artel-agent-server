@@ -16,6 +16,7 @@ from app.agents.qa.knowledge import (
     render_expansion,
     render_neighbour,
 )
+from app.agents.qa.arch import PhaseCycleMode, default_resolved_arch
 from app.agents.qa.tools import QaRunState, build_tools
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import (
@@ -27,6 +28,12 @@ from app.qa.envelope import (
 )
 
 
+# phase gate 를 끈다. 이 파일은 tool 하나하나가 무엇을 하는지 보는 자리이고, gate 는 그 위층
+# 이다. 기본값이 무엇인지는 `tests/test_qa_arch.py` 가 지킨다.
+_NO_PHASE_GATE = default_resolved_arch().model_copy(
+    update={"phase_cycle": PhaseCycleMode.off}
+)
+
 def make(total_steps: int = 1):
     sent: list[dict] = []
 
@@ -35,7 +42,7 @@ def make(total_steps: int = 1):
 
     channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=0.05, write_timeout=0.05)
     state = QaRunState(total_steps=total_steps)
-    tools = {tool.name: tool for tool in build_tools(channel, state)}
+    tools = {tool.name: tool for tool in build_tools(channel, state, arch=_NO_PHASE_GATE)}
     return channel, state, tools, sent
 
 
@@ -213,7 +220,7 @@ def test_a_neighbour_line_appears_under_its_hit() -> None:
 def test_deleting_something_only_glimpsed_is_refused_with_what_to_do() -> None:
     """The regression this feature could most easily ship.
 
-    `FORGET_KNOWLEDGE_DESCRIPTION` calls deletion the most destructive thing the
+    `tool_forget_knowledge.md` calls deletion the most destructive thing the
     agent does; a clipped one-line summary is not having read the entry. The
     message has to name the reason, or the agent meets a refusal it cannot
     explain — it can see the id right there in the transcript.

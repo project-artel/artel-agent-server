@@ -103,6 +103,14 @@ def _result_event(result: ScenarioAgentResult) -> dict:
     # rollback path — not an empty object, which would read as "reviewed nothing".
     if result.reviewed is not None:
         event["reviewed"] = result.reviewed.model_dump(by_alias=True)
+    # Same rule for the split answer and the questions (ARTEL-927): absent on a plain
+    # reply, so the receiving side keeps reading `message` alone exactly as before.
+    if result.reply is not None:
+        event["reply"] = result.reply.model_dump()
+    if result.questions:
+        event["questions"] = [question.model_dump() for question in result.questions]
+    if result.refs:
+        event["refs"] = [ref.model_dump() for ref in result.refs]
     return event
 
 
@@ -159,9 +167,10 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
     send `test_case_search` frames and needs their `test_case_search_result`
     answers back on the same socket. So each turn runs as its own task and this
     coroutine keeps reading, routing inbound frames — search replies to the
-    channel, `close` to teardown, a `turn` arriving mid-turn back as a busy
-    error. This mirrors `app/api/qa_sessions.py`'s dispatch, with a persistent
-    receive so a frame is never lost to a cancellation when a turn completes.
+    channel, `close` to teardown, `cancel` to end the turn without the session
+    (ARTEL-954), a `turn` arriving mid-turn back as a busy error. This mirrors
+    `app/api/qa_sessions.py`'s dispatch, with a persistent receive so a frame is
+    never lost to a cancellation when a turn completes.
     """
     service = _service(websocket.app)
     await websocket.accept()
@@ -253,6 +262,32 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 await service.close(session_id)
                 await send({"type": "closed"})
                 break
+
+            if kind == "cancel":
+                # **턴만 끊는다 — 세션은 살아 있다**(ARTEL-954). `close` 와 따로 두는 이유가 이것
+                # 하나다: 저쪽은 기다림을 그만두려는 것이지 대화를 끝내려는 것이 아니다. `close`
+                # 로 대신하면 Redis 의 세션이 지워져 다음 말이 새 세션을 열고, 그 대화는 앞엣것을
+                # 모른다.
+                #
+                # 이미 넘어간 것은 되돌리지 않는다. 이 턴이 `submit_scenario` 로 넘긴 시나리오는
+                # 저쪽에 저장돼 있고, 여기서 지울 방법도 지울 이유도 없다 — 사용자가 멈춘 것은
+                # 남은 작업이지 끝난 작업이 아니다.
+                #
+                # 끊긴 턴은 `history` 에 남지 않는다. `service.run_turn` 이 모델 호출을 지난 뒤에
+                # 적고 저장하므로, 중간에 끊기면 사용자 말도 답도 안 적힌다 — 하지 않은 답을
+                # 적어 두면 다음 턴이 그것을 지난 대화로 읽는다.
+                if current is not None and not current.done():
+                    current.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await current
+                    current = None
+                    await send({"type": "cancelled", "was_running": True})
+                else:
+                    # 한가하거나, **방금 끝났다.** 뒤엣것은 결과가 이미 손에 있다는 뜻이라
+                    # 여기서 버리지 않는다 — 다음 바퀴가 드레인해 평소대로 내보낸다. 사용자에게
+                    # 무엇을 보일지는 저쪽이 정한다(취소를 먼저 말했으면 그 결과를 버린다).
+                    await send({"type": "cancelled", "was_running": False})
+                continue
 
             if kind == "turn":
                 if current is not None:

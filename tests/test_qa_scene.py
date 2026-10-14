@@ -266,7 +266,7 @@ def test_render_omits_the_visuals_section_when_the_scene_sends_none() -> None:
 
 
 def test_render_wraps_the_view_in_start_and_end_markers() -> None:
-    """`fold_stale_scenes` (app/agents/qa/context.py) locates a view by these,
+    """`fold_context` (app/agents/qa/context.py) locates a view by these,
     rather than guessing where `scene: ...` text starts or ends."""
     memory = SceneMemory()
     memory.apply(state(interactables=[Interactable(id=1, name="Start", type="button")]))

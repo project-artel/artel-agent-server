@@ -32,6 +32,8 @@ from pathlib import Path
 
 from app.prompts import loader
 from app.prompts.loader import (
+    data_in,
+    data_sha256,
     PromptError,
     available_versions,
     known_agents,
@@ -64,9 +66,15 @@ def compute_lock() -> dict:
     """What the lock should say about the prompts currently on disk.
 
     Keyed ``<agent>/<version>/<role>`` and carrying ``body_sha256``, which
-    excludes the frontmatter: ``note`` is documentation, and rewording it does
-    not change what the model read. ``v8`` shipping the same body as ``v7`` under
-    a different note is a real case, so the hash has to be about the body alone.
+    excludes ``note``: it is documentation, and rewording it does not change
+    what the model read. ``v8`` shipping the same body as ``v7`` under a
+    different note is a real case, so the hash has to be about the body.
+
+    A skill's ``description`` is the one piece of frontmatter the model does
+    read — it becomes that skill's line in the system prompt's Skills section —
+    so for a ``skill_*`` file with one the hash covers ``description`` and body
+    together (see ``loader.content_sha256``). Only skills may carry a
+    description, so the entries of every other role are unchanged by this.
 
     Every version is named explicitly, which keeps this off ``Settings`` —
     ``resolve_version`` only consults ``*_PROMPT_VERSION`` when no version is
@@ -79,6 +87,18 @@ def compute_lock() -> dict:
             for agent in known_agents()
             for version in available_versions(agent)
             for role in roles_in(agent, version)
+        },
+        # 판본 디렉터리의 자료 파일(`.json`)도 잠근다. 결정 전용 모델은 선택지를 **구조로**
+        # 받으므로 그 명세가 산문이 아니고, 그러면 산문만 잠그는 lock 은 모델이 읽은 것의
+        # 절반만 지킨다 — criteria 를 고치고 산문을 그대로 두면 아무도 모른다.
+        #
+        # 키를 `prompts` 와 가르는 이유는 둘이 다른 물건이라서다. 자료는 역할(role)이 아니고
+        # placeholder 검사도 없다. 섞으면 `roles_in` 과 어긋난다.
+        "data": {
+            f"{agent}/{version}/{name}": data_sha256(agent, name, version)
+            for agent in known_agents()
+            for version in available_versions(agent)
+            for name in data_in(agent, version)
         },
     }
 

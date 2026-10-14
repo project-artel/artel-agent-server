@@ -16,6 +16,7 @@ from app.agents.qa import arch as arch_module
 from app.agents.qa.arch import (
     BASE_TOOL_CALLS,
     DEFAULT_ARCH,
+    PhaseCycleMode,
     MAX_EXPANDS_PER_RUN,
     MAX_FORGETS_PER_RUN,
     MAX_LINKS_PER_RUN,
@@ -95,13 +96,37 @@ def test_turning_folding_off_changes_the_fingerprint() -> None:
     assert structure_of(resolved())[2] != structure_of(resolved(fold_stale_scenes=False))[2]
 
 
+def test_pulse_relevance_is_off_by_default_and_moves_the_fingerprint() -> None:
+    """The two arms of ARTEL-958 have to hash apart.
+
+    The view the model reads is what this knob changes, and `arch_fingerprint`
+    hashes nothing about the view. The knob itself is the only thing in the digest
+    that can separate the arms, so it has to be in `arch.model_dump()`.
+    """
+    assert DEFAULT_ARCH.pulse_relevance is False
+    assert structure_of(resolved())[2] != structure_of(resolved(pulse_relevance=True))[2]
+
+
+def test_report_step_view_is_on_by_default_and_moves_the_fingerprint() -> None:
+    """The two arms of ARTEL-960 have to hash apart, for the same reason as `pulse_relevance`."""
+    assert DEFAULT_ARCH.report_step_view is True
+    assert structure_of(resolved())[2] != structure_of(resolved(report_step_view=False))[2]
+
+
 def test_the_fingerprint_ignores_the_model_and_the_prompt() -> None:
     """The axes are independent, and a digest that moved with all of them could
     not group "the same structure under two models" — the comparison this exists
     to make possible."""
-    sonnet = resolve_run_config(model=LLMModel.claude_sonnet_5_5)
-    gpt = resolve_run_config(model=LLMModel.gpt_6_luna)
-    pinned = resolve_run_config(model=LLMModel.gpt_6_luna, prompt_version="v1")
+    # `v1` predates the phase cycle and carries no `phase_directive`, so the
+    # pinned side is asked for with the rung that needs none — and then so are
+    # the other two, because a structure that differed between them is the one
+    # thing that would make this comparison say nothing.
+    old_shape = QaArchSpec(phase_cycle=PhaseCycleMode.off)
+    sonnet = resolve_run_config(model=LLMModel.claude_sonnet_5_5, arch=old_shape)
+    gpt = resolve_run_config(model=LLMModel.gpt_6_luna, arch=old_shape)
+    pinned = resolve_run_config(
+        model=LLMModel.gpt_6_luna, prompt_version="v1", arch=old_shape
+    )
 
     assert sonnet.agent_fingerprint == gpt.agent_fingerprint == pinned.agent_fingerprint
     assert pinned.prompt_version != gpt.prompt_version
@@ -381,6 +406,101 @@ def test_a_pinned_summarizer_stays_apart_from_the_run_model() -> None:
     assert resolved.model is LLMModel.gpt_6_luna
 
 
+# --- the phase cycle as an axis -----------------------------------------------
+
+
+def test_the_off_rung_is_the_run_that_existed_before_the_axis() -> None:
+    """`off` has to stay the run that existed before the field did.
+
+    It is not the default any more, which is exactly why this is still checked.
+    `off` is what a caller reaches for to get the old shape back — a pinned
+    prompt version, a rollback, the arm the pilot measured against — and it is
+    worth nothing if it has drifted in the meantime. The three things that decide
+    what a run does are the tool set, each tool's argument schema and the
+    middleware; they are compared against the `in_verdict` rung, the nearest
+    value that does change `report_step`, so this asserts identity in two of them
+    and a difference in the third.
+    """
+    off = resolved(phase_cycle=PhaseCycleMode.off, vision=VisionMode.on)
+    in_verdict = resolved(phase_cycle=PhaseCycleMode.remember_in_verdict, vision=VisionMode.on)
+
+    # Same tools and same middleware as the rung above; only `report_step`'s
+    # schema and the knob itself separate them.
+    assert structure_of(off)[0] == structure_of(in_verdict)[0]
+    assert structure_of(off)[1] == structure_of(in_verdict)[1]
+    assert structure_of(off)[2] != structure_of(in_verdict)[2]
+
+
+def test_each_rung_of_the_ladder_is_its_own_structure() -> None:
+    """Four values, four digests, or `agent_fingerprint` averages the arms.
+
+    The pilot compares arms that run from one image against one game. If two of
+    them hashed the same, `/api/qa-stats` would put them in one cell and the
+    comparison would read as noise inside a single structure.
+    """
+    digests = {
+        mode: structure_of(resolved(phase_cycle=mode, vision=VisionMode.on))[2]
+        for mode in PhaseCycleMode
+    }
+    assert len(set(digests.values())) == len(PhaseCycleMode)
+
+
+def test_the_default_structure_holds_the_run_to_the_phase_cycle() -> None:
+    """기본값이 `lite` 라는 것을, 기본값을 안 적은 자리에서 지킨다.
+
+    `tests/test_qa_tools.py` 는 `make()` 에서 `phase_cycle=off` 를 명시한다 — 그 파일은 tool
+    하나하나를 보는 자리이고, gate 를 켜 두면 거의 모든 테스트가 한 왕복씩 더 쓴다. 그래서
+    기본값이 바뀌어도 저쪽은 안 깨진다. **이 테스트가 그 자리를 대신한다.**
+
+    아래 `_EXPECTED_DEFAULT_TOOL_NAMES` 와 fingerprint 핀도 같은 것을 지키지만, 그 둘은 값이
+    맞는지만 말한다. 기본 런이 실제로 phase 를 강제하는지는 이 줄이 말한다.
+    """
+    # 요청이 아무 말도 안 했을 때 무엇이 되는지를 두 자리에서 본다 — spec 의 기본값과,
+    # 그 spec 이 실제 런 설정으로 풀린 결과.
+    assert DEFAULT_ARCH.phase_cycle is PhaseCycleMode.lite
+    mode = resolve_run_config().arch.phase_cycle
+    assert mode is PhaseCycleMode.lite
+
+    assert mode.gates_phases
+    assert mode.remembers_in_verdict
+    # `decide_next_action` 은 `full` 만의 것이고 기본값은 그 왕복을 안 쓴다.
+    assert not mode.decides_in_its_own_turn
+
+
+# --- the skills axis ----------------------------------------------------------
+
+
+def test_skills_default_to_off() -> None:
+    assert QaArchSpec().skills == "off"
+    assert resolved().skills == "off"
+
+
+def test_an_unknown_skills_value_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        QaArchSpec(skills="always")
+
+
+def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
+    structure_of.cache_clear()
+    try:
+        off_names, _, off_fingerprint = structure_of(
+            resolved(**_PINNED_COMPACTION_KNOBS, skills="off")
+        )
+        on_names, _, on_fingerprint = structure_of(
+            resolved(**_PINNED_COMPACTION_KNOBS, skills="on_demand")
+        )
+    finally:
+        structure_of.cache_clear()
+
+    # `build_tools` registers the real `load_skill` itself, so the fingerprint
+    # reads its real schema (`name`, `thought`) rather than a stand-in.
+    assert "load_skill" not in off_names
+    # `build_tools` appends it before the compaction tool, so compare as sets.
+    assert set(on_names) == set(off_names) | {"load_skill"}
+    assert len(on_names) == len(off_names) + 1
+    assert on_fingerprint != off_fingerprint
+
+
 # --- the label stays paired with the structure it names ------------------------
 
 # Pinned next to the label they were computed under, so a diff to either one
@@ -395,7 +515,7 @@ def test_a_pinned_summarizer_stays_apart_from_the_run_model() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v5-pointer-target"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v24-macro-wait-until"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -446,20 +566,81 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
     "pause_game_time",
     "resume_game_time",
     "reset_game",
+    "write_macro",
+    "edit_macro",
+    "read_macro",
+    "register_macro",
+    "run_macro",
+    "resume_macro",
+    "decline_macro_draft",
+    "search_macros",
     "wait_for_operator",
     "report_step",
     "report_issue",
     "finish_run",
     "reply_to_operator",
     "capture_screen",
+    "skip_memory_update",
     "compact_context",
 )
-# Moved twice since it was last pinned: `screen_capture` joined `QaArchSpec`
-# (ARTEL-868), which every structure's digest follows because the dump gained a
-# key, and then three pointer tool names and four tool schemas changed
-# (ARTEL-880). Only the second is a change of shape, and it is why the label
-# above moved with the digest this time.
-_EXPECTED_DEFAULT_FINGERPRINT = "83bc272fee58"
+# Moved twice since `83bc272fee58`, which was the last digest taken before this
+# axis existed. First to `7235b9a26d43`, by the smallest thing that can move a
+# digest: `phase_cycle` joined `QaArchSpec`, so `arch.model_dump()` gained a key
+# and every structure followed, the default's shape included, while nothing the
+# default run did had moved at all.
+#
+# Then here, by the largest thing on this axis: the default itself moved from
+# `off` to `lite`. This is the first bullet of the docstring below, not the
+# third — `skip_memory_update` is in the list above now, `report_step` carries
+# `capability_key` and `learned`, and the phase state machine sits in front of
+# every call. A run that names nothing is a different agent than it was, so the
+# label was bumped with it.
+#
+# Moved once more, from `2a87923211b7`, when the skills branch merged develop:
+# `QaArchSpec` gained `skills` and `fold_stale_skills`, so the dump the digest
+# hashes gained two keys and every structure followed. Nothing the default run
+# does moved with it — `skills` defaults to `off`, so `load_skill` is not in the
+# list above, and the skill fold is wired only when `skills` is `on_demand`, so
+# the default middleware list is the same. The label moved to
+# `v8-skills-on-demand` anyway, because the structure now has a second shape
+# along that axis and a run has to say which side of it it was filed on.
+#
+# Moved again, from `e458f275968a`, for the five macro tools (ARTEL-925):
+# `write_macro`, `edit_macro`, `read_macro`, `register_macro` and `run_macro`
+# joined the set above. That is the first case in the docstring below — the tool
+# set changed — and `v9-macros` is the label bump it asks for. ARTEL-926 still owes
+# the QA run that gives the new label numbers to be read against; until then the
+# label separates the structures and no run supplies the comparison.
+#
+# Moved again within the same label, from `887277ea051d`, when `resume_macro`
+# joined the set for `checkpoint` (ARTEL-949). No run had been filed under
+# `v9-macros` yet, so the label still names the macro shape as it ships.
+#
+# And once more, from `388b1fc3438e`, when `QaArchSpec.macros` joined (ARTEL-926):
+# the dump the digest hashes gained a key. The default is `on`, so the default
+# tool set did not move — `macros=off` is the arm an A/B compares it against.
+#
+# And once more, from `2db1454a7b0f`, when `decline_macro_draft` joined the macro tools.
+# The default is `macros=on`, so the default tool set moved with it.
+#
+# And once more, from `450105a42315`, when `pulse_relevance` (ARTEL-958) joined
+# `QaArchSpec` at `False`. At `False` the default run's tools, middleware and view
+# are where they were, so the label stays.
+#
+# And from `6f4035a1242e`, when `report_step_view` (ARTEL-960) joined at `True`.
+# At `True` every tool answer is what it was, so the label stays.
+#
+# And once more, from `24e30f3191d9`, when the scene view, knowledge neighbour and skill
+# folds became the one `fold_context` middleware (v19). The tool set did not move.
+#
+# And once more, from `055e7ce108a3`, when `QaArchSpec.fold_threshold_chars` joined in v19:
+# the dump the digest hashes gained a key. Its default is the threshold v19 already used.
+#
+# And once more, from `83792f9f8d54`, when that default went from 56,000 to 112,000.
+#
+# And from `e7d85ceb94cd`, when `search_macros` joined the macro tools (ARTEL-984, v20).
+# The default is `macros=on`, so the default tool set moved with it.
+_EXPECTED_DEFAULT_FINGERPRINT = "1024ec5d29c8"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
@@ -537,3 +718,59 @@ def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
         "middleware or a loop bound. See this test's docstring for what to do "
         "next."
     )
+
+
+# --- macros 축 (ARTEL-926) -----------------------------------------------------
+
+
+def _with_macros(macros: str, skills: str = "on_demand"):
+    return resolve_arch(
+        QaArchSpec(vision=VisionMode.on, skills=skills, macros=macros),
+        LLMModel.gpt_6_luna,
+    )
+
+
+MACRO_TOOLS = (
+    "write_macro",
+    "edit_macro",
+    "read_macro",
+    "register_macro",
+    "run_macro",
+    "resume_macro",
+    "decline_macro_draft",
+    "search_macros",
+)
+
+
+def test_macros_off_offers_none_of_the_six_macro_tools_and_changes_the_fingerprint() -> None:
+    """A/B 의 두 arm 이 macro 만큼 다르고 그 밖에는 같아야 한다."""
+    off_tools, off_middleware, off_print = structure_of(_with_macros("off"))
+    on_tools, on_middleware, on_print = structure_of(_with_macros("on"))
+
+    assert not set(MACRO_TOOLS) & set(off_tools)
+    assert [name for name in on_tools if name not in MACRO_TOOLS] == list(off_tools)
+    assert off_middleware == on_middleware
+    assert off_print != on_print
+
+
+def test_macros_off_withholds_the_macro_skill_from_every_list_of_skills() -> None:
+    """남기면 `off` arm 의 Skills 절이 없는 tool("before your first `write_macro`")을 가리킨다."""
+    from app.agents.qa.arch import _ThrowawayChannel, withheld_skills
+    from app.agents.qa.runner import _skills_directive, system_prompt_with_skills
+    from app.agents.qa.tools import QaRunState, build_tools
+
+    off, on = _with_macros("off"), _with_macros("on")
+
+    assert "`macro`" not in _skills_directive("v19", "on_demand", withheld_skills(off))
+    assert "`macro`" in _skills_directive("v19", "on_demand", withheld_skills(on))
+
+    inlined_off = system_prompt_with_skills("system", "v19", "off", withheld_skills(off))
+    inlined_on = system_prompt_with_skills("system", "v19", "off", withheld_skills(on))
+    assert "## Skill: macro" not in inlined_off
+    assert "## Skill: macro" in inlined_on
+
+    load_skill = {
+        one.name: one
+        for one in build_tools(_ThrowawayChannel(), QaRunState(total_steps=0), off, "v19")
+    }["load_skill"]
+    assert "macro" not in load_skill.description

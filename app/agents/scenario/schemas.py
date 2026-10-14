@@ -398,6 +398,44 @@ class ScenarioQuestion(BaseModel):
     allow_free_text: bool = True
 
 
+class ScenarioChange(BaseModel):
+    """이번 턴에 바뀐 시나리오 하나 (ARTEL-936). 화면이 결과 박스에 색으로 나눠 그린다."""
+
+    action: Literal["created", "updated", "removed"]
+    title: str
+    # 지운 것은 이제 없으므로 번호가 없을 수 있다. 있으면 화면이 그 시나리오로 잇는다.
+    scenario_id: int | None = None
+
+
+class AgentReply(BaseModel):
+    """한 턴의 답을 사람이 읽는 두 칸으로 (ARTEL-927).
+
+    한 덩어리 글이던 답에서는 무엇을 했는지와 왜 그랬는지가 섞여, 사용자가 반박하거나
+    결정할 자리가 보이지 않았다. 세 번째 칸인 질문은 [ScenarioAgentResult.questions] 다 —
+    답할 수 있어야 하는 것이라 선택지까지 따로 실린다.
+    """
+
+    # 코드가 센 한 줄. 몇 건을 생성·수정·삭제했는지(ARTEL-936) — 무엇이 바뀌었는지는 [changes].
+    result: str
+    # 판단한 모델의 말. 마크다운(문단·목록·표)이고, 모양은 읽기 쉬운 쪽으로 모델이 고른다.
+    detail: str = ""
+    # 바뀐 시나리오 목록(ARTEL-936). [result] 는 이것을 센 한 줄이다.
+    changes: list[ScenarioChange] = Field(default_factory=list)
+
+
+class Ref(BaseModel):
+    """답 속 `[[tc:N]]`·`[[ts:N]]` 표식이 가리키는 것 (ARTEL-931).
+
+    번호는 표식 안에서 기계만 읽는다. 화면은 [label] 로 칩을 그리고, TC 칩을 누르면
+    [detail](사전조건·기대값)을 보여 준다 — TC 를 따로 볼 화면이 없어서다.
+    """
+
+    kind: Literal["tc", "ts"]
+    id: int
+    label: str
+    detail: str | None = None
+
+
 class ScenarioAgentResult(BaseModel):
     message: str
     # The run goal, decomposed. Empty when no matching cases were found: the agent
@@ -409,11 +447,17 @@ class ScenarioAgentResult(BaseModel):
     # population to be exhaustive over. Orchestration reads None as "skip the check",
     # which is also the rollback path: stop emitting this and the checking stops.
     reviewed: ReviewedCases | None = None
-    # One thing to ask the user (ARTEL-487). None on an ordinary turn.
+    # The answer split for the screen (ARTEL-927). None for a plain reply — a greeting,
+    # an off-topic decline, a failure — which stays `message` alone.
+    reply: AgentReply | None = None
+    # What the user can decide (ARTEL-487, ARTEL-927). Empty on an ordinary turn.
     #
-    # **One at a time.** Two questions leave the user no way to say which one they
-    # answered, and the screen no way to route the reply.
-    question: ScenarioQuestion | None = None
+    # Several are allowed: each carries its own id, so the screen shows them as a batch
+    # and an answer comes back naming the one it belongs to.
+    questions: list[ScenarioQuestion] = Field(default_factory=list)
+    # What every `[[tc:N]]`/`[[ts:N]]` marker in `reply` and `questions` points at
+    # (ARTEL-931). Only markers that resolved are listed; the rest were removed.
+    refs: list[Ref] = Field(default_factory=list)
 
 
 # ScenarioAgentRequest references ScenarioPlan (defined after it) via a forward

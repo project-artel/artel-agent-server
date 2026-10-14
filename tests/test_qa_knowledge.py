@@ -33,12 +33,25 @@ from app.agents.qa.knowledge import (
     render_hit,
 )
 from app.agents.qa.runner import QaRunner
+from app.qa.run_config import resolve_run_config
+from app.agents.qa.arch import PhaseCycleMode, QaArchSpec, default_resolved_arch
 from app.agents.qa.tools import QaRunState, build_tools
 from app.qa.schemas import QaCaseRef, QaScenario, QaStep
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import KnowledgeSearchHit, LogCategory, MessageType
 from app.qa.scene import SCENE_VIEW_START_PREFIX
 
+
+# phase gate 를 끈다. 이 파일은 tool 하나하나가 무엇을 하는지 보는 자리이고, gate 는 그 위층
+# 이다. 기본값이 무엇인지는 `tests/test_qa_arch.py` 가 지킨다.
+_NO_PHASE_GATE = default_resolved_arch().model_copy(
+    update={"phase_cycle": PhaseCycleMode.off}
+)
+
+
+def _run_config_without_the_gate():
+    """같은 것을 런 전체에 대해. `build_tools` 가 아니라 `QaRunner` 가 받는 자리다."""
+    return resolve_run_config(arch=QaArchSpec(phase_cycle=PhaseCycleMode.off))
 
 def make(timeout: float = 0.05):
     """A channel whose knowledge search times out fast unless a test answers it."""
@@ -49,7 +62,7 @@ def make(timeout: float = 0.05):
 
     channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=timeout, write_timeout=timeout)
     state = QaRunState(total_steps=1)
-    tools = {tool.name: tool for tool in build_tools(channel, state)}
+    tools = {tool.name: tool for tool in build_tools(channel, state, arch=_NO_PHASE_GATE)}
     return channel, state, tools, sent
 
 
@@ -77,7 +90,7 @@ def make_with_undeliverable(*types: MessageType):
 
     channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=0.05, write_timeout=0.05)
     state = QaRunState(total_steps=1)
-    tools = {tool.name: tool for tool in build_tools(channel, state)}
+    tools = {tool.name: tool for tool in build_tools(channel, state, arch=_NO_PHASE_GATE)}
     return channel, state, tools, sent
 
 
@@ -508,7 +521,7 @@ def test_a_reply_to_a_foreign_request_does_not_resolve_this_search(
 def test_a_search_neither_touches_the_game_nor_returns_a_scene() -> None:
     """The regression this tool was most likely to cause.
 
-    Every acting tool answers with the scene it produced, and `fold_stale_scenes`
+    Every acting tool answers with the scene it produced, and `fold_context`
     exists because those views pile up. A search changes no screen, so returning
     one would re-spend the context that fold was written to save — and it would
     also cost a game round trip for a picture the agent already has.
@@ -561,7 +574,7 @@ def test_the_description_says_when_not_to_use_it() -> None:
     _, _, tools, _ = make()
     description = tools["search_knowledge"].description
 
-    assert "Do NOT" in description
+    assert "Not for what is on screen" in description
     assert "observe_scene" in description
 
 
@@ -1578,7 +1591,7 @@ def test_a_successful_record_closes_the_outstanding_deletion() -> None:
 
 def test_a_write_neither_touches_the_game_nor_returns_a_scene() -> None:
     """The same regression `search_knowledge` had to avoid. Neither write changes
-    a screen, so returning one would re-spend the context `fold_stale_scenes` was
+    a screen, so returning one would re-spend the context `fold_context` was
     written to save, and cost a game round trip for a picture already in hand."""
 
     async def run() -> None:
@@ -1640,7 +1653,7 @@ def test_the_record_description_draws_the_line_it_has_to_draw() -> None:
     for name in KNOWLEDGE_TAGS:
         assert name in description
     # This run's own state is not knowledge.
-    assert "500 gold" in description
+    assert "this run's state" in description
     # A bug is reported, not recorded.
     assert "report_step" in description
 
@@ -1653,16 +1666,22 @@ def test_the_forget_description_sets_the_bar_high_and_points_at_the_repair() -> 
 
     assert str(MAX_FORGETS_PER_RUN) in description
     # One contradiction is more often a bug than stale documentation.
-    assert "ONE contradiction is not enough" in description
+    assert "One contradiction is more often a bug" in description
     assert "report_step" in description
     # Correcting is `update_knowledge`, not a deletion.
-    assert "Do NOT delete in order to correct" in description
     assert "update_knowledge" in description
-    # The delete-then-record route is still described, as the safety net it now is.
-    assert "record_knowledge" in description
-    assert "IMMEDIATELY" in description
+    # The long form of the same bar, and the delete-then-record safety net, live
+    # in the knowledge_base skill; the description points at it by name.
+    assert "knowledge_base skill" in description
     # And deleting is only possible for what the run has read.
-    assert "search_knowledge" in description
+    assert "search hit" in description
+
+    from app.prompts import load_skill
+
+    skill = load_skill("knowledge_base", "v19").body
+    assert "the bar is high" in skill
+    assert "Do not delete in order to correct" in skill
+    assert "call `record_knowledge` immediately afterwards" in skill
 
 
 def test_the_update_description_draws_the_line_against_forget_and_against_a_bug() -> None:
@@ -1677,12 +1696,11 @@ def test_the_update_description_draws_the_line_against_forget_and_against_a_bug(
     for name in KNOWLEDGE_TAGS:
         assert name in description
     # Correct versus delete.
-    assert "forget_knowledge" in description
-    assert "keeps its id" in description
+    assert "keeping its id" in description
     # A disagreement may be a bug, and a bug is reported.
     assert "report_step" in description
     # Partial updates, and the id rule.
-    assert "Send only what changes" in description
+    assert "Send only the fields that change" in description
     assert "search_knowledge" in description
 
 
@@ -1841,7 +1859,10 @@ def test_a_run_searches_knowledge_and_carries_on_to_its_verdict(
         ],
     )
 
-    asyncio.run(QaRunner().run(channel, scenario, state))
+    # 대본의 tool 순서는 phase 축이 생기기 전에 쓰였다 — 이 런들은 지식을 판정보다
+    # 먼저 적는데, gate 는 `UPDATE_MEMORY` 를 `VERIFY` 뒤에 둔다. 여기서 보는 것은
+    # 지식 tool 과 런 loop 이므로 gate 를 끄고 본다.
+    asyncio.run(QaRunner(_run_config_without_the_gate()).run(channel, scenario, state))
 
     assert state.finished
     assert len(searches(sent)) == 1
@@ -1994,7 +2015,10 @@ def test_a_run_corrects_an_entry_by_deleting_it_and_recording_the_new_one(
         ],
     )
 
-    asyncio.run(QaRunner().run(channel, scenario, state))
+    # 대본의 tool 순서는 phase 축이 생기기 전에 쓰였다 — 이 런들은 지식을 판정보다
+    # 먼저 적는데, gate 는 `UPDATE_MEMORY` 를 `VERIFY` 뒤에 둔다. 여기서 보는 것은
+    # 지식 tool 과 런 loop 이므로 gate 를 끄고 본다.
+    asyncio.run(QaRunner(_run_config_without_the_gate()).run(channel, scenario, state))
 
     assert state.finished
     assert deletes(sent)[0]["payload"] == {"knowledge_id": "41"}
@@ -2116,7 +2140,10 @@ def test_a_run_corrects_an_entry_in_place_with_the_update_tool(
         ],
     )
 
-    asyncio.run(QaRunner().run(channel, scenario, state))
+    # 대본의 tool 순서는 phase 축이 생기기 전에 쓰였다 — 이 런들은 지식을 판정보다
+    # 먼저 적는데, gate 는 `UPDATE_MEMORY` 를 `VERIFY` 뒤에 둔다. 여기서 보는 것은
+    # 지식 tool 과 런 loop 이므로 gate 를 끄고 본다.
+    asyncio.run(QaRunner(_run_config_without_the_gate()).run(channel, scenario, state))
 
     assert state.finished
     # One frame, naming the entry that already existed. Nothing was deleted and

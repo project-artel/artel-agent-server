@@ -14,12 +14,12 @@ from app.agents.qa.capability import (
     CAPABILITY_ORIGINS,
     CAPABILITY_VERDICTS,
     INPUT_PHASES,
-    LIST_SCENE_CAPABILITIES_DESCRIPTION,
     MAX_RATIONALE_LENGTH,
     MAX_SUMMARY_LENGTH,
-    RECORD_CAPABILITY_VERDICT_DESCRIPTION,
-    RECORD_NEW_CAPABILITY_DESCRIPTION,
     UNCONFIRMED_CAPABILITY_WRITE,
+    capability_search_matches,
+    capability_search_page,
+    capability_tool_description,
     render_capability_search,
     render_capability_write_result,
 )
@@ -128,7 +128,7 @@ def build_capability_tools(ctx: ToolContext) -> list[BaseTool]:
             )
         return None
 
-    @tool(description=RECORD_CAPABILITY_VERDICT_DESCRIPTION)
+    @tool(description=capability_tool_description("record_capability_verdict"))
     async def record_capability_verdict(
         step: int,
         thought: str,
@@ -138,7 +138,7 @@ def build_capability_tools(ctx: ToolContext) -> list[BaseTool]:
         capability_id: str = "",
         action_method: str = "",
     ) -> str:
-        # What the agent reads is RECORD_CAPABILITY_VERDICT_DESCRIPTION, not this.
+        # What the agent reads is tool_record_capability_verdict.md, not this.
         #
         # 화면을 안 돌려준다. 이 호출은 게임을 안 건드리므로 화면을 실으면 에이전트가 이미
         # 들고 있는 것을 문맥에 한 번 더 사는 것이다 — 지식 tool 들과 같은 판단(ARTEL-180).
@@ -185,7 +185,7 @@ def build_capability_tools(ctx: ToolContext) -> list[BaseTool]:
             ),
         )
 
-    @tool(description=RECORD_NEW_CAPABILITY_DESCRIPTION)
+    @tool(description=capability_tool_description("record_new_capability"))
     async def record_new_capability(
         step: int,
         thought: str,
@@ -202,7 +202,7 @@ def build_capability_tools(ctx: ToolContext) -> list[BaseTool]:
         based_on: list[str] | None = None,
         action_method: str = "",
     ) -> str:
-        # What the agent reads is RECORD_NEW_CAPABILITY_DESCRIPTION, not this.
+        # What the agent reads is tool_record_new_capability.md, not this.
         scene = _standing_scene()
         if not scene:
             return (
@@ -326,11 +326,11 @@ def build_capability_tools(ctx: ToolContext) -> list[BaseTool]:
             ),
         )
 
-    @tool(description=LIST_SCENE_CAPABILITIES_DESCRIPTION)
+    @tool(description=capability_tool_description("list_scene_capabilities"))
     async def list_scene_capabilities(
         step: int, thought: str, contains: str = "", offset: int = 0
     ) -> str:
-        # What the agent reads is LIST_SCENE_CAPABILITIES_DESCRIPTION, not this.
+        # What the agent reads is tool_list_scene_capabilities.md, not this.
         #
         # 아무 프레임도 안 나간다. 씬 문맥은 런 시작에 한 번 받아 메모리에 있고, 이 tool 은
         # 그 중 지금 씬의 것을 뒤진다 — 블록이 자리 때문에 못 그린 나머지를 당겨 오는 것이
@@ -349,9 +349,14 @@ def build_capability_tools(ctx: ToolContext) -> list[BaseTool]:
                 "here to look up. Anything you watch happen on this scene is new — "
                 "`record_new_capability` is where it goes."
             )
-        return render_capability_search(
-            scene, entry.all_capabilities(), contains, offset
+        capabilities = entry.all_capabilities()
+        # 이 호출이 실제로 찍는 줄만 기억한다. `report_step` 의 `capability_key` 가 이 표에
+        # 묻고, 안 찍힌 줄까지 넣으면 그 검사가 "이 런이 받은 것" 이 아니라 "이 씬에 있는 것"
+        # 을 묻게 된다.
+        state.remember_listed_capabilities(
+            capability_search_page(capability_search_matches(capabilities, contains), offset)
         )
+        return render_capability_search(scene, capabilities, contains, offset)
 
 
     return [
