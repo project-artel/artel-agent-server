@@ -19,6 +19,7 @@ from typing import Awaitable, Callable
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
+from app.llm.api_key import get_llm_api_key_provider
 from app.llm.chat_model import build_chat_model
 from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig, get_model_spec
 from app.prompts import load_prompt
@@ -163,10 +164,11 @@ class JevScenarioRouter(ScenarioRouter):
         from app.agents.scenario import jev_criteria as spec
 
         settings = get_settings()
-        if not settings.llm_api_key:
-            raise RuntimeError("결정 모델 라우터에 LLM_API_KEY 가 없다")
+        api_key = get_llm_api_key_provider().get_openrouter_key()
+        if not api_key:
+            raise RuntimeError("결정 모델 라우터에 OpenRouter key 가 없다")
         headers = {
-            "Authorization": f"Bearer {settings.llm_api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         if settings.openrouter_site_url:
