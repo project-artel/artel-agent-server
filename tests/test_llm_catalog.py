@@ -40,7 +40,13 @@ SEED_IDS = [
     "qwen/qwen3.7-max",
     "bedrock/us.anthropic.claude-haiku-5-5",
     "bedrock/us.openai.gpt-6.1-sol",
+    "claude/claude-opus-5-5",
+    "claude/claude-sonnet-5-5",
+    "claude/claude-haiku-5-5",
+    "claude/claude-fable-5-1",
 ]
+
+CLAUDE_IDS = SEED_IDS[-4:]
 
 
 class FakeClock:
@@ -78,16 +84,61 @@ def answer(rows):
 # --- the fixture mirrors the seed ----------------------------------------------
 
 
-def test_fixture_mirrors_the_fifteen_seed_rows_in_order() -> None:
+def test_fixture_mirrors_the_nineteen_seed_rows_in_order() -> None:
     rows = fixture_rows()
 
     assert [row["id"] for row in rows] == SEED_IDS
-    assert [row["sortOrder"] for row in rows] == list(range(10, 160, 10))
+    assert [row["sortOrder"] for row in rows] == list(range(10, 200, 10))
     disabled = [row["id"] for row in rows if not row["enabled"]]
     assert disabled == [
         "bedrock/us.anthropic.claude-haiku-5-5",
         "bedrock/us.openai.gpt-6.1-sol",
+        *CLAUDE_IDS,
     ]
+
+
+def test_claude_api_rows_parse_with_effort_reasoning_and_pricing() -> None:
+    catalog = parse_model_catalog(fixture_rows())
+
+    for model_id in CLAUDE_IDS:
+        spec = catalog[model_id]
+        assert spec.provider is LLMProvider.anthropic
+        assert spec.enabled is False
+        assert spec.supports_strict_json is True
+        assert spec.max_input_tokens == 872_000
+        assert spec.input_modalities == ("text", "image", "file")
+        assert spec.reasoning is ReasoningKind.effort
+        assert spec.reasoning_efforts == tuple(ReasoningEffort)
+        assert spec.pricing is not None
+        assert spec.pricing.as_of == "2026-10-14"
+        assert spec.pricing.source == (
+            "Anthropic model table (claude-api skill, cached 2026-10-06)"
+        )
+
+    prices = {
+        model_id: (
+            catalog[model_id].pricing.input_per_mtok,
+            catalog[model_id].pricing.output_per_mtok,
+            catalog[model_id].pricing.cache_write_per_mtok,
+            catalog[model_id].pricing.cache_read_per_mtok,
+        )
+        for model_id in CLAUDE_IDS
+    }
+    assert prices == {
+        "claude/claude-opus-5-5": (4.0, 20.0, 5.0, 0.2),
+        "claude/claude-sonnet-5-5": (2.0, 10.0, 2.5, 0.2),
+        "claude/claude-haiku-5-5": (0.1, 0.5, 0.125, 0.01),
+        "claude/claude-fable-5-1": (10.0, 50.0, 12.5, 0.25),
+    }
+    haiku = catalog["claude/claude-haiku-5-5"].pricing
+    assert haiku.long_context_threshold_tokens == 100_000
+    assert (
+        haiku.long_context_input_per_mtok,
+        haiku.long_context_output_per_mtok,
+        haiku.long_context_cache_write_per_mtok,
+        haiku.long_context_cache_read_per_mtok,
+    ) == (0.5, 2.5, 0.625, 0.05)
+    assert catalog["claude/claude-opus-5-5"].pricing.long_context_threshold_tokens is None
 
 
 # --- parsing --------------------------------------------------------------------

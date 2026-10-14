@@ -3,6 +3,7 @@ from functools import lru_cache
 from typing import Any
 
 from botocore.config import Config as BotocoreConfig
+from langchain_anthropic import ChatAnthropic
 from langchain_aws import ChatBedrockConverse
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
@@ -22,8 +23,10 @@ from app.llm.models import (
 from app.llm.api_key import (
     KeyRefreshOnUnauthorized,
     get_llm_api_key_provider,
+    is_key_rejected_by_anthropic,
     is_key_rejected_by_bedrock,
 )
+from app.llm.claude_api import ClaudeApiChat
 from app.llm.usage import UsageCallback
 
 
@@ -35,6 +38,14 @@ TEMPERATURE = 0.2
 # 모델 id 가 이것으로 시작하면 Bedrock 으로 간다. OpenRouter slug 에는 이
 # 접두가 없으므로 둘이 섞이지 않는다.
 BEDROCK_PREFIX = "bedrock/"
+
+# 모델 id 가 이것으로 시작하면 Claude API 로 간다. 뒤는 Anthropic model id 다.
+# `anthropic/...` 은 OpenRouter, `bedrock/us.anthropic...` 은 Bedrock 이라 셋이 섞이지 않는다.
+CLAUDE_PREFIX = "claude/"
+
+# Claude API 주소. 넘기지 않으면 langchain-anthropic 이 `ANTHROPIC_BASE_URL` 같은 환경 변수를
+# 읽는데, 셸에 남은 값이 호출을 다른 곳으로 보내지 않게 고정한다.
+CLAUDE_API_BASE_URL = "https://api.anthropic.com"
 
 # Converse API 가 캐시 경계를 읽는 표기. 이 block 까지가 되읽을 수 있는 prefix 다.
 CACHE_POINT: dict[str, Any] = {"cachePoint": {"type": "default"}}
@@ -67,6 +78,19 @@ THINKING_HEADROOM = 2
 # 있다. token 예산으로 추론하는 Haiku 4.5 는 이 값이 아니라 예산에서 `max_tokens` 를
 # 계산한다.
 BEDROCK_MAX_OUTPUT_TOKENS = 128_000
+
+# Claude API 의 최대 출력. 이 값은 streaming 으로만 받을 수 있다. catalog row 의
+# `max_input_tokens` 872,000 은 1M context 에서 이 값을 뺀 것이다.
+CLAUDE_MAX_OUTPUT_TOKENS = 128_000
+
+
+class ClaudeApiKeyMissingError(RuntimeError):
+    """`claude/` 모델을 부르려는데 저장된 Claude API key 가 없다.
+
+    API 를 부르기 전에 던진다. key 없이 부르면 SDK 가 `ANTHROPIC_API_KEY` 환경 변수를
+    찾거나 인증 실패로 끝나는데, 둘 다 key 를 넣을 곳이 admin page 라는 것을 알려 주지
+    않는다.
+    """
 
 
 def _is_transient(message: BaseMessage) -> bool:
@@ -195,6 +219,92 @@ def _bedrock_request(spec: ModelSpec, reasoning: ReasoningConfig | None) -> _Bed
     return _BedrockRequest(fields, None, BEDROCK_MAX_OUTPUT_TOKENS)
 
 
+@dataclass(frozen=True)
+class _ClaudeRequest:
+    """Claude API 요청에서 추론 설정에 따라 달라지는 두 값. None 이면 보내지 않는다."""
+
+    thinking: dict[str, Any] | None
+    output_config: dict[str, Any] | None
+
+
+# `ReasoningConfig.disabled` 를 model 마다 어떻게 보내는가. Anthropic model id 로 찾는다.
+#
+# Opus 5.5 와 Fable 5.1 은 `{"type": "disabled"}` 를 거절하고 thinking 을 끌 방법이 없다.
+# 가장 적게 생각하는 effort `low` 를 보낸다. Sonnet 5.5 도 `disabled` 를 거절하고
+# `between_tools` 로 끈다(effort high 이하, 다른 thinking 필드 없이). Haiku 5.5 는
+# `disabled` 를 받는다(effort high 이하). 네 model 모두 `budget_tokens` 는 400 이다.
+_CLAUDE_THINKING_OFF: dict[str, _ClaudeRequest] = {
+    "claude-opus-5-5": _ClaudeRequest(None, {"effort": "low"}),
+    "claude-fable-5-1": _ClaudeRequest(None, {"effort": "low"}),
+    "claude-sonnet-5-5": _ClaudeRequest({"type": "between_tools"}, None),
+    "claude-haiku-5-5": _ClaudeRequest({"type": "disabled"}, None),
+}
+
+
+def _claude_request(model_id: str, reasoning: ReasoningConfig | None) -> _ClaudeRequest:
+    """effort 를 고르면 adaptive `thinking` 과 `output_config.effort` 를 보낸다.
+
+    고르지 않았으면 둘 다 보내지 않는다. 그때는 model 의 기본 동작을 따른다.
+    끄라고 했으면 `_CLAUDE_THINKING_OFF` 를 따른다. 표에 없는 model 은 아무것도 보내지
+    않는다 — 끄는 표기가 model 마다 달라서, 확인하지 않은 표기를 보내면 400 이 될 수 있다.
+    """
+    if reasoning is None:
+        return _ClaudeRequest(None, None)
+    if reasoning.disabled:
+        return _CLAUDE_THINKING_OFF.get(model_id, _ClaudeRequest(None, None))
+    if reasoning.effort is None:
+        return _ClaudeRequest(None, None)
+    return _ClaudeRequest({"type": "adaptive"}, {"effort": reasoning.effort.value})
+
+
+def _claude(
+    model: LLMModel,
+    reasoning: ReasoningConfig | None,
+    cache_prompt: bool,
+    anthropic_api_key: str,
+) -> ChatAnthropic:
+    """Claude API 경로. key 는 관리자가 admin page 에 넣은 값이다.
+
+    `temperature`, `top_p`, `top_k` 는 보내지 않는다. Opus 5.5 와 Fable 5.1 은 sampling
+    parameter 를 거절하고, Sonnet 5.5 와 Haiku 5.5 는 기본값이 아닌 값을 거절한다.
+
+    `ClaudeApiChat` 은 강제 `tool_choice` 를 `auto` 로 낮추고, 앞의 메시지가 바뀌어 무효가
+    된 thinking block 을 요청에서 뺀다. 이유는 `app/llm/claude_api.py` 에 있다.
+    """
+    settings = get_settings()
+    model_id = model.removeprefix(CLAUDE_PREFIX)
+    request = _claude_request(model_id, reasoning)
+    model_kwargs: dict[str, Any] = {}
+    if cache_prompt:
+        # Claude API 는 top-level `cache_control` 을 받아 마지막 cache 가능한 block 에
+        # 경계를 놓는다. OpenRouter 의 `extra_body["cache_control"]` 과 같은 동작이다.
+        model_kwargs["cache_control"] = {"type": "ephemeral"}
+
+    return ClaudeApiChat(
+        model=model_id,
+        # key 를 넘기면 SDK 는 `ANTHROPIC_API_KEY` 와 `ANTHROPIC_AUTH_TOKEN` 을 읽지 않는다.
+        api_key=anthropic_api_key,
+        base_url=CLAUDE_API_BASE_URL,
+        max_tokens=CLAUDE_MAX_OUTPUT_TOKENS,
+        thinking=request.thinking,
+        output_config=request.output_config,
+        model_kwargs=model_kwargs,
+        # 128,000 token 출력은 streaming 으로만 받을 수 있다. Bedrock 과 같은 이유로 답을
+        # chunk 로 받는다 — 통째로 받으면 긴 답부터 timeout 에 걸린다.
+        streaming=True,
+        timeout=settings.anthropic_timeout_seconds,
+        max_retries=settings.anthropic_max_retries,
+        # 응답의 `model_name` 에는 `claude/` 가 없다. catalog id 로 기록하려고 slug 를 넘긴다.
+        # langchain-anthropic 의 `input_tokens` 는 cache write 를 포함한다.
+        callbacks=[
+            UsageCallback(slug=model, input_includes_cache_write=True),
+            KeyRefreshOnUnauthorized(
+                get_llm_api_key_provider(), rejected=is_key_rejected_by_anthropic
+            ),
+        ],
+    )
+
+
 def _bedrock(
     model: LLMModel,
     reasoning: ReasoningConfig | None,
@@ -263,21 +373,30 @@ def build_chat_model(
 ) -> BaseChatModel:
     """Build a chat model, or return the cached one built from the same inputs.
 
-    Bedrock 모델은 지금의 Bedrock key 까지 cache key 에 들어간다. `ChatBedrockConverse`
-    는 만들어질 때 키를 한 번 받아 boto3 client 에 고정하므로, 키가 바뀌면 같은 client 를
-    다시 쓸 수 없다. 키를 cache key 에 넣으면 관리자가 키를 바꾼 뒤 처음 부르는 호출이 새
+    Bedrock 모델은 지금의 Bedrock key 까지, `claude/` 모델은 지금의 Claude API key 까지
+    cache key 에 들어간다. `ChatBedrockConverse` 는 만들어질 때 키를 한 번 받아 boto3
+    client 에 고정하므로, 키가 바뀌면 같은 client 를 다시 쓸 수 없다. 키를 cache key 에 넣으면 관리자가 키를 바꾼 뒤 처음 부르는 호출이 새
     client 를 받고, 재시작이 필요 없다. 이미 client 를 받아 간 run 은 끝날 때까지 그
     client 의 키를 쓴다.
 
+    `ChatAnthropic` 도 만들어질 때 키를 SDK client 에 고정하므로 같은 방법을 쓴다.
+
     OpenRouter 모델은 키를 요청마다 읽으므로(`api_key` 에 callable 을 넘긴다) 키가
     cache key 에 들어가지 않는다.
+
+    `claude/` 모델인데 저장된 Claude API key 가 없으면 `ClaudeApiKeyMissingError` 다.
     """
-    bedrock_api_key = (
-        get_llm_api_key_provider().get_bedrock_key()
-        if model.startswith(BEDROCK_PREFIX)
-        else None
-    )
-    return _build_chat_model(model, reasoning, cache_prompt, bedrock_api_key)
+    provider_key: str | None = None
+    if model.startswith(BEDROCK_PREFIX):
+        provider_key = get_llm_api_key_provider().get_bedrock_key()
+    elif model.startswith(CLAUDE_PREFIX):
+        provider_key = get_llm_api_key_provider().get_anthropic_key()
+        if provider_key is None:
+            raise ClaudeApiKeyMissingError(
+                f"Model '{model}' needs a Claude API key, and none is stored. "
+                "An administrator enters it on the admin page."
+            )
+    return _build_chat_model(model, reasoning, cache_prompt, provider_key)
 
 
 @lru_cache
@@ -285,11 +404,12 @@ def _build_chat_model(
     model: LLMModel,
     reasoning: ReasoningConfig | None,
     cache_prompt: bool,
-    bedrock_api_key: str | None,
+    provider_key: str | None,
 ) -> BaseChatModel:
     """Build a chat model.
 
-    `bedrock/` 로 시작하는 값은 Bedrock 으로, 나머지는 OpenRouter 로 간다.
+    `bedrock/` 로 시작하는 값은 Bedrock 으로, `claude/` 로 시작하는 값은 Claude API 로,
+    나머지는 OpenRouter 로 간다. `provider_key` 는 앞의 둘에서 쓰는 key 다.
     OpenRouter 경로의 동작은 그대로다 — credit 이 없으면 그쪽이 실패하는 것도
     포함해서, 이 변경이 손대지 않는다.
 
@@ -311,7 +431,11 @@ def _build_chat_model(
     if model.startswith(BEDROCK_PREFIX):
         # Bedrock 은 OpenAI 호환이 아니다(SigV4 + Converse). 아래 `extra_body` 는
         # 전부 OpenRouter 표기라 여기서 갈라지는 편이 옮기는 것보다 정직하다.
-        return _bedrock(model, reasoning, cache_prompt, bedrock_api_key)
+        return _bedrock(model, reasoning, cache_prompt, provider_key)
+    if model.startswith(CLAUDE_PREFIX):
+        # `build_chat_model` 이 key 가 없으면 여기까지 오지 않게 한다.
+        assert provider_key is not None
+        return _claude(model, reasoning, cache_prompt, provider_key)
 
     settings = get_settings()
     headers: dict[str, str] = {}
@@ -369,7 +493,15 @@ build_chat_model.cache_clear = _build_chat_model.cache_clear  # type: ignore[att
 
 
 def select_structured_method(model: LLMModel) -> str:
-    """Strict json_schema for capable models, json_mode as the fallback."""
+    """Strict json_schema for capable models, json_mode as the fallback.
+
+    `claude/` 모델은 catalog 값과 상관없이 `json_schema` 다. ChatAnthropic 에는
+    `json_mode` 가 없고, 나머지 방식인 `function_calling` 은 tool 을 강제하는데 Opus 5.5,
+    Sonnet 5.5, Fable 5.1 이 그것을 400 으로 거절한다. `json_schema` 는
+    `output_config.format` 으로 간다.
+    """
+    if model.startswith(CLAUDE_PREFIX):
+        return "json_schema"
     return "json_schema" if get_model_spec(model).supports_strict_json else "json_mode"
 
 
@@ -378,8 +510,9 @@ def structured(model: LLMModel, schema: Any) -> Runnable:
 
     OpenRouter 에서 strict schema 를 지원하면 `json_schema + strict`, 지원하지 않으면
     `json_mode` 를 쓴다. Bedrock model card 가 structured outputs 를 지원하지 않는다고
-    하면 `function_calling` 으로 내린다. 이 분기를 호출부마다 복사하면 provider 가
-    바뀔 때 일부 stage 만 조용히 실패하므로 이 한 곳이 결정한다(ARTEL-806).
+    하면 `function_calling` 으로 내린다. `claude/` 는 언제나 `strict` 없는 `json_schema`
+    다. ChatAnthropic 은 `strict` 인자를 쓰지 않는다. 이 분기를 호출부마다 복사하면
+    provider 가 바뀔 때 일부 stage 만 조용히 실패하므로 이 한 곳이 결정한다(ARTEL-806).
     """
     chat = build_chat_model(model)
     if select_structured_method(model) != "json_schema" and model.startswith(
@@ -388,6 +521,6 @@ def structured(model: LLMModel, schema: Any) -> Runnable:
         return chat.with_structured_output(schema, method="function_calling")
     if select_structured_method(model) != "json_schema":
         return chat.with_structured_output(schema, method="json_mode")
-    if model.startswith(BEDROCK_PREFIX):
+    if model.startswith((BEDROCK_PREFIX, CLAUDE_PREFIX)):
         return chat.with_structured_output(schema, method="json_schema")
     return chat.with_structured_output(schema, method="json_schema", strict=True)

@@ -241,6 +241,11 @@ class Settings(BaseSettings):
     bedrock_timeout_seconds: float = 120.0
     bedrock_max_attempts: int = 3
 
+    # `claude/` 모델 호출의 한도. 답을 streaming 으로 받으므로 이 값은 다음 chunk 를 기다리는
+    # 시간이다. Bedrock 과 같은 120초로 둔다. 재시도는 anthropic SDK 기본값인 2회다.
+    anthropic_timeout_seconds: float = 120.0
+    anthropic_max_retries: int = 2
+
     embedding_base_url: str | None = None
     embedding_api_key: str | None = None
     embedding_dimensions: int = 1024

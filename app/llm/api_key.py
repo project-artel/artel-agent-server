@@ -1,21 +1,23 @@
 """Where the provider keys come from, and how long a fetched value is trusted.
 
-Both keys live only in the orchestration server, stored encrypted after an
+The three keys live only in the orchestration server, stored encrypted after an
 administrator enters them on the admin page. This module reads them from
 ``GET {ORCHESTRATION_BASE_URL}/internal/settings/llm``, which answers
-``{ "openrouterApiKey": ..., "bedrockApiKey": ... }`` with either value possibly
-null. There is no environment fallback: a key in ``.env`` is not read.
+``{ "openrouterApiKey": ..., "bedrockApiKey": ..., "anthropicApiKey": ... }`` with
+any value possibly null. There is no environment fallback: a key in ``.env`` is
+not read.
 
-The fetched pair is cached for ``llm_key_cache_ttl_seconds`` so a model call does
-not pay a network round trip. It is dropped early when a provider rejects a key
-(401 from OpenRouter, 401 or 403 from Bedrock) or when orchestration calls
-``POST /internal/llm-cache/invalidate``, so a key an administrator just replaced
-takes effect on the next call instead of after the TTL.
+The fetched keys are cached for ``llm_key_cache_ttl_seconds`` so a model call does
+not pay a network round trip. They are dropped early when a provider rejects a
+key (401 from OpenRouter or the Claude API, 401 or 403 from Bedrock) or when
+orchestration calls ``POST /internal/llm-cache/invalidate``, so a key an
+administrator just replaced takes effect on the next call instead of after the
+TTL.
 
 Orchestration being down, slow or answering something unexpected keeps the last
-pair that loaded and pushes its expiry out by one TTL, so an outage costs one
-short wait per TTL rather than one per model call. Before any pair has loaded,
-both keys are None.
+keys that loaded and pushes their expiry out by one TTL, so an outage costs one
+short wait per TTL rather than one per model call. Before any answer has loaded,
+every key is None.
 
 The keys themselves are never logged. Only the HTTP status and error type are.
 """
@@ -27,6 +29,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 
+import anthropic
 import httpx
 from langchain_core.callbacks import AsyncCallbackHandler
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -54,19 +57,22 @@ class _LlmSettingsBody(BaseModel):
 
     openrouter_api_key: str | None = None
     bedrock_api_key: str | None = None
+    anthropic_api_key: str | None = None
 
 
 @dataclass(frozen=True)
 class ProviderKeys:
     openrouter: str | None = None
     bedrock: str | None = None
+    anthropic: str | None = None
 
     def __repr__(self) -> str:
-        # The dataclass default would print both keys into any log or traceback
+        # The dataclass default would print every key into any log or traceback
         # that shows this object.
         return (
             f"ProviderKeys(openrouter={'set' if self.openrouter else None}, "
-            f"bedrock={'set' if self.bedrock else None})"
+            f"bedrock={'set' if self.bedrock else None}, "
+            f"anthropic={'set' if self.anthropic else None})"
         )
 
 
@@ -112,10 +118,14 @@ class LlmApiKeyProvider:
         """The Bedrock API key to use now, or None so the AWS credential chain answers."""
         return self._current().bedrock
 
-    def invalidate(self) -> None:
-        """Forget the cached pair's freshness so the next call asks orchestration again.
+    def get_anthropic_key(self) -> str | None:
+        """The Claude API key to use now, or None when none is stored."""
+        return self._current().anthropic
 
-        The pair itself is kept, so a refetch that fails still has something to use.
+    def invalidate(self) -> None:
+        """Forget the cached keys' freshness so the next call asks orchestration again.
+
+        The keys themselves are kept, so a refetch that fails still has something to use.
         """
         with self._lock:
             self._expires_at = None
@@ -167,6 +177,7 @@ class LlmApiKeyProvider:
         return ProviderKeys(
             openrouter=_clean(body.openrouter_api_key),
             bedrock=_clean(body.bedrock_api_key),
+            anthropic=_clean(body.anthropic_api_key),
         )
 
 
@@ -202,12 +213,22 @@ def is_key_rejected_by_bedrock(error: BaseException) -> bool:
     return _status_code(error) in (UNAUTHORIZED, FORBIDDEN)
 
 
+def is_key_rejected_by_anthropic(error: BaseException) -> bool:
+    """True when the Claude API answered 401.
+
+    langchain-anthropic re-raises the SDK's `anthropic.AuthenticationError` as a
+    subclass of it, so the `isinstance` check covers both. The status check covers
+    an error that reaches the callback without either class.
+    """
+    return isinstance(error, anthropic.AuthenticationError) or is_unauthorized(error)
+
+
 class KeyRefreshOnUnauthorized(AsyncCallbackHandler):
     """Drops the cached keys when a chat call is rejected for its key.
 
     The call that failed is not retried here; the next one reads a fresh key.
-    `rejected` decides which errors count, so the OpenRouter and Bedrock clients
-    can share this class.
+    `rejected` decides which errors count, so the OpenRouter, Bedrock and Claude
+    API clients can share this class.
     """
 
     def __init__(

@@ -377,6 +377,12 @@ def _fold_context_for(
         if FoldKind.scene_view in fold.newly_folded_kinds:
             channel.scene.pulse.redraw_all_values_next()
         state.folded_blocks = fold.folded_keys
+        # `claude/` 모델에서는 앞의 도구 결과를 `placeholder` 로 고쳐 쓰는 순간, 그 뒤 assistant
+        # turn 의 thinking block 이 무효가 된다.
+        # Claude API 는 block 앞의 메시지가 바뀐 채로 그 block 을 다시 받으면 400 을 돌려준다
+        # (2026-08-31 이후 만든 계정). `ClaudeApiChat`(`app/llm/claude_api.py`)이 그런 block 을
+        # 그 요청에서 빼므로 400 은 나지 않지만, 바뀐 지점 뒤 turn 들의 추론은 다음 호출에 넘어가지
+        # 않는다.
         return await handler(request.override(messages=fold.messages))
 
     return fold_context_middleware

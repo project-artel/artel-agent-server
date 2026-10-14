@@ -382,6 +382,12 @@ class QaCompactionMiddleware(SummarizationMiddleware):
             await self._decline_compaction()
             return None
 
+        # `claude/` 모델에서는 요약이 앞 turn 을 바꾸므로, 남긴 꼬리 turn 의 thinking block 이
+        # 무효가 된다. 그 block 들은 요약 전의 전체 이력을 앞에 두고 만들어졌다.
+        # Claude API 는 block 앞의 메시지가 바뀐 채로 그 block 을 다시 받으면 400 을 돌려준다
+        # (2026-08-31 이후 만든 계정). `ClaudeApiChat`(`app/llm/claude_api.py`)이 그런 block 을
+        # 그 요청에서 빼므로 400 은 나지 않지만, 바뀐 지점 뒤 turn 들의 추론은 다음 호출에 넘어가지
+        # 않는다.
         update["messages"] = _insert_after_summary(
             messages, HumanMessage(content=render_progress_ledger(self._state, self._channel))
         )

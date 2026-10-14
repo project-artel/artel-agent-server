@@ -9,6 +9,7 @@ from app.config import Settings
 from app.llm.api_key import (
     KeyRefreshOnUnauthorized,
     LlmApiKeyProvider,
+    is_key_rejected_by_anthropic,
     is_key_rejected_by_bedrock,
 )
 
@@ -273,6 +274,75 @@ def test_bedrock_rejection_invalidates_the_cache():
     assert provider.get_bedrock_key() == "old"
     asyncio.run(callback.on_llm_error(_botocore_error(403)))
     assert provider.get_bedrock_key() == "new"
+
+
+def test_the_claude_api_key_is_read_from_the_same_response():
+    provider, calls = build_provider(
+        lambda request: httpx.Response(
+            200,
+            json={
+                "openrouterApiKey": "or-key",
+                "bedrockApiKey": None,
+                "anthropicApiKey": " sk-ant-key ",
+            },
+        )
+    )
+
+    assert provider.get_anthropic_key() == "sk-ant-key"
+    assert provider.get_openrouter_key() == "or-key"
+    assert len(calls) == 1
+    assert "sk-ant" not in repr(provider._keys)
+
+
+def test_a_missing_claude_api_key_is_none():
+    provider, _ = build_provider(answer("or-key", "br-key"))
+
+    assert provider.get_anthropic_key() is None
+
+
+def _anthropic_error(status: int) -> Exception:
+    import anthropic
+
+    response = httpx.Response(
+        status, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    )
+    error_class = {
+        401: anthropic.AuthenticationError,
+        403: anthropic.PermissionDeniedError,
+        500: anthropic.InternalServerError,
+    }[status]
+    return error_class("rejected", response=response, body=None)
+
+
+@pytest.mark.parametrize(("status", "rejected"), [(401, True), (403, False), (500, False)])
+def test_claude_api_rejection_is_an_authentication_error(status, rejected):
+    assert is_key_rejected_by_anthropic(_anthropic_error(status)) is rejected
+
+
+def test_langchain_anthropics_own_authentication_error_counts():
+    """langchain-anthropic re-raises the SDK error as its own subclass."""
+    from langchain_anthropic.chat_models import AnthropicAuthenticationError
+
+    original = _anthropic_error(401)
+    wrapped = AnthropicAuthenticationError(
+        message="invalid x-api-key", response=original.response, body=None
+    )
+
+    assert is_key_rejected_by_anthropic(wrapped) is True
+
+
+def test_claude_api_rejection_invalidates_the_cache():
+    keys = iter(["old", "new"])
+    provider, _ = build_provider(
+        lambda request: httpx.Response(200, json={"anthropicApiKey": next(keys)})
+    )
+    callback = KeyRefreshOnUnauthorized(provider, rejected=is_key_rejected_by_anthropic)
+
+    assert provider.get_anthropic_key() == "old"
+    asyncio.run(callback.on_llm_error(_anthropic_error(500)))
+    assert provider.get_anthropic_key() == "old"
+    asyncio.run(callback.on_llm_error(_anthropic_error(401)))
+    assert provider.get_anthropic_key() == "new"
 
 
 def test_chat_client_sends_the_key_the_provider_currently_holds(monkeypatch):

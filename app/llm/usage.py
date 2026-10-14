@@ -348,7 +348,12 @@ class UsageCallback(AsyncCallbackHandler):
     accounting gap; an exception would be a failed QA run.
     """
 
-    def __init__(self, buffer: UsageBuffer | None = None, slug: str | None = None) -> None:
+    def __init__(
+        self,
+        buffer: UsageBuffer | None = None,
+        slug: str | None = None,
+        input_includes_cache_write: bool = False,
+    ) -> None:
         self._buffer = buffer
         # 카탈로그가 쓰는 이름. 응답이 vendor 접두를 잃고 돌아올 때 이것으로 되살린다.
         # Bedrock 이 그렇다 — 클라이언트에는 `bedrock/` 을 뗀 profile ID 만 넘기므로
@@ -356,6 +361,11 @@ class UsageCallback(AsyncCallbackHandler):
         # 전체가 되어 `provider VARCHAR(40)` 을 넘긴다. 같은 함정을 embedding 쪽이
         # 먼저 밟았고(`_record_from_embedding`), 거기서 쓴 처방과 같다.
         self._slug = slug
+        # langchain-anthropic 은 `input_tokens` 에 `cache_read` 와 `cache_creation` 을 모두
+        # 더해 준다. 받는 쪽 규칙은 cache write 를 `inputTokens` 밖에 두는 것이라(Bedrock 이
+        # 그렇게 온다) True 이면 그 몫을 뺀다. 빼지 않으면 cache write 가 입력 단가와 쓰기
+        # 단가로 두 번 계산된다.
+        self._input_includes_cache_write = input_includes_cache_write
         # ponytail: a run that ends without either end or error callback leaves
         # its entry here. Bound it (TTL or deque) if that ever adds up — one
         # abandoned run costs a timestamp pair.
@@ -377,7 +387,9 @@ class UsageCallback(AsyncCallbackHandler):
     async def on_llm_end(self, response: LLMResult, *, run_id: UUID, **kwargs: Any) -> None:
         started = self._started.pop(run_id, None)
         try:
-            record = _record_from_response(response, started, self._slug)
+            record = _record_from_response(
+                response, started, self._slug, self._input_includes_cache_write
+            )
             if record is not None:
                 await self._target.add(record)
         except Exception:  # noqa: BLE001 - accounting never propagates
@@ -389,6 +401,7 @@ def _record_from_response(
     response: LLMResult,
     started: tuple[float, datetime] | None,
     slug: str | None = None,
+    input_includes_cache_write: bool = False,
 ) -> dict[str, Any] | None:
     generations = response.generations[0] if response.generations else []
     message = getattr(generations[0], "message", None) if generations else None
@@ -410,15 +423,19 @@ def _record_from_response(
         model = slug
     cost = raw_usage.get("cost")
     now = time.monotonic()
+    cache_write_tokens = _cache_write_of(usage)
+    input_tokens = usage.get("input_tokens", 0)
+    if input_includes_cache_write:
+        input_tokens = max(input_tokens - cache_write_tokens, 0)
 
     return _build_record(
         model,
-        input_tokens=usage.get("input_tokens", 0),
+        input_tokens=input_tokens,
         output_tokens=usage.get("output_tokens", 0),
         cached_input_tokens=(usage.get("input_token_details") or {}).get(
             "cache_read", 0
         ),
-        cache_write_tokens=_cache_write_of(usage),
+        cache_write_tokens=cache_write_tokens,
         reasoning_tokens=(usage.get("output_token_details") or {}).get("reasoning", 0),
         cost_usd=float(cost) if isinstance(cost, (int, float)) else None,
         started_at=started[1] if started else datetime.now(UTC),

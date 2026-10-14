@@ -411,5 +411,154 @@
     "pricing": null,
     "enabled": false,
     "sortOrder": 150
+  },
+  {
+    "id": "claude/claude-opus-5-5",
+    "label": "Claude Opus 5.5 (Claude API)",
+    "provider": "anthropic",
+    "supportsStrictJson": true,
+    "maxInputTokens": 872000,
+    "inputModalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": {
+      "inputPerMtok": 4.0,
+      "outputPerMtok": 20.0,
+      "cacheWritePerMtok": 5.0,
+      "cacheReadPerMtok": 0.2,
+      "asOf": "2026-10-14",
+      "source": "Anthropic model table (claude-api skill, cached 2026-10-06)"
+    },
+    "enabled": false,
+    "sortOrder": 160
+  },
+  {
+    "id": "claude/claude-sonnet-5-5",
+    "label": "Claude Sonnet 5.5 (Claude API)",
+    "provider": "anthropic",
+    "supportsStrictJson": true,
+    "maxInputTokens": 872000,
+    "inputModalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": {
+      "inputPerMtok": 2.0,
+      "outputPerMtok": 10.0,
+      "cacheWritePerMtok": 2.5,
+      "cacheReadPerMtok": 0.2,
+      "asOf": "2026-10-14",
+      "source": "Anthropic model table (claude-api skill, cached 2026-10-06)"
+    },
+    "enabled": false,
+    "sortOrder": 170
+  },
+  {
+    "id": "claude/claude-haiku-5-5",
+    "label": "Claude Haiku 5.5 (Claude API)",
+    "provider": "anthropic",
+    "supportsStrictJson": true,
+    "maxInputTokens": 872000,
+    "inputModalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": {
+      "inputPerMtok": 0.1,
+      "outputPerMtok": 0.5,
+      "cacheWritePerMtok": 0.125,
+      "cacheReadPerMtok": 0.01,
+      "asOf": "2026-10-14",
+      "source": "Anthropic model table (claude-api skill, cached 2026-10-06)",
+      "longContextThresholdTokens": 100000,
+      "longContextInputPerMtok": 0.5,
+      "longContextOutputPerMtok": 2.5,
+      "longContextCacheWritePerMtok": 0.625,
+      "longContextCacheReadPerMtok": 0.05
+    },
+    "enabled": false,
+    "sortOrder": 180
+  },
+  {
+    "id": "claude/claude-fable-5-1",
+    "label": "Claude Fable 5.1 (Claude API)",
+    "provider": "anthropic",
+    "supportsStrictJson": true,
+    "maxInputTokens": 872000,
+    "inputModalities": [
+      "text",
+      "image",
+      "file"
+    ],
+    "reasoning": {
+      "kind": "effort",
+      "efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "minTokens": null,
+      "maxTokens": null,
+      "step": null,
+      "defaultTokens": null
+    },
+    "pricing": {
+      "inputPerMtok": 10.0,
+      "outputPerMtok": 50.0,
+      "cacheWritePerMtok": 12.5,
+      "cacheReadPerMtok": 0.25,
+      "asOf": "2026-10-14",
+      "source": "Anthropic model table (claude-api skill, cached 2026-10-06)"
+    },
+    "enabled": false,
+    "sortOrder": 190
   }
 ]
