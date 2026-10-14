@@ -133,10 +133,17 @@ def render_progress_ledger(state: QaRunState, channel: QaRunChannel) -> str:
         listed = ", ".join(str(step) for step in remaining)
         lines.append("")
         lines.append(f"Steps still without a verdict: {listed}")
-        lines.append(
-            f"Continue with step {remaining[0]}. Observe the screen first if you "
-            "are unsure where the game is."
-        )
+        if state.execution_mode == "FREE":
+            # FREE 시나리오는 순서를 agent 가 정하므로 가장 작은 번호를 다음으로 지정하지 않는다.
+            lines.append(
+                "Choose which of these to verify next. Observe the screen first if "
+                "you are unsure where the game is."
+            )
+        else:
+            lines.append(
+                f"Continue with step {remaining[0]}. Observe the screen first if you "
+                "are unsure where the game is."
+            )
     else:
         lines.append("")
         lines.append("Every step has a verdict. Call `finish_run` to close the run.")

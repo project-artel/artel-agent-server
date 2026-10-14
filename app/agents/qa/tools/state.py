@@ -79,8 +79,12 @@ class QaRunState:
         total_steps: int,
         step_meta: list[tuple[int | None, bool]] | None = None,
         step_texts: list[str] | None = None,
+        execution_mode: str = "ORDERED",
     ) -> None:
         self.total_steps = total_steps
+        # `QaScenario.execution_mode`. `FREE` 이면 스텝 하나가 TC 하나이고 보고가 순서 없이
+        # 온다 — `report_step` 의 답과 압축 원장이 "다음 스텝" 대신 남은 TC 번호를 말한다.
+        self.execution_mode = execution_mode
         # 시나리오가 각 스텝에 적은 행위 문장, 1번 스텝이 0번 자리. macro 초안의 docstring 이
         # 이것을 싣는다(`draft_for_step`). 비면 문장을 모르는 것이고 초안은 번호만 적는다.
         self.step_texts: list[str] = step_texts or []

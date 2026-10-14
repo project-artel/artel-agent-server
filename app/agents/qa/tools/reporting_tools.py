@@ -308,6 +308,8 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
                 "stands. Cite only ids printed to you by a search or a neighbour line."
             )
         note = "".join(f"\n\n{line}" for line in notes) + _macro_draft(step, passed)
+        if state.execution_mode == "FREE":
+            return _free_verdict_answer(passed, note)
         if remaining <= 0:
             # 무엇을 남길지 묻는 자리이자 이유는 `render_closing_asks` 가 들고 있다. 여기서
             # 말하는 것은 그 자리가 여기라는 것뿐이다 — 매 스텝마다 붙이면 표가 뜻을 잃고,
@@ -324,6 +326,29 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         if not passed:
             body = f"{body} A failed step is not a reason to stop."
         return _verdict_answer(f"{body}{note}{_next_step_macro(step + 1)}")
+
+    def _free_verdict_answer(passed: bool, note: str) -> str:
+        """FREE 시나리오에서 `report_step` 의 답 (ARTEL-1029).
+
+        TC 를 어떤 순서로 보고해도 되므로 "다음 스텝" 이 없다. 그래서 남은 수를 보고 수로 빼지
+        않고 `unreported_steps` 로 센다 — 같은 TC 를 다시 보고하면 빼기는 하나를 더 뺀다. 다음
+        스텝 번호로 macro 를 찾아 붙이는 hint 도 같은 이유로 붙이지 않는다.
+        """
+        unreported = state.unreported_steps()
+        if not unreported:
+            return _verdict_answer(
+                "Recorded. This report does not close the run. Every test case now has "
+                "a verdict — when you are done with the follow-up work below, call "
+                f"`finish_run` yourself:{render_closing_asks(state)}{note}"
+            )
+        listed = ", ".join(str(number) for number in unreported)
+        body = (
+            f"Recorded. {len(unreported)} test case(s) still without a verdict: {listed}. "
+            "Choose which one to verify next."
+        )
+        if not passed:
+            body = f"{body} A failed test case is not a reason to stop."
+        return _verdict_answer(f"{body}{note}")
 
     def _verdict_answer(body: str) -> str:
         """`report_step` 의 답. `report_step_view` 가 꺼져 있으면 view 대신 한 줄을 붙인다(ARTEL-960).

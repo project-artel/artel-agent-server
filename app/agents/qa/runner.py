@@ -208,6 +208,10 @@ def _step_plan(scenario: QaScenario) -> list[tuple[int | None, bool]]:
     TC 판정 = 그 구간 검증 스텝의 판정(파생)이라 여기 하드코딩되지 않는다.
     """
     steps = scenario.steps
+    if scenario.execution_mode == "FREE":
+        # FREE 시나리오는 스텝 하나가 TC 하나라 모든 보고가 그 TC 의 판정이다. 연속 구간으로
+        # 자르지 않는 것은 보고가 어떤 순서로 와도 같은 표가 나와야 해서다.
+        return [(step.case_id, step.case_id is not None) for step in steps]
     plan: list[tuple[int | None, bool]] = []
     for idx, step in enumerate(steps):
         cid = step.case_id
@@ -226,6 +230,8 @@ def _plan(scenario: QaScenario) -> str:
     (기대결과)가 붙는다. `verify`가 있는 스텝의 passed는 **기대결과가 나왔는가**(그게 그 TC의 최종
     판정), 그 외 스텝의 passed는 **그 행위를 수행/성립했는가**다.
     """
+    if scenario.execution_mode == "FREE":
+        return _free_plan(scenario)
     plan = _step_plan(scenario)
     items: list[dict] = []
     prev_cid: int | None = None
@@ -256,6 +262,51 @@ def _plan(scenario: QaScenario) -> str:
         f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
         "Begin. Observe the screen first."
     )
+
+
+def _free_plan(scenario: QaScenario) -> str:
+    """FREE 시나리오(TC 묶음)의 첫 메시지 (ARTEL-1029).
+
+    스텝 하나가 TC 하나다. 실행 순서, scene 사이의 경로, 조작 방법은 agent 가 정하므로
+    `do` 와 `try:`·`via:` 는 싣지 않고 TC 의 네 칸(scene, precondition, test_step, expected)만
+    싣는다. 번호 `step` 은 `report_step` 의 `step` 인자이고, 보고는 순서와 상관없이 받는다.
+    """
+    items: list[dict] = []
+    for idx, step in enumerate(scenario.steps):
+        case = step.case
+        item: dict = {"step": idx + 1}
+        if step.case_id is not None:
+            item["case_id"] = step.case_id
+        if case and case.scene:
+            item["scene"] = case.scene
+        if case and case.precondition:
+            item["precondition"] = case.precondition
+        item["test_step"] = (case.test_step if case and case.test_step else step.action).strip()
+        item["expected"] = case.expected if case else ""
+        items.append(item)
+    total = len(items)
+    return (
+        f"Scenario: {scenario.title} — {scenario.description}\n\n"
+        f"This scenario is a set of {total} test cases, not a script. You choose the order "
+        "and the method: which case to verify first, how to move between scenes, and which "
+        "controls to use. Plan an efficient route before you start — for example, verify the "
+        "cases that share a scene or a precondition together — and revisit a scene whenever "
+        "a case needs it.\n"
+        "Call report_step(step, passed, message) exactly once for EVERY test case, with "
+        "`step` = the case's number below. Report in whatever order you verify them.\n"
+        "- `passed` = whether the `expected` result actually occurred when you carried out "
+        "`test_step` with the `precondition` holding. Judge honestly: a case you could not "
+        "observe has not passed.\n"
+        "- A `precondition` must hold before you carry out that case's `test_step`. If you "
+        "cannot reach it, report the case passed=false with a message beginning "
+        "'SETUP-FAILED:' and do NOT report_issue (an unreachable precondition is not a "
+        "defect).\n"
+        "- `test_step` says what to check, not how. Find the way through the game yourself.\n\n"
+        f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
+        "Begin. Observe the screen first, then plan your route through the cases."
+    )
+
+
 def fold_kinds_for(arch: ResolvedArch) -> frozenset[FoldKind]:
     """Which kinds of stale block this structure folds out of what the model reads.
 
@@ -794,6 +845,7 @@ class QaRunner:
             total_steps=len(scenario.steps),
             step_meta=step_meta,
             step_texts=[step.action for step in scenario.steps],
+            execution_mode=scenario.execution_mode,
         )
         deadline = self._config.arch.deadline_seconds
         # `pulse_relevance` 가 켜진 run 만 판정기를 단다(ARTEL-958). 이미 도착한 reading 이
