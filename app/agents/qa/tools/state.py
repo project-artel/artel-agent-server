@@ -204,6 +204,9 @@ class QaRunState:
         # 담으므로 macro 호출은 여기 따로 남는다. stage draft, macro hint, macro result
         # `fold` 가 이것을 읽는다.
         self.macro_calls = MacroCallLog()
+        # macro hint 를 Jev 에게 이미 물은 step → 그 답으로 hint 가 결과에 실렸나(ARTEL-1026).
+        # 한 step 에 한 번만 묻는다. 실린 step 중 `run_macro` 를 부른 것이 "따랐다" 의 수다.
+        self.macro_hint_steps: dict[int, bool] = {}
         # macro 초안을 이미 내민 step. 같은 step 을 다시 판정해도 초안을 또 만들지 않는다.
         self.drafted_steps: set[int] = set()
         # step 마다 내민 초안의 이름. 통과한 판정에만 초안이 붙으므로 `drafted_steps` 의

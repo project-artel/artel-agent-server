@@ -12,6 +12,7 @@
 `answer` 와 `run` 도 같은 이유로 `self.` 를 첫 줄에서 한 번만 푼다.
 """
 
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 from app.agents.qa.arch import ResolvedArch
@@ -19,6 +20,12 @@ from app.agents.qa.tools.state import QaRunState
 from app.qa.acting import ActionOutcome, PressLanding, ScreenChange
 from app.qa.channel import QaRunChannel, with_operator_messages
 from app.qa.envelope import JsonRpcAction
+
+
+# 지금 도는 손 조작의 결과에 실을 macro hint 한 줄(`action_tools._recorded` 가 정한다).
+# `answer` 가 화면보다 앞에 붙이고 비운다. 결과 문장이 `answer` 안에서 한 번에 만들어지므로
+# 다 만든 문장에 끼워 넣을 수 없고, 도구 인자도 아니라서 context variable 로 건넨다.
+PENDING_MACRO_HINT: ContextVar[str | None] = ContextVar("pending_macro_hint", default=None)
 
 
 @dataclass(frozen=True)
@@ -56,6 +63,12 @@ class ToolContext:
         번째와 같은 것을 반복한다. 화면이 필요하면 `observe_scene` 이 있다.
         """
         channel, state = self.channel, self.state
+        # macro hint 는 화면과 오퍼레이터의 말보다 앞이다. 화면은 이 결과 맨 끝에서 읽히는
+        # 자리라 hint 가 그 뒤에 있으면 화면의 일부로 읽힌다.
+        hint = PENDING_MACRO_HINT.get()
+        if hint:
+            PENDING_MACRO_HINT.set(None)
+            body = f"{body}\n\n{hint}" if body else hint
         if screen and (channel.scene.pulse.seen or channel.scene.frames > 0):
             view = channel.scene.render(state.watermark, since_action=state.last_action_frame)
             state.watermark = channel.scene.updates
