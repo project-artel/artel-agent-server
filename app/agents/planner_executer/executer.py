@@ -4,14 +4,17 @@ A step module defines, at top level:
 
     def when_<name>(g) -> bool     # this func can be done and is still needed now
     run_<name> = '''def run_<name>() -> None: ...'''   # its inputs, as a macro
-    FUNCS = {"<name>": ("<what it does>", when_<name>, run_<name>), ...}   # order = priority
+    FUNCS = {"<name>": ("<what it does, and when>", when_<name>, run_<name>), ...}
     def done(g) -> bool            # the step's goal is reached
     def lost(g)                    # optional: a reason once the goal can no longer be reached
     async def check(g)             # the verdict, run by the evaluator after play stops
 
 Each turn: stop if `done` holds or `lost` gives a reason, collect the funcs whose `when` is true,
-run the first of them in `FUNCS` order with the macro runner (`macro_host.py`), and record the
-turn. 고르는 데 Jev 를 묻지 않는다 — 순서는 planner 가 정한다. Python 읽기(`when`, `done`, `lost`)는
+pick one, run it with the macro runner (`macro_host.py`), and record the turn. 하나뿐이면 그것을
+돌리고, 둘 이상이면 macro 의 `match decide(...)` 와 같은 요청을 같은 길로 Jev 에 묻는다
+(`_pick`): 선택지는 func 이름과 그 description 에 `none_fits` 를 더한 것, state 는 keyword 없는
+`decide` 가 보내는 화면 전체다. Jev 가 `none_fits` 를 고르면 그 turn 은 적용되는 func 가 없는
+것으로 보고, Jev 를 부르지 못하면 `FUNCS` 에 먼저 적힌 것을 돌린다. Python 읽기(`when`, `done`, `lost`)는
 이 모듈의 `_holds`·`_reason`·`_applies` 로만 평가한다. 나중에 그 읽기를 macro 쪽으로 옮길 때 바꿀
 곳이 여기다.
 
@@ -36,10 +39,14 @@ from pydantic import Field
 from app.agents.planner_executer import sandbox
 from app.agents.planner_executer.arch import PlannerExecuterArchSpec
 from app.agents.planner_executer.g import GameHandle
-from app.agents.planner_executer.macro_host import FuncOutcome, MacroJev, run_func
+from app.agents.planner_executer.macro_host import FuncOutcome, GameMacroHost, MacroJev, run_func
 from app.agents.planner_executer.runs import RegisteredMacros, parse_run
+from app.agents.qa.macro.binding import MacroMemories, MacroScope
+from app.agents.qa.macro.context import build_context_state
 from app.agents.qa.macro.errors import MacroRejection
+from app.agents.qa.macro.grammar import NONE_FITS, NONE_FITS_DESCRIPTION
 from app.agents.qa.macro.model import MacroDefinition
+from app.agents.qa.macro.runner import MacroDecideOption, MacroDecideRequest, MacroJevUnavailable
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory, LogPayload, MessageType
 
@@ -47,6 +54,9 @@ logger = logging.getLogger(__name__)
 
 # How long the executer waits for a reading when no func applies, before it looks again.
 IDLE_LOOK_SECONDS = 1.0
+
+# func 가 둘 이상 적용될 때 Jev 에 묻는 말. 뒤에 step 의 글이 붙는다.
+PICK_QUESTION = "Which of these should the player do now to progress this step?"
 
 # A func's error as kept in the turn record. A macro's stop reason names the line, what it
 # expected and what it saw.
@@ -175,8 +185,9 @@ class Executer:
         # Every turn played this scenario, in order.
         self.turns: list[dict] = []
 
-    async def play(self, step: int, source: str) -> StepPlay:
-        """Load `source` and play step `step` with it until it stops."""
+    async def play(self, step: int, source: str, action: str = "") -> StepPlay:
+        """Load `source` and play step `step` with it until it stops. `action` 은 step 의 글로,
+        func 를 고를 때 Jev 에 묻는 말에 붙는다."""
         try:
             module = load_step_module(source, step)
         except sandbox.ModuleRejected as error:
@@ -209,7 +220,11 @@ class Executer:
                     stopped = f"lost: {reason}"
                     break
                 applicable = [name for name, func in module.funcs.items() if _applies(func, g)]
-                if not applicable:
+                name, decision = await self._pick(module, applicable, action)
+                if name is None and decision is not None:
+                    # Jev 가 `none_fits` 를 골랐다: 적용되는 func 가 없는 turn 과 같다.
+                    await self._record(step, turn, applicable, None, None, decision)
+                if name is None:
                     no_func_since = no_func_since or now
                     remaining = spec.no_func_grace_seconds - (now - no_func_since)
                     if remaining <= 0:
@@ -218,9 +233,8 @@ class Executer:
                     await g.next_reading(min(remaining, IDLE_LOOK_SECONDS))
                     continue
                 no_func_since = None
-                name = applicable[0]
                 outcome = await self._run(module.funcs[name], step)
-                await self._record(step, turn, applicable, name, outcome)
+                await self._record(step, turn, applicable, name, outcome, decision)
                 failures_in_a_row = failures_in_a_row + 1 if outcome.kind == "failed" else 0
                 if failures_in_a_row >= spec.max_failures_in_a_row:
                     stopped = (
@@ -233,6 +247,40 @@ class Executer:
             g.end_step()
         return StepPlay(stopped, module, turns=turn, seconds=round(clock() - started, 1))
 
+    async def _pick(
+        self, module: StepModule, applicable: list[str], action: str
+    ) -> tuple[str | None, dict | None]:
+        """돌릴 func 와, Jev 에 물었으면 그 기록.
+
+        요청은 macro runner 의 `_match` 가 `match decide(...)` 에서 만드는 것과 같은 모양이고
+        (`MacroDecideRequest`, 끝에 `none_fits`), 같은 host 의 `decide` 로 `app/qa/jev.py` 의
+        `JevClient` 에 간다. state 는 keyword 없는 `decide` 처럼 `build_context_state` 가 만든다.
+        `JevClient.choose` 는 고른 이름만 돌려주므로 확률은 기록하지 못한다.
+        """
+        if len(applicable) <= 1:
+            return (applicable[0] if applicable else None), None
+        state, clipped = build_context_state(MacroMemories(scene=self._channel.scene), MacroScope(), ())
+        request = MacroDecideRequest(
+            question=f"{PICK_QUESTION} The step: {action}" if action else PICK_QUESTION,
+            options=tuple(
+                MacroDecideOption(name=name, description=module.funcs[name].description)
+                for name in applicable
+            )
+            + (MacroDecideOption(name=NONE_FITS, description=NONE_FITS_DESCRIPTION),),
+            state=state,
+            clipped=clipped,
+        )
+        decision: dict[str, Any] = {"question": request.question, "options": applicable, "clipped": clipped}
+        try:
+            answer = await GameMacroHost(self.g, self._jev).decide(request)
+        except MacroJevUnavailable as error:
+            decision["error"] = str(error)[:MAX_ERROR_CHARS]
+            self.g.log(f"func pick: Jev did not answer ({error}); taking {applicable[0]}")
+            return applicable[0], decision
+        decision["answer"] = answer
+        self.g.log(f"func pick: Jev chose {answer} of {', '.join(applicable)}")
+        return (None if answer == NONE_FITS else answer), decision
+
     async def _run(self, func: Func, step: int) -> FuncOutcome:
         assert func.macro is not None, "`parse_runs` parses every func before play"
         try:
@@ -243,13 +291,24 @@ class Executer:
             return FuncOutcome("failed", f"{type(error).__name__}: {str(error)[:200]}")
 
     async def _record(
-        self, step: int, turn: int, applicable: list[str], picked: str, outcome: FuncOutcome
+        self,
+        step: int,
+        turn: int,
+        applicable: list[str],
+        picked: str | None,
+        outcome: FuncOutcome | None,
+        decision: dict | None,
     ) -> None:
-        """turn 하나를 기록하고 `LOG` 로 보낸다: 적용된 func, 고른 func, 그 결과."""
+        """turn 하나를 기록하고 `LOG` 로 보낸다: 적용된 func, 고른 func, 그 결과, Jev 에 물었으면 그 답.
+
+        Jev 가 `none_fits` 를 고른 turn 은 `picked` 가 None 이고 `outcome` 이 `none_fits` 다.
+        """
         entry = {
             "step": step, "turn": turn, "frame": self.g.frame, "scene": self.g.scene,
-            "applicable": applicable, "picked": picked, "outcome": outcome.kind,
-            "reason": outcome.reason[:MAX_ERROR_CHARS] or None,
+            "applicable": applicable, "picked": picked,
+            "outcome": outcome.kind if outcome is not None else NONE_FITS,
+            "reason": (outcome.reason[:MAX_ERROR_CHARS] or None) if outcome is not None else None,
+            "decision": decision,
         }
         self.turns.append(entry)
         await self._channel.emit(MessageType.LOG, _turn_log(entry))
@@ -284,7 +343,7 @@ def _reason(lost, g: GameHandle) -> str | None:
 def _turn_log(entry: dict) -> TurnLogPayload:
     """The turn as a `LOG`: a readable line, and the record itself."""
     others = f" (of {', '.join(entry['applicable'])})" if len(entry["applicable"]) > 1 else ""
-    message = f"turn {entry['turn']}: {entry['picked']}{others} — {entry['outcome']}" + (
+    message = f"turn {entry['turn']}: {entry['picked'] or 'nothing'}{others} — {entry['outcome']}" + (
         f": {entry['reason']}" if entry.get("reason") else ""
     )
     body = json.loads(json.dumps(entry, default=str))

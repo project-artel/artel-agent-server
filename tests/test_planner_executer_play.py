@@ -214,19 +214,86 @@ def test_play_stops_after_funcs_fail_in_a_row() -> None:
 # --- which func runs ------------------------------------------------------------------------------
 
 
-def test_of_the_funcs_that_apply_the_first_written_runs() -> None:
+# Menu 에서 `start` 와 `look` 이 함께 적용된다.
+TWO = START.replace(
+    'FUNCS = {"start": ("Press Start on the title screen", when_start, run_start)}',
+    LOOK
+    + '\nFUNCS = {\n    "start": ("Press Start to open the map", when_start, run_start),\n'
+    '    "look": ("Look at the menu without pressing anything", when_start, run_look),\n}',
+)
+
+
+def test_a_single_func_that_applies_runs_without_asking_jev() -> None:
     fake = _menu()
-    two = START.replace(
-        'FUNCS = {"start": ("Press Start on the title screen", when_start, run_start)}',
-        LOOK
-        + '\nFUNCS = {\n    "start": ("Press Start", when_start, run_start),\n'
-        '    "look": ("Look at the menu", when_start, run_look),\n}',
+    jev = FakeJev()
+
+    _run(fake, START, jev=JevClient(post=jev))
+
+    assert jev.bodies == []
+    (turn,) = _turns(fake)
+    assert turn["picked"] == "start" and turn["decision"] is None
+
+
+def test_when_several_funcs_apply_jev_picks_one_as_a_macro_decide_would() -> None:
+    fake = _menu()
+    jev = FakeJev(choice="start")
+
+    _run(fake, TWO, jev=JevClient(post=jev))
+
+    (body,) = jev.bodies
+    question = body["questions"]["answer"]
+    assert question["type"] == "choice"
+    assert question["instructions"] == (
+        "Which of these should the player do now to progress this step? The step: Step 1."
     )
-
-    _run(fake, two)
-
+    assert question["criteria"] == {
+        "start": {"what": "Press Start to open the map"},
+        "look": {"what": "Look at the menu without pressing anything"},
+        "none_fits": {"what": "None of the other options fits the current state."},
+    }
+    # keyword 없는 `decide` 처럼 scene 과 화면의 object 전부가 state 로 간다.
+    assert body["state"]["scene"] == "Menu"
+    assert [obj["path"] for obj in body["state"]["objects"]] == ["Root/Start"]
     (turn,) = _turns(fake)
     assert turn["applicable"] == ["start", "look"] and turn["picked"] == "start"
+    assert turn["decision"]["answer"] == "start"
+    assert _verdicts(fake)[0]["status"] == "COMPLETED"
+
+
+def test_jevs_answer_is_followed_even_when_it_is_not_the_first_written() -> None:
+    fake = _menu()
+
+    _run(fake, TWO, jev=JevClient(post=FakeJev(choice="look")), max_turns_per_step=1)
+
+    (turn,) = _turns(fake)
+    assert turn["picked"] == "look" and fake.actions == []
+
+
+def test_none_fits_counts_as_no_func_applying_and_play_stops_after_the_grace() -> None:
+    fake = _menu()
+    jev = FakeJev(choice="none_fits")
+
+    _run(fake, TWO, jev=JevClient(post=jev))
+
+    assert fake.actions == []
+    turns = _turns(fake)
+    assert turns and all(t["picked"] is None and t["outcome"] == "none_fits" for t in turns)
+    (verdict,) = _verdicts(fake)
+    assert verdict["message"].endswith("(executer stopped: no func applied for 0.2s)")
+
+
+def test_when_jev_cannot_answer_the_first_written_func_runs_and_the_error_is_recorded() -> None:
+    fake = _menu()
+
+    async def down(body: dict) -> dict:
+        raise RuntimeError("decisions endpoint down")
+
+    _run(fake, TWO, jev=JevClient(post=down))
+
+    turn = _turns(fake)[0]
+    assert turn["picked"] == "start"
+    assert "decisions endpoint down" in turn["decision"]["error"]
+    assert _verdicts(fake)[0]["status"] == "COMPLETED"
 
 
 def test_a_checkpoint_ends_the_turn_without_a_failure() -> None:

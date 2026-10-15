@@ -107,7 +107,7 @@ class PlannerExecuterRunner:
                     f"{self._spec.max_rewrites} rewrites: " + "; ".join(written.problems),
                 )
                 continue
-            played = await executer.play(step, written.source)
+            played = await executer.play(step, written.source, scenario.steps[step - 1].action)
             if played.rejected is not None or played.module is None:
                 await evaluator.report(channel, state, step, False, played.rejected or played.stopped)
                 continue

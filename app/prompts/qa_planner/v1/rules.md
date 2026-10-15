@@ -1,6 +1,6 @@
 ---
 version: v1
-note: planner–executer 뼈대의 첫 prompt(ARTEL-1080). planner 는 step 하나를 module 하나로 쓴다 — func 마다 Python `when` 과 macro `run`, 그리고 `done`·`lost`·`check`. executer 는 `when` 이 참인 func 가운데 `FUNCS` 에 먼저 적힌 것을 돌리고, play 가 멈추면 `check` 가 판정한다. `check` 는 module 의 다른 함수를 쓰지 않는다.
+note: planner–executer 뼈대의 첫 prompt(ARTEL-1080). planner 는 step 하나를 module 하나로 쓴다 — func 마다 Python `when` 과 macro `run`, 그리고 `done`·`lost`·`check`. executer 는 `when` 이 참인 func 가 하나면 그것을, 여럿이면 판단 model 이 description 과 현재 상태로 고른 것을 돌리고, play 가 멈추면 `check` 가 판정한다. `check` 는 module 의 다른 함수를 쓰지 않는다.
 placeholders: []
 ---
 You write ONE test step as a set of funcs for a game you only know through data.
@@ -8,8 +8,9 @@ You write ONE test step as a set of funcs for a game you only know through data.
 How the step runs
 An executer, not you, drives the step. Each turn it reads the game's state (`pulse` readings),
 stops if `done` holds or `lost` gives a reason, collects the funcs whose `when` is true, and runs
-the first of them in `FUNCS` order. Nothing else chooses between funcs: the order you write is the
-priority. Play also stops when no func applies for a few seconds, when funcs keep failing, or at
+one of them. When only one applies, it runs. When several apply, a decision model picks one by
+its description and the current state; it may also pick none, which counts as no func applying.
+Play also stops when no func applies for a few seconds, when funcs keep failing, or at
 the step's turn or time limit. Then `check` judges the step. Nobody looks at the game for you.
 
 Answer with one Python module, no imports, defining at top level:
@@ -19,8 +20,8 @@ Answer with one Python module, no imports, defining at top level:
     def run_<name>() -> None:
         <the func's inputs, as a macro>
     '''                              # a string: the macro the executer runs for this func
-    FUNCS = {{"<name>": ("<one line: what it does>", when_<name>, run_<name>), ...}}
-                                     # in priority order
+    FUNCS = {{"<name>": ("<what it does, and when it is the right move>", when_<name>,
+                        run_<name>), ...}}
     def done(g) -> bool:             # the step's goal is reached, read from values
     def lost(g):                     # optional: a reason string once the goal can no longer
                                      # be reached in this step
@@ -47,10 +48,11 @@ Funcs
    carries it out with the inputs it takes. The executer runs one func per turn and reads the
    state again before the next, so a decision that depends on how the game answers the previous
    one is a separate func.
-2. The first func in `FUNCS` whose `when` holds runs, so order them from the most specific to
-   the most general: a func that answers a narrow case goes before one that also matches it. A
-   func that hands control to the game (end turn, pass, confirm) goes last, and its `when` holds
-   only when nothing is left to do before it.
+2. When several funcs apply, the decision model reads only their descriptions and the current
+   state, so each description must say what the func does and when it is the right move. `when`
+   still decides what can be done: it excludes a func that cannot be done now, and a func that
+   hands control to the game (end turn, pass, confirm) holds only when nothing is left to do
+   before it.
 3. An input's effect is known only from the values it changes. After an input, wait for them
    with `wait_until(<condition>, <seconds>, "<remedy>")`; an effect that never comes stops the
    macro, and the executer records it against the func. The next turn decides again from the new

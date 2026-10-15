@@ -17,10 +17,11 @@ from pydantic import BaseModel, ConfigDict, Field
 # pe1: 뼈대만 있는 엔진이다(ARTEL-1080). planner(LLM)가 step 마다 module 하나를 쓴다 — func 마다 Python
 # `when` 과 macro DSL `run`, 그리고 `done`·`lost`·`check`. 답마다 sandbox, macro parser, `check` 규칙으로
 # 검사하고, 거절되면 이유를 실어 `max_rewrites` 번까지 다시 쓰게 한다. executer 는 turn 마다 `when`
-# 이 참인 func 가운데 `FUNCS` 에 먼저 적힌 것을 macro runner 로 돌린다. 입력과 macro 의 `ask`·
-# `decide` 는 tool loop 의 macro 와 같은 runner 와 같은 Jev client 로 가서, 두 구조를 비교할 때
-# 게임에 닿는 층이 같다. evaluator 는 play 가 멈춘 뒤 `check` 를 돌려 step 을 판정한다. step module
-# 편집, play 검토, 진척 측정, Jev 로 func 고르기, 게임 노트, game time 붙잡기는 없다.
+# 이 참인 func 가 하나면 그것을, 여럿이면 macro 의 `match decide(...)` 와 같은 요청으로 Jev 가 고른
+# 것을 macro runner 로 돌린다. 입력과 macro 의 `ask`·`decide`, func 고르기는 tool loop 의 macro 와
+# 같은 runner 와 같은 Jev client 로 가서, 두 구조를 비교할 때 게임에 닿는 층이 같다. evaluator 는
+# play 가 멈춘 뒤 `check` 를 돌려 step 을 판정한다. step module 편집, play 검토, 진척 측정, 게임
+# 노트, game time 붙잡기는 없다.
 PLANNER_EXECUTER_LABEL = "pe1-skeleton"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
