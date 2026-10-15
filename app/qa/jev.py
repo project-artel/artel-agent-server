@@ -13,6 +13,7 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError
 
 from app.config import get_settings
+from app.llm.api_key import get_llm_api_key_provider
 
 logger = logging.getLogger(__name__)
 
@@ -144,10 +145,11 @@ class JevClient:
 
     async def _post(self, body: dict) -> dict:
         settings = get_settings()
-        if not settings.llm_api_key:
-            raise JevError("Jev requires LLM_API_KEY.")
+        api_key = get_llm_api_key_provider().get_openrouter_key()
+        if not api_key:
+            raise JevError("Jev requires an OpenRouter key.")
         headers = {
-            "Authorization": f"Bearer {settings.llm_api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         if settings.openrouter_site_url:

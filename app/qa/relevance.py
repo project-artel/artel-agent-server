@@ -23,6 +23,7 @@ from typing import Any, Awaitable, Callable
 from pydantic import BaseModel
 
 from app.config import get_settings
+from app.llm.api_key import get_llm_api_key_provider
 from app.qa.pulse import PulseMemory
 
 logger = logging.getLogger(__name__)
@@ -263,10 +264,11 @@ class PulseRelevanceJudge:
 async def post_decision(http: Any, body: dict) -> dict:
     """Jev 결정 API 에 `body` 를 보내고 응답 JSON 을 돌려준다. `app/qa/reach.py` 도 쓴다."""
     settings = get_settings()
-    if not settings.llm_api_key:
-        raise RuntimeError("Jev 결정 API 에 LLM_API_KEY 가 없다")
+    api_key = get_llm_api_key_provider().get_openrouter_key()
+    if not api_key:
+        raise RuntimeError("Jev 결정 API 에 OpenRouter key 가 없다")
     headers = {
-        "Authorization": f"Bearer {settings.llm_api_key}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
     if settings.openrouter_site_url:

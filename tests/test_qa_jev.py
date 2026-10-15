@@ -85,9 +85,11 @@ def test_probability_sends_exact_request_and_returns_float() -> None:
 
 
 def test_missing_api_key_raises_jev_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(jev, "get_settings", lambda: SimpleNamespace(llm_api_key=None))
+    monkeypatch.setattr(
+        jev, "get_llm_api_key_provider", lambda: SimpleNamespace(get_openrouter_key=lambda: None)
+    )
 
-    with pytest.raises(JevError, match="LLM_API_KEY"):
+    with pytest.raises(JevError, match="OpenRouter key"):
         asyncio.run(JevClient().choose("Choose.", {"yes": "Yes."}, {}))
 
 
@@ -96,11 +98,13 @@ def test_default_post_uses_settings_and_reuses_http_client(monkeypatch: pytest.M
         jev,
         "get_settings",
         lambda: SimpleNamespace(
-            llm_api_key="secret",
             llm_base_url="https://example.com/api/v1/",
             openrouter_site_url="https://artel.example",
             openrouter_app_title="Artel",
         ),
+    )
+    monkeypatch.setattr(
+        jev, "get_llm_api_key_provider", lambda: SimpleNamespace(get_openrouter_key=lambda: "secret")
     )
     clients: list[object] = []
 
