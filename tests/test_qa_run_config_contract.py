@@ -143,3 +143,24 @@ def test_the_response_says_this_run_can_report_citations() -> None:
     left on the run at the time. This field is that mark.
     """
     assert open_session()["run_config"]["citation_reporting"] is True
+
+
+def test_the_decision_model_is_recorded(monkeypatch) -> None:
+    """Jev 질문에 답한 model 은 런의 model 축과 따로 움직이므로 따로 남긴다."""
+    from types import SimpleNamespace
+
+    from app.llm import decision
+
+    monkeypatch.setattr(
+        decision,
+        "get_model_settings_provider",
+        lambda: SimpleNamespace(get_decision_model=lambda: None),
+    )
+    assert open_session()["run_config"]["decision_model"] == "typesafe/jev-1.13"
+
+    monkeypatch.setattr(
+        decision,
+        "get_model_settings_provider",
+        lambda: SimpleNamespace(get_decision_model=lambda: "openai/gpt-6-luna"),
+    )
+    assert open_session()["run_config"]["decision_model"] == "openai/gpt-6-luna"

@@ -9,8 +9,27 @@ import pytest
 # app.qa를 먼저 import하면 app.agents와 순환하므로 기존 QA 테스트의 import 순서를 따른다.
 import app.agents  # noqa: F401
 
+from app.llm import decision
 from app.qa import jev
 from app.qa.jev import JevClient, JevError
+
+
+def _jev_without_typesafe_key(monkeypatch: pytest.MonkeyPatch, openrouter_key: str | None) -> None:
+    """결정 model 은 Jev, key 는 OpenRouter key 만 있는 상태로 둔다(`app/llm/decision.py`)."""
+    monkeypatch.setattr(
+        decision,
+        "get_model_settings_provider",
+        lambda: SimpleNamespace(get_decision_model=lambda: None),
+    )
+    monkeypatch.setattr(
+        decision,
+        "get_llm_api_key_provider",
+        lambda: SimpleNamespace(
+            get_openrouter_key=lambda: openrouter_key,
+            get_typesafe_key=lambda: None,
+            invalidate=lambda: None,
+        ),
+    )
 
 
 def test_choose_sends_exact_request_and_returns_option(caplog: pytest.LogCaptureFixture) -> None:
@@ -85,9 +104,7 @@ def test_probability_sends_exact_request_and_returns_float() -> None:
 
 
 def test_missing_api_key_raises_jev_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        jev, "get_llm_api_key_provider", lambda: SimpleNamespace(get_openrouter_key=lambda: None)
-    )
+    _jev_without_typesafe_key(monkeypatch, None)
 
     with pytest.raises(JevError, match="OpenRouter key"):
         asyncio.run(JevClient().choose("Choose.", {"yes": "Yes."}, {}))
@@ -95,7 +112,7 @@ def test_missing_api_key_raises_jev_error(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_default_post_uses_settings_and_reuses_http_client(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        jev,
+        decision,
         "get_settings",
         lambda: SimpleNamespace(
             llm_base_url="https://example.com/api/v1/",
@@ -103,9 +120,7 @@ def test_default_post_uses_settings_and_reuses_http_client(monkeypatch: pytest.M
             openrouter_app_title="Artel",
         ),
     )
-    monkeypatch.setattr(
-        jev, "get_llm_api_key_provider", lambda: SimpleNamespace(get_openrouter_key=lambda: "secret")
-    )
+    _jev_without_typesafe_key(monkeypatch, "secret")
     clients: list[object] = []
 
     class FakeResponse:

@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     # orchestration is down; the last keys that loaded answer after that.
     llm_key_cache_ttl_seconds: float = 30.0
     llm_key_fetch_timeout_seconds: float = 3.0
+    # Jev 를 OpenRouter 를 거치지 않고 TypeSafe 에서 직접 부를 때의 주소다. TypeSafe key 가
+    # 저장돼 있을 때만 쓴다(`app/llm/decision.py`). 경로 `/v1/systemone` 은 코드에 있다.
+    typesafe_base_url: str = "https://api.typesafe.ai"
     openrouter_site_url: str | None = None
     openrouter_app_title: str = "Artel Agent Server"
     # Per-request ceiling on a model call, and how many times the client retries.

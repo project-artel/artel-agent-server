@@ -11,6 +11,9 @@ tween, camera shake 같은 cosmetic member 가 QA agent 의 view 를 채우면 �
   질문은 하나다.
 - run 당 한 번만 판정한다. scenario step 마다 다르게 판정하는 일은 하지 않는다.
 - 실패하면 `relevance` 를 비워 둔다. 비어 있으면 view 가 전부 보여 주므로 fail open 이다.
+
+관리자가 결정 model 로 Jev 가 아닌 model 을 고르면 그 model 이 같은 질문에 답한다
+(`app/llm/decision.py`).
 """
 
 from __future__ import annotations
@@ -22,14 +25,13 @@ from typing import Any, Awaitable, Callable
 
 from pydantic import BaseModel
 
-from app.config import get_settings
-from app.llm.api_key import get_llm_api_key_provider
+from app.llm.decision import JEV_MODEL, decide
 from app.qa.pulse import PulseMemory
 
 logger = logging.getLogger(__name__)
 
-RELEVANCE_MODEL = "typesafe/jev-1.13"
-DECISIONS_PATH = "/api/alpha/decisions"
+# body 에 싣는 model 이름. 실제로 답할 model 은 `decide` 가 결정 model 설정으로 정한다.
+RELEVANCE_MODEL = JEV_MODEL
 # 질문 하나가 약 110 token 으로 측정됐다. 40개면 32k context 의 15% 도 안 쓴다.
 QUESTIONS_PER_REQUEST = 40
 MAX_ATTEMPTS = 2
@@ -262,20 +264,5 @@ class PulseRelevanceJudge:
 
 
 async def post_decision(http: Any, body: dict) -> dict:
-    """Jev 결정 API 에 `body` 를 보내고 응답 JSON 을 돌려준다. `app/qa/reach.py` 도 쓴다."""
-    settings = get_settings()
-    api_key = get_llm_api_key_provider().get_openrouter_key()
-    if not api_key:
-        raise RuntimeError("Jev 결정 API 에 OpenRouter key 가 없다")
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    if settings.openrouter_site_url:
-        headers["HTTP-Referer"] = settings.openrouter_site_url
-    if settings.openrouter_app_title:
-        headers["X-Title"] = settings.openrouter_app_title
-    base = settings.llm_base_url.rstrip("/").removesuffix("/api/v1")
-    answer = await http.post(f"{base}{DECISIONS_PATH}", headers=headers, json=body)
-    answer.raise_for_status()
-    return answer.json()
+    """결정 model 에 `body` 를 보내고 Jev 모양의 응답 JSON 을 돌려준다. `app/qa/reach.py` 도 쓴다."""
+    return await decide(http, body)
