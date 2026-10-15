@@ -1,14 +1,14 @@
-"""The planner: writes each step's module with the run's model.
+"""The planner: writes each step as one macro source with the run's model.
 
-One call per step. Every answer is checked before anything runs: the module must load in the
-sandbox — which also refuses a `check` that uses another function of the module — and every func's
-`run` must pass the macro parser (`runs.parse_run`, the same checks the tool loop's macros pass
-when they are written). A refused answer goes back to the model with the reasons, up to
-`max_rewrites` times; an answer still refused after that is returned with its problems, and the
-runner fails the step on them.
+The answer is checked before anything runs (`macros.parse_step`): the macro parser reads each
+action and `done`, and the source must have what the executer needs. A refused answer goes back to
+the model with the parser's sentences, up to `max_rewrites` times; an answer still refused after
+that is returned with the refusal, and the runner fails the step without playing it.
 
-Calls go through `build_chat_model`, so their usage reaches Orchestration under the run's scope
-like the agent's, and a run on a user's key uses that key.
+The call goes through `build_chat_model` like the tool loop's, so it takes the route the model id
+names — `claude/` to the Claude API, `gpt/` to the OpenAI API, `bedrock/` to Bedrock, anything else
+to OpenRouter — with the user's key when the session bound one and the platform key otherwise,
+and its usage reaches Orchestration under the run's scope.
 """
 
 import re
@@ -17,12 +17,10 @@ from dataclasses import dataclass
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from app.agents.planner_executer import sandbox
 from app.agents.planner_executer.arch import PlannerExecuterArchSpec
-from app.agents.planner_executer.executer import load_step_module, parse_runs
-from app.agents.planner_executer.g import GameHandle
-from app.agents.planner_executer.prompt_maker import PromptMaker
-from app.agents.planner_executer.runs import RegisteredMacros
+from app.agents.planner_executer.macros import RegisteredMacros, StepMacros, parse_step
+from app.agents.planner_executer.prompts import RULES_ROLE, game_map, prompt_text, screen, this_step
+from app.agents.qa.macro.errors import MacroRejection
 from app.llm.chat_model import build_chat_model
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import LogCategory
@@ -43,10 +41,11 @@ def extract_code(text: str) -> str:
 
 @dataclass(frozen=True)
 class Written:
-    """The planner's last answer for a step, and why it is still refused (empty when it is not)."""
+    """The planner's last answer for a step: parsed, or the refusal it still gets."""
 
     source: str
-    problems: list[str]
+    macros: StepMacros | None
+    refusal: str | None = None
 
 
 class Planner:
@@ -55,70 +54,66 @@ class Planner:
         config: RunConfig,
         channel: QaRunChannel,
         spec: PlannerExecuterArchSpec,
+        registered: RegisteredMacros,
         ask: Ask | None = None,
-        registered: RegisteredMacros | None = None,
     ) -> None:
         self._config = config
         self._channel = channel
         self._spec = spec
-        self._maker = PromptMaker(config.prompt_version)
+        self._registered = registered
+        self._system = prompt_text(RULES_ROLE, config.prompt_version)
         self._ask = ask or self._ask_model
         self._model = None
-        # `from macros import` 를 풀 이 build 의 등록된 macro. executer 와 같은 것을 쓴다.
-        self._registered = registered or RegisteredMacros(channel)
 
-    async def write(self, scenario: QaScenario, step: int, g: GameHandle) -> Written:
-        """Step `step`'s module, checked; rewritten while it is refused, up to `max_rewrites`."""
-        system = self._maker.system()
-        state = g.state_view()
+    async def write(self, scenario: QaScenario, step: int) -> Written:
+        """Step `step`'s macros; rewritten while the parser refuses them, up to `max_rewrites`."""
         feedback = ""
-        written = Written("", [])
+        written = Written("", None, "nothing was written")
         for attempt in range(self._spec.max_rewrites + 1):
-            user = self._maker.write_request(
-                scenario=scenario,
-                step=step,
-                state=state,
-                context=self._channel.scene.scene_context,
-                feedback=feedback,
-            )
             await self._channel.note(
-                f"Step {step}: the planner is writing funcs"
+                f"Step {step}: the planner is writing macros"
                 + (" again (the last answer was refused)" if attempt else "")
-                + f". Prompt {self._maker.version}.",
+                + f". Prompt {self._config.prompt_version}.",
                 LogCategory.THOUGHT,
                 step,
             )
-            source = extract_code(await self._ask(system, user))
-            written = Written(source, await self.problems(source))
-            if not written.problems:
-                break
-            feedback = (
-                "Your previous answer cannot be used as written. It is refused before it runs:\n"
-                + "\n".join(f"  - {problem}" for problem in written.problems)
-                + "\nEach refusal names what is accepted instead. Rewrite the whole module."
-            )
+            source = extract_code(await self._ask(self._system, self._request(scenario, step, feedback)))
+            try:
+                written = Written(source, await parse_step(source, self._registered))
+            except MacroRejection as rejection:
+                written = Written(source, None, rejection.render())
+                feedback = (
+                    "Your previous answer cannot be used as written. The macro parser refused it:\n"
+                    f"  {written.refusal}\n"
+                    "The refusal names what is accepted instead. Rewrite the whole source."
+                )
+                continue
+            break
         return written
 
-    async def problems(self, source: str) -> list[str]:
-        """module 을 load 하지 못하는 이유와, func 마다 `run` macro 를 parser 가 거절한 이유."""
-        try:
-            module = load_step_module(source, 0)
-        except sandbox.ModuleRejected as error:
-            return [f"the module is refused: {error}"]
-        return [
-            f"{problem} (refused by the macro parser)"
-            for problem in await parse_runs(module.funcs, self._registered)
-        ]
+    def _request(self, scenario: QaScenario, step: int, feedback: str) -> str:
+        drawn = game_map(self._channel.scene.scene_context)
+        return (
+            (f"Game map:\n{drawn}\n\n" if drawn else "")
+            + f"Scenario: {scenario.title}\n\n"
+            + f"Write step {step} now:\n{this_step(scenario, step)}\n\n"
+            + f"Current screen:\n{screen(self._channel.scene.pulse)}\n"
+            + (f"\n{feedback}\n" if feedback else "")
+        )
 
     async def _ask_model(self, system: str, user: str) -> str:
         if self._model is None:
             self._model = build_chat_model(self._config.model, self._config.reasoning)
         answer = await self._model.ainvoke([SystemMessage(system), HumanMessage(user)])
-        content = answer.content
-        if isinstance(content, list):
-            content = "".join(
-                block if isinstance(block, str) else block.get("text", "")
-                for block in content
-                if isinstance(block, str) or block.get("type") in (None, "text")
-            )
-        return str(content)
+        return _text(answer.content)
+
+
+def _text(content) -> str:
+    """The model's text, whether the provider answered with a string or with content blocks."""
+    if isinstance(content, list):
+        return "".join(
+            block if isinstance(block, str) else block.get("text", "")
+            for block in content
+            if isinstance(block, str) or block.get("type") in (None, "text")
+        )
+    return str(content)

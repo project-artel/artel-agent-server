@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.agents.planner_executer.arch import PLANNER_EXECUTER_LABEL, PlannerExecuterArchSpec
-from app.agents.planner_executer.prompt_maker import MACRO_GRAMMAR
+from app.agents.planner_executer.prompts import MACRO_GRAMMAR
 from app.agents.planner_executer.runner import PlannerExecuterRunner
 from app.agents.qa.arch import QA_ARCH_LABEL, QaArchError, QaArchSpec
 from app.agents.qa.runner import QaRunner
@@ -57,8 +57,7 @@ def test_the_planner_executer_run_is_filed_under_its_own_label_and_digest() -> N
     assert config.agent_fingerprint != agent.agent_fingerprint
     assert config.decision_model == resolve_decision_model()
     assert config.citation_reporting is False and config.compaction_model is None
-    assert {"macro.click", "macro.press_key", "value", "expect"} <= set(config.tools)
-    assert "click" not in config.tools
+    assert {"macro.click", "macro.press_key"} <= set(config.tools)
 
 
 def test_a_relabelled_planner_executer_run_keeps_its_digest() -> None:
@@ -76,10 +75,10 @@ def test_the_planner_prompt_is_recorded_with_the_macro_grammar_it_reads() -> Non
     config = resolve_run_config(arch=PLANNER_EXECUTER)
 
     assert config.prompt_version == "v1"
-    assert set(config.prompt_hashes) == {"rules", "api", "macro_grammar"}
+    assert set(config.prompt_hashes) == {"rules", "evaluator", "macro_grammar"}
     locked = read_lock()["prompts"]
     assert locked["qa_planner/v1/rules"] == config.prompt_hashes["rules"]
-    assert locked["qa_planner/v1/api"] == config.prompt_hashes["api"]
+    assert locked["qa_planner/v1/evaluator"] == config.prompt_hashes["evaluator"]
     assert config.prompt_hashes["macro_grammar"] == hashlib.sha256(MACRO_GRAMMAR.encode()).hexdigest()
 
 

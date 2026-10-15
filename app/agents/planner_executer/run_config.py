@@ -6,8 +6,7 @@ ride along in `arch`; `arch.engine` says they were not what ran.
 """
 
 from app.agents.planner_executer.arch import planner_executer_fingerprint
-from app.agents.planner_executer.g import g_functions
-from app.agents.planner_executer.prompt_maker import static_pieces
+from app.agents.planner_executer.prompts import static_pieces
 from app.agents.qa.arch import ResolvedArch
 from app.agents.qa.macro.grammar import TOOL_NAMES
 from app.agents.scenario import OutputLanguage
@@ -29,7 +28,8 @@ def resolve_planner_executer_config(
     """Settle a planner–executer run. `model` is the planner's model; `reasoning` is validated.
 
     `prompt_version` names a `qa_planner` version, resolved here so the alias never reaches the
-    record; the hashes cover the rules, the `g` API and the macro grammar the run reads.
+    record; the hashes cover the planner's rules, the evaluator's prompt and the macro grammar.
+    The planner and the evaluator both run on `model`.
     """
     assert arch.planner is not None, "resolve_arch fills `planner` for this engine"
     version, hashes = static_pieces(prompt_version)
@@ -53,7 +53,7 @@ def resolve_planner_executer_config(
         citation_reporting=False,
         compaction_model=None,
         compaction_prompt_version=None,
-        # func 의 macro 가 묻는 `ask`·`decide` 의 판단 model. tool loop 와 같은 값을 남긴다.
+        # executer 와 macro 의 `ask`·`decide` 가 묻는 판단 model. tool loop 와 같은 값을 남긴다.
         decision_model=resolve_decision_model(),
         git_sha=settings.git_sha,
         image_tag=settings.image_tag,
@@ -61,6 +61,5 @@ def resolve_planner_executer_config(
 
 
 def step_module_functions() -> tuple[str, ...]:
-    """step module 이 쓸 수 있는 것: Python 이 읽는 `g` 의 함수와 func 의 macro 가 보내는 tool
-    (`macro.<name>`)."""
-    return (*g_functions(), *(f"macro.{name}" for name in TOOL_NAMES))
+    """planner 의 macro 가 보낼 수 있는 tool (`macro.<name>`)."""
+    return tuple(f"macro.{name}" for name in TOOL_NAMES)
