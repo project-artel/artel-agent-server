@@ -435,7 +435,12 @@ A refusal is about the scenario you just sent, not about the ones already accept
 Do not resend them.
 
 Arguments are the scenario itself: `title`, `description`, and `steps` in order. `scenario_id`
-only when you are editing one that already exists (echo it from `current_scenarios`)."""
+only when you are editing one that already exists (echo it from `current_scenarios`).
+
+`execution_mode` is FREE only when the user asked for an unordered bundle of test cases, or when
+you edit a scenario `current_scenarios` marks FREE and the user did not ask to convert it. A FREE
+scenario's steps are one per case: `{"action": "", "case_id": <id>, "step_source": "CASE"}`, no
+case twice, no step without a case. Leave it empty otherwise."""
 
 FIND_PATH_DESCRIPTION = """What has to happen between two test cases — for pairs the flows do not cover.
 

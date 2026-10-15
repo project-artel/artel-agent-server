@@ -25,7 +25,7 @@ cached case list away. A tool call pays only when someone asks.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from langchain_core.tools import BaseTool, tool
 from pydantic import ValidationError
@@ -74,11 +74,13 @@ def build_tools(
         description: str,
         steps: list[dict],
         scenario_id: int | None = None,
+        execution_mode: Literal["ORDERED", "FREE"] | None = None,
     ) -> str:
         # agent 가 읽는 것은 SUBMIT_SCENARIO_DESCRIPTION 이지 이 주석이 아니다.
         try:
             plan = ScenarioPlan(
-                scenario_id=scenario_id, title=title, description=description, steps=steps
+                scenario_id=scenario_id, title=title, description=description, steps=steps,
+                execution_mode=execution_mode,
             )
         except ValidationError as err:
             # 시나리오를 거절한 것이 아니라 인자가 틀렸다고 말한다. 저쪽은 이것을 본 적이

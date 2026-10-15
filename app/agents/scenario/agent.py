@@ -391,7 +391,12 @@ class ScenarioAgent:
         Failing here is not fatal. The unordered result is what we had a moment ago,
         and orchestration still sees it; a repair that errors should not lose the turn.
         """
-        problems = unreachable_climbs(result.scenarios, request.test_case_list)
+        # FREE 시나리오는 순서가 없어 오름을 따질 대상이 아니다 — QA agent 가 순서를 정한다.
+        problems = {
+            index: climbs
+            for index, climbs in unreachable_climbs(result.scenarios, request.test_case_list).items()
+            if not result.scenarios[index].is_free()
+        }
         if not problems:
             trace.record(request.run_id, "  · 스스로 되짚었다", "못 가는 오름 없음")
             return result

@@ -335,6 +335,33 @@ class ScenarioPlan(BaseModel):
     # 시나리오 본문 = 순서 있는 스텝 리스트. 검증 스텝은 `search_test_cases`로 찾은 TC의 id를
     # `case_id`로 단다. 빈 리스트는 `scenarios`가 비어있을 때만 정상(작성할 게 없는 턴).
     steps: list[AuthoredStep] = Field(default_factory=list)
+    # ORDERED 는 스텝 순서대로 실행하고, FREE 는 순서 없는 TC 묶음이라 QA agent 가 순서를 정한다.
+    # FREE 의 스텝은 TC 마다 하나(`action` 은 비고 `case_id` 만 있다)다.
+    #
+    # None 은 "말하지 않음" 이다. 제출에서는 새 시나리오면 ORDERED, `scenario_id` 가 있으면 저장된
+    # 모드를 그대로 둔다는 뜻이고, `current_scenarios` 로 받은 값에서는 ORDERED 로 읽는다 —
+    # 이 칸을 안 보내는 orchestration 의 시나리오는 전부 ORDERED 였다. 그렇게 읽는 곳이 [mode] 다.
+    execution_mode: Literal["ORDERED", "FREE"] | None = None
+
+    def mode(self) -> Literal["ORDERED", "FREE"]:
+        """비어 있으면 ORDERED 로 읽은 실행 모드."""
+        return self.execution_mode or "ORDERED"
+
+    def is_free(self) -> bool:
+        return self.mode() == "FREE"
+
+
+def free_steps(case_ids: list[int]) -> list[AuthoredStep]:
+    """FREE 시나리오의 스텝 — 중복을 뺀 case id 하나에 스텝 하나, 받은 순서대로.
+
+    모델에게 쓰게 하지 않는다. FREE 스텝에는 문장도 순서도 없어서 쓸 것이 없고, 모델이 쓰면
+    같은 TC 를 두 번 싣거나 `case_id` 없는 스텝을 섞어 orchestration 이 `invalid_free_scenario`
+    로 돌려보낸다.
+    """
+    return [
+        AuthoredStep(action="", case_id=case_id, step_source="CASE")
+        for case_id in dict.fromkeys(case_ids)
+    ]
 
 
 class ReviewedCases(BaseModel):
