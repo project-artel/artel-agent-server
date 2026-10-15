@@ -46,6 +46,7 @@ from app.agents.qa.macro.grammar import (
     MAX_WAIT_PER_STATEMENT_SECONDS,
     MIN_MATCH_CASES,
     NONE_FITS,
+    NUMBER_RETURNS,
     PAIRED_TOOLS,
     PairedTools,
     READER_NAME_LIST,
@@ -106,6 +107,7 @@ from app.agents.qa.macro.model import (
     MacroNameArgument,
     MacroNameOperand,
     MacroNameTarget,
+    MacroNumberCallOperand,
     MacroOperand,
     MacroParameter,
     MacroPredicateCondition,
@@ -151,6 +153,12 @@ _COMPARE_OPERATORS: dict[type[ast.cmpop], MacroOperator] = {
     ast.GtE: MacroOperator.greater_or_equal,
     ast.LtE: MacroOperator.less_or_equal,
 }
+
+# 숫자 `def` 의 `return` 이 받는 것. 거절 문장 여럿이 같은 말을 한다.
+_NUMBER_FORMS = (
+    "one number literal, a name declared `int` or `float`, a reader call "
+    f"({READER_NAME_LIST}), or a call to another `-> int` or `-> float` def"
+)
 
 # bind 된 적 없는 이름 중, 무엇을 적으려 했는지가 뻔한 것들. 거절 문장이 고칠 글자를
 # 그대로 대 준다.
@@ -240,6 +248,14 @@ class _Signature:
     returns: str
 
 
+def _value_def_noun(returns: str) -> str:
+    """값을 돌려주는 `def` 를 거절 문장이 부르는 말.
+
+    predicate 는 숫자 `def` 가 생기기 전의 문장을 글자 그대로 지키려고 "predicate" 로 둔다.
+    """
+    return "predicate" if returns == "bool" else "def"
+
+
 def _ends_in_return(statements: tuple[MacroStatement, ...]) -> bool:
     if not statements:
         return False
@@ -320,6 +336,12 @@ def macro_definition_from_source(
         raise MacroRejection(
             "the entry point acts; a `-> bool` def is a predicate that a condition "
             "calls. Declare the entry point `-> None`.",
+            next(node.lineno for node in functions if node.name == name),
+        )
+    if signatures[name].returns in NUMBER_RETURNS:
+        raise MacroRejection(
+            f"the entry point acts; a `-> {signatures[name].returns}` def computes a "
+            "number that a condition compares. Declare the entry point `-> None`.",
             next(node.lineno for node in functions if node.name == name),
         )
     imported = _imported_definitions(name, import_nodes, signatures, imports or {})
@@ -619,6 +641,10 @@ def _parameters(node: ast.FunctionDef) -> tuple[tuple[MacroParameter, ...], str]
         returns = "none"
     elif isinstance(node.returns, ast.Name) and node.returns.id == "bool":
         returns = "bool"
+    elif isinstance(node.returns, ast.Name) and node.returns.id in NUMBER_RETURNS:
+        # 숫자 `def` (ARTEL-1066). 위아래 거절 문장은 그것이 생기기 전 그대로 둔다 — QA
+        # agent 의 skill 이 아직 숫자 `def` 를 가르치지 않는다.
+        returns = node.returns.id
     else:
         raise MacroRejection(
             f"`def {node.name}` must be declared `-> None` for an action def or "
@@ -887,25 +913,22 @@ class _FunctionReader:
                 # `for` 의 이름은 그 몸통 안에서만 산다. 대입과 같은 규칙으로 bind 하므로
                 # parameter 나 바깥 이름을 가리는 것도 같은 거절을 받는다.
                 self._bind(loop_name[0], loop_name[1], _LOOP, owner)
+            returns = self._returns()
             statements: list[MacroStatement] = []
             for node in nodes:
-                if self.signatures[self.name].returns == "bool" and _ends_in_return(
-                    tuple(statements)
-                ):
+                if self._returns_value() and _ends_in_return(tuple(statements)):
                     raise MacroRejection(
-                        "a statement after `return` cannot run. End this predicate "
-                        "body at the `return`.",
+                        "a statement after `return` cannot run. End this "
+                        f"{_value_def_noun(returns)} body at the `return`.",
                         node.lineno,
                     )
                 statements.append(self._statement(node))
             built = tuple(statements)
-            if (
-                isinstance(owner, ast.FunctionDef)
-                and self.signatures[self.name].returns == "bool"
-            ):
+            if isinstance(owner, ast.FunctionDef) and self._returns_value():
                 if not _ends_in_return(built):
                     raise MacroRejection(
-                        "every path through a `-> bool` predicate must end in `return`.",
+                        f"every path through a `-> {returns}` "
+                        f"{_value_def_noun(returns)} must end in `return`.",
                         owner.lineno,
                     )
             return built
@@ -915,19 +938,25 @@ class _FunctionReader:
             self.scopes.pop()
 
     def _statement(self, node: ast.stmt) -> MacroStatement:
-        if self._is_predicate():
+        # 숫자 `def` 도 predicate 와 같은 규칙을 받는다. 둘 다 조건이나 식 안에서 동기로
+        # 평가되므로 action·대기·Jev·`checkpoint`·`flag` 를 품을 수 없다.
+        if self._returns_value():
+            returns = self._returns()
             if isinstance(node, ast.Return):
                 return self._return(node)
             if not isinstance(node, (ast.AnnAssign, ast.If)):
+                described = (
+                    "a predicate" if returns == "bool" else f"a `-> {returns}` def"
+                )
                 jev = (
-                    " `match decide(...)` calls Jev, and a predicate is evaluated "
+                    f" `match decide(...)` calls Jev, and {described} is evaluated "
                     "synchronously."
                     if isinstance(node, ast.Match)
                     else ""
                 )
                 raise MacroRejection(
-                    "a `-> bool` predicate allows only a typed assignment, `if`, "
-                    f"and `return`.{jev}",
+                    f"a `-> {returns}` {_value_def_noun(returns)} allows only a typed "
+                    f"assignment, `if`, and `return`.{jev}",
                     node.lineno,
                 )
         if isinstance(node, ast.AnnAssign):
@@ -944,10 +973,22 @@ class _FunctionReader:
             return self._call_statement(node.value)
         self._reject_statement(node)
 
+    def _returns(self) -> str:
+        return self.signatures[self.name].returns
+
     def _is_predicate(self) -> bool:
-        return self.signatures[self.name].returns == "bool"
+        return self._returns() == "bool"
+
+    def _returns_number(self) -> bool:
+        return self._returns() in NUMBER_RETURNS
+
+    def _returns_value(self) -> bool:
+        """predicate 이거나 숫자 `def` 다. 둘이 같은 몸통 규칙을 받는다."""
+        return self._returns() != "none"
 
     def _return(self, node: ast.Return) -> MacroReturnStatement:
+        if self._returns_number():
+            return self._number_return(node)
         if node.value is None:
             raise MacroRejection(
                 "a `-> bool` predicate must return `True`, `False`, or a condition; "
@@ -958,6 +999,81 @@ class _FunctionReader:
         if isinstance(node.value, ast.Constant) and type(node.value.value) is bool:
             return MacroReturnStatement(source=source, value=node.value.value)
         return MacroReturnStatement(source=source, condition=self._condition(node.value))
+
+    # -- 숫자 `def` 와 산술식 (ARTEL-1066) --
+
+    def _number_return(self, node: ast.Return) -> MacroReturnStatement:
+        returns = self._returns()
+        if node.value is None:
+            raise MacroRejection(
+                f"a `-> {returns}` def must return a number; bare `return` is not "
+                f"allowed. It returns {_NUMBER_FORMS}.",
+                node.lineno,
+            )
+        expression = self._number_value(node.value, f"what `{self.name}` returns")
+        return MacroReturnStatement(
+            source=_written(node, self.lines), expression=expression
+        )
+
+    def _number_value(self, node: ast.expr, what: str) -> MacroOperand:
+        """`return` 과 대입의 오른쪽에 오는 숫자 식 하나. 모양을 알면 number 인지 본다."""
+        operand, shape = self._number_expression(node, what)
+        if shape is not None and shape is not MacroShape.number:
+            raise MacroRejection(
+                f"{what} has to be a number, and this is a {shape.value}. A `-> "
+                f"{self._returns()}` def computes with {_NUMBER_FORMS}.",
+                getattr(node, "lineno", None),
+            )
+        return operand
+
+    def _number_expression(
+        self, node: ast.expr, what: str
+    ) -> tuple[MacroOperand, MacroShape | None]:
+        """숫자 식의 한 자리. 참거짓과 숫자를 못 내는 호출을 먼저 거르고 `_operand` 에 넘긴다.
+
+        먼저 거르는 이유는 거절 문장이다. `_operand` 의 문장은 비교의 한쪽을 말하므로,
+        `return x > 1` 이나 `return find(...)` 가 거기까지 가면 엉뚱한 자리를 말한다.
+        """
+        line = getattr(node, "lineno", None)
+        is_bool_literal = isinstance(node, ast.Constant) and type(node.value) is bool
+        if is_bool_literal or isinstance(node, (ast.Compare, ast.BoolOp)) or (
+            isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not)
+        ):
+            raise MacroRejection(
+                f"{what} has to be a number, and this is true or false. A `-> bool` "
+                "predicate is the def that returns a condition.",
+                line,
+            )
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            called = node.func.id
+            _reject_jev_call(node)
+            if called == ASK:
+                self._ask(node, ask_allowed=False)
+            computes = (
+                called in READERS_BY_NAME
+                or self._number_signature(called) is not None
+            )
+            if not computes:
+                raise MacroRejection(
+                    f"`{called}(...)` cannot stand in {what}: it gives no number. A "
+                    f"number here is {_NUMBER_FORMS}.",
+                    line,
+                )
+        return self._operand(node, what)
+
+    def _number_signature(self, name: str) -> _Signature | None:
+        signature = self.signatures.get(name)
+        if signature is None or signature.returns not in NUMBER_RETURNS:
+            return None
+        return signature
+
+    def _number_call(self, node: ast.Call) -> MacroNumberCallOperand:
+        """인자는 helper·predicate 호출과 같은 규칙이다 — 리터럴·이름·target 만 받는다."""
+        signature = self.signatures[node.func.id]  # type: ignore[union-attr]
+        return MacroNumberCallOperand(
+            callee=signature.name,
+            arguments=self._arguments(signature.name, _helper_parameters(signature), node),
+        )
 
     def _reject_statement(self, node: ast.stmt) -> None:
         line = node.lineno
@@ -1594,6 +1710,13 @@ class _FunctionReader:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             if node.func.id in self.signatures:
                 signature = self.signatures[node.func.id]
+                if signature.returns in NUMBER_RETURNS:
+                    raise MacroRejection(
+                        f"`{signature.name}` is declared `-> {signature.returns}` and "
+                        "returns a number, so it is not a condition on its own. Compare "
+                        f"it: `{signature.name}(...) >= <number>`.",
+                        node.lineno,
+                    )
                 if signature.returns != "bool":
                     raise MacroRejection(
                         f"`{signature.name}` is declared `-> None` and cannot be a "
@@ -1645,6 +1768,13 @@ class _FunctionReader:
             raise MacroRejection(
                 "`ask(...)` is not allowed inside a `-> bool` predicate, its `return` "
                 "included: predicates are evaluated synchronously and `ask` waits for "
+                f"Jev. {_ASK_ONLY_AS_CONDITION}",
+                node.lineno,
+            )
+        if self._returns_number():
+            raise MacroRejection(
+                f"`ask(...)` is not allowed inside a `-> {self._returns()}` def: a def "
+                "that returns a number is evaluated synchronously and `ask` waits for "
                 f"Jev. {_ASK_ONLY_AS_CONDITION}",
                 node.lineno,
             )
@@ -1748,6 +1878,10 @@ class _FunctionReader:
                     node.lineno,
                 )
             _reject_jev_call(node)
+            # 숫자 `def` 호출은 비교의 한쪽 어디에나 선다 — `-> None` 의 `if`·`while`·
+            # `require`·`wait_until` 과 predicate 의 `return` 까지.
+            if self._number_signature(node.func.id) is not None:
+                return self._number_call(node), MacroShape.number
             if node.func.id in READERS_BY_NAME:
                 call = self._reader(node)
                 return (
@@ -1929,6 +2063,12 @@ class _FunctionReader:
                 raise MacroRejection(
                     f"`{name}` is a predicate and returns a value; call it in a "
                     "condition.",
+                    node.lineno,
+                )
+            if helper.returns in NUMBER_RETURNS:
+                raise MacroRejection(
+                    f"`{name}` is declared `-> {helper.returns}` and returns a number; "
+                    f"compare it in a condition: `if {name}(...) >= <number>:`.",
                     node.lineno,
                 )
             return MacroHelperCallStatement(
@@ -2282,32 +2422,56 @@ def _reader_arguments(spec: ReaderSpec) -> str:
 # 평범한 경우다.
 
 
-def _predicate_callee(statement: MacroStatement) -> str | None:
-    if isinstance(
-        statement,
-        (
-            MacroRequireStatement,
-            MacroIfStatement,
-            MacroWhileStatement,
-            MacroWaitUntilStatement,
-            MacroReturnStatement,
-        ),
-    ) and isinstance(statement.condition, MacroPredicateCondition):
-        return statement.condition.callee
-    return None
+def _number_callees(operand: MacroOperand) -> list[str]:
+    """숫자 식 하나가 부르는 숫자 `def` 이름, 적힌 순서대로."""
+    if isinstance(operand, MacroNumberCallOperand):
+        return [operand.callee]
+    return []
+
+
+def _condition_callees(condition: MacroCondition) -> list[str]:
+    if isinstance(condition, MacroPredicateCondition):
+        return [condition.callee]
+    if isinstance(condition, MacroComparisonCondition):
+        return _number_callees(condition.left) + _number_callees(condition.right)
+    return []
+
+
+def _expression_callees(statement: MacroStatement) -> list[str]:
+    """statement 가 조건·`return`·대입 안에서 부르는 predicate 와 숫자 `def`.
+
+    숫자 `def` 가 생기기 전에는 조건 하나가 predicate 하나만 부를 수 있었다. 이제 비교의
+    양쪽에서 둘을 부를 수 있어 목록이다.
+    """
+    names: list[str] = []
+    if (
+        isinstance(
+            statement,
+            (
+                MacroRequireStatement,
+                MacroIfStatement,
+                MacroWhileStatement,
+                MacroWaitUntilStatement,
+                MacroReturnStatement,
+            ),
+        )
+        and statement.condition is not None
+    ):
+        names.extend(_condition_callees(statement.condition))
+    if isinstance(statement, MacroReturnStatement) and statement.expression is not None:
+        names.extend(_number_callees(statement.expression))
+    return names
 
 
 def _called_helpers(statements: tuple[MacroStatement, ...]) -> list[str]:
-    """그 몸통이 부르는 helper 와 predicate 이름 전부, 부른 순서대로.
+    """그 몸통이 부르는 helper·predicate·숫자 `def` 이름 전부, 부른 순서대로.
 
     분기 안쪽까지 센다. 같은 `def` 를 두 번 부르면 두 번 적힌다. 세는 쪽이 그것을
     알아야 statement 총수가 맞는다.
     """
     names: list[str] = []
     for statement in statements:
-        predicate = _predicate_callee(statement)
-        if predicate is not None:
-            names.append(predicate)
+        names.extend(_expression_callees(statement))
         if isinstance(statement, MacroHelperCallStatement):
             names.append(statement.callee)
         elif isinstance(statement, MacroIfStatement):
@@ -2444,7 +2608,7 @@ class _CallGraph:
 
         `if` 는 적힌 statement 를 세는 것을 바꾸지 않는다 — 최대값은 가지들 중 큰 쪽이라
         여전히 정적이다. helper 호출은 호출 그 자체 하나에 그 helper 의 총수를 더한다.
-        조건에서 부른 predicate 의 총수도 해당 statement 에 더한다.
+        조건에서 부른 predicate 와 식에서 부른 숫자 `def` 의 총수도 해당 statement 에 더한다.
 
         **반복 몸통은 한 번만 센다.** 몇 번 돌지는 저장 때 모른다. 그래서 이 수는 실행될
         양이 아니라 적힌 길이의 상한이 됐고, 실행된 양은 runner 가 `MAX_LOOP_PASSES` 와
@@ -2456,9 +2620,8 @@ class _CallGraph:
         """
         total = 0
         for statement in statements:
-            predicate = _predicate_callee(statement)
-            if predicate is not None:
-                total += self.statements_in(predicate)
+            for callee in _expression_callees(statement):
+                total += self.statements_in(callee)
             if isinstance(statement, MacroIfStatement):
                 total += 1 + max(
                     self._count(statement.body), self._count(statement.orelse)

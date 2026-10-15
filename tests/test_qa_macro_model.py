@@ -442,3 +442,15 @@ def test_old_json_without_imports_defaults_to_none() -> None:
     del stored["imports"]
 
     assert MacroDefinition.model_validate(stored).imports == ()
+
+
+def test_return_statement_carries_an_expression_as_its_one_slot() -> None:
+    """숫자 `def` 의 `return` 은 `expression` 하나만 든다(ARTEL-1066)."""
+    from app.agents.qa.macro.grammar import MacroShape
+    from app.agents.qa.macro.model import MacroLiteral, MacroLiteralOperand
+
+    number = MacroLiteralOperand(literal=MacroLiteral(shape=MacroShape.number, value=1))
+
+    assert MacroReturnStatement(source="return 1", expression=number).expression == number
+    with pytest.raises(ValidationError):
+        MacroReturnStatement(source="return both", value=True, expression=number)

@@ -138,6 +138,18 @@ def operator_names(operators: tuple[MacroOperator, ...]) -> str:
     return ", ".join(operator.value for operator in operators)
 
 
+# --- 숫자를 돌려주는 `def` (ARTEL-1066) ---------------------------------------------
+
+
+# `def` 줄의 반환 타입 중 숫자 둘. `-> None` 은 동작하고 `-> bool` 은 predicate 이며, 이 둘이
+# 숫자를 돌려주는 `def` 다. 숫자 `def` 는 predicate 와 같은 몸통 규칙을 받는다 — 대입·`if`·
+# `return` 셋뿐이고 동기로 평가된다.
+NUMBER_RETURNS: dict[str, MacroType] = {
+    MacroType.int_.value: MacroType.int_,
+    MacroType.float_.value: MacroType.float_,
+}
+
+
 # --- tool 열넷 -----------------------------------------------------------------
 
 

@@ -24,7 +24,8 @@
   그 기록에 없다.
 
 그리고 비교의 거절이 `COMPARISON_REJECTED` 다. 게임이 틀린 것이 아니라 macro 가 못
-묻는 것을 물은 것이라 `REQUIRE_FAILED` 와 같은 코드로 낼 수 없다.
+묻는 것을 물은 것이라 `REQUIRE_FAILED` 와 같은 코드로 낼 수 없다. 숫자 `def` 의 `return`
+이 같은 이유로 `ARITHMETIC_REJECTED` 를 낸다(ARTEL-1066).
 """
 
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ from typing import Any
 
 from app.agents.qa.macro.errors import (
     ACTION_REJECTED,
+    ARITHMETIC_REJECTED,
     COMPARISON_REJECTED,
     SELECTOR_AMBIGUOUS,
     SELECTOR_NOT_FOUND,
@@ -657,6 +659,26 @@ def _apply(operator: MacroOperator, left: Any, right: Any) -> bool:
     if operator is MacroOperator.greater_or_equal:
         return bool(left >= right)
     return bool(left <= right)
+
+
+# --- 숫자 `def` 의 반환값 (ARTEL-1066) ------------------------------------------------
+
+
+def require_number(value: Any, what: str) -> int | float:
+    """숫자 `def` 가 돌려줄 값이 숫자인지. 아니면 `ARITHMETIC_REJECTED` 다.
+
+    `member`·`static`·`observable` 은 값이 도착해야 모양을 알아서, 저장 때 못 거른 것이
+    여기서 걸린다.
+    """
+    shape = shape_of(value)
+    if shape is MacroShape.number:
+        return value
+    raise MacroFailure(
+        ARITHMETIC_REJECTED,
+        f"{what} has to be a number, and the value that arrived is a {shape.value} "
+        f"({value!r}). Nothing was sent to the game.",
+        {"shape": shape.value, "arrived": repr(value)},
+    )
 
 
 # --- 조건 하나 -----------------------------------------------------------------
