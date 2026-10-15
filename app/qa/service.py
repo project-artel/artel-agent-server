@@ -14,6 +14,7 @@ from app.llm.credentials import LlmKey, bind_llm_key
 from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig
 from app.llm.usage import set_usage_scope
 from app.qa.channel import QaRunChannel
+from app.qa.game_functions import GameFunctionCatalog, GameFunctionEntry
 from app.qa.envelope import (
     ErrorPayload,
     MessageType,
@@ -110,6 +111,8 @@ class QaExecutionService:
         project_id: int | None = None,
         game_build_id: int | None = None,
         llm_key: LlmKey | None = None,
+        cheats: list[GameFunctionEntry] | None = None,
+        behaviors: list[GameFunctionEntry] | None = None,
     ) -> tuple[str, RunConfig]:
         """Open a run-scoped session and return its id alongside what it will run with.
 
@@ -147,6 +150,8 @@ class QaExecutionService:
             project_id=project_id,
             game_build_id=game_build_id,
             llm_key=llm_key,
+            cheats=cheats or [],
+            behaviors=behaviors or [],
         )
         await self._store.save(session_id, record)
         return session_id, run_config
@@ -250,6 +255,12 @@ class QaExecutionService:
                 project_id=record.project_id,
                 game_build_id=record.game_build_id,
                 qa_try_id=item.qa_try_id,
+            )
+
+            # session open 의 catalog (ARTEL-1054). 씬 맥락처럼 채널에 얹는다 — 도구와 runner 가
+            # 채널을 이미 쥐고 있어서 runner 의 서명을 안 바꾼다.
+            channel.game_functions = GameFunctionCatalog(
+                cheats=record.cheats, behaviors=record.behaviors
             )
 
             runner = self._runner_factory(config=record.run_config)
@@ -365,6 +376,9 @@ class QaExecutionService:
                 channel.on_macro_read_result(raw)
             elif message_type == MessageType.MACRO_SEARCH_RESULT:
                 channel.on_macro_search_result(raw)
+            elif message_type == MessageType.BEHAVIOR_ENDED:
+                # 무엇도 기다리지 않는다. 다음 tool 결과 끝에 붙는다(ARTEL-1054).
+                channel.on_behavior_ended(raw)
             elif message_type == MessageType.ERROR:
                 # Always accepted, answered or not. ERROR is a legitimate frame in
                 # both directions, so answering it with "unsupported inbound frame"

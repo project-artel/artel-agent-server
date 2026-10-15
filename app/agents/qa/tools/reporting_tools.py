@@ -8,6 +8,12 @@ from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.macro.for_step import macros_for_step, render_step_macro_hint
 from app.agents.qa.macro.lift import draft_for_step, offer
+from app.agents.qa.tools.game_function_tools import (
+    active_behaviors,
+    focus,
+    running_lines,
+    stop_not_allowed_before,
+)
 from app.agents.qa.tools.phase import MAX_CONSECUTIVE_REFUSALS
 from app.agents.qa.tools.state import QaRunState
 from app.agents.qa.tools.tool_context import ToolContext
@@ -305,8 +311,13 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
                 message=message,
                 used_knowledge_ids=cited,
                 rejected_knowledge_id_count=len(rejected),
+                # 모델이 아니라 이쪽이 채운다(ARTEL-1054). 축이 꺼지면 `None` 이고 frame 에서
+                # key 가 빠진다.
+                used_cheats=list(state.used_cheats) if arch.cheats == "on" else None,
+                active_behaviors=active_behaviors(ctx) if arch.behaviors == "on" else None,
             ),
         )
+        state.used_cheats = []
         remaining = state.total_steps - len(state.step_results)
         # Said out loud, not dropped. The verdict itself is already recorded, so
         # this is not a refusal — but an agent told nothing would carry on
@@ -320,7 +331,18 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             )
         note = "".join(f"\n\n{line}" for line in notes) + _macro_draft(step, passed)
         if state.execution_mode == "FREE":
+            # FREE run 은 TC 를 순서 없이 보고하므로 "다음 step" 이 없다. 그래서 다음 TC 기준으로
+            # behavior 를 멈추거나 view 를 옮기지 않고, 실행 중인 behavior 목록만 적는다.
+            if arch.behaviors == "on":
+                note += running_lines(ctx)
             return _free_verdict_answer(passed, note)
+        if arch.behaviors == "on":
+            # 다음 step 이 새 TC 의 첫 step 이고 그 TC 가 허용하지 않는 behavior 가 돌면, 그 step
+            # 전에 멈춘다. 남은 것은 다음 step 으로 넘어가므로 그 목록을 적는다.
+            note += await stop_not_allowed_before(ctx, step + 1) + running_lines(ctx)
+        if arch.cheats == "on" or arch.behaviors == "on":
+            # view 의 function 줄이 다음 step 의 TC 기준으로 그려지게 한다.
+            focus(ctx, min(step + 1, max(state.total_steps, 1)))
         if remaining <= 0:
             # 무엇을 남길지 묻는 자리이자 이유는 `render_closing_asks` 가 들고 있다. 여기서
             # 말하는 것은 그 자리가 여기라는 것뿐이다 — 매 스텝마다 붙이면 표가 뜻을 잃고,

@@ -27,6 +27,12 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.qa.envelope import center_of
+from app.qa.game_functions import (
+    FunctionPulseEntry,
+    PulseFunctions,
+    RunningBehavior,
+    render_function_lines,
+)
 
 # 한 번에 들여다볼 수 있는 객체 수. 부분 일치가 많이 걸려도 프롬프트를 삼키지 않도록.
 MAX_INSPECTED = 5
@@ -240,6 +246,12 @@ class PulseReading(BaseModel):
     # moved" from "nothing was legible".
     unwatchable: int | None = None
     gaps: list[str] = Field(default_factory=list)
+    # 게임이 등록한 cheat 와 behavior 를 지금 쓸 수 있는가(ARTEL-1054). 바뀐 것이 있을 때만
+    # 실린다. 이 기능이 없는 SDK 와 release build 는 안 보낸다.
+    functions: PulseFunctions | None = None
+    # 지금 도는 behavior 전부. 하나라도 도는 동안 매 `PULSE` 에 실리고, 다 끝나면 `[]` 이다.
+    # 없으면(`None`) 아무것도 안 돌았거나 이 기능이 없는 SDK 다.
+    behaviors: list[RunningBehavior] | None = None
 
 
 class ReadingLog(BaseModel):
@@ -386,6 +398,38 @@ class PulseMemory(BaseModel):
     #
     # `None` 이면 넘긴 적이 없다. 기본 run 은 늘 `None` 이라 view 가 그대로다.
     deferred_since: int | None = None
+    # `PULSE.functions` 의 entry 를 `kind|name|target` 으로(ARTEL-1054). `removed` 가 온 key 는
+    # 지운다 — 그 instance 가 사라졌다.
+    functions: dict[str, FunctionPulseEntry] = Field(default_factory=dict)
+    # 지금 도는 behavior. `PULSE.behaviors` 가 통째로 바꾸고, `BEHAVIOR_ENDED` 가 하나씩 빼고,
+    # `start_behavior` 가 다음 `PULSE` 가 오기 전까지 쓸 임시 줄을 넣는다.
+    behaviors: list[RunningBehavior] = Field(default_factory=list)
+    # view 에 function 줄을 그릴 때 쓰는, 지금 test case 가 허용하는 이름. 축이 꺼진 쪽은
+    # `None` 이고 그 쪽 줄이 없다. 둘 다 `None` 이면 view 가 이 필드가 생기기 전과 같다.
+    # tool 이 지금 step 을 옮길 때 고친다(`GameFunctionSession.focus`).
+    allowed_cheats: list[str] | None = None
+    allowed_behaviors: list[str] | None = None
+
+    def apply_functions(self, update: PulseFunctions) -> None:
+        """`PULSE.functions` 를 합친다. `whole` 이면 쥔 것을 통째로 바꾼다."""
+        if update.whole:
+            self.functions = {}
+        for entry in update.entries:
+            if entry.removed:
+                self.functions.pop(entry.key, None)
+            else:
+                self.functions[entry.key] = entry
+
+    def end_behavior(self, behavior_id: int) -> None:
+        self.behaviors = [one for one in self.behaviors if one.behavior_id != behavior_id]
+
+    def function_lines(self) -> list[str]:
+        return render_function_lines(
+            list(self.functions.values()),
+            self.behaviors,
+            self.allowed_cheats,
+            self.allowed_behaviors,
+        )
 
     def is_cosmetic(self, type_key: str | None) -> bool:
         """판정이 있고 그 확률이 `COSMETIC_BELOW` 미만일 때만 True. 판정이 없으면 보인다."""
@@ -461,6 +505,11 @@ class PulseMemory(BaseModel):
             self.gone_at = {}
             self.off_at = {}
             self.page_due = True
+
+        if reading.functions is not None:
+            self.apply_functions(reading.functions)
+        if reading.behaviors is not None:
+            self.behaviors = list(reading.behaviors)
 
         if reading.scene is not None:
             self.scene = reading.scene
@@ -621,6 +670,9 @@ class PulseMemory(BaseModel):
         if self.unwatchable:
             # Said out loud so "nothing moved" is not read as "nothing is there".
             lines.append(f"could not read: {self.unwatchable}")
+        # cheat 와 behavior 줄(ARTEL-1054). 창을 안 타고 매번 그린다 — `statics` 와 같이, 안
+        # 변하는 동안에도 지금 무엇을 부를 수 있는지를 정한다. 축이 꺼진 run 에는 줄이 없다.
+        lines.extend(self.function_lines())
 
         # 로그도 창을 탄다. 지난번에 그린 판독을 다시 적으면 그만큼이 매 턴 반복된다.
         #

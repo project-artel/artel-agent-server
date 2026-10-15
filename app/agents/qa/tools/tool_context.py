@@ -12,13 +12,18 @@
 `answer` 와 `run` 도 같은 이유로 `self.` 를 첫 줄에서 한 번만 푼다.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from app.agents.qa.arch import ResolvedArch
 from app.agents.qa.tools.state import QaRunState
 from app.qa.acting import ActionOutcome, PressLanding, ScreenChange
 from app.qa.channel import QaRunChannel, with_operator_messages
-from app.qa.envelope import JsonRpcAction
+from app.qa.envelope import ActionResultItem, JsonRpcAction
+
+# 결과 항목 하나를 모델이 읽는 한 줄로 바꾸는 함수. 게임 function tool 이 `returnValue` 를
+# 문장에 싣으려고 넘긴다(ARTEL-1054). 없으면 종전의 `ok` / `FAILED — ...` 다.
+DescribeResult = Callable[[ActionResultItem], str]
 
 
 @dataclass(frozen=True)
@@ -83,6 +88,7 @@ class ToolContext:
         summary: str,
         step: int,
         screen: bool = True,
+        describe: DescribeResult | None = None,
     ) -> ActionOutcome:
         """`_act` 를 돌리고 그 결과를 `state.last_outcome` 에 남긴다.
 
@@ -95,12 +101,17 @@ class ToolContext:
         없고 runner 는 문장이 아니라 데이터를 본다. view 는 `run_macro` 가 답할 때
         `answer` 가 한 번 붙인다.
         """
-        outcome = await self._act(actions, summary, step, screen)
+        outcome = await self._act(actions, summary, step, screen, describe)
         self.state.last_outcome = outcome
         return outcome
 
     async def _act(
-        self, actions: list[JsonRpcAction], summary: str, step: int, screen: bool
+        self,
+        actions: list[JsonRpcAction],
+        summary: str,
+        step: int,
+        screen: bool,
+        describe: DescribeResult | None = None,
     ) -> ActionOutcome:
         """`run` 과 같은 일을 하되, 문장과 **그 문장이 되기 전의 데이터**를 함께 낸다.
 
@@ -144,7 +155,9 @@ class ToolContext:
             # 배치에 없던 id 로 답하면 그것을 액션 결과인 척 옮기지 않는다.
             if item.id not in methods:
                 continue
-            if item.success and _is_press(item.returnValue):
+            if describe is not None:
+                outcome = describe(item)
+            elif item.success and _is_press(item.returnValue):
                 landing = _press_landing(item.returnValue)
                 landings.append(landing)
                 outcome = _press_sentence(landing, item.returnValue)

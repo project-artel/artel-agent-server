@@ -13,6 +13,7 @@ from app.agents.qa.macro.lift import DispatchRecord
 from app.agents.qa.macro.session import MacroSession
 from app.qa.jev import JevClient
 from app.qa.envelope import ActionResultItem, JsonRpcAction
+from app.qa.game_functions import CaseFunctions, UsedCheat
 from app.qa.schemas import QaStepResult
 
 
@@ -51,7 +52,7 @@ def capture_from_action_result(
     """
     if not item.success:
         return None
-    captured = item.returnValue or {}
+    captured = item.returnValue if isinstance(item.returnValue, dict) else {}
     url = captured.get("url")
     if not url:
         return None
@@ -80,11 +81,22 @@ class QaRunState:
         step_meta: list[tuple[int | None, bool]] | None = None,
         step_texts: list[str] | None = None,
         execution_mode: str = "ORDERED",
+        step_functions: list[CaseFunctions | None] | None = None,
     ) -> None:
         self.total_steps = total_steps
         # `QaScenario.execution_mode`. `FREE` 이면 스텝 하나가 TC 하나이고 보고가 순서 없이
         # 온다 — `report_step` 의 답과 압축 원장이 "다음 스텝" 대신 남은 TC 번호를 말한다.
         self.execution_mode = execution_mode
+        # 스텝별 그 TC 의 `functions`, 1번 스텝이 0번 자리(ARTEL-1054). `None` 은 TC 가 없거나
+        # TC 가 `functions` 를 안 적은 것이고, 그때는 run 이 받은 cheat·behavior 전부다.
+        self.step_functions: list[CaseFunctions | None] = step_functions or []
+        # 지난 `report_step` 뒤에 보낸 cheat. 다음 `report_step` 이 `STATUS` 에 싣고 비운다.
+        # 보내지 않고 거절한 호출은 안 든다.
+        self.used_cheats: list[UsedCheat] = []
+        # 상한을 세는 것은 시도다. 게임이 매번 거절해도 루프에 끝이 있어야 한다 — 위
+        # `captures_attempted` 와 같은 이유다.
+        self.cheats_attempted = 0
+        self.behavior_calls_attempted = 0
         # 시나리오가 각 스텝에 적은 행위 문장, 1번 스텝이 0번 자리. macro 초안의 docstring 이
         # 이것을 싣는다(`draft_for_step`). 비면 문장을 모르는 것이고 초안은 번호만 적는다.
         self.step_texts: list[str] = step_texts or []
@@ -263,6 +275,18 @@ class QaRunState:
         """
         for action in actions:
             self.dispatched_action_params[action.method] = list(action.params)
+
+    def case_id_at(self, step: int | None) -> int | None:
+        """그 스텝이 속한 TC. 범위 밖이거나 TC 가 없으면 `None`."""
+        if step is None or not 0 <= step - 1 < len(self.step_meta):
+            return None
+        return self.step_meta[step - 1][0]
+
+    def case_functions_at(self, step: int | None) -> CaseFunctions | None:
+        """그 스텝의 TC 가 적은 `functions`. 없으면 `None` 이고 그것은 "전부" 다."""
+        if step is None or not 0 <= step - 1 < len(self.step_functions):
+            return None
+        return self.step_functions[step - 1]
 
     def knows_of(self, knowledge_id: str) -> bool:
         """Whether this run has been shown this entry at all, in full or as a line."""

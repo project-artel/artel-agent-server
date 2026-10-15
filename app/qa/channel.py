@@ -44,6 +44,7 @@ from app.qa.envelope import (
     ToolResultPayload,
     outbound_envelope,
 )
+from app.qa.game_functions import BehaviorEndedPayload, GameFunctionCatalog
 from app.qa.pulse import PulseReading
 from app.qa.scene import SceneMemory
 
@@ -239,6 +240,12 @@ class QaRunChannel:
         # Unbounded, and bounded in practice by the run's own deadline: an operator
         # cannot type enough in 600 seconds for the restated block to matter.
         self.operator_instructions: list[str] = []
+        # session open 의 cheat·behavior catalog (ARTEL-1054). `QaExecutionService` 가 시나리오를
+        # 시작하기 전에 얹는다. 비어 있으면 tool 이 모든 호출을 거절한다.
+        self.game_functions = GameFunctionCatalog()
+        # 도착했고 아직 어느 tool 결과에도 안 붙은 `BEHAVIOR_ENDED`, 온 순서대로. operator 의 말과
+        # 같은 방식이다 — 그래프를 끊지 않고 다음 tool 결과 끝에 붙인다(`tools/__init__.py`).
+        self._behavior_endings: list[BehaviorEndedPayload] = []
 
     @property
     def qa_try_id(self) -> int:
@@ -979,6 +986,17 @@ class QaRunChannel:
             return False
         pending.waiter.set_result(answer)
         return True
+
+    def on_behavior_ended(self, raw: dict) -> None:
+        """behavior 하나가 끝났다. 도는 목록에서 빼고 다음 tool 결과에 붙이려고 쌓는다."""
+        ended = BehaviorEndedPayload.model_validate(raw.get("payload") or {})
+        self.scene.pulse.end_behavior(ended.behavior_id)
+        self._behavior_endings.append(ended)
+
+    def drain_behavior_endings(self) -> list[BehaviorEndedPayload]:
+        endings = self._behavior_endings
+        self._behavior_endings = []
+        return endings
 
     def on_chat(self, raw: dict) -> None:
         payload = ChatPayload.model_validate(raw.get("payload") or {})
