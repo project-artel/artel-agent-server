@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 from app.agents.qa.macro.errors import MacroRejection
 from app.agents.qa.macro.grammar import (
+    ARITHMETIC_FUNCTIONS,
     ASK,
     ASK_VERDICT,
     CHECKPOINT,
@@ -61,24 +62,28 @@ from app.agents.qa.macro.grammar import (
     TOOL_NAME_LIST,
     TOOLS_BY_NAME,
     UNDER,
+    MacroArithmetic,
     MacroOperator,
     MacroShape,
     MacroType,
     ToolParameter,
     ToolSpec,
     allowed_operators,
+    arithmetic_allowed,
     comparison_allowed,
     operator_names,
 )
 from app.agents.qa.macro.model import (
     MacroActionStatement,
     MacroArgument,
+    MacroArithmeticOperand,
     MacroAskCondition,
     MacroAskVerdictStatement,
     MacroAssignStatement,
     MacroAssignValue,
     MacroCheckpointStatement,
     MacroComparisonCondition,
+    MacroComputeValue,
     MacroCondition,
     MacroContextArgument,
     MacroContextFindAll,
@@ -88,6 +93,7 @@ from app.agents.qa.macro.model import (
     MacroContextUnder,
     MacroDecideCall,
     MacroDefinition,
+    MacroExtremumOperand,
     MacroFindAllIterable,
     MacroFindValue,
     MacroFlagStatement,
@@ -154,10 +160,21 @@ _COMPARE_OPERATORS: dict[type[ast.cmpop], MacroOperator] = {
     ast.LtE: MacroOperator.less_or_equal,
 }
 
-# 숫자 `def` 의 `return` 이 받는 것. 거절 문장 여럿이 같은 말을 한다.
+# 숫자 `def` 안의 이항 연산. 단항 `-` 는 `0 - x` 로 읽어 `subtract` 가 받는다.
+_ARITHMETIC_OPERATORS: dict[type[ast.operator], MacroArithmetic] = {
+    ast.Add: MacroArithmetic.add,
+    ast.Sub: MacroArithmetic.subtract,
+    ast.Mult: MacroArithmetic.multiply,
+    ast.Div: MacroArithmetic.divide,
+}
+_ARITHMETIC_NAMES = "`+`, `-`, `*`, `/`, `min(...)` and `max(...)`"
+
+# 숫자 `def` 의 `return` 과 대입의 오른쪽, 산술의 피연산자가 받는 것. 거절 문장 여럿이
+# 같은 말을 한다.
 _NUMBER_FORMS = (
     "one number literal, a name declared `int` or `float`, a reader call "
-    f"({READER_NAME_LIST}), or a call to another `-> int` or `-> float` def"
+    f"({READER_NAME_LIST}), a call to another `-> int` or `-> float` def, or "
+    f"arithmetic over those with {_ARITHMETIC_NAMES}"
 )
 
 # bind 된 적 없는 이름 중, 무엇을 적으려 했는지가 뻔한 것들. 거절 문장이 고칠 글자를
@@ -217,6 +234,8 @@ _ASK_ONLY_AS_CONDITION = (
 _READ = "read"
 # `for` 가 bind 한 이름의 `origin`.
 _LOOP = "loop"
+# 숫자 `def` 안에서 산술식이나 숫자 `def` 호출을 bind 한 이름의 `origin`.
+_COMPUTE = "compute"
 
 # 도착 모양이 정해진 reader 를 bind 할 때 선언할 수 있는 타입. `number` 는 `int` 와
 # `float` 둘 다 받는다 — SDK 가 반올림해 보내므로 도착한 값만 보고는 둘을 못 가른다
@@ -1011,6 +1030,13 @@ class _FunctionReader:
                 node.lineno,
             )
         expression = self._number_value(node.value, f"what `{self.name}` returns")
+        if returns == MacroType.int_.value and self._may_have_fraction(expression):
+            raise MacroRejection(
+                f"`{self.name}` is declared `-> int`, but what it returns can have a "
+                "fraction — it divides with `/`, or uses a float literal, a name declared "
+                "`float` or a `-> float` def. Declare it `-> float`.",
+                node.lineno,
+            )
         return MacroReturnStatement(
             source=_written(node, self.lines), expression=expression
         )
@@ -1051,6 +1077,7 @@ class _FunctionReader:
                 self._ask(node, ask_allowed=False)
             computes = (
                 called in READERS_BY_NAME
+                or called in ARITHMETIC_FUNCTIONS
                 or self._number_signature(called) is not None
             )
             if not computes:
@@ -1074,6 +1101,82 @@ class _FunctionReader:
             callee=signature.name,
             arguments=self._arguments(signature.name, _helper_parameters(signature), node),
         )
+
+    def _arithmetic(self, node: ast.BinOp, side: str) -> MacroArithmeticOperand:
+        arithmetic = _ARITHMETIC_OPERATORS.get(type(node.op))
+        if arithmetic is None:
+            raise MacroRejection(
+                f"that operator is not allowed. A `-> {self._returns()}` def computes "
+                f"with {_ARITHMETIC_NAMES}.",
+                node.lineno,
+            )
+        return MacroArithmeticOperand(
+            left=self._arithmetic_side(node.left, arithmetic, side),
+            operator=arithmetic,
+            right=self._arithmetic_side(node.right, arithmetic, side),
+        )
+
+    def _negation(self, node: ast.UnaryOp, side: str) -> MacroArithmeticOperand:
+        """`-x` 를 `0 - x` 로 든다. 숫자 리터럴 앞의 `-` 는 `_literal` 이 이미 받는다."""
+        return MacroArithmeticOperand(
+            left=MacroLiteralOperand(literal=MacroLiteral(shape=MacroShape.number, value=0)),
+            operator=MacroArithmetic.subtract,
+            right=self._arithmetic_side(node.operand, MacroArithmetic.subtract, side),
+        )
+
+    def _extremum(self, node: ast.Call, side: str) -> MacroExtremumOperand:
+        arithmetic = ARITHMETIC_FUNCTIONS[node.func.id]  # type: ignore[union-attr]
+        if node.keywords or len(node.args) < 2:
+            raise MacroRejection(
+                f"`{arithmetic.value}` takes two or more numbers, written as positional "
+                f"arguments: `{arithmetic.value}(a, b)`.",
+                node.lineno,
+            )
+        return MacroExtremumOperand(
+            operator=arithmetic,
+            operands=tuple(
+                self._arithmetic_side(argument, arithmetic, side) for argument in node.args
+            ),
+        )
+
+    def _arithmetic_side(
+        self, node: ast.expr, arithmetic: MacroArithmetic, side: str
+    ) -> MacroOperand:
+        """산술 하나의 피연산자. 모양을 알면 `grammar.ARITHMETIC_TABLE` 에 묻는다.
+
+        모양을 모르는 `member`·`static`·`observable` 은 값이 도착한 뒤
+        `binding.calculate` 가 같은 표로 거절한다.
+        """
+        operand, shape = self._number_expression(node, side)
+        if shape is not None and not arithmetic_allowed(shape, arithmetic):
+            raise MacroRejection(
+                f"`{arithmetic.value}` is not allowed on a {shape.value}. Arithmetic takes "
+                f"numbers only: {_NUMBER_FORMS}.",
+                getattr(node, "lineno", None),
+            )
+        return operand
+
+    def _may_have_fraction(self, operand: MacroOperand) -> bool:
+        """저장 때 보이는 것만으로 소수가 나올 수 있나. `-> int` 와 `int` 대입이 묻는다.
+
+        reader 는 `False` 다. 도착한 값은 int 와 float 를 못 가르므로(`grammar.MacroShape`)
+        `count: int = member(...)` 가 이미 그렇듯 실행 때도 가르지 않는다.
+        """
+        if isinstance(operand, MacroLiteralOperand):
+            return isinstance(operand.literal.value, float)
+        if isinstance(operand, MacroNameOperand):
+            return operand.declared_type is MacroType.float_
+        if isinstance(operand, MacroNumberCallOperand):
+            return self.signatures[operand.callee].returns == MacroType.float_.value
+        if isinstance(operand, MacroArithmeticOperand):
+            return (
+                operand.operator is MacroArithmetic.divide
+                or self._may_have_fraction(operand.left)
+                or self._may_have_fraction(operand.right)
+            )
+        if isinstance(operand, MacroExtremumOperand):
+            return any(self._may_have_fraction(one) for one in operand.operands)
+        return False
 
     def _reject_statement(self, node: ast.stmt) -> None:
         line = node.lineno
@@ -1170,6 +1273,9 @@ class _FunctionReader:
             _reject_type_mismatch(declared, literal, f"`{name}`", node)
             return MacroLiteralValue(literal=literal), "literal"
 
+        if self._returns_number() and self._computes(node):
+            return self._compute_value(node, declared, name), _COMPUTE
+
         if isinstance(node, ast.Name):
             # 먼저 bind 됐는지 묻는다. 소문자 `true` 가 여기로 오므로, 그 자리에서 `True` 를
             # 이름으로 대 줘야 모델이 한 번에 고친다. bind 된 이름이면 아래에서 거절한다 —
@@ -1216,6 +1322,42 @@ class _FunctionReader:
             "Arithmetic and any other call are refused.",
             getattr(node, "lineno", None),
         )
+
+    def _computes(self, node: ast.expr) -> bool:
+        """숫자 `def` 안에서 `MacroComputeValue` 로 드는 오른쪽인가.
+
+        산술식, `min`·`max`, 숫자 `def` 호출이다. reader 하나와 리터럴 하나는 예전 그대로
+        `MacroReadValue`·`MacroLiteralValue` 로 든다.
+        """
+        if isinstance(node, ast.BinOp):
+            return True
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            return True
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            return (
+                node.func.id in ARITHMETIC_FUNCTIONS
+                or self._number_signature(node.func.id) is not None
+            )
+        return False
+
+    def _compute_value(
+        self, node: ast.expr, declared: MacroType, name: str
+    ) -> MacroComputeValue:
+        if declared.value not in NUMBER_RETURNS:
+            raise MacroRejection(
+                f"`{name}` is declared `{declared.value}`, but it is bound to a number "
+                "this def computes. Declare it `int` or `float`.",
+                getattr(node, "lineno", None),
+            )
+        expression = self._number_value(node, f"`{name}`")
+        if declared is MacroType.int_ and self._may_have_fraction(expression):
+            raise MacroRejection(
+                f"`{name}` is declared `int`, but what it is bound to can have a fraction "
+                "— it divides with `/`, or uses a float literal, a name declared `float` or "
+                "a `-> float` def. Declare it `float`.",
+                getattr(node, "lineno", None),
+            )
+        return MacroComputeValue(expression=expression)
 
     def _read_value(
         self, node: ast.Call, declared: MacroType, name: str
@@ -1870,6 +2012,15 @@ class _FunctionReader:
                 _SHAPE_OF_TYPE[bound.declared_type],
             )
 
+        # 숫자 `def` 안에서는 산술식이 피연산자로 선다. 밖에서는 아래의 예전 거절 그대로다.
+        if self._returns_number():
+            if isinstance(node, ast.BinOp):
+                return self._arithmetic(node, side), MacroShape.number
+            if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+                return self._negation(node, side), MacroShape.number
+            if isinstance(node, ast.Call) and _is_call_to_any(node, ARITHMETIC_FUNCTIONS):
+                return self._extremum(node, side), MacroShape.number
+
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             if node.func.id == ASK:
                 raise MacroRejection(
@@ -2350,6 +2501,14 @@ def _is_call_to(node: ast.expr, called: str) -> bool:
     )
 
 
+def _is_call_to_any(node: ast.expr, called: Mapping[str, object]) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in called
+    )
+
+
 def _reject_jev_call(node: ast.Call) -> None:
     """`match` 의 주어가 아닌 자리에 온 `decide(...)` 를 거절한다."""
     if _is_call_to(node, DECIDE):
@@ -2426,6 +2585,10 @@ def _number_callees(operand: MacroOperand) -> list[str]:
     """숫자 식 하나가 부르는 숫자 `def` 이름, 적힌 순서대로."""
     if isinstance(operand, MacroNumberCallOperand):
         return [operand.callee]
+    if isinstance(operand, MacroArithmeticOperand):
+        return _number_callees(operand.left) + _number_callees(operand.right)
+    if isinstance(operand, MacroExtremumOperand):
+        return [name for one in operand.operands for name in _number_callees(one)]
     return []
 
 
@@ -2441,7 +2604,7 @@ def _expression_callees(statement: MacroStatement) -> list[str]:
     """statement 가 조건·`return`·대입 안에서 부르는 predicate 와 숫자 `def`.
 
     숫자 `def` 가 생기기 전에는 조건 하나가 predicate 하나만 부를 수 있었다. 이제 비교의
-    양쪽에서 둘을 부를 수 있어 목록이다.
+    양쪽과 산술식 안에서 여럿을 부를 수 있어 목록이다.
     """
     names: list[str] = []
     if (
@@ -2460,6 +2623,10 @@ def _expression_callees(statement: MacroStatement) -> list[str]:
         names.extend(_condition_callees(statement.condition))
     if isinstance(statement, MacroReturnStatement) and statement.expression is not None:
         names.extend(_number_callees(statement.expression))
+    if isinstance(statement, MacroAssignStatement) and isinstance(
+        statement.value, MacroComputeValue
+    ):
+        names.extend(_number_callees(statement.value.expression))
     return names
 
 

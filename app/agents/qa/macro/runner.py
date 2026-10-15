@@ -59,6 +59,7 @@ from app.agents.qa.macro.binding import (
     LateSelector,
     MacroMemories,
     MacroScope,
+    calculate,
     compare,
     evaluate,
     operand_value,
@@ -98,10 +99,13 @@ from app.agents.qa.macro.model import (
     MacroAskCondition,
     MacroAskVerdictStatement,
     MacroAssignStatement,
+    MacroArithmeticOperand,
     MacroCheckpointStatement,
     MacroComparisonCondition,
+    MacroComputeValue,
     MacroCondition,
     MacroDefinition,
+    MacroExtremumOperand,
     MacroFindValue,
     MacroFlagStatement,
     MacroForStatement,
@@ -633,9 +637,24 @@ class _Runner:
             self.stop(failure, place)
             return False
 
-    def _assign(self, frame: _Frame, statement: MacroAssignStatement) -> None:
-        """게임에 아무것도 안 보낸다. 그래서 `applied` 에 절대 안 든다."""
+    def _assign(
+        self,
+        frame: _Frame,
+        statement: MacroAssignStatement,
+        observed: dict[str, Any] | None = None,
+    ) -> None:
+        """게임에 아무것도 안 보낸다. 그래서 `applied` 에 절대 안 든다.
+
+        `observed` 는 숫자 `def` 안의 산술식이 읽은 값을 적는 자리다. 숫자 `def` 를 부른 조건의
+        `observed` 가 그대로 온다.
+        """
         value = statement.value
+        if isinstance(value, MacroComputeValue):
+            frame.scope.bind(
+                statement.name,
+                self._value(frame, value.expression, {} if observed is None else observed),
+            )
+            return
         if isinstance(value, MacroFindValue):
             frame.scope.bind(
                 statement.name, resolve_find(self.memories(), frame.scope, value)
@@ -671,7 +690,7 @@ class _Runner:
         if isinstance(condition, MacroPredicateCondition):
             return self._call(frame, condition, observed)
         if isinstance(condition, MacroComparisonCondition):
-            # 양쪽을 runner 가 푼다. 숫자 `def` 호출은 frame 이 있어야 풀리므로
+            # 양쪽을 runner 가 푼다. 숫자 `def` 호출과 산술식은 frame 이 있어야 풀리므로
             # `binding.evaluate` 로는 못 푼다. 그 밖의 피연산자는 `operand_value` 가 예전
             # 그대로 푼다.
             left = self._value(frame, condition.left, observed)
@@ -682,9 +701,22 @@ class _Runner:
     def _value(
         self, frame: _Frame, operand: MacroOperand, observed: dict[str, Any]
     ) -> Any:
-        """피연산자 하나의 지금 값. 숫자 `def` 호출을 여기서 푼다."""
+        """피연산자 하나의 지금 값. 숫자 `def` 호출과 산술식을 여기서 푼다."""
         if isinstance(operand, MacroNumberCallOperand):
             return self._call(frame, operand, observed)
+        if isinstance(operand, MacroArithmeticOperand):
+            return calculate(
+                operand.operator,
+                [
+                    self._value(frame, operand.left, observed),
+                    self._value(frame, operand.right, observed),
+                ],
+            )
+        if isinstance(operand, MacroExtremumOperand):
+            return calculate(
+                operand.operator,
+                [self._value(frame, one, observed) for one in operand.operands],
+            )
         return operand_value(self.memories(), frame.scope, operand, observed)
 
     def _call(
@@ -729,7 +761,7 @@ class _Runner:
                 frame.at = frame.number_of(statement)
                 try:
                     if isinstance(statement, MacroAssignStatement):
-                        self._assign(frame, statement)
+                        self._assign(frame, statement, observed)
                     elif isinstance(statement, MacroIfStatement):
                         branch = (
                             statement.body

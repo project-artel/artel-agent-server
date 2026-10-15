@@ -61,10 +61,13 @@ WAIT_TIMEOUT = "WAIT_TIMEOUT"
 # 넘기지 않고 멈추는 이유는, 넘기면 Jev 가 없는 런과 있는 런이 같은 결과로 보이기 때문이다.
 JEV_FAILED = "JEV_FAILED"
 
-# 숫자 `def` 의 `return` 에 도착한 값이 숫자가 아니다. `member`·`static`·`observable` 은
-# 모양을 값이 도착해야 알므로 저장 때 못 거른다.
+# 산술식이나 숫자 `def` 의 `return` 에 도착한 값이 숫자가 아니다. `member`·`static`·
+# `observable` 은 모양을 값이 도착해야 알므로 저장 때 못 거른다.
 # `COMPARISON_REJECTED` 와 같은 이유로 macro 정의의 잘못이고, step 을 실패로 적지 않는다.
 ARITHMETIC_REJECTED = "ARITHMETIC_REJECTED"
+# `/` 의 오른쪽이 0 이었다. 값이 도착해야 알 수 있다. 0 이나 무한대로 바꿔 계속 가면 그 뒤의
+# 비교가 조용히 틀리므로 멈춘다.
+DIVIDED_BY_ZERO = "DIVIDED_BY_ZERO"
 
 RUNTIME_CODES = (
     REQUIRE_FAILED,
@@ -79,6 +82,7 @@ RUNTIME_CODES = (
     WAIT_TIMEOUT,
     JEV_FAILED,
     ARITHMETIC_REJECTED,
+    DIVIDED_BY_ZERO,
 )
 
 
