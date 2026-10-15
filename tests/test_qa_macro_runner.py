@@ -2169,3 +2169,150 @@ def test_jev_unavailable_on_ask_stops_with_jev_failed() -> None:
     assert result.failure.payload["reason"] == "no API key"
     assert str(result.stopped_at) == "m step 1 of 2"
     assert host.sent == []
+
+
+# --- 숫자 `def` (ARTEL-1066) ---------------------------------------------------------
+#
+# planner–executer 엔진의 executer 가 숫자 `def` 를 매 턴 `evaluate_number` 로 부른다.
+
+from app.agents.qa.macro.errors import ARITHMETIC_REJECTED, MacroFailure  # noqa: E402
+from app.agents.qa.macro.runner import evaluate_number  # noqa: E402
+
+
+def fight_scene(hp, lives) -> SceneMemory:
+    return scene_with(
+        enemy_with_hp(hp),
+        statics=[{"declaring": "Game.Game", "member": "Lives", "value": lives}],
+    )
+
+
+def test_a_number_def_returning_a_reader_of_another_shape_is_refused() -> None:
+    source = (
+        "def m() -> None:\n"
+        '    require(p() > 0, "x")\n\n'
+        "def p() -> float:\n"
+        '    return static("Game.Name")\n'
+    )
+    host = FakeHost(
+        scene_with(statics=[{"declaring": "Game.Game", "member": "Name", "value": "hero"}])
+    )
+    result = drive(host, source, "m", {})
+
+    assert result.failure.code == ARITHMETIC_REJECTED
+
+
+# 산술과 `at_start` 없이 도는 숫자 `def`(ARTEL-1066). `evaluate_number` 와 조건 자리를 잰다.
+
+NUMBER_MODULE = '''
+def step() -> None:
+    if hp() <= 40:
+        flag("half way")
+    while hp() > 0:
+        press_key("Space", 0.1)
+    require(lives() == 3, "The player lost a life; replan.")
+
+def hp() -> float:
+    enemy: object = find(name="Enemy")
+    return member(enemy, "Enemy.Hp")
+
+def remaining() -> float:
+    return hp()
+
+def lives() -> int:
+    return static("Game.Lives")
+
+def threshold(limit: float = 40) -> float:
+    return limit
+
+def scaled(value: float) -> float:
+    return value
+'''
+
+
+def number_module() -> MacroDefinition:
+    return macro_definition_from_source("step", NUMBER_MODULE)
+
+
+class LosingHp(FakeHost):
+    """action 이 하나 나갈 때마다 적의 hp 가 20 준다."""
+
+    def __init__(self, hp: int, lives: int) -> None:
+        super().__init__(fight_scene(hp, lives))
+        self.hp = hp
+        self.lives = lives
+
+    async def run(self, actions, summary: str, step: int) -> ActionOutcome:
+        outcome = await super().run(actions, summary, step)
+        self.hp -= 20
+        self.memory = fight_scene(self.hp, self.lives)
+        return outcome
+
+
+def test_evaluate_number_returns_what_a_number_def_reads() -> None:
+    host = FakeHost(fight_scene(30, 3))
+
+    assert evaluate_number(host, number_module(), "hp") == 30
+    assert evaluate_number(host, number_module(), "lives") == 3
+    assert isinstance(evaluate_number(host, number_module(), "lives"), int)
+
+
+def test_evaluate_number_takes_arguments_defaults_and_nested_calls() -> None:
+    host = FakeHost(fight_scene(30, 3))
+
+    assert evaluate_number(host, number_module(), "threshold") == 40
+    assert evaluate_number(host, number_module(), "threshold", {"limit": 7.5}) == 7.5
+    assert evaluate_number(host, number_module(), "remaining") == 30
+
+
+def test_evaluate_number_refuses_the_entry_point_and_a_missing_argument() -> None:
+    host = FakeHost(fight_scene(30, 3))
+
+    with pytest.raises(ValueError):
+        evaluate_number(host, number_module(), "step")
+    with pytest.raises(ValueError):
+        evaluate_number(host, number_module(), "scaled")
+
+
+def test_a_number_def_that_fails_names_its_own_step() -> None:
+    host = FakeHost(scene_with(statics=[]))
+
+    with pytest.raises(MacroFailure) as failed:
+        evaluate_number(host, number_module(), "remaining")
+
+    assert failed.value.code == SELECTOR_NOT_FOUND
+    assert failed.value.payload["number_def"] == "hp step 1"
+
+
+def test_a_number_def_drives_if_while_and_require() -> None:
+    host = LosingHp(hp=60, lives=3)
+    result = asyncio.run(run_macro(host, number_module(), {}, 2))
+
+    assert result.passed
+    # 60 → 40 → 20 → 0. `if` 는 60 에서 판정해 `flag` 를 건너뛴다.
+    assert len(host.sent) == 3
+    assert result.flags == []
+
+
+def test_a_number_def_in_a_failed_require_reports_what_it_returned() -> None:
+    host = LosingHp(hp=0, lives=2)
+    result = asyncio.run(run_macro(host, number_module(), {}, 2))
+
+    assert result.failure.code == SCENE_MISMATCH
+    assert [one.message for one in result.flags] == ["half way"]
+    assert result.failure.payload["observed"]["lives()"] == "2"
+    assert result.failure.payload["observed"]["lives returned at"] == "'step 1'"
+
+
+def test_a_number_def_without_arithmetic_drives_a_wait_until() -> None:
+    host = PulseHost(fight_scene(80, 3), [(MacroPulseWait(1, 0.5), fight_scene(30, 3))])
+    source = NUMBER_MODULE.replace(
+        '    if hp() <= 40:\n        flag("half way")\n',
+        '    wait_until(hp() <= 40, 5, "The enemy did not lose half its hp.")\n',
+    ).replace('    while hp() > 0:\n        press_key("Space", 0.1)\n', "")
+    result = drive(host, source, "step", {})
+
+    assert result.passed
+    assert "was true after 0.5s (1 pulses)" in result.waits[0]
+
+
+# 산술식(ARTEL-1076). `at_start` 없이 도는 식으로 잰다.

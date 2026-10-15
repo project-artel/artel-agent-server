@@ -2081,3 +2081,194 @@ def test_under_refuses_anything_but_one_path_or_object(argument: str, expected: 
     )
 
     assert expected in reason
+
+
+# --- 숫자 `def` (ARTEL-1066) --------------------------------------------------------
+#
+# planner–executer 엔진의 step module 이 `progress`·`risk`·`setbacks` 를 Python 대신 macro 로
+# 적을 수 있게 하는 문법이다. 기존 문법의 거절 문장은 그대로여야 한다.
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        'if progress() >= 0.5:\n        flag("x")',
+        'while progress() < 1:\n        press_key("Space", 0.1)',
+        'require(progress() > 0, "Hit the enemy.")',
+        'wait_until(progress() >= 1, 5, "Wait.")',
+        'require(0.5 <= progress(), "Hit the enemy.")',
+    ],
+    ids=["if", "while", "require", "wait_until", "right side"],
+)
+def test_a_number_def_stands_on_a_comparison_in_every_condition(kind: str) -> None:
+    parse(
+        f"def m() -> None:\n    {kind}\n\n"
+        "def progress() -> float:\n    return member(selector(\"E[0]\"), \"Enemy.Hp\")\n"
+    )
+
+
+def test_a_predicate_may_compare_a_number_def() -> None:
+    parse(
+        'def m() -> None:\n    require(done(), "Wait.")\n\n'
+        "def done() -> bool:\n    return progress() >= 1\n\n"
+        "def progress() -> float:\n    return 0.5\n"
+    )
+
+
+def test_an_entry_point_cannot_return_a_number() -> None:
+    reason = rejection("def m() -> float:\n    return 1.0\n")
+
+    assert "Declare the entry point `-> None`" in reason and "`-> float`" in reason
+
+
+def test_a_number_def_must_return_on_every_path() -> None:
+    reason = rejection(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        "def p() -> float:\n    if scene() == \"A\":\n        return 1\n"
+    )
+
+    assert reason == "every path through a `-> float` def must end in `return`."
+
+
+def test_a_statement_after_a_number_return_is_refused() -> None:
+    reason = rejection(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        "def p() -> int:\n    return 1\n    x: int = 2\n"
+    )
+
+    assert "End this def body at the `return`" in reason
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'click(selector("A"))',
+        'wait_until(scene() == "A", 1, "Wait.")',
+        "checkpoint()",
+        'flag("x")',
+        'ask_verdict("x")',
+        "for i in range(2):\n        x: int = 1",
+        'while scene() == "A":\n        x: int = 1',
+        'match decide("What?"):\n        case "a":\n            x: int = 1\n        case "b":\n            x: int = 2',
+    ],
+    ids=["tool", "wait_until", "checkpoint", "flag", "ask_verdict", "for", "while", "match"],
+)
+def test_a_number_def_allows_only_assignment_if_and_return(body: str) -> None:
+    reason = rejection(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        f"def p() -> float:\n    {body}\n    return 1\n"
+    )
+
+    assert "a `-> float` def allows only a typed assignment, `if`, and `return`" in reason
+
+
+def test_ask_and_decide_are_refused_inside_a_number_def() -> None:
+    asked = rejection(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        'def p() -> float:\n    if ask("Winning?"):\n        return 1\n    return 0\n'
+    )
+    decided = rejection(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        'def p() -> float:\n    return decide("Which?")\n'
+    )
+    returned_ask = rejection(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        'def p() -> float:\n    return ask("Which?")\n'
+    )
+
+    assert "`ask(...)` is not allowed inside a `-> float` def" in asked
+    assert "`decide(...)` stands only as the subject of a `match`" in decided
+    assert "`ask(...)` is not allowed inside a `-> float` def" in returned_ask
+
+
+def test_the_predicate_refusals_keep_their_sentences() -> None:
+    """숫자 `def` 와 같은 code path 를 타도 predicate 의 거절 문장은 그대로다."""
+    assert rejection(
+        'def m() -> None:\n    require(p(), "x")\n\ndef p() -> bool:\n    flag("x")\n'
+    ) == "a `-> bool` predicate allows only a typed assignment, `if`, and `return`."
+    assert rejection(
+        'def m() -> None:\n    require(p(), "x")\n\n'
+        'def p() -> bool:\n    if scene() == "A":\n        return True\n'
+    ) == "every path through a `-> bool` predicate must end in `return`."
+    assert rejection(
+        'def m() -> None:\n    require(p(), "x")\n\n'
+        "def p() -> bool:\n    return True\n    x: int = 1\n"
+    ) == "a statement after `return` cannot run. End this predicate body at the `return`."
+
+
+@pytest.mark.parametrize(
+    ("returned", "expected"),
+    [
+        ("", "bare `return` is not allowed"),
+        ("True", "true or false"),
+        ("scene() == \"A\"", "true or false"),
+        ('"fast"', "has to be a number, and this is a string"),
+        ("text(selector(\"A\"))", "has to be a number, and this is a string"),
+        ("label", "has to be a number, and this is a string"),
+        ('find(name="A")', "`find(...)` cannot stand in what `p` returns"),
+        ("helper()", "`helper(...)` cannot stand in what `p` returns"),
+    ],
+    ids=["bare", "bool", "comparison", "string", "text", "string name", "find", "none def"],
+)
+def test_a_number_def_returns_only_a_number(returned: str, expected: str) -> None:
+    reason = rejection(
+        'def m() -> None:\n    require(p("x") > 0, "x")\n\n'
+        f"def p(label: string) -> float:\n    return {returned}\n\n"
+        'def helper() -> None:\n    flag("x")\n'
+    )
+
+    assert expected in reason
+
+
+def test_a_number_def_cannot_be_bound_or_called_outside_number_defs() -> None:
+    bound = rejection(
+        "def m() -> None:\n    x: float = p()\n    flag(\"x\")\n\n"
+        "def p() -> float:\n    return 1.0\n"
+    )
+    called = rejection(
+        "def m() -> None:\n    p()\n\ndef p() -> float:\n    return 1.0\n"
+    )
+    bare = rejection(
+        'def m() -> None:\n    require(p(), "x")\n\ndef p() -> float:\n    return 1.0\n'
+    )
+
+    assert "Arithmetic and any other call are refused" in bound
+    assert "`p` is declared `-> float` and returns a number" in called
+    assert "is not a condition on its own" in bare
+
+
+def test_number_def_recursion_is_refused() -> None:
+    reason = rejection(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        "def p() -> float:\n    return q()\n\n"
+        "def q() -> float:\n    return p()\n"
+    )
+
+    assert "this macro calls itself" in reason and "p → q → p" in reason
+
+
+def test_number_defs_count_toward_depth_and_statements() -> None:
+    """숫자 `def` 도 predicate 처럼 호출 그래프의 한 단계이고, 그 statement 가 세진다."""
+    chain = "".join(
+        f"def p{index}() -> float:\n    return p{index + 1}()\n\n"
+        for index in range(1, MAX_CALL_DEPTH)
+    ) + f"def p{MAX_CALL_DEPTH}() -> float:\n    return 1\n"
+    reason = rejection('def m() -> None:\n    require(p1() > 0, "x")\n\n' + chain)
+
+    assert f"limit is {MAX_CALL_DEPTH}" in reason
+
+    padding = "".join(f"    x{index}: int = {index}\n" for index in range(MAX_STATEMENTS))
+    reason = rejection(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        f"def p() -> int:\n{padding}    return 1\n"
+    )
+    assert f"the limit is {MAX_STATEMENTS}" in reason
+
+
+def test_a_number_def_takes_arguments_like_a_helper() -> None:
+    reason = rejection(
+        'def m() -> None:\n    require(p("fast") > 0, "x")\n\n'
+        "def p(weight: int) -> float:\n    return weight\n"
+    )
+
+    assert "`weight` of `p` wants `int`" in reason or "declared `int` but holds" in reason

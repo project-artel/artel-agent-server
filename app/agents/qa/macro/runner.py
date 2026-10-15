@@ -44,6 +44,10 @@ macro 는 이미 나간 action 을 되돌리지 못한다.
 
 **세는 것만 편다, 실행은 안 편다.** helper 호출은 펼치지 않고 호출로 돈다. `step N of M`
 은 `def` 마다 1부터 세고, payload 가 어느 `def` 의 몇 번인지와 호출 사슬을 함께 싣는다.
+
+**숫자 `def` 는 predicate 처럼 동기로 평가한다(ARTEL-1066).** 조건의 비교 한쪽에서 부르면
+`_evaluate` 가, 바깥(planner–executer 엔진)에서 숫자 하나만 원하면 `evaluate_number` 가
+부른다. 둘 다 `_returned` 하나를 지난다.
 """
 
 from collections.abc import Iterator
@@ -55,8 +59,11 @@ from app.agents.qa.macro.binding import (
     LateSelector,
     MacroMemories,
     MacroScope,
+    compare,
     evaluate,
+    operand_value,
     read_to_bind,
+    require_number,
     resolve_find,
     resolve_find_all,
     resolve_target,
@@ -81,6 +88,7 @@ from app.agents.qa.macro.grammar import (
     MAX_WAIT_PER_CALL_SECONDS,
     NONE_FITS,
     NONE_FITS_DESCRIPTION,
+    NUMBER_RETURNS,
     TOOLS_BY_NAME,
     ToolParameter,
     ToolSpec,
@@ -91,6 +99,7 @@ from app.agents.qa.macro.model import (
     MacroAskVerdictStatement,
     MacroAssignStatement,
     MacroCheckpointStatement,
+    MacroComparisonCondition,
     MacroCondition,
     MacroDefinition,
     MacroFindValue,
@@ -101,6 +110,8 @@ from app.agents.qa.macro.model import (
     MacroIfStatement,
     MacroLiteralValue,
     MacroMatchStatement,
+    MacroNumberCallOperand,
+    MacroOperand,
     MacroReadValue,
     MacroParameter,
     MacroPredicateCondition,
@@ -414,6 +425,43 @@ class _Frame:
 # --- 실행 ---------------------------------------------------------------------
 
 
+def evaluate_number(
+    host: MacroHost,
+    definition: MacroDefinition,
+    name: str,
+    arguments: dict[str, Any] | None = None,
+) -> int | float:
+    """숫자 `def` 하나를 지금의 memory 에 대고 평가해 숫자만 돌려준다.
+
+    planner–executer 엔진의 executer 가 매 턴 `progress`·`risk`·`setbacks` 를 부르는 자리다.
+    동기다 — 숫자 `def` 는 predicate 처럼 action·대기·Jev 를 품을 수 없어 기다릴 것이 없다.
+    host 에서 부르는 것은 `memories()` 하나뿐이다.
+
+    `arguments` 는 `run_macro` 처럼 이미 검사된 값이다. 안 준 parameter 는 `def` 줄의
+    기본값을 쓴다. 실패는 `MacroFailure` 로 올라가고 payload 의 `number_def` 가 그 `def` 의
+    몇 번째 statement 인지를 싣는다.
+    """
+    function = definition.function(name)
+    if function is None or function.returns not in NUMBER_RETURNS:
+        raise ValueError(f"`{name}` is not a `-> int` or `-> float` def in {definition.name!r}.")
+    given = dict(arguments or {})
+    values: dict[str, Any] = {}
+    for parameter in function.parameters:
+        if parameter.name in given:
+            values[parameter.name] = given[parameter.name]
+        elif parameter.default is not None:
+            values[parameter.name] = parameter.default.value
+        else:
+            raise ValueError(f"`{name}` needs an argument for `{parameter.name}`.")
+    observed: dict[str, Any] = {}
+    runner = _Runner(host, definition, step=0)
+    try:
+        return runner._returned(function, MacroScope(values), definition, observed)
+    except MacroFailure as failure:
+        failure.payload.setdefault("observed", _printable(observed))
+        raise
+
+
 async def run_macro(
     host: MacroHost,
     definition: MacroDefinition,
@@ -621,24 +669,62 @@ class _Runner:
             "`_evaluate` is synchronous and must never receive one"
         )
         if isinstance(condition, MacroPredicateCondition):
-            return self._predicate(frame, condition, observed)
+            return self._call(frame, condition, observed)
+        if isinstance(condition, MacroComparisonCondition):
+            # 양쪽을 runner 가 푼다. 숫자 `def` 호출은 frame 이 있어야 풀리므로
+            # `binding.evaluate` 로는 못 푼다. 그 밖의 피연산자는 `operand_value` 가 예전
+            # 그대로 푼다.
+            left = self._value(frame, condition.left, observed)
+            right = self._value(frame, condition.right, observed)
+            return compare(self.memories(), left, condition.operator, right)
         return evaluate(self.memories(), frame.scope, condition, observed)
 
-    def _predicate(
-        self, caller: _Frame, condition: MacroPredicateCondition, observed: dict[str, Any]
-    ) -> bool:
-        function = caller.definition.function(condition.callee)
+    def _value(
+        self, frame: _Frame, operand: MacroOperand, observed: dict[str, Any]
+    ) -> Any:
+        """피연산자 하나의 지금 값. 숫자 `def` 호출을 여기서 푼다."""
+        if isinstance(operand, MacroNumberCallOperand):
+            return self._call(frame, operand, observed)
+        return operand_value(self.memories(), frame.scope, operand, observed)
+
+    def _call(
+        self,
+        caller: _Frame,
+        call: MacroPredicateCondition | MacroNumberCallOperand,
+        observed: dict[str, Any],
+    ) -> Any:
+        """predicate 나 숫자 `def` 하나를 부른 쪽 frame 의 인자로 부른다."""
+        function = caller.definition.function(call.callee)
         if function is None:  # pragma: no cover - parser 가 없는 이름을 거절한다
             raise MacroFailure(
-                ACTION_REJECTED, f"`{condition.callee}` is not a `def` in this macro."
+                ACTION_REJECTED, f"`{call.callee}` is not a `def` in this macro."
             )
         arguments = {
             parameter.name: value
-            for parameter, value in _helper_arguments(function, condition, caller, self)
+            for parameter, value in _helper_arguments(function, call, caller, self)
         }
-        frame = _Frame(function, MacroScope(arguments), caller.definition)
+        return self._returned(
+            function, MacroScope(arguments), caller.definition, observed
+        )
 
-        def walk(statements: tuple[MacroStatement, ...]) -> bool | None:
+    def _returned(
+        self,
+        function: MacroFunction,
+        scope: MacroScope,
+        definition: MacroDefinition,
+        observed: dict[str, Any],
+    ) -> Any:
+        """predicate 나 숫자 `def` 의 몸통을 돌아 `return` 한 값을 낸다.
+
+        predicate 의 규칙(ARTEL-988)을 숫자 `def` 가 그대로 받는다 — frame 을 `self.frames` 에
+        올리지 않고, statement 를 `MAX_EXECUTED_STATEMENTS` 에 세지 않고, 안에서 난 실패에
+        자리를 붙여 다시 올린다. 그 자리의 key 만 다르다: predicate 는 `predicate`, 숫자
+        `def` 는 `number_def` 다.
+        """
+        frame = _Frame(function, scope, definition)
+        where = "predicate" if function.returns == "bool" else "number_def"
+
+        def walk(statements: tuple[MacroStatement, ...]) -> Any:
             for statement in statements:
                 frame.at = frame.number_of(statement)
                 try:
@@ -655,15 +741,20 @@ class _Runner:
                             return returned
                     else:
                         assert isinstance(statement, MacroReturnStatement)
-                        result = (
-                            statement.value
-                            if statement.condition is None
-                            else self._evaluate(frame, statement.condition, observed)
-                        )
+                        if statement.expression is not None:
+                            result = require_number(
+                                self._value(frame, statement.expression, observed),
+                                f"what `{function.name}` returns",
+                            )
+                            observed[f"{function.name}()"] = result
+                        elif statement.condition is not None:
+                            result = self._evaluate(frame, statement.condition, observed)
+                        else:
+                            result = statement.value
                         observed[f"{function.name} returned at"] = f"step {frame.at}"
                         return result
                 except MacroFailure as failure:
-                    failure.payload.setdefault("predicate", f"{function.name} step {frame.at}")
+                    failure.payload.setdefault(where, f"{function.name} step {frame.at}")
                     raise
             return None
 
@@ -1243,11 +1334,11 @@ def _argument_values(
 
 def _helper_arguments(
     helper: MacroFunction,
-    statement: MacroHelperCallStatement | MacroPredicateCondition,
+    statement: MacroHelperCallStatement | MacroPredicateCondition | MacroNumberCallOperand,
     frame: _Frame,
     runner: "_Runner",
 ) -> Iterator[tuple[MacroParameter, Any]]:
-    """`helper` 와 `predicate` 의 parameter 마다 값. 안 적힌 자리는 `def` 줄의 기본값."""
+    """helper·predicate·숫자 `def` 의 parameter 마다 값. 안 적힌 자리는 `def` 줄의 기본값."""
     written = {argument.parameter: argument for argument in statement.arguments}
     for parameter in helper.parameters:
         argument = written.get(parameter.name)
