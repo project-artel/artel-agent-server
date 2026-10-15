@@ -20,6 +20,7 @@ from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
+from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel, Field
 
 from app.agents.base import AgentContext
@@ -35,7 +36,9 @@ logger = logging.getLogger(__name__)
 _MARKER = re.compile(r"\[\[(tc|ts):(-?\d+)\]\]")
 
 # 한 질문의 천장. 관계를 몇 번 따라가면 답이 나오는 것이 정상이고, 그보다 길면 헛돌고 있는 것이다.
-MAX_TOOL_CALLS = 12
+# 실측(TR 99, "최근 QA 결과 요약")에서 28 걸음 한도에 걸려 턴이 죽었다 — 걸음은 도구 호출의 두 배 남짓에 답 도구가
+# 더해진다. 넉넉히 두고, 넘으면 죽지 않고 읽은 데까지로 답한다.
+MAX_TOOL_CALLS = 20
 
 
 class QuestionAnswer(BaseModel):
@@ -64,13 +67,15 @@ _SYSTEM_KO = """너는 게임 QA 서비스 Artel 의 도우미다. 사용자의 
 
 ## 답하는 법
 - 추측하지 말고 도구로 확인한 것만 말한다. 찾지 못했으면 찾지 못했다고 말한다.
+- 번호가 있으면(예: "TC 359", "QA 17") 찾지 말고 get_resource 로 바로 읽는다.
 - 사용자가 TC 번호를 몰라도 된다 — 말한 내용으로 find_resource 를 먼저 부른다.
+- find 결과가 여럿이면 질문에 맞는 것을 모두 확인한다. 하나만 보고 "없다" 고 단정하지 않는다.
 - 실패 이유를 물으면 verdicts 를 읽는다. `earlier_failed_steps` 가 있으면 앞 스텝이 막혀 확인 자체를 못 한 것일 수 있다
   — 게임 결함인지 사전조건이 안 선 것인지를 나눠 말한다.
 - TC · TS 는 결과의 `ref` 표식([[tc:N]] · [[ts:N]])을 그대로 쓴다. 표식을 지어내지 않는다.
-- result 는 한 줄 결론, detail 은 근거를 짧게. 한국어로 답한다."""
+- result 는 한 줄 결론, detail 은 근거를 짧게. 한국어 해요체로 답한다."""
 
-_SYSTEM_EN = _SYSTEM_KO.replace("한국어로 답한다.", "Answer in English.")
+_SYSTEM_EN = _SYSTEM_KO.replace("한국어 해요체로 답한다.", "Answer in English.")
 
 
 async def run_question_workflow(
@@ -88,7 +93,11 @@ async def run_question_workflow(
             return json.dumps({"note": "조회가 시간 안에 답하지 않았다."}, ensure_ascii=False)
         for item in answer.get("items", []):
             _remember(found, item)
-        return json.dumps(answer, ensure_ascii=False, default=str)
+        text = json.dumps(answer, ensure_ascii=False, default=str)
+        # 결과 안쪽 칸(실패 스텝의 case_ref 등)에 실린 표식도 쓸 수 있게 한다. 이름은 모르니 번호로 부른다.
+        for kind, ref_id in _MARKER.findall(text):
+            found.setdefault((kind, int(ref_id)), Ref(kind=kind, id=int(ref_id), label=f"{kind.upper()} {ref_id}"))
+        return text
 
     @tool
     async def find_resource(kind: str, text: str = "", limit: int = 10) -> str:
@@ -115,10 +124,18 @@ async def run_question_workflow(
         middleware=limit_middleware(),
     )
     messages = [*request.history, HumanMessage(request.user_input)]
-    state = await agent.ainvoke(
-        {"messages": messages},
-        {**context.trace_config("scenario-question"), "recursion_limit": MAX_TOOL_CALLS * 2 + 4},
-    )
+    try:
+        state = await agent.ainvoke(
+            {"messages": messages},
+            {**context.trace_config("scenario-question"), "recursion_limit": MAX_TOOL_CALLS * 2 + 6},
+        )
+    except GraphRecursionError:
+        # 헛돈 질문이 턴을 죽이지 않게 한다. 읽은 것을 지어 붙이지 않고 다 읽지 못했다고 말한다.
+        logger.warning("[scenario] question hit the step ceiling after %d resource calls", len(calls))
+        state = {"structured_response": QuestionAnswer(
+            result="질문에 답할 만큼 다 읽지 못했어요. 범위를 좁혀 다시 물어봐 주세요.",
+            detail="예: TC 번호, 테스트 런 이름, QA 실행 번호를 함께 말해 주세요.",
+        )}
     answer = state.get("structured_response")
     if not isinstance(answer, QuestionAnswer):
         last = state["messages"][-1].content if state.get("messages") else ""
