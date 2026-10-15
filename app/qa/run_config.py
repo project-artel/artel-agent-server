@@ -214,6 +214,21 @@ def resolve_run_config(
     reasoning = validate_reasoning(model, reasoning)
     spec = get_model_spec(model)
     resolved_arch = resolve_arch(arch, model)
+    if resolved_arch.engine == "planner_executer":
+        if execution_mode != "ORDERED":
+            # planner_executer 는 스텝을 순서대로 하나씩 건다. FREE 시나리오의 `report_case` 를
+            # 모르므로 그 모양으로 기록되기 전에 거절한다.
+            raise QaArchError("engine='planner_executer' runs ORDERED scenarios only.")
+        # Imported here: that module builds a `RunConfig`, which is defined in this one.
+        from app.agents.planner_executer.run_config import resolve_planner_executer_config
+
+        return resolve_planner_executer_config(
+            model=model,
+            language=language,
+            prompt_version=prompt_version,
+            reasoning=reasoning,
+            arch=resolved_arch,
+        )
     tools, _middleware, fingerprint = structure_of(resolved_arch, execution_mode)
 
     prompt = load_prompt(PROMPT_AGENT, SYSTEM_ROLE, prompt_version)

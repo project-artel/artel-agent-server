@@ -35,6 +35,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.agents.planner_executer.arch import PlannerExecuterArchSpec
 from app.config import get_settings
 from app.llm.models import LLMModel, get_model_spec
 
@@ -679,6 +680,27 @@ class QaArchSpec(BaseModel):
     compaction_keep_messages: int | None = Field(default=None, ge=1, le=200)
     compaction_min_new_messages: int | None = Field(default=None, ge=1, le=100)
     compaction_trim_tokens: int | None = Field(default=None, ge=0, le=200_000)
+    # Which engine runs the scenario. `agent` is the tool loop this file describes, and every run
+    # before this axis existed was one. `planner_executer` is the engine in
+    # `app/agents/planner_executer/`: a planner writes each step as a module of functions and an
+    # executer plays them. Its knobs are on `planner`, apart from the tool loop's, and neither
+    # field enters `arch_fingerprint` — see there.
+    engine: Literal["agent", "planner_executer"] = "agent"
+    planner: PlannerExecuterArchSpec | None = None
+
+    @model_validator(mode="after")
+    def planner_knobs_need_their_engine(self) -> "QaArchSpec":
+        """Planner knobs on a tool-loop run would be recorded and never read.
+
+        The run would then be filed with settings it did not have, which is the wrong-bucket
+        failure `resolve_arch` refuses `vision='on'` for.
+        """
+        if self.planner is not None and self.engine != "planner_executer":
+            raise QaArchError(
+                f"planner applies only to engine='planner_executer', and this run asked for "
+                f"engine={self.engine!r}."
+            )
+        return self
 
     @model_validator(mode="after")
     def forgets_need_records(self) -> "QaArchSpec":
@@ -772,6 +794,10 @@ class ResolvedArch(BaseModel):
     compaction_keep_messages: int
     compaction_min_new_messages: int
     compaction_trim_tokens: int
+    engine: Literal["agent", "planner_executer"]
+    # Filled with the engine's defaults when the run asked for `planner_executer` without knobs,
+    # so the record says what the run had rather than that it asked for nothing.
+    planner: PlannerExecuterArchSpec | None
 
     def tool_call_limit(self, steps: int) -> int:
         """Two bounds exist because either alone leaves a hole: a call cap alone
@@ -820,6 +846,8 @@ def _resolved(spec: QaArchSpec, vision: bool) -> ResolvedArch:
     for field, fallback in deferred.items():
         if chosen[field] is None:
             chosen[field] = fallback
+    if chosen["engine"] == "planner_executer" and chosen["planner"] is None:
+        chosen["planner"] = PlannerExecuterArchSpec().model_dump()
     return ResolvedArch(**{**chosen, "vision": vision})
 
 
@@ -887,7 +915,12 @@ def arch_fingerprint(
         # a structure. Hashing it would mean a rename split one structure into two
         # buckets, and the pair of records could no longer show that the rename
         # changed nothing.
-        "arch": arch.model_dump(mode="json", exclude={"label"}),
+        #
+        # `engine` and `planner` are excluded because they are not the tool loop's shape. A run
+        # with `engine="agent"` has the same loop whatever they hold, and the other engine is
+        # hashed by `planner_executer_fingerprint`. Hashed here, the axis would have moved every
+        # default run's digest the day it was added, filing one structure under two.
+        "arch": arch.model_dump(mode="json", exclude={"label", "engine", "planner"}),
         "tools": sorted(
             (tool.name, json.dumps(tool.args, sort_keys=True, default=str))
             for tool in tools
