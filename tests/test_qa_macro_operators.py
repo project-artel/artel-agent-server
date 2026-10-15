@@ -173,3 +173,64 @@ def test_the_vector_rows_cannot_be_reached_at_all_from_a_declaration(
             macro_definition_from_source("m", source)
         for declarable in grammar.DECLARABLE_TYPES:
             assert declarable.value in rejected.value.reason
+
+
+# --- 산술 표 (ARTEL-1066) --------------------------------------------------------
+#
+# 일곱 행 곱하기 여섯 연산. 숫자 `def` 의 산술식은 number 끼리만 된다. 문자열 잇기와
+# vector 연산은 이번에 열지 않았다. 위 `EXPECTED` 와 같은 이유로 손으로 적은 기대다 —
+# number 행만 참이라는 것을 행마다 다시 적는 대신, 그 결정을 한 줄로 적는다.
+ARITHMETIC_EXPECTED: dict[tuple[MacroShape, grammar.MacroArithmetic], bool] = {
+    (shape, arithmetic): shape is MacroShape.number
+    for shape in MacroShape
+    for arithmetic in map(grammar.MacroArithmetic, ("+", "-", "*", "/", "min", "max"))
+}
+
+
+def test_the_arithmetic_matrix_has_every_cell() -> None:
+    assert len(ARITHMETIC_EXPECTED) == 42
+    assert len(grammar.ARITHMETIC_TABLE) == len(ARITHMETIC_EXPECTED)
+
+
+@pytest.mark.parametrize(
+    "shape, arithmetic",
+    sorted(ARITHMETIC_EXPECTED, key=lambda cell: (cell[0].value, cell[1].value)),
+)
+def test_every_arithmetic_cell_allows_numbers_only(
+    shape: MacroShape, arithmetic: grammar.MacroArithmetic
+) -> None:
+    assert (
+        grammar.arithmetic_allowed(shape, arithmetic)
+        is ARITHMETIC_EXPECTED[(shape, arithmetic)]
+    )
+
+
+# 평가 시점에 도착하는 모양마다 값 하나. 저장 때 모양을 모르는 reader 가 이것들을 낸다.
+_ARRIVED: dict[MacroShape, object] = {
+    MacroShape.number: 4,
+    MacroShape.string: "4",
+    MacroShape.bool_: True,
+    MacroShape.vector2: {"x": 1, "y": 2},
+    MacroShape.vector3: {"x": 1, "y": 2, "z": 3},
+    MacroShape.object_: {"path": "Root/Enemy"},
+    MacroShape.other: {"unread": "not-a-number"},
+}
+
+
+@pytest.mark.parametrize(
+    "shape, arithmetic",
+    sorted(ARITHMETIC_EXPECTED, key=lambda cell: (cell[0].value, cell[1].value)),
+)
+def test_the_evaluator_follows_the_arithmetic_table_for_every_arrived_shape(
+    shape: MacroShape, arithmetic: grammar.MacroArithmetic
+) -> None:
+    from app.agents.qa.macro.binding import calculate
+    from app.agents.qa.macro.errors import ARITHMETIC_REJECTED, MacroFailure
+
+    values = [2, _ARRIVED[shape]]
+    if ARITHMETIC_EXPECTED[(shape, arithmetic)]:
+        calculate(arithmetic, values)
+        return
+    with pytest.raises(MacroFailure) as failed:
+        calculate(arithmetic, values)
+    assert failed.value.code == ARITHMETIC_REJECTED

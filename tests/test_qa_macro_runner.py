@@ -2171,11 +2171,15 @@ def test_jev_unavailable_on_ask_stops_with_jev_failed() -> None:
     assert host.sent == []
 
 
-# --- 숫자 `def` (ARTEL-1066) ---------------------------------------------------------
+# --- 숫자 `def`·산술식 (ARTEL-1066) ---------------------------------------------------
 #
 # planner–executer 엔진의 executer 가 숫자 `def` 를 매 턴 `evaluate_number` 로 부른다.
 
-from app.agents.qa.macro.errors import ARITHMETIC_REJECTED, MacroFailure  # noqa: E402
+from app.agents.qa.macro.errors import (  # noqa: E402
+    ARITHMETIC_REJECTED,
+    DIVIDED_BY_ZERO,
+    MacroFailure,
+)
 from app.agents.qa.macro.runner import evaluate_number  # noqa: E402
 
 
@@ -2184,6 +2188,22 @@ def fight_scene(hp, lives) -> SceneMemory:
         enemy_with_hp(hp),
         statics=[{"declaring": "Game.Game", "member": "Lives", "value": lives}],
     )
+
+
+def test_a_reader_that_arrives_as_text_is_refused_in_arithmetic() -> None:
+    source = (
+        "def m() -> None:\n"
+        '    require(p() > 0, "x")\n\n'
+        "def p() -> float:\n"
+        '    return static("Game.Name") * 2\n'
+    )
+    host = FakeHost(
+        scene_with(statics=[{"declaring": "Game.Game", "member": "Name", "value": "hero"}])
+    )
+    result = drive(host, source, "m", {})
+
+    assert result.failure.code == ARITHMETIC_REJECTED
+    assert result.failure.payload["number_def"] == "p step 1"
 
 
 def test_a_number_def_returning_a_reader_of_another_shape_is_refused() -> None:
@@ -2316,3 +2336,62 @@ def test_a_number_def_without_arithmetic_drives_a_wait_until() -> None:
 
 
 # 산술식(ARTEL-1076). `at_start` 없이 도는 식으로 잰다.
+
+ARITHMETIC_MODULE = '''
+def m() -> None:
+    require(lost() >= 0.5, "The enemy still has more than half its hp.")
+
+def lost() -> float:
+    return 1 - hp() / 80
+
+def hp() -> float:
+    enemy: object = find(name="Enemy")
+    return member(enemy, "Enemy.Hp")
+
+def ratio(a: float, b: float) -> float:
+    return a / b
+
+def plain(weight: float = 2.5) -> float:
+    return -weight + 2 * 3 - max(1, 2, 3)
+
+def clamped(value: float) -> float:
+    return max(0, min(1, value))
+'''
+
+
+def arithmetic_module() -> MacroDefinition:
+    return macro_definition_from_source("m", ARITHMETIC_MODULE)
+
+
+def test_arithmetic_follows_python_precedence_and_unary_minus() -> None:
+    host = FakeHost(fight_scene(80, 3))
+
+    assert evaluate_number(host, arithmetic_module(), "plain") == -2.5 + 2 * 3 - 3
+    assert evaluate_number(host, arithmetic_module(), "plain", {"weight": 1}) == 2
+
+
+@pytest.mark.parametrize(("value", "expected"), [(1.7, 1), (-0.3, 0), (0.25, 0.25)])
+def test_min_and_max_clamp_a_value(value: float, expected: float) -> None:
+    host = FakeHost(fight_scene(80, 3))
+
+    assert evaluate_number(host, arithmetic_module(), "clamped", {"value": value}) == expected
+
+
+def test_dividing_by_zero_stops_with_its_own_code() -> None:
+    host = FakeHost(fight_scene(80, 3))
+
+    with pytest.raises(MacroFailure) as failed:
+        evaluate_number(host, arithmetic_module(), "ratio", {"a": 1, "b": 0})
+
+    assert failed.value.code == DIVIDED_BY_ZERO
+    assert failed.value.payload["number_def"] == "ratio step 1"
+
+
+@pytest.mark.parametrize(("hp", "passed"), [(20, True), (60, False)], ids=["lost 3/4", "lost 1/4"])
+def test_arithmetic_over_a_reader_drives_a_require(hp: int, passed: bool) -> None:
+    result = asyncio.run(run_macro(FakeHost(fight_scene(hp, 3)), arithmetic_module(), {}, 2))
+
+    assert result.passed is passed
+    if not passed:
+        assert result.failure.code == SCENE_MISMATCH
+        assert result.failure.payload["observed"]["lost()"] == "0.25"

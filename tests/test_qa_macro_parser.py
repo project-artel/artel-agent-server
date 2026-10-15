@@ -2083,10 +2083,11 @@ def test_under_refuses_anything_but_one_path_or_object(argument: str, expected: 
     assert expected in reason
 
 
-# --- 숫자 `def` (ARTEL-1066) --------------------------------------------------------
+# --- 숫자 `def`·산술식 (ARTEL-1066) --------------------------------------------------
 #
 # planner–executer 엔진의 step module 이 `progress`·`risk`·`setbacks` 를 Python 대신 macro 로
-# 적을 수 있게 하는 문법이다. 기존 문법의 거절 문장은 그대로여야 한다.
+# 적을 수 있게 하는 문법이다. 기존 문법의 거절 문장은 그대로여야 하므로, 숫자 `def` 밖에서
+# 산술이 여전히 예전 문장으로 거절되는 것까지 잰다.
 
 
 @pytest.mark.parametrize(
@@ -2220,6 +2221,58 @@ def test_a_number_def_returns_only_a_number(returned: str, expected: str) -> Non
     assert expected in reason
 
 
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ('1 + "a"', "`+` is not allowed on a string"),
+        ("ready * 2", "`*` is not allowed on a bool"),
+        ("card - 1", "`-` is not allowed on a object"),
+        ('min(1, text(card))', "`min` is not allowed on a string"),
+        ('-label', "`-` is not allowed on a string"),
+        ("1 // 2", "that operator is not allowed"),
+        ("2 ** 3", "that operator is not allowed"),
+        ("min(1)", "`min` takes two or more numbers"),
+        ("max(a=1, b=2)", "`max` takes two or more numbers"),
+    ],
+    ids=["string", "bool", "object", "min text", "negate", "floor", "power", "one arg", "keywords"],
+)
+def test_arithmetic_takes_numbers_only(expression: str, expected: str) -> None:
+    reason = rejection(
+        'def m(card: object) -> None:\n    require(p(card) > 0, "x")\n\n'
+        "def p(card: object, ready: bool = True, label: string = \"x\") -> float:\n"
+        f"    return {expression}\n"
+    )
+
+    assert expected in reason
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'def m() -> None:\n    hp: float = 1 + 2\n',
+        'def m() -> None:\n    require(member(selector("E"), "E.hp") - 1 > 0, "x")\n',
+        'def m() -> None:\n    hp: float = -static("Game.Hp")\n',
+    ],
+    ids=["assign in -> None", "condition in -> None", "negate in -> None"],
+)
+def test_arithmetic_outside_a_number_def_keeps_the_old_refusal(source: str) -> None:
+    reason = rejection(source)
+
+    assert (
+        "Arithmetic and any other call are refused" in reason
+        or "arithmetic is not allowed in a condition" in reason
+    )
+
+
+def test_arithmetic_inside_a_predicate_keeps_the_old_refusal() -> None:
+    reason = rejection(
+        'def m() -> None:\n    require(p(), "x")\n\n'
+        'def p() -> bool:\n    return static("Game.Score") + 1 > 3\n'
+    )
+
+    assert "arithmetic is not allowed in a condition" in reason
+
+
 def test_a_number_def_cannot_be_bound_or_called_outside_number_defs() -> None:
     bound = rejection(
         "def m() -> None:\n    x: float = p()\n    flag(\"x\")\n\n"
@@ -2235,6 +2288,49 @@ def test_a_number_def_cannot_be_bound_or_called_outside_number_defs() -> None:
     assert "Arithmetic and any other call are refused" in bound
     assert "`p` is declared `-> float` and returns a number" in called
     assert "is not a condition on its own" in bare
+
+
+def test_arithmetic_is_allowed_in_assignments_and_conditions_inside_a_number_def() -> None:
+    definition = parse(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        "def p() -> float:\n"
+        '    hp: float = member(selector("E[0]"), "Enemy.Hp")\n'
+        "    ratio: float = hp / 100\n"
+        "    if ratio * 2 < 0.5:\n"
+        "        return -ratio\n"
+        "    return ratio\n"
+    )
+
+    ratio = definition.helpers[0].statements[1]
+    assert isinstance(ratio, MacroAssignStatement) and ratio.value.kind == "compute"
+    negated = definition.helpers[0].statements[2].body[0].expression
+    assert negated.kind == "arithmetic" and negated.left.literal.value == 0
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def p() -> int:\n    return 1 / 2\n",
+        "def p() -> int:\n    return 1.5\n",
+        "def p(speed: float = 1.5) -> int:\n    return speed + 1\n",
+        "def p() -> int:\n    return max(1, q())\n\ndef q() -> float:\n    return 1.0\n",
+        "def p() -> int:\n    x: int = 3 / 2\n    return x\n",
+    ],
+    ids=["divide", "float literal", "float name", "float def", "int assignment"],
+)
+def test_an_int_def_refuses_what_can_have_a_fraction(source: str) -> None:
+    reason = rejection('def m() -> None:\n    require(p() > 0, "x")\n\n' + source)
+
+    assert "can have a fraction" in reason
+
+
+def test_a_number_assignment_must_be_declared_a_number() -> None:
+    reason = rejection(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        "def p() -> float:\n    x: string = 1 + 2\n    return 1\n"
+    )
+
+    assert "Declare it `int` or `float`" in reason
 
 
 def test_number_def_recursion_is_refused() -> None:

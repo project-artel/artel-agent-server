@@ -21,7 +21,12 @@ from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.agents.qa.macro.grammar import MacroOperator, MacroShape, MacroType
+from app.agents.qa.macro.grammar import (
+    MacroArithmetic,
+    MacroOperator,
+    MacroShape,
+    MacroType,
+)
 
 
 class _Frozen(BaseModel):
@@ -165,8 +170,9 @@ class MacroSelectorOperand(_Frozen):
     selector: str
 
 
-# 숫자를 내는 피연산자(ARTEL-1066). 숫자 `def` 호출은 비교의 한쪽 어디에나 선다. runner 가
-# 평가한다 — 숫자 `def` 를 부르려면 frame 이 필요해서 `binding.operand_value` 로는 못 푼다.
+# 아래 셋은 숫자를 내는 피연산자다(ARTEL-1066). 숫자 `def` 호출은 비교의 한쪽 어디에나
+# 서고, 산술식 둘은 숫자 `def` 안에서만 선다. 셋 다 runner 가 평가한다 — 숫자 `def` 를
+# 부르려면 frame 이 필요해서 `binding.operand_value` 로는 못 푼다.
 
 
 class MacroNumberCallOperand(_Frozen):
@@ -177,6 +183,23 @@ class MacroNumberCallOperand(_Frozen):
     arguments: tuple[MacroArgument, ...] = ()
 
 
+class MacroArithmeticOperand(_Frozen):
+    """`left <+ - * /> right`. `-x` 는 `0 - x` 로 든다."""
+
+    kind: Literal["arithmetic"] = "arithmetic"
+    left: "MacroOperand"
+    operator: MacroArithmetic
+    right: "MacroOperand"
+
+
+class MacroExtremumOperand(_Frozen):
+    """`min(a, b, ...)` 나 `max(a, b, ...)`. 인자가 둘 이상이다."""
+
+    kind: Literal["extremum"] = "extremum"
+    operator: MacroArithmetic
+    operands: tuple["MacroOperand", ...]
+
+
 MacroOperand = Annotated[
     Union[
         MacroLiteralOperand,
@@ -184,9 +207,14 @@ MacroOperand = Annotated[
         MacroReaderOperand,
         MacroSelectorOperand,
         MacroNumberCallOperand,
+        MacroArithmeticOperand,
+        MacroExtremumOperand,
     ],
     Field(discriminator="kind"),
 ]
+
+MacroArithmeticOperand.model_rebuild()
+MacroExtremumOperand.model_rebuild()
 
 
 class MacroComparisonCondition(_Frozen):
@@ -346,8 +374,25 @@ class MacroReadValue(_Frozen):
     call: MacroReaderCall
 
 
+class MacroComputeValue(_Frozen):
+    """숫자 `def` 안에서만 서는 대입의 오른쪽. 산술식이나 숫자 `def` 호출 하나다.
+
+    reader 하나와 리터럴 하나는 이것이 아니라 예전 그대로 `MacroReadValue`·
+    `MacroLiteralValue` 로 든다.
+    """
+
+    kind: Literal["compute"] = "compute"
+    expression: MacroOperand
+
+
 MacroAssignValue = Annotated[
-    Union[MacroFindValue, MacroSelectorValue, MacroLiteralValue, MacroReadValue],
+    Union[
+        MacroFindValue,
+        MacroSelectorValue,
+        MacroLiteralValue,
+        MacroReadValue,
+        MacroComputeValue,
+    ],
     Field(discriminator="kind"),
 ]
 

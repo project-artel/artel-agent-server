@@ -24,10 +24,11 @@
   그 기록에 없다.
 
 그리고 비교의 거절이 `COMPARISON_REJECTED` 다. 게임이 틀린 것이 아니라 macro 가 못
-묻는 것을 물은 것이라 `REQUIRE_FAILED` 와 같은 코드로 낼 수 없다. 숫자 `def` 의 `return`
-이 같은 이유로 `ARITHMETIC_REJECTED` 를 낸다(ARTEL-1066).
+묻는 것을 물은 것이라 `REQUIRE_FAILED` 와 같은 코드로 낼 수 없다. 숫자 `def` 의 산술이
+같은 이유로 `ARITHMETIC_REJECTED` 와 `DIVIDED_BY_ZERO` 를 낸다(ARTEL-1066).
 """
 
+import operator as python_operator
 from dataclasses import dataclass
 from typing import Any
 
@@ -35,16 +36,19 @@ from app.agents.qa.macro.errors import (
     ACTION_REJECTED,
     ARITHMETIC_REJECTED,
     COMPARISON_REJECTED,
+    DIVIDED_BY_ZERO,
     SELECTOR_AMBIGUOUS,
     SELECTOR_NOT_FOUND,
     STALE_BINDING,
     MacroFailure,
 )
 from app.agents.qa.macro.grammar import (
+    MacroArithmetic,
     MacroOperator,
     MacroShape,
     MacroType,
     allowed_operators,
+    arithmetic_allowed,
     comparison_allowed,
     operator_names,
 )
@@ -661,14 +665,56 @@ def _apply(operator: MacroOperator, left: Any, right: Any) -> bool:
     return bool(left <= right)
 
 
-# --- 숫자 `def` 의 반환값 (ARTEL-1066) ------------------------------------------------
+# --- 산술 (ARTEL-1066) -------------------------------------------------------------
+
+# 이항 연산 넷이 하는 일. 어느 칸이 되는지는 `grammar.ARITHMETIC_TABLE` 이 정하고, 여기는
+# 된 칸의 계산만 든다.
+_BINARY: dict[MacroArithmetic, Any] = {
+    MacroArithmetic.add: python_operator.add,
+    MacroArithmetic.subtract: python_operator.sub,
+    MacroArithmetic.multiply: python_operator.mul,
+    MacroArithmetic.divide: python_operator.truediv,
+}
+_GATHERING: dict[MacroArithmetic, Any] = {
+    MacroArithmetic.minimum: min,
+    MacroArithmetic.maximum: max,
+}
+
+
+def calculate(arithmetic: MacroArithmetic, values: list[Any]) -> int | float:
+    """도착한 값들에 산술 하나를 한다. 표에 없는 모양이면 `ARITHMETIC_REJECTED` 다.
+
+    저장 때 모양을 아는 피연산자는 parser 가 이미 같은 표로 걸렀다. 여기 닿는 거절은
+    `member`·`static`·`observable` 처럼 값이 도착해야 모양을 아는 것이다.
+    """
+    for value in values:
+        shape = shape_of(value)
+        if arithmetic_allowed(shape, arithmetic):
+            continue
+        raise MacroFailure(
+            ARITHMETIC_REJECTED,
+            f"`{arithmetic.value}` cannot be used on a {shape.value}, and the value that "
+            f"arrived is one ({value!r}). Nothing was sent to the game. Arithmetic takes "
+            "numbers only.",
+            {"shape": shape.value, "operator": arithmetic.value, "arrived": repr(value)},
+        )
+    if arithmetic in _GATHERING:
+        return _GATHERING[arithmetic](values)
+    left, right = values
+    if arithmetic is MacroArithmetic.divide and right == 0:
+        raise MacroFailure(
+            DIVIDED_BY_ZERO,
+            f"{left!r} / {right!r} divides by zero. Nothing was sent to the game. Guard "
+            "the division with an `if` on the divisor before it.",
+            {"left": repr(left), "right": repr(right)},
+        )
+    return _BINARY[arithmetic](left, right)
 
 
 def require_number(value: Any, what: str) -> int | float:
     """숫자 `def` 가 돌려줄 값이 숫자인지. 아니면 `ARITHMETIC_REJECTED` 다.
 
-    `member`·`static`·`observable` 은 값이 도착해야 모양을 알아서, 저장 때 못 거른 것이
-    여기서 걸린다.
+    `return member(...)` 처럼 산술 없이 reader 하나를 돌려주면 `calculate` 를 안 거친다.
     """
     shape = shape_of(value)
     if shape is MacroShape.number:
