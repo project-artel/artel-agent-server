@@ -388,6 +388,9 @@ class ReaderSpec:
     takes_target: bool = False
     takes_key: bool = False
     shape: MacroShape | None = None
+    # target 을 빼고 key 하나만 받아도 되는가. `at_start` 하나다 — target 이 있으면
+    # `member` 처럼, 없으면 `static` 처럼 읽는다.
+    target_optional: bool = False
 
 
 READERS: tuple[ReaderSpec, ...] = (
@@ -405,7 +408,22 @@ READERS: tuple[ReaderSpec, ...] = (
     ReaderSpec("absent", takes_target=True, shape=MacroShape.bool_),
 )
 
-READERS_BY_NAME: dict[str, ReaderSpec] = {spec.name: spec for spec in READERS}
+# 지금 step 이 시작될 때의 값을 읽는 reader. `at_start(target, "Type.member")` 는
+# `member` 처럼, `at_start("Type.member")` 는 `static` 처럼 읽는다. 값은 host 가 step 이
+# 시작될 때 잡아 둔 `pulse` 에서 오고, 그것을 들지 않는 host 에서는 `AT_START_UNAVAILABLE`
+# 로 멈춘다(`runner.StepStartValues`).
+#
+# `READERS` 에 넣지 않는다. `READER_NAMES` 와 `READER_NAME_LIST` 는 QA agent 의 macro skill
+# (`reference.py`)과 거절 문장에 그대로 실리는데, QA 런의 host 는 step 시작 값을 들지 않아
+# 쓰는 쪽이 아직 없다. 쓰는 쪽이 생기면 그때 `READERS` 로 옮기고 skill 을 고친다.
+AT_START = "at_start"
+STEP_START_READERS: tuple[ReaderSpec, ...] = (
+    ReaderSpec(AT_START, takes_target=True, takes_key=True, target_optional=True),
+)
+
+READERS_BY_NAME: dict[str, ReaderSpec] = {
+    spec.name: spec for spec in READERS + STEP_START_READERS
+}
 READER_NAMES: tuple[str, ...] = tuple(spec.name for spec in READERS)
 READER_NAME_LIST = ", ".join(f"{name}()" for name in READER_NAMES)
 

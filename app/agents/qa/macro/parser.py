@@ -173,7 +173,7 @@ _ARITHMETIC_NAMES = "`+`, `-`, `*`, `/`, `min(...)` and `max(...)`"
 # 같은 말을 한다.
 _NUMBER_FORMS = (
     "one number literal, a name declared `int` or `float`, a reader call "
-    f"({READER_NAME_LIST}), a call to another `-> int` or `-> float` def, or "
+    f"({READER_NAME_LIST}, at_start()), a call to another `-> int` or `-> float` def, or "
     f"arithmetic over those with {_ARITHMETIC_NAMES}"
 )
 
@@ -1144,7 +1144,7 @@ class _FunctionReader:
     ) -> MacroOperand:
         """산술 하나의 피연산자. 모양을 알면 `grammar.ARITHMETIC_TABLE` 에 묻는다.
 
-        모양을 모르는 `member`·`static`·`observable` 은 값이 도착한 뒤
+        모양을 모르는 `member`·`static`·`observable`·`at_start` 는 값이 도착한 뒤
         `binding.calculate` 가 같은 표로 거절한다.
         """
         operand, shape = self._number_expression(node, side)
@@ -2089,14 +2089,16 @@ class _FunctionReader:
             )
 
         wanted = int(spec.takes_target) + int(spec.takes_key)
-        if len(node.args) != wanted:
+        # `at_start("Type.member")` 처럼 target 을 뺀 모양이다. 그때는 key 하나만 읽는다.
+        without_target = spec.target_optional and len(node.args) == wanted - 1
+        if len(node.args) != wanted and not without_target:
             raise MacroRejection(
                 f"`{spec.name}` takes {_reader_arguments(spec)}.", node.lineno
             )
 
         index = 0
         target: MacroTarget | None = None
-        if spec.takes_target:
+        if spec.takes_target and not without_target:
             target = self._target(node.args[index], f"the target of `{spec.name}`")
             index += 1
         key: MacroStringRef | None = None
@@ -2565,6 +2567,8 @@ def _reader_arguments(spec: ReaderSpec) -> str:
         parts.append("one target")
     if spec.takes_key:
         parts.append("one plain string")
+    if spec.target_optional:
+        return f"one plain string, or {' and '.join(parts)}"
     return " and ".join(parts) if parts else "no arguments"
 
 

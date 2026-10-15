@@ -2083,11 +2083,49 @@ def test_under_refuses_anything_but_one_path_or_object(argument: str, expected: 
     assert expected in reason
 
 
-# --- 숫자 `def`·산술식 (ARTEL-1066) --------------------------------------------------
+# --- 숫자 `def`·산술식·`at_start` (ARTEL-1066) -----------------------------------
 #
 # planner–executer 엔진의 step module 이 `progress`·`risk`·`setbacks` 를 Python 대신 macro 로
 # 적을 수 있게 하는 문법이다. 기존 문법의 거절 문장은 그대로여야 하므로, 숫자 `def` 밖에서
 # 산술이 여전히 예전 문장으로 거절되는 것까지 잰다.
+
+STEP_MODULE = '''
+def step() -> None:
+    if progress() >= 0.5:
+        flag("half way")
+    while risk(2) > 0.8:
+        press_key("Space", 0.1)
+    wait_until(progress() >= 1, 10, "Wait for the enemy to fall.")
+    require(setbacks() == 0, "The player lost a life; replan.")
+
+def progress() -> float:
+    enemy: object = find(name="Enemy")
+    hp: float = member(enemy, "Enemy.Hp")
+    start: float = at_start(enemy, "Enemy.Hp")
+    if start <= 0:
+        return 1
+    return max(0, min(1, (start - hp) / start))
+
+def risk(weight: int = 1) -> float:
+    return weight * (1 - progress())
+
+def setbacks() -> int:
+    lost: int = at_start("Game.Lives") - static("Game.Lives")
+    return max(lost, 0)
+'''
+
+
+def test_a_step_module_with_number_defs_passes() -> None:
+    definition = parse(STEP_MODULE, "step")
+
+    assert [helper.returns for helper in definition.helpers] == ["float", "float", "int"]
+    returned = definition.helpers[0].statements[-1]
+    assert isinstance(returned, MacroReturnStatement)
+    assert returned.expression is not None and returned.expression.kind == "extremum"
+    condition = definition.entry.statements[0].condition
+    assert condition.left.kind == "number_call" and condition.left.callee == "progress"
+    risk = definition.entry.statements[1].condition.left
+    assert risk.arguments[0].literal.value == 2
 
 
 @pytest.mark.parametrize(
@@ -2246,6 +2284,14 @@ def test_arithmetic_takes_numbers_only(expression: str, expected: str) -> None:
     assert expected in reason
 
 
+def test_arithmetic_on_a_reader_of_unknown_shape_waits_for_the_value() -> None:
+    """`member`·`static`·`at_start` 의 모양은 값이 도착해야 안다. 거절은 runner 가 한다."""
+    parse(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        'def p() -> float:\n    return static("Game.Score") / at_start("Game.Score") - 1\n'
+    )
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -2324,6 +2370,13 @@ def test_an_int_def_refuses_what_can_have_a_fraction(source: str) -> None:
     assert "can have a fraction" in reason
 
 
+def test_an_int_def_accepts_whole_numbers_and_readers() -> None:
+    parse(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        'def p() -> int:\n    return max(at_start("Game.Lives") - static("Game.Lives"), 0) * 2\n'
+    )
+
+
 def test_a_number_assignment_must_be_declared_a_number() -> None:
     reason = rejection(
         'def m() -> None:\n    require(p() > 0, "x")\n\n'
@@ -2368,3 +2421,44 @@ def test_a_number_def_takes_arguments_like_a_helper() -> None:
     )
 
     assert "`weight` of `p` wants `int`" in reason or "declared `int` but holds" in reason
+
+
+@pytest.mark.parametrize(
+    "reading",
+    [
+        'at_start(enemy, "Enemy.Hp")',
+        'at_start(selector("Root[0]/Enemy[1]"), "Enemy.Hp")',
+        'at_start("Game.Lives")',
+    ],
+    ids=["object", "selector", "static"],
+)
+def test_at_start_reads_like_member_or_static(reading: str) -> None:
+    definition = parse(
+        "def m() -> None:\n"
+        '    enemy: object = find(name="Enemy")\n'
+        f"    before: float = {reading}\n"
+        f'    require(before > 0, "x")\n'
+        f'    require({reading} > 0, "x")\n'
+    )
+
+    assert definition.entry.statements[1].value.call.reader == "at_start"
+
+
+@pytest.mark.parametrize(
+    "reading",
+    ["at_start()", 'at_start(enemy, "A.b", "c")', "at_start(enemy)", 'at_start(key="A.b")'],
+    ids=["none", "three", "no key", "keyword"],
+)
+def test_at_start_refuses_other_argument_shapes(reading: str) -> None:
+    reason = rejection(
+        "def m() -> None:\n"
+        '    enemy: object = find(name="Enemy")\n'
+        f'    require({reading} > 0, "x")\n'
+    )
+
+    assert "at_start" in reason
+
+
+def test_at_start_is_kept_out_of_the_reader_list_the_qa_agent_reads() -> None:
+    """QA agent 의 skill 과 거절 문장은 `READER_NAMES` 를 쓴다. 쓰는 쪽이 생길 때까지 그대로다."""
+    assert "at_start" not in READER_NAMES
