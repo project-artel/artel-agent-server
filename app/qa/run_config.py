@@ -31,6 +31,7 @@ from app.agents.qa.arch import (
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage
 from app.config import get_settings
 from app.llm.chat_model import TEMPERATURE
+from app.llm.decision import resolve_decision_model
 from app.llm.models import (
     DEFAULT_MODEL,
     LLMModel,
@@ -162,6 +163,10 @@ class RunConfig(BaseModel):
     # axes do not describe. Null when the structure has compaction off.
     compaction_model: str | None
     compaction_prompt_version: str | None
+    # 이 런의 Jev 질문(macro decide·ask, `pulse` relevance, reach)에 답하는 model.
+    # 관리자 설정이므로 런의 model 축과 따로 움직인다. 세션을 열 때의 값이고, 런 중간에
+    # 관리자가 바꾸면 다음 질문부터 새 model 이 답한다.
+    decision_model: str
     # Null outside a built image. Reported as null rather than guessed.
     git_sha: str | None
     image_tag: str | None
@@ -283,6 +288,7 @@ def resolve_run_config(
         citation_reporting=CITATION_REPORTING,
         compaction_model=compaction_model,
         compaction_prompt_version=compaction_prompt.version if compaction_prompt else None,
+        decision_model=resolve_decision_model(),
         git_sha=settings.git_sha,
         image_tag=settings.image_tag,
     )

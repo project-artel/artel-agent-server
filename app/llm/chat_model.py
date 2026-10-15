@@ -658,7 +658,9 @@ def select_structured_method(model: LLMModel) -> str:
     return "json_schema" if get_model_spec(model).supports_strict_json else "json_mode"
 
 
-def structured(model: LLMModel, schema: Any) -> Runnable:
+def structured(
+    model: LLMModel, schema: Any, reasoning: ReasoningConfig | None = None
+) -> Runnable:
     """`schema` 모양으로 답하는 chain. 부르는 쪽은 provider 를 몰라도 된다.
 
     OpenRouter 에서 strict schema 를 지원하면 `json_schema + strict`, 지원하지 않으면
@@ -666,8 +668,11 @@ def structured(model: LLMModel, schema: Any) -> Runnable:
     하면 `function_calling` 으로 내린다. `claude/` 는 언제나 `strict` 없는 `json_schema`
     다. ChatAnthropic 은 `strict` 인자를 쓰지 않는다. 이 분기를 호출부마다 복사하면
     provider 가 바뀔 때 일부 stage 만 조용히 실패하므로 이 한 곳이 결정한다(ARTEL-806).
+
+    `reasoning` 은 `build_chat_model` 에 그대로 넘긴다. 결정 질문처럼 얕은 호출은
+    `ReasoningConfig(max_tokens=0)` 으로 추론을 끈다.
     """
-    chat = build_chat_model(model)
+    chat = build_chat_model(model) if reasoning is None else build_chat_model(model, reasoning)
     if select_structured_method(model) != "json_schema" and model.startswith(
         BEDROCK_PREFIX
     ):

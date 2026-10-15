@@ -56,6 +56,23 @@ def test_openrouter_still_gets_strict(monkeypatch) -> None:
     )
 
 
+def test_a_reasoning_setting_reaches_the_chat_model(monkeypatch) -> None:
+    """결정 질문은 추론을 끈 model 로 묻는다(`app/llm/decision.py`)."""
+    from app.llm.models import ReasoningConfig
+
+    built: list[tuple] = []
+    chat = MagicMock()
+    monkeypatch.setattr(
+        "app.llm.chat_model.build_chat_model",
+        lambda model, reasoning=None: built.append((model, reasoning)) or chat,
+    )
+    off = ReasoningConfig(max_tokens=0)
+
+    structured(OPENROUTER, _Schema, off)
+
+    assert built == [(OPENROUTER, off)]
+
+
 def test_bedrock_catalog_reports_strict_schema_support_per_row() -> None:
     assert select_structured_method(BEDROCK) == "json_schema"
     assert select_structured_method(BEDROCK_WITHOUT_STRICT) == "json_mode"

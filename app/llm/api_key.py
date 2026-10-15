@@ -1,10 +1,10 @@
 """Where the provider keys come from, and how long a fetched value is trusted.
 
-The three keys live only in the orchestration server, stored encrypted after an
+The keys live only in the orchestration server, stored encrypted after an
 administrator enters them on the admin page. This module reads them from
 ``GET {ORCHESTRATION_BASE_URL}/internal/settings/llm``, which answers
-``{ "openrouterApiKey": ..., "bedrockApiKey": ..., "anthropicApiKey": ... }`` with
-any value possibly null. There is no environment fallback: a key in ``.env`` is
+``{ "openrouterApiKey": ..., "bedrockApiKey": ..., "anthropicApiKey": ...,
+"typesafeApiKey": ... }`` with any value possibly null. There is no environment fallback: a key in ``.env`` is
 not read.
 
 The fetched keys are cached for ``llm_key_cache_ttl_seconds`` so a model call does
@@ -58,6 +58,7 @@ class _LlmSettingsBody(BaseModel):
     openrouter_api_key: str | None = None
     bedrock_api_key: str | None = None
     anthropic_api_key: str | None = None
+    typesafe_api_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,7 @@ class ProviderKeys:
     openrouter: str | None = None
     bedrock: str | None = None
     anthropic: str | None = None
+    typesafe: str | None = None
 
     def __repr__(self) -> str:
         # The dataclass default would print every key into any log or traceback
@@ -72,7 +74,8 @@ class ProviderKeys:
         return (
             f"ProviderKeys(openrouter={'set' if self.openrouter else None}, "
             f"bedrock={'set' if self.bedrock else None}, "
-            f"anthropic={'set' if self.anthropic else None})"
+            f"anthropic={'set' if self.anthropic else None}, "
+            f"typesafe={'set' if self.typesafe else None})"
         )
 
 
@@ -121,6 +124,10 @@ class LlmApiKeyProvider:
     def get_anthropic_key(self) -> str | None:
         """The Claude API key to use now, or None when none is stored."""
         return self._current().anthropic
+
+    def get_typesafe_key(self) -> str | None:
+        """The TypeSafe API key for calling Jev directly, or None when none is stored."""
+        return self._current().typesafe
 
     def invalidate(self) -> None:
         """Forget the cached keys' freshness so the next call asks orchestration again.
@@ -178,6 +185,7 @@ class LlmApiKeyProvider:
             openrouter=_clean(body.openrouter_api_key),
             bedrock=_clean(body.bedrock_api_key),
             anthropic=_clean(body.anthropic_api_key),
+            typesafe=_clean(body.typesafe_api_key),
         )
 
 

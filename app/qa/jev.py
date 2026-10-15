@@ -1,6 +1,7 @@
-"""세 번째 Jev 호출자인 macro runner가 결정 API를 쓰도록 한다.
+"""macro runner 가 결정 API 를 쓰도록 한다.
 
-기존 두 호출자의 코드를 이 client로 옮기는 일은 후속 변경으로 남긴다.
+요청은 `app/llm/decision.py` 의 `decide` 로 보낸다. 관리자가 결정 model 로 Jev 가 아닌
+model 을 골랐으면 그 model 이 답하고, 실패는 그대로 `JevError` 다.
 """
 
 from __future__ import annotations
@@ -12,13 +13,10 @@ from typing import Any, Awaitable, Callable, Literal
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
-from app.config import get_settings
-from app.llm.api_key import get_llm_api_key_provider
+from app.llm.decision import JEV_MODEL, decide
 
 logger = logging.getLogger(__name__)
 
-JEV_MODEL = "typesafe/jev-1.13"
-DECISIONS_PATH = "/api/alpha/decisions"
 TIMEOUT_SECONDS = 20.0
 
 
@@ -43,7 +41,8 @@ class JevNoulQuestion(BaseModel):
 
 
 class JevRequest(BaseModel):
-    model: Literal["typesafe/jev-1.13"] = JEV_MODEL
+    # 실제로 보내는 model 은 `decide` 가 정한다. 이 값은 Jev 로 보낼 때 덮어쓰인다.
+    model: str = JEV_MODEL
     state: dict[str, Any]
     questions: dict[str, JevChoiceQuestion | JevNoulQuestion]
 
@@ -144,24 +143,9 @@ class JevClient:
             raise JevError(f"Jev request failed: {error}.") from error
 
     async def _post(self, body: dict) -> dict:
-        settings = get_settings()
-        api_key = get_llm_api_key_provider().get_openrouter_key()
-        if not api_key:
-            raise JevError("Jev requires an OpenRouter key.")
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        if settings.openrouter_site_url:
-            headers["HTTP-Referer"] = settings.openrouter_site_url
-        if settings.openrouter_app_title:
-            headers["X-Title"] = settings.openrouter_app_title
-        base = settings.llm_base_url.rstrip("/").removesuffix("/api/v1")
         if self._http is None:
             self._http = httpx.AsyncClient(timeout=TIMEOUT_SECONDS)
-        response = await self._http.post(f"{base}{DECISIONS_PATH}", headers=headers, json=body)
-        response.raise_for_status()
-        return response.json()
+        return await decide(self._http, body)
 
     @staticmethod
     def _log_cost(usage: JevUsage | None) -> None:

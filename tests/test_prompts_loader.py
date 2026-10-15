@@ -558,6 +558,8 @@ def test_every_live_agent_has_a_v1(monkeypatch) -> None:
             "screen_verdict",
             "screen_name",
             "step_phrasing",
+            # Jev 질문을 범용 LLM 이 답할 때 쓰는 프롬프트(`app/llm/decision.py`).
+            "decision",
         }
         for agent in known_agents():
             assert available_versions(agent)[0] == "v1"

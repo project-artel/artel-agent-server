@@ -378,3 +378,22 @@ def test_chat_client_sends_the_key_the_provider_currently_holds(monkeypatch):
 
     build_chat_model.cache_clear()
     assert seen == ["Bearer first-key", "Bearer second-key"]
+
+
+def test_the_typesafe_key_is_read_with_the_others():
+    provider, calls = build_provider(
+        lambda request: httpx.Response(
+            200, json={"openrouterApiKey": "or-key", "typesafeApiKey": " ts-key "}
+        )
+    )
+
+    assert provider.get_typesafe_key() == "ts-key"
+    assert provider.get_openrouter_key() == "or-key"
+    assert len(calls) == 1
+    assert "ts-key" not in repr(provider._current())
+
+
+def test_a_body_without_the_typesafe_key_means_none():
+    provider, _ = build_provider(answer("or-key"))
+
+    assert provider.get_typesafe_key() is None
