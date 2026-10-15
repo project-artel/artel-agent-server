@@ -80,6 +80,25 @@ def m() -> None:
     assert "no docstring" in body["rejection"]["reason"]
 
 
+def test_an_entry_docstring_over_2000_characters_is_refused_at_its_def_line() -> None:
+    def source(docstring_length: int) -> str:
+        docstring = "가" * docstring_length
+        return f'''from macros import open_shop
+
+def m() -> None:
+    """{docstring}"""
+    open_shop()
+'''
+
+    at_limit = _check("m", source(2_000), {"open_shop": OPEN_SHOP})
+    over_limit = _check("m", source(2_001), {"open_shop": OPEN_SHOP})
+
+    assert at_limit["ok"] is True
+    assert over_limit["ok"] is False
+    assert over_limit["rejection"]["line"] == 3
+    assert "limit of 2000" in over_limit["rejection"]["reason"]
+
+
 def test_an_import_is_resolved_through_its_own_imports() -> None:
     restock = '''from macros import buy_item
 

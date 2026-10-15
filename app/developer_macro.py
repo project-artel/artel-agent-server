@@ -18,6 +18,10 @@ from app.agents.qa.macro.parser import imported_names, macro_definition_from_sou
 from app.agents.qa.macro.reference import GRAMMAR, NUMBER_EQUALITY
 from app.agents.qa.macro.selector_check import reject_unstable_selectors
 
+# orchestration `developer_macro.docstring` 의 상한. 검사를 통과한 macro 가 저장할 때
+# 길이로 거절되면 안 되므로 같은 값을 여기서 먼저 건다.
+MAX_DOCSTRING_LENGTH = 2_000
+
 # `reference.GRAMMAR` 는 QA agent 에게 쓴 글이라 `register_macro`·`search_macros` 를
 # 이름으로 부른다. developer macro 를 쓰는 사람에게 다르게 적용되는 것만 여기 덧붙인다.
 DEVELOPER_MACRO_RULES = (
@@ -41,8 +45,10 @@ def check_developer_macro(
     """통과하면 정의를, 못 통과하면 `MacroRejection` 을 낸다. 저장하지 않는다.
 
     검사 순서는 tool loop 의 `register_macro` 와 같다 — 파싱, 불안정한 `selector`, entry
-    docstring. 가져온 macro 에는 `selector` 와 docstring 검사를 하지 않는다. 이미 publish 된
-    것이고, tool loop 도 저장된 macro 를 읽을 때는 그 두 검사를 끈다.
+    docstring. docstring 길이 상한(`MAX_DOCSTRING_LENGTH`)만 여기에 더 있다.
+
+    가져온 macro 에는 `selector` 와 docstring 검사를 하지 않는다. 이미 publish 된 것이고,
+    tool loop 도 저장된 macro 를 읽을 때는 그 두 검사를 끈다.
     """
     definition = _ImportResolver(imports).definition(name, source, ())
     reject_unstable_selectors(source)
@@ -51,6 +57,14 @@ def check_developer_macro(
             f"the entry `def {name}` has no docstring. Add one as the first statement of "
             "that `def`, saying what the macro does and when it is the right move — it "
             "is the summary a planner reads to choose this macro.",
+            _def_line(source, name),
+        )
+    if len(definition.entry.docstring) > MAX_DOCSTRING_LENGTH:
+        raise MacroRejection(
+            f"the docstring of `def {name}` is {len(definition.entry.docstring)} "
+            f"characters, over the limit of {MAX_DOCSTRING_LENGTH}. It is a summary a "
+            "planner reads to choose this macro; keep it to what the macro does and when "
+            "it is the right move.",
             _def_line(source, name),
         )
     return definition
