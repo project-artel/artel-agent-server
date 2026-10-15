@@ -51,8 +51,8 @@ macro 는 이미 나간 action 을 되돌리지 못한다.
 """
 
 from collections.abc import Iterator
-from dataclasses import dataclass, field
-from typing import Any, Protocol
+from dataclasses import dataclass, field, replace
+from typing import Any, Protocol, runtime_checkable
 
 from app.agents.qa.macro.binding import (
     FoundObject,
@@ -128,6 +128,7 @@ from app.agents.qa.macro.model import (
 )
 from app.qa.acting import ActionOutcome, PressLanding, ScreenChange
 from app.qa.envelope import JsonRpcAction
+from app.qa.pulse import PulseMemory
 
 # 화면이 연달아 이만큼 그대로면 멈춘다.
 #
@@ -245,6 +246,23 @@ class MacroHost(Protocol):
     async def ask(self, request: MacroAskRequest) -> float:
         """Jev 가 질문을 참이라고 볼 확률. 못 받으면 `MacroJevUnavailable` 을 낸다."""
         ...
+
+
+@runtime_checkable
+class StepStartValues(Protocol):
+    """host 가 **골라서** 더하는 capability 하나. `at_start(...)` 가 읽는 값의 출처다.
+
+    `MacroHost` 에 넣지 않는다. 넣으면 QA 런의 host 처럼 step 시작 값을 들지 않는 host 가
+    전부 이것을 구현해야 한다. runner 가 `isinstance` 로 이것을 가진 host 인지 묻고, 없으면
+    `at_start(...)` 가 `AT_START_UNAVAILABLE` 로 멈춘다.
+
+    값 하나(`at_start(target, key)`)가 아니라 `pulse` 하나를 받는 이유는 이름 규칙이다.
+    `"Type.member"` 를 맞추는 규칙은 `binding` 의 `member`·`static` 이 이미 들고 있어서,
+    host 가 값을 고르게 하면 같은 규칙을 host 가 한 벌 더 들게 된다. host 는 step 이 시작될
+    때의 `PulseMemory` 를 복사해 두고 그것을 내면 된다. 아직 step 이 없으면 `None` 이다.
+    """
+
+    def pulse_at_step_start(self) -> PulseMemory | None: ...
 
 
 @dataclass(frozen=True)
@@ -439,7 +457,7 @@ def evaluate_number(
 
     planner–executer 엔진의 executer 가 매 턴 `progress`·`risk`·`setbacks` 를 부르는 자리다.
     동기다 — 숫자 `def` 는 predicate 처럼 action·대기·Jev 를 품을 수 없어 기다릴 것이 없다.
-    host 에서 부르는 것은 `memories()` 하나뿐이다.
+    host 에서 부르는 것은 `memories()` 하나와, 있으면 `StepStartValues` 뿐이다.
 
     `arguments` 는 `run_macro` 처럼 이미 검사된 값이다. 안 준 parameter 는 `def` 줄의
     기본값을 쓴다. 실패는 `MacroFailure` 로 올라가고 payload 의 `number_def` 가 그 `def` 의
@@ -500,7 +518,11 @@ class _Runner:
     # -- 바깥 --
 
     def memories(self) -> MacroMemories:
-        return self.host.memories()
+        """host 의 memory 에, host 가 들고 있으면 step 시작 때의 `pulse` 를 얹는다."""
+        memories = self.host.memories()
+        if isinstance(self.host, StepStartValues):
+            return replace(memories, step_start=self.host.pulse_at_step_start())
+        return memories
 
     def chain(self) -> list[MacroPlace]:
         """지금 선 자리까지의 호출 사슬. 바깥 frame 이 앞이다."""

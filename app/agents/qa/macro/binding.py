@@ -35,6 +35,7 @@ from typing import Any
 from app.agents.qa.macro.errors import (
     ACTION_REJECTED,
     ARITHMETIC_REJECTED,
+    AT_START_UNAVAILABLE,
     COMPARISON_REJECTED,
     DIVIDED_BY_ZERO,
     SELECTOR_AMBIGUOUS,
@@ -43,6 +44,7 @@ from app.agents.qa.macro.errors import (
     MacroFailure,
 )
 from app.agents.qa.macro.grammar import (
+    AT_START,
     MacroArithmetic,
     MacroOperator,
     MacroShape,
@@ -104,9 +106,15 @@ class LateSelector:
 
 @dataclass(frozen=True)
 class MacroMemories:
-    """macro 가 읽는 것 전부. `observable()` 하나만 `SceneMemory` 쪽을 본다."""
+    """macro 가 읽는 것 전부. `observable()` 하나만 `SceneMemory` 쪽을 본다.
+
+    `step_start` 는 지금 step 이 시작될 때 잡아 둔 `pulse` 다. `at_start(...)` 만 읽는다.
+    host 는 이것을 채우지 않는다 — runner 가 host 의 `StepStartValues` capability 에서 받아
+    채우고, 그것이 없는 host(QA 런의 `run_macro`)에서는 `None` 이다.
+    """
 
     scene: SceneMemory
+    step_start: PulseMemory | None = None
 
     @property
     def pulse(self) -> PulseMemory:
@@ -416,6 +424,8 @@ def read(memories: MacroMemories, scope: MacroScope, call: MacroReaderCall) -> A
     reader = call.reader
     if reader == "scene":
         return memories.scene_name
+    if reader == AT_START:
+        return _at_start(memories, scope, call)
     if reader == "observable":
         return _observable(memories, scope, call)
     if reader == "static":
@@ -469,6 +479,75 @@ def _static(memories: MacroMemories, scope: MacroScope, call: MacroReaderCall) -
             {"asked": name, "available": sorted(named)},
         )
     return named[name]
+
+
+def _at_start(memories: MacroMemories, scope: MacroScope, call: MacroReaderCall) -> Any:
+    """step 이 시작될 때의 값. 이름을 맞추는 규칙은 `member`·`static` 과 같다.
+
+    target 이 있으면 `member`, 없으면 `static` 처럼 읽는다. 같은 규칙인 이유는 agent 가
+    화면에서 읽은 이름을 그대로 적기 때문이다 — 두 reader 가 다른 이름을 받으면 같은 글자가
+    한쪽에서만 맞는다.
+    """
+    asked = describe(call)
+    snapshot = memories.step_start
+    if snapshot is None:
+        raise MacroFailure(
+            AT_START_UNAVAILABLE,
+            f"{asked} reads the value from when this step began, and whoever runs this "
+            "macro keeps no such values — a QA run's `run_macro` does not. Read the "
+            "value now with `member(...)` or `static(...)` instead.",
+            {"asked": asked},
+        )
+    name = scope.text(call.key)
+    if call.target is None:
+        named = _static_names(snapshot)
+    else:
+        record = _record_at_start(scope, call.target, snapshot)
+        if record is None:
+            raise MacroFailure(
+                AT_START_UNAVAILABLE,
+                f"{asked} names an object that was not in the pulse when this step "
+                "began, so there is no value from then to read.",
+                {"asked": asked},
+            )
+        named = _member_names(record)
+    if name not in named:
+        raise MacroFailure(
+            AT_START_UNAVAILABLE,
+            f"{asked} asks for {name!r}, which the pulse did not carry when this step "
+            "began.",
+            {"asked": asked, "available": sorted(named)},
+        )
+    return named[name]
+
+
+def _record_at_start(
+    scope: MacroScope, target: MacroTarget, snapshot: PulseMemory
+) -> _HeldObject | None:
+    """target 하나를 step 시작 때의 `pulse` 에서 찾는다. 지금 살아 있는지는 묻지 않는다.
+
+    `find(...)` 로 bind 한 이름은 그 기록의 key 로, selector 는 `_by_selector` 와 같은
+    규칙(`selector` 나 `path` 가 같은 것)으로 찾는다. 지금 사라진 object 의 처음 값을 읽는
+    것이 이 reader 의 쓸모라서, `resolve_target` 처럼 지금의 memory 에 대고 풀지 않는다.
+    """
+    if isinstance(target, MacroSelectorTarget):
+        selector = target.selector
+    else:
+        bound = scope.value(target.name)
+        if isinstance(bound, FoundObject):
+            record = snapshot.held.get(bound.key)
+            return record if record is not None and record.live else None
+        if not isinstance(bound, LateSelector):
+            raise MacroFailure(
+                ACTION_REJECTED,
+                f"`{target.name}` holds {bound!r}, which is not an object to read.",
+                {"name": target.name},
+            )
+        selector = bound.selector
+    for _key, record in _live(snapshot):
+        if record.selector == selector or record.path == selector:
+            return record
+    return None
 
 
 def _member(found: FoundObject, scope: MacroScope, call: MacroReaderCall) -> Any:
@@ -685,7 +764,7 @@ def calculate(arithmetic: MacroArithmetic, values: list[Any]) -> int | float:
     """도착한 값들에 산술 하나를 한다. 표에 없는 모양이면 `ARITHMETIC_REJECTED` 다.
 
     저장 때 모양을 아는 피연산자는 parser 가 이미 같은 표로 걸렀다. 여기 닿는 거절은
-    `member`·`static`·`observable` 처럼 값이 도착해야 모양을 아는 것이다.
+    `member`·`static`·`observable`·`at_start` 처럼 값이 도착해야 모양을 아는 것이다.
     """
     for value in values:
         shape = shape_of(value)
