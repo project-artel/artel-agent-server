@@ -14,6 +14,7 @@ from app.api.embeddings import router as embeddings_router
 from app.api.extract import router as extract_router
 from app.api.knowledge_queries import router as knowledge_queries_router
 from app.api.llm_cache import router as llm_cache_router
+from app.api.macros import router as macros_router
 from app.api.qa_sessions import router as qa_sessions_router
 from app.api.routes import router as api_router
 from app.api.sessions import router as sessions_router
@@ -130,6 +131,7 @@ def create_app() -> FastAPI:
     app.include_router(specs_v2_router, prefix=INTERNAL_PREFIX)
     app.include_router(step_phrasing_router, prefix=INTERNAL_PREFIX)
     app.include_router(llm_cache_router, prefix=INTERNAL_PREFIX)
+    app.include_router(macros_router, prefix=INTERNAL_PREFIX)
     app.add_exception_handler(ModelCatalogUnavailableError, _model_catalog_unavailable)
     app.add_exception_handler(RequestValidationError, _validation_error_without_api_keys)
     return app
