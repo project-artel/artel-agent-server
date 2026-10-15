@@ -234,6 +234,7 @@ def build_behavior_tools(ctx: ToolContext) -> list[BaseTool]:
                     report=value.get("report"),
                 )
             )
+            pulse.note_running()
             report = f" — {value['report']}" if value.get("report") else ""
             return f"started as #{behavior_id}, up to {max_seconds}s{report}"
 
@@ -345,12 +346,20 @@ def _stopped_line(channel: QaRunChannel, item: ActionResultItem) -> str:
 
 
 def active_behaviors(ctx: ToolContext) -> list[ActiveBehavior]:
-    """`report_step` 의 `STATUS` 에 싣는, 지금 도는 behavior."""
+    """`report_step` 의 `STATUS` 에 싣는, 직전 `report_step` 뒤로 한 번이라도 돈 behavior.
+
+    판정할 때 아직 도는 것만 적으면, 판정 직전에 스스로 끝난 behavior 가 빠진다(2026-10-15 로컬
+    run 에서 `auto_cast_spells` 가 적을 모두 처치하고 끝난 step 의 기록이 비었다). `seconds` 는 이
+    step 동안 돈 시간이다. 부르면 구간을 다시 열므로 `report_step` 한 번에 한 번만 부른다.
+    """
     return [
         ActiveBehavior(
-            behaviorId=one.behavior_id, name=one.name, target=one.target, seconds=one.seconds
+            behaviorId=span.behavior_id,
+            name=span.name,
+            target=span.target,
+            seconds=round(span.last_seconds - span.first_seconds, 1),
         )
-        for one in ctx.channel.scene.pulse.behaviors
+        for span in ctx.channel.scene.pulse.take_step_behaviors()
     ]
 
 

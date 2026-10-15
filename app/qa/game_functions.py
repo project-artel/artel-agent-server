@@ -166,6 +166,20 @@ class BehaviorEndedPayload(BaseModel):
     frame: int | None = None
 
 
+class StepBehaviorSpan(BaseModel):
+    """직전 `report_step` 뒤로 behavior 하나가 돈 구간. `seconds` 는 그 behavior 의 누적 실행 시간이다.
+
+    `first_seconds` 는 이 구간에서 처음 본 값, `last_seconds` 는 마지막으로 본 값이다. 둘의 차가 이
+    step 동안 돈 시간이다.
+    """
+
+    behavior_id: int
+    name: str
+    target: str | None = None
+    first_seconds: float
+    last_seconds: float
+
+
 class UsedCheat(BaseModel):
     """`report_step` 의 `STATUS` 에 agent-server 가 적는 cheat 호출 하나(계약 4절 `Step status`)."""
 

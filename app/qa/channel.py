@@ -990,7 +990,7 @@ class QaRunChannel:
     def on_behavior_ended(self, raw: dict) -> None:
         """behavior 하나가 끝났다. 도는 목록에서 빼고 다음 tool 결과에 붙이려고 쌓는다."""
         ended = BehaviorEndedPayload.model_validate(raw.get("payload") or {})
-        self.scene.pulse.end_behavior(ended.behavior_id)
+        self.scene.pulse.end_behavior(ended.behavior_id, ended.seconds)
         self._behavior_endings.append(ended)
 
     def drain_behavior_endings(self) -> list[BehaviorEndedPayload]:

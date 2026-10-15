@@ -31,6 +31,7 @@ from app.qa.game_functions import (
     FunctionPulseEntry,
     PulseFunctions,
     RunningBehavior,
+    StepBehaviorSpan,
     render_function_lines,
 )
 
@@ -404,6 +405,10 @@ class PulseMemory(BaseModel):
     # 지금 도는 behavior. `PULSE.behaviors` 가 통째로 바꾸고, `BEHAVIOR_ENDED` 가 하나씩 빼고,
     # `start_behavior` 가 다음 `PULSE` 가 오기 전까지 쓸 임시 줄을 넣는다.
     behaviors: list[RunningBehavior] = Field(default_factory=list)
+    # 직전 `report_step` 뒤로 한 번이라도 돈 behavior(계약 4절 `Step status`). `behaviors` 는 지금 도는
+    # 것뿐이라, 판정 직전에 스스로 끝난 behavior 가 빠진다. 그 behavior 가 결과를 만든 step 일수록
+    # 기록이 비게 되므로 따로 쥔다. `take_step_behaviors` 가 비운다.
+    step_behaviors: dict[int, StepBehaviorSpan] = Field(default_factory=dict)
     # view 에 function 줄을 그릴 때 쓰는, 지금 test case 가 허용하는 이름. 축이 꺼진 쪽은
     # `None` 이고 그 쪽 줄이 없다. 둘 다 `None` 이면 view 가 이 필드가 생기기 전과 같다.
     # tool 이 지금 step 을 옮길 때 고친다(`app/agents/qa/tools/game_function_tools.py` 의 `focus`).
@@ -420,8 +425,38 @@ class PulseMemory(BaseModel):
             else:
                 self.functions[entry.key] = entry
 
-    def end_behavior(self, behavior_id: int) -> None:
+    def end_behavior(self, behavior_id: int, seconds: float | None = None) -> None:
+        span = self.step_behaviors.get(behavior_id)
+        if span is not None and seconds is not None:
+            span.last_seconds = max(span.last_seconds, seconds)
         self.behaviors = [one for one in self.behaviors if one.behavior_id != behavior_id]
+
+    def note_running(self, carried: bool = False) -> None:
+        """지금 도는 behavior 를 이 step 의 구간에 적는다. `behaviors` 를 바꾼 뒤마다 부른다.
+
+        이 구간에서 처음 보는 behavior 는 이 step 안에서 시작한 것이라 구간을 0 초부터 센다.
+        `carried` 는 `take_step_behaviors` 가 앞 step 에서 넘어온 것을 다시 열 때이고, 그때는 지금의
+        누적 시간부터 센다.
+        """
+        for one in self.behaviors:
+            span = self.step_behaviors.get(one.behavior_id)
+            if span is None:
+                self.step_behaviors[one.behavior_id] = StepBehaviorSpan(
+                    behavior_id=one.behavior_id,
+                    name=one.name,
+                    target=one.target,
+                    first_seconds=one.seconds if carried else 0.0,
+                    last_seconds=one.seconds,
+                )
+            else:
+                span.last_seconds = max(span.last_seconds, one.seconds)
+
+    def take_step_behaviors(self) -> list[StepBehaviorSpan]:
+        """이 step 동안 돈 behavior 를 돌려주고, 다음 step 의 구간을 지금 도는 것으로 다시 연다."""
+        spans = list(self.step_behaviors.values())
+        self.step_behaviors = {}
+        self.note_running(carried=True)
+        return spans
 
     def function_lines(self) -> list[str]:
         return render_function_lines(
@@ -510,6 +545,7 @@ class PulseMemory(BaseModel):
             self.apply_functions(reading.functions)
         if reading.behaviors is not None:
             self.behaviors = list(reading.behaviors)
+            self.note_running()
 
         if reading.scene is not None:
             self.scene = reading.scene

@@ -795,3 +795,63 @@ def test_a_test_case_carries_functions() -> None:
     assert functions.cheats == ["give_gold"] and functions.behaviors == "all"
     # 키가 없으면 "all" 이다.
     assert CaseFunctions.model_validate({}).permission("behavior") == "all"
+
+
+def test_active_behaviors_keeps_a_behavior_that_ended_before_the_verdict() -> None:
+    # 2026-10-15 로컬 run: `auto_cast_spells` 가 적을 모두 처치하고 `report_step` 전에 끝나서,
+    # 판정할 때 도는 것만 적던 `active_behaviors` 가 비었다.
+    async def run() -> None:
+        channel, _, tools, sent, _ = make()
+        running = {
+            "behaviorId": 1,
+            "name": "auto_attack",
+            "target": None,
+            "seconds": 12.0,
+            "maxSeconds": 30,
+        }
+        channel.scene.pulse.apply(PulseReading.model_validate({"reading": 1, "behaviors": [running]}))
+        channel.on_behavior_ended(
+            {"payload": {"behaviorId": 1, "name": "auto_attack", "reason": "completed", "seconds": 26.3}}
+        )
+        channel.scene.pulse.apply(PulseReading.model_validate({"reading": 2, "behaviors": []}))
+
+        await tools["report_step"].ainvoke({"step": 1, "passed": True, "message": "ok", "thought": "x"})
+
+        [status] = _status_frames(sent)
+        assert status["active_behaviors"] == [
+            {"behaviorId": 1, "name": "auto_attack", "target": None, "seconds": 26.3}
+        ]
+
+    asyncio.run(run())
+
+
+def test_active_behaviors_counts_only_this_steps_share_of_a_carried_behavior() -> None:
+    async def run() -> None:
+        channel, _, tools, sent, _ = make()
+
+        def pulse(reading: int, seconds: float) -> None:
+            channel.scene.pulse.apply(
+                PulseReading.model_validate(
+                    {
+                        "reading": reading,
+                        "behaviors": [
+                            {"behaviorId": 3, "name": "auto_attack", "seconds": seconds, "maxSeconds": 60}
+                        ],
+                    }
+                )
+            )
+
+        pulse(1, 5.0)
+        await tools["report_step"].ainvoke({"step": 1, "passed": True, "message": "ok", "thought": "x"})
+        pulse(2, 9.0)
+        await tools["report_step"].ainvoke({"step": 2, "passed": True, "message": "ok", "thought": "x"})
+
+        first, second = _status_frames(sent)
+        assert first["active_behaviors"] == [
+            {"behaviorId": 3, "name": "auto_attack", "target": None, "seconds": 5.0}
+        ]
+        assert second["active_behaviors"] == [
+            {"behaviorId": 3, "name": "auto_attack", "target": None, "seconds": 4.0}
+        ]
+
+    asyncio.run(run())
