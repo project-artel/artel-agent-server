@@ -190,6 +190,12 @@ class ScenarioAgent:
                 # **E 수정 갈래**(Step 3): 오케가 실어 준 current_scenarios 에서 대상을
                 # 가리키고, scenario_id 교체 저장으로 되돌린다. 모델 1회 + 반려 시 1회.
                 return await run_modify_workflow(request, context, channel)
+            if verdict.route is Route.QUESTION and get_settings().scenario_resource_tools_enabled:
+                # **범용 질문**(ARTEL-1086, POC): 케이스 · 버전 · 판정 · 시나리오 · TR · QA 실행을 리소스 도구로
+                # 따라가며 답한다. 스위치를 끄면 아래의 예전 소형 턴이다.
+                from app.agents.scenario.question import run_question_workflow
+
+                return await run_question_workflow(request, context, channel)
             if verdict.route is Route.QUESTION:
                 # **새 기계가 아니라 설계된 폴백을 탄다**: 전량을 비우면 프롬프트가
                 # 검색 안내(NO_TEST_CASE_LIST_NOTICE)로 갈리고 검색 도구가 켜진다

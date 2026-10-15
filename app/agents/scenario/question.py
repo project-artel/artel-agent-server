@@ -1,0 +1,169 @@
+"""질문 갈래 — 서비스 전반을 리소스 도구로 읽으며 답한다 (ARTEL-1086, POC).
+
+저작이 아닌 질문("이 TC 는 이전 버전 거야?", "이 TC 왜 실패했어?", "어제 QA 어땠어?")은 케이스 목록만으로 답할 수
+없다. 답이 버전 · 판정 · QA 실행 기록에 흩어져 있기 때문이다. 질문마다 도구를 따로 만들지 않고, 엔터티를 따라가는
+세 도구를 준다 — `find_resource`(말로 찾기) · `get_resource`(하나 자세히) · `related_resources`(관계 따라가기).
+무엇을 읽을지는 모델이 고르고, 범위(프로젝트 · TR 버전)는 Orchestration 이 세션에서 정한다.
+
+답은 다른 갈래와 같은 두 칸이다 — 한 줄 결론(`result`)과 근거(`detail`). TC · TS 는 도구가 준 표식(`[[tc:N]]`)으로
+가리키고, 도구 결과에 없던 표식은 지운다(지어낸 번호가 칩이 되지 않게).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+from typing import TYPE_CHECKING
+
+from langchain.agents import create_agent
+from langchain.agents.structured_output import ToolStrategy
+from langchain_core.messages import HumanMessage
+from langchain_core.tools import tool
+from pydantic import BaseModel, Field
+
+from app.agents.base import AgentContext
+from app.agents.scenario import trace
+from app.agents.scenario.schemas import AgentReply, Ref, ScenarioAgentRequest, ScenarioAgentResult
+from app.llm.chat_model import build_chat_model
+
+if TYPE_CHECKING:
+    from app.sessions.channel import ScenarioChannel
+
+logger = logging.getLogger(__name__)
+
+_MARKER = re.compile(r"\[\[(tc|ts):(-?\d+)\]\]")
+
+# 한 질문의 천장. 관계를 몇 번 따라가면 답이 나오는 것이 정상이고, 그보다 길면 헛돌고 있는 것이다.
+MAX_TOOL_CALLS = 12
+
+
+class QuestionAnswer(BaseModel):
+    """질문 답의 두 칸."""
+
+    result: str = Field(description="질문에 대한 한 줄 결론. 사용자가 가장 먼저 읽는다.")
+    detail: str = Field(
+        default="",
+        description="결론의 근거. 도구에서 읽은 사실만, 짧은 마크다운으로. TC · TS 는 도구가 준 ref 표식 그대로.",
+    )
+
+
+_SYSTEM_KO = """너는 게임 QA 서비스 Artel 의 도우미다. 사용자의 질문에 서비스 데이터를 읽어 답한다.
+
+## 도구
+- find_resource(kind, text): 말로 찾는다. kind = case · scenario · test_run · qa_run · build.
+- get_resource(kind, id): 하나를 자세히 읽는다. kind = case · scenario · test_run · qa_run · qa_try · build.
+- related_resources(kind, id, relation): 관계를 따라간다. 결과의 `relations` 에 있는 이름만 쓴다.
+  - case: versions(빌드별 내용 · 판정 · 이 TR 버전과 다른 칸), verdicts(QA 판정 · 실패 이유 · 앞서 막힌 스텝), scenarios
+  - scenario: cases, test_runs / test_run: scenarios, qa_runs / qa_run: tries / qa_try: issues
+
+## 범위
+- 이 대화는 한 프로젝트의 한 테스트 런(TR) 안에서 열렸다. 케이스 내용은 그 TR 의 게임 버전으로 보인다.
+- `in_this_test_run_version: false` 인 케이스는 이 TR 버전에 없는 케이스다. 사용자가 그런 케이스를 말하면 "이전 버전(○○)의
+  케이스" 라고 알려 준다.
+
+## 답하는 법
+- 추측하지 말고 도구로 확인한 것만 말한다. 찾지 못했으면 찾지 못했다고 말한다.
+- 사용자가 TC 번호를 몰라도 된다 — 말한 내용으로 find_resource 를 먼저 부른다.
+- 실패 이유를 물으면 verdicts 를 읽는다. `earlier_failed_steps` 가 있으면 앞 스텝이 막혀 확인 자체를 못 한 것일 수 있다
+  — 게임 결함인지 사전조건이 안 선 것인지를 나눠 말한다.
+- TC · TS 는 결과의 `ref` 표식([[tc:N]] · [[ts:N]])을 그대로 쓴다. 표식을 지어내지 않는다.
+- result 는 한 줄 결론, detail 은 근거를 짧게. 한국어로 답한다."""
+
+_SYSTEM_EN = _SYSTEM_KO.replace("한국어로 답한다.", "Answer in English.")
+
+
+async def run_question_workflow(
+    request: ScenarioAgentRequest,
+    context: AgentContext,
+    channel: ScenarioChannel,
+) -> ScenarioAgentResult:
+    found: dict[tuple[str, int], Ref] = {}
+    calls: list[str] = []
+
+    async def ask(payload: dict) -> str:
+        calls.append(json.dumps(payload, ensure_ascii=False))
+        answer = await channel.query_resource(payload)
+        if answer is None:
+            return json.dumps({"note": "조회가 시간 안에 답하지 않았다."}, ensure_ascii=False)
+        for item in answer.get("items", []):
+            _remember(found, item)
+        return json.dumps(answer, ensure_ascii=False, default=str)
+
+    @tool
+    async def find_resource(kind: str, text: str = "", limit: int = 10) -> str:
+        """Find resources by words. kind: case | scenario | test_run | qa_run | build."""
+        return await ask({"op": "find", "kind": kind, "text": text, "limit": limit})
+
+    @tool
+    async def get_resource(kind: str, id: int) -> str:  # noqa: A002 - the contract field is `id`
+        """Read one resource in detail. kind: case | scenario | test_run | qa_run | qa_try | build."""
+        return await ask({"op": "get", "kind": kind, "id": id})
+
+    @tool
+    async def related_resources(kind: str, id: int, relation: str, limit: int = 10) -> str:  # noqa: A002
+        """Follow a relation listed in a result's `relations`."""
+        return await ask({"op": "related", "kind": kind, "id": id, "relation": relation, "limit": limit})
+
+    from app.agents.scenario.agent import limit_middleware
+
+    agent = create_agent(
+        model=build_chat_model(request.model, request.reasoning),
+        tools=[find_resource, get_resource, related_resources],
+        system_prompt=_SYSTEM_KO if request.locale.value == "ko" else _SYSTEM_EN,
+        response_format=ToolStrategy(schema=QuestionAnswer),
+        middleware=limit_middleware(),
+    )
+    messages = [*request.history, HumanMessage(request.user_input)]
+    state = await agent.ainvoke(
+        {"messages": messages},
+        {**context.trace_config("scenario-question"), "recursion_limit": MAX_TOOL_CALLS * 2 + 4},
+    )
+    answer = state.get("structured_response")
+    if not isinstance(answer, QuestionAnswer):
+        last = state["messages"][-1].content if state.get("messages") else ""
+        answer = QuestionAnswer(result=str(last)[:300] or "답을 만들지 못했습니다.")
+
+    result = _checked(answer.result, found)
+    detail = _checked(answer.detail, found)
+    used = {key: ref for key, ref in found.items() if _MARKER_KEY(key) in result + detail}
+    trace.record(
+        request.run_id, "질문에 답했다 (리소스 도구)",
+        f"도구 {len(calls)}번\n" + "\n".join(calls) + f"\n결론: {result}",
+    )
+    logger.info("[scenario] question answered with %d resource calls", len(calls))
+    return ScenarioAgentResult(
+        message=_spoken("\n".join(part for part in (result, detail) if part), used),
+        scenarios=[],
+        reply=AgentReply(result=result, detail=detail),
+        refs=list(used.values()),
+    )
+
+
+def _remember(found: dict[tuple[str, int], Ref], item: dict) -> None:
+    """도구가 돌려준 TC · TS 를 기억한다. 답의 표식은 이 안에 있는 것만 남긴다."""
+    match = _MARKER.fullmatch(item.get("ref") or "")
+    if match is None:
+        return
+    kind, ref_id = match.group(1), int(match.group(2))
+    fields = item.get("fields") or {}
+    detail = fields.get("expected") if kind == "tc" else fields.get("description")
+    found[(kind, ref_id)] = Ref(kind=kind, id=ref_id, label=str(item.get("label") or ""), detail=detail or None)
+
+
+def _MARKER_KEY(key: tuple[str, int]) -> str:  # noqa: N802 - reads as the marker it builds
+    return f"[[{key[0]}:{key[1]}]]"
+
+
+def _checked(text: str, found: dict[tuple[str, int], Ref]) -> str:
+    """도구에서 본 번호의 표식만 남긴다. 모르는 번호는 지운다 — 누를 곳이 없는 칩이 된다."""
+    return _MARKER.sub(lambda m: m.group(0) if (m.group(1), int(m.group(2))) in found else "", text).strip()
+
+
+def _spoken(text: str, found: dict[tuple[str, int], Ref]) -> str:
+    """대화 기록에는 표식 대신 이름을 쓴다(`@TC 이름`) — 다른 갈래와 같다."""
+    def name(match: re.Match) -> str:
+        ref = found.get((match.group(1), int(match.group(2))))
+        return f"@{ref.kind.upper()} {ref.label}" if ref else ""
+
+    return _MARKER.sub(name, text)

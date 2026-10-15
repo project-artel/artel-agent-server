@@ -183,6 +183,9 @@ class Settings(BaseSettings):
     # 실험 중에는 꺼서 — 루프로 갈 요청을 **기록만 남기고 끊는다**. 워크플로가 못 받는
     # 요청이 얼마나, 어떤 모양으로 오는지는 이 기록이 곧 Step 3(E 갈래)의 재료다.
     scenario_loop_enabled: bool = True
+    # 질문 갈래가 리소스 도구(find · get · related)로 서비스 전반을 읽으며 답한다(ARTEL-1086, POC).
+    # 끄면 질문 갈래는 예전처럼 케이스 검색만 붙은 소형 턴이다. 실험 스위치 — 기본은 끈다.
+    scenario_resource_tools_enabled: bool = False
     scenario_max_model_calls: int = 40
     scenario_max_tool_calls: int = 30
     game_context_prompt_version: str | None = None
