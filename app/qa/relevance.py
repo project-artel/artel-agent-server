@@ -22,13 +22,12 @@ from typing import Any, Awaitable, Callable
 
 from pydantic import BaseModel
 
-from app.config import get_settings
+from app.llm.decisions import post_decision as _post_decision
 from app.qa.pulse import PulseMemory
 
 logger = logging.getLogger(__name__)
 
 RELEVANCE_MODEL = "typesafe/jev-1.13"
-DECISIONS_PATH = "/api/alpha/decisions"
 # 질문 하나가 약 110 token 으로 측정됐다. 40개면 32k context 의 15% 도 안 쓴다.
 QUESTIONS_PER_REQUEST = 40
 MAX_ATTEMPTS = 2
@@ -261,19 +260,8 @@ class PulseRelevanceJudge:
 
 
 async def post_decision(http: Any, body: dict) -> dict:
-    """Jev 결정 API 에 `body` 를 보내고 응답 JSON 을 돌려준다. `app/qa/reach.py` 도 쓴다."""
-    settings = get_settings()
-    if not settings.llm_api_key:
-        raise RuntimeError("Jev 결정 API 에 LLM_API_KEY 가 없다")
-    headers = {
-        "Authorization": f"Bearer {settings.llm_api_key}",
-        "Content-Type": "application/json",
-    }
-    if settings.openrouter_site_url:
-        headers["HTTP-Referer"] = settings.openrouter_site_url
-    if settings.openrouter_app_title:
-        headers["X-Title"] = settings.openrouter_app_title
-    base = settings.llm_base_url.rstrip("/").removesuffix("/api/v1")
-    answer = await http.post(f"{base}{DECISIONS_PATH}", headers=headers, json=body)
-    answer.raise_for_status()
-    return answer.json()
+    """Jev 결정 API 에 `body` 를 보내고 응답 JSON 을 돌려준다. `app/qa/reach.py` 도 쓴다.
+
+    key 와 header 는 `app/llm/decisions.py` 한 자리에서 만든다(ARTEL-1071).
+    """
+    return await _post_decision(http, body)

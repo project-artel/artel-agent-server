@@ -180,3 +180,69 @@ def test_the_engine_switch_picks_the_router(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr(service, "get_settings", lambda: with_engine("jev", enabled=False))
     assert _build_router() is None
+
+
+# ── key 의 출처(ARTEL-1071) ───────────────────────────────────────────────────
+
+
+class _Keys:
+    """orchestration 이 주는 key 를 흉내 낸다. 401 뒤에 캐시를 버렸는지 센다."""
+
+    def __init__(self, key: str | None) -> None:
+        self.key = key
+        self.invalidated = 0
+
+    def get_openrouter_key(self) -> str | None:
+        return self.key
+
+    def invalidate(self) -> None:
+        self.invalidated += 1
+
+
+def _wired(monkeypatch: pytest.MonkeyPatch, keys: _Keys, handler) -> JevScenarioRouter:
+    import httpx
+
+    from app.llm import decisions
+
+    monkeypatch.setattr(decisions, "get_llm_api_key_provider", lambda: keys)
+    made = JevScenarioRouter()
+    made._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return made
+
+
+def test_the_decision_call_uses_the_key_orchestration_holds(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["Authorization"])
+        return httpx.Response(200, json={"answers": _answers("authoring", "none")})
+
+    made = _wired(monkeypatch, _Keys("sk-from-orchestration"), handler)
+
+    verdict = asyncio.run(made.route("보스전 시나리오 만들어 줘"))
+
+    assert seen == ["Bearer sk-from-orchestration"]
+    assert verdict.route is Route.AUTHORING
+
+
+def test_no_key_falls_back_to_authoring_without_calling(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("key 가 없으면 부르지 않는다")
+
+    made = _wired(monkeypatch, _Keys(None), handler)
+
+    assert asyncio.run(made.route("안녕")).route is Route.AUTHORING
+
+
+def test_a_rejected_key_drops_the_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    keys = _Keys("sk-stale")
+    made = _wired(monkeypatch, keys, lambda _: httpx.Response(401, json={"error": {"code": 401}}))
+
+    assert asyncio.run(made.route("안녕")).route is Route.AUTHORING
+    assert keys.invalidated == 1

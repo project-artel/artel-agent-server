@@ -9,6 +9,7 @@ import pytest
 # app.qa를 먼저 import하면 app.agents와 순환하므로 기존 QA 테스트의 import 순서를 따른다.
 import app.agents  # noqa: F401
 
+from app.llm import decisions
 from app.qa import jev
 from app.qa.jev import JevClient, JevError
 
@@ -84,19 +85,33 @@ def test_probability_sends_exact_request_and_returns_float() -> None:
     ]
 
 
-def test_missing_api_key_raises_jev_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(jev, "get_settings", lambda: SimpleNamespace(llm_api_key=None))
+class _Keys:
+    """orchestration 이 주는 key(ARTEL-1071). 설정에는 key 가 없다."""
 
-    with pytest.raises(JevError, match="LLM_API_KEY"):
+    def __init__(self, key: str | None) -> None:
+        self.key = key
+        self.invalidated = 0
+
+    def get_openrouter_key(self) -> str | None:
+        return self.key
+
+    def invalidate(self) -> None:
+        self.invalidated += 1
+
+
+def test_missing_api_key_raises_jev_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(decisions, "get_llm_api_key_provider", lambda: _Keys(None))
+
+    with pytest.raises(JevError, match="OpenRouter key"):
         asyncio.run(JevClient().choose("Choose.", {"yes": "Yes."}, {}))
 
 
 def test_default_post_uses_settings_and_reuses_http_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(decisions, "get_llm_api_key_provider", lambda: _Keys("secret"))
     monkeypatch.setattr(
-        jev,
+        decisions,
         "get_settings",
         lambda: SimpleNamespace(
-            llm_api_key="secret",
             llm_base_url="https://example.com/api/v1/",
             openrouter_site_url="https://artel.example",
             openrouter_app_title="Artel",
@@ -105,6 +120,8 @@ def test_default_post_uses_settings_and_reuses_http_client(monkeypatch: pytest.M
     clients: list[object] = []
 
     class FakeResponse:
+        status_code = 200
+
         def raise_for_status(self) -> None:
             pass
 

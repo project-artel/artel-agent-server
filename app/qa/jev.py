@@ -12,12 +12,11 @@ from typing import Any, Awaitable, Callable, Literal
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
-from app.config import get_settings
+from app.llm.decisions import MissingDecisionKey, post_decision
 
 logger = logging.getLogger(__name__)
 
 JEV_MODEL = "typesafe/jev-1.13"
-DECISIONS_PATH = "/api/alpha/decisions"
 TIMEOUT_SECONDS = 20.0
 
 
@@ -143,23 +142,12 @@ class JevClient:
             raise JevError(f"Jev request failed: {error}.") from error
 
     async def _post(self, body: dict) -> dict:
-        settings = get_settings()
-        if not settings.llm_api_key:
-            raise JevError("Jev requires LLM_API_KEY.")
-        headers = {
-            "Authorization": f"Bearer {settings.llm_api_key}",
-            "Content-Type": "application/json",
-        }
-        if settings.openrouter_site_url:
-            headers["HTTP-Referer"] = settings.openrouter_site_url
-        if settings.openrouter_app_title:
-            headers["X-Title"] = settings.openrouter_app_title
-        base = settings.llm_base_url.rstrip("/").removesuffix("/api/v1")
         if self._http is None:
             self._http = httpx.AsyncClient(timeout=TIMEOUT_SECONDS)
-        response = await self._http.post(f"{base}{DECISIONS_PATH}", headers=headers, json=body)
-        response.raise_for_status()
-        return response.json()
+        try:
+            return await post_decision(self._http, body)
+        except MissingDecisionKey as error:
+            raise JevError(f"Jev requires an OpenRouter key: {error}.") from error
 
     @staticmethod
     def _log_cost(usage: JevUsage | None) -> None:

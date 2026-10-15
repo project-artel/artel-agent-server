@@ -19,6 +19,7 @@ from typing import Awaitable, Callable
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
+from app.llm.decisions import post_decision
 from app.llm.chat_model import build_chat_model
 from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig, get_model_spec
 from app.prompts import load_prompt
@@ -99,7 +100,6 @@ class ScenarioRouter:
 # ── 결정 전용 모델 라우터 (ARTEL-944) ─────────────────────────────────────────
 
 JEV_MODEL = "typesafe/jev-1.13"
-JEV_DECISIONS_PATH = "/api/alpha/decisions"
 
 # 갈래가 `modify` 인데 대상이 `existing` 이 아니면 되묻는다.
 #
@@ -162,23 +162,9 @@ class JevScenarioRouter(ScenarioRouter):
     async def _decide(self, user_input: str) -> dict:
         from app.agents.scenario import jev_criteria as spec
 
-        settings = get_settings()
-        if not settings.llm_api_key:
-            raise RuntimeError("결정 모델 라우터에 LLM_API_KEY 가 없다")
-        headers = {
-            "Authorization": f"Bearer {settings.llm_api_key}",
-            "Content-Type": "application/json",
-        }
-        if settings.openrouter_site_url:
-            headers["HTTP-Referer"] = settings.openrouter_site_url
-        if settings.openrouter_app_title:
-            headers["X-Title"] = settings.openrouter_app_title
-
-        base = settings.llm_base_url.rstrip("/").removesuffix("/api/v1")
-        answer = await self._client().post(
-            f"{base}{JEV_DECISIONS_PATH}",
-            headers=headers,
-            json={
+        answer = await post_decision(
+            self._client(),
+            {
                 "model": JEV_MODEL,
                 "state": {"user_message": user_input},
                 "questions": {
@@ -195,8 +181,7 @@ class JevScenarioRouter(ScenarioRouter):
                 },
             },
         )
-        answer.raise_for_status()
-        return answer.json()["answers"]
+        return answer["answers"]
 
     async def route(self, user_input: str, context_hint: str = "") -> RouteVerdict:
         # `context_hint` 는 아직 쓰지 않는다. 측정이 문맥 없이 이뤄졌으므로 넣는 것은 재 본
