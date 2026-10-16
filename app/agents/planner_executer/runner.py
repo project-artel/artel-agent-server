@@ -12,7 +12,7 @@ carries `QaRunState.build_summary`, so Orchestration grades both engines' runs t
 import asyncio
 
 from app.agents.planner_executer import evaluator
-from app.agents.planner_executer.developer_macros import DeveloperMacro, load_developer_macros
+from app.agents.planner_executer.developer_macros import NO_DEVELOPER_MACROS, LoadedDeveloperMacros
 from app.agents.planner_executer.evaluator import Evaluator, Judge
 from app.agents.planner_executer.executer import Executer
 from app.agents.planner_executer.macros import RegisteredMacros
@@ -36,13 +36,13 @@ class PlannerExecuterRunner:
         ask: Ask | None = None,
         judge: Judge | None = None,
         jev: JevClient | None = None,
-        developer_macros: tuple[DeveloperMacro, ...] = (),
+        developer: LoadedDeveloperMacros = NO_DEVELOPER_MACROS,
     ) -> None:
         """`ask` (planner), `judge` (evaluator) and `jev` are replaced by tests; a run uses the run's
-        model for the first two and `app/qa/jev.py`'s client for Jev. `developer_macros` 는
-        `QaExecutionService` 가 런 시작에 한 번 읽어 넘긴다."""
+        model for the first two and `app/qa/jev.py`'s client for Jev. `developer` 는
+        `QaExecutionService` 가 런 시작에 한 번 읽고 파싱해 시나리오마다 같은 것을 넘긴다."""
         self._config = config
-        self._developer_macros = developer_macros
+        self._developer = developer
         assert config.arch.planner is not None, "resolve_arch fills `planner` for this engine"
         self._spec = config.arch.planner
         self._ask = ask
@@ -78,9 +78,8 @@ class PlannerExecuterRunner:
     ) -> None:
         if not channel.scene.pulse.seen:
             await channel.wait_for_reading(FIRST_READING_SECONDS)
-        developer = await load_developer_macros(self._developer_macros)
         planner = Planner(
-            self._config, channel, self._spec, RegisteredMacros(channel), ask=self._ask, developer=developer
+            self._config, channel, self._spec, RegisteredMacros(channel), ask=self._ask, developer=self._developer
         )
         executer = Executer(channel, self._spec, jev)
         judge = Evaluator(self._config, self._judge)

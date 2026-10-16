@@ -209,8 +209,9 @@ def _run(fake: FakeGame, asked, developer_macros: tuple[DeveloperMacro, ...], je
 
     async def go():
         fake.push_reading()
+        developer = await load_developer_macros(developer_macros)
         runner = PlannerExecuterRunner(
-            config, ask=asked, judge=judge, jev=JevClient(post=jev or FakeJev()), developer_macros=developer_macros
+            config, ask=asked, judge=judge, jev=JevClient(post=jev or FakeJev()), developer=developer
         )
         return await runner.run_with_deadline(fake.channel, _scenario())
 
@@ -423,16 +424,22 @@ def _serve(monkeypatch, arch: QaArchSpec, fetch) -> tuple[list[dict], list]:
     return seen, fetched
 
 
-def test_the_service_reads_developer_macros_once_per_run_for_the_planner_executer(monkeypatch) -> None:
-    macros = (_macro("tap_start", TAP_START),)
+def test_the_service_reads_and_parses_developer_macros_once_per_run_for_the_planner_executer(
+    monkeypatch, caplog
+) -> None:
+    macros = (_macro("broken", BROKEN), _macro("tap_start", TAP_START))
 
     async def fetch(project_id, game_build_id):
         return macros
 
-    seen, fetched = _serve(monkeypatch, QaArchSpec(engine="planner_executer"), fetch)
+    with caplog.at_level(logging.WARNING):
+        seen, fetched = _serve(monkeypatch, QaArchSpec(engine="planner_executer"), fetch)
 
     assert fetched == [(5, RUN_BUILD)]
-    assert seen == [{"developer_macros": macros}, {"developer_macros": macros}]
+    # 두 시나리오가 같은 파싱 결과를 받고, 파싱되지 않는 macro 의 log 는 런에 한 줄이다.
+    first, second = (options["developer"] for options in seen)
+    assert first is second and list(first.usable) == ["tap_start"]
+    assert caplog.text.count("developer macro broken skipped") == 1
 
 
 def test_the_tool_loop_does_not_read_developer_macros(monkeypatch) -> None:
@@ -451,5 +458,5 @@ def test_the_run_goes_on_when_orchestration_fails(monkeypatch) -> None:
 
     seen, _ = _serve(monkeypatch, QaArchSpec(engine="planner_executer"), fetch)
 
-    assert seen == [{"developer_macros": ()}, {"developer_macros": ()}]
+    assert [options["developer"].usable for options in seen] == [{}, {}]
 
