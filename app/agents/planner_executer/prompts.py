@@ -114,19 +114,16 @@ def developer_macro_list(usable: Iterable[UsableDeveloperMacro]) -> str | None:
     """프로젝트의 developer macro: 호출 모양, 기준 build, docstring. 없으면 `None`.
 
     build 로 거르지 않으므로 이 런의 build 가 아닌 build 를 기준으로 쓴 macro 도 실린다. 그런
-    macro 에는 그 사실만 적는다 — 쓸지는 planner 가 화면과 docstring 으로 정한다.
+    macro 에는 그 사실만 적는다 — 쓸지는 planner 가 화면과 docstring 으로 정한다. 고르는 법과
+    reuse-first 규칙은 `qa_planner/v2/rules.md` 에 있고, 이 글은 그와 같은 말만 짧게 한다.
     """
     usable = list(usable)
     if not usable:
         return None
     lines = [
-        "Developer macros of this project, written by its developers. To let the executer use "
-        "some of them in this step, add a ```developer block after your python block, one per "
-        "line: the name alone for a macro without parameters, or a call with its arguments "
-        "written as macro expressions, such as `buy_item(find(name=\"Potion\"), 2)`. Each line "
-        "becomes one more action the decision model may pick, described by the macro's "
-        "docstring. A step may select only developer macros; its python block then holds just "
-        "`done()`."
+        "Developer macros of this project, written by its developers. Read them before you write "
+        "an action, and select the ones this step needs in the ```developer block, one per line "
+        "— the name alone, or a call with its arguments:"
     ]
     for item in usable:
         macro = item.macro

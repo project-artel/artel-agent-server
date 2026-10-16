@@ -18,6 +18,7 @@ from app.agents.planner_executer.developer_macros import (
 )
 from app.agents.planner_executer.macros import RegisteredMacros
 from app.agents.planner_executer.planner import Planner
+from app.agents.planner_executer.prompts import RULES_ROLE, prompt_text
 from app.agents.planner_executer.runner import PlannerExecuterRunner
 from app.agents.qa.arch import QaArchSpec
 from app.qa.jev import JevClient
@@ -237,9 +238,13 @@ def test_the_planner_sees_each_developer_macro_with_its_build() -> None:
 
     _run(_menu(), asked, macros)
 
-    (_system, user), = asked.calls
-    assert "add a ```developer block after your python block" in user
+    (system, user), = asked.calls
+    assert "select the ones this step needs in the ```developer block" in user
     assert "from macros import" not in user
+    # 기본 planner prompt 는 v2 이고, 목록과 같은 말을 하는 reuse-first 규칙을 담는다.
+    assert _config().prompt_version == "v2"
+    assert system == prompt_text(RULES_ROLE, "v2")
+    assert "- Reuse first. Before you write an action, read the developer macros the request lists." in system
     assert (
         "- `tap_start()` — written against build 1.2.0 (beta)\n"
         "    Press Start on the title screen.\n"
