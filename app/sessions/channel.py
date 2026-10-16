@@ -221,8 +221,28 @@ class ScenarioChannel:
         self._path_waiter: asyncio.Future[ScenarioPath] | None = None
         self._pending_path_id: str | None = None
         self._pending_facts_id: str | None = None
+        # 리소스 조회(ARTEL-1086)는 모델이 한 걸음에 여럿을 부를 수 있다. 답을 messageId 로 짝짓는다.
+        self._resource_waiters: dict[str, asyncio.Future[dict]] = {}
 
     # --- outbound -------------------------------------------------------------
+
+    async def query_resource(self, request: dict) -> dict | None:
+        """서비스 엔터티를 읽는다(ARTEL-1086, POC). `op`(find · get · related) · `kind` · `id` · `text` ·
+        `relation` · `limit` 을 그대로 넘긴다. 범위(프로젝트 · TR 버전)는 저쪽이 세션에서 정한다.
+
+        답은 `{items, note}`. 아무도 답하지 않으면 `None` — 조회는 곁가지라 턴을 죽이지 않는다.
+        """
+        loop = asyncio.get_running_loop()
+        message_id = str(uuid4())
+        waiter: asyncio.Future[dict] = loop.create_future()
+        self._resource_waiters[message_id] = waiter
+        try:
+            await self._send({"type": "resource_query", "messageId": message_id, **request})
+            return await asyncio.wait_for(waiter, timeout=self._search_timeout)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            self._resource_waiters.pop(message_id, None)
 
     async def submit_scenario(
         self, scenario: dict, absorbed_scenario_ids: list[int] | None = None
@@ -417,6 +437,11 @@ class ScenarioChannel:
                     and raw.get("correlationId") == self._pending_path_id
                 ):
                     waiter.set_result(ScenarioPath.model_validate(raw))
+                return True
+            if message_type == "resource_query_result":
+                waiter = self._resource_waiters.get(raw.get("correlationId") or "")
+                if waiter is not None and not waiter.done():
+                    waiter.set_result({"items": raw.get("items") or [], "note": raw.get("note")})
                 return True
             if message_type == "test_case_search_result":
                 if self._answers_pending(raw):

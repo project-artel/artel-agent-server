@@ -5,6 +5,12 @@ from collections.abc import Awaitable, Callable
 
 from pydantic import ValidationError
 
+from app.agents.planner_executer.developer_macros import (
+    NO_DEVELOPER_MACROS,
+    LoadedDeveloperMacros,
+    fetch_developer_macros,
+    load_developer_macros,
+)
 from app.agents.planner_executer.runner import PlannerExecuterRunner
 from app.agents.qa.arch import DEFAULT_ARCH, QaArchSpec
 from app.agents.qa.reset import DEFAULT_RESET_POLICY, ResetPolicy
@@ -35,10 +41,12 @@ logger = logging.getLogger(__name__)
 Send = Callable[[dict], Awaitable[None]]
 
 
-def _build_runner(*, config: RunConfig) -> QaRunner | PlannerExecuterRunner:
+def _build_runner(
+    *, config: RunConfig, developer: LoadedDeveloperMacros = NO_DEVELOPER_MACROS
+) -> QaRunner | PlannerExecuterRunner:
     """The runner for the engine the run asked for (`QaArchSpec.engine`)."""
     if config.arch.engine == "planner_executer":
-        return PlannerExecuterRunner(config)
+        return PlannerExecuterRunner(config, developer=developer)
     return QaRunner(config)
 
 
@@ -207,6 +215,16 @@ class QaExecutionService:
         """
         record = await self._load(session_id)
         total = len(record.scenarios)
+        # developer macro 는 planner–executer 엔진만 쓴다(ARTEL-1101). 시나리오마다가 아니라 런에
+        # 한 번 읽고 한 번 파싱한다 — 런 중에 누가 macro 를 고쳐도 한 런의 시나리오들은 같은 macro
+        # 를 보고, 파싱되지 않는 macro 의 log 도 런에 한 줄이다. 파싱은 channel 이 필요 없다
+        # (`DeveloperMacros` 는 developer macro 안에서만 import 를 푼다). 다른 엔진의 runner
+        # factory 에는 넘기지 않는다.
+        runner_options = {}
+        if record.run_config.arch.engine == "planner_executer":
+            runner_options["developer"] = await load_developer_macros(
+                await fetch_developer_macros(record.project_id, record.game_build_id)
+            )
 
         for index, item in enumerate(record.scenarios):
             # Every model call inherits this label; the contextvar rides the task.
@@ -263,7 +281,7 @@ class QaExecutionService:
                 cheats=record.cheats, behaviors=record.behaviors
             )
 
-            runner = self._runner_factory(config=record.run_config)
+            runner = self._runner_factory(config=record.run_config, **runner_options)
             try:
                 state, failure = await runner.run_with_deadline(channel, item.scenario)
             finally:

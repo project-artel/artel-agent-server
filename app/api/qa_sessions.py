@@ -36,9 +36,10 @@ class QaContext(BaseModel):
     game_instance_id: int
     qa_run_id: int | None = None
     scenarios: list[QaRunScenario] = []
-    # 런 시작에 씬별 capability·앵커 지식을 한 번 조회하는 데 쓰는 두 값 (ARTEL-612).
-    # 선택이다: 지금 orchestration 은 이 둘을 보내지 않고, 그때는 조회를 건너뛴 채
-    # 런이 그대로 돈다. 없는 것을 필수로 만들면 오늘의 호출자가 전부 422 가 된다.
+    # 런 시작에 씬별 capability·앵커 지식(ARTEL-612)과 developer macro(ARTEL-1101)를
+    # 조회하는 데 쓰는 두 값. orchestration 은 둘을 싣는다(`WebSocketQaAgentAdapter`).
+    # 선택으로 두는 것은 둘이 빠진 호출자도 422 없이 열리게 하기 위해서다 — 그때는 조회를
+    # 건너뛴 채 런이 그대로 돈다.
     project_id: int | None = None
     game_build_id: int | None = None
     # 이 run 이 부를 수 있는 cheat 와 behavior 의 catalog entry (ARTEL-1054). orchestration 이
