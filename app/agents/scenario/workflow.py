@@ -434,8 +434,12 @@ def _answer(
     reviewed: ReviewedCases | None = None,
     changes: list[ScenarioChange] | None = None,
 ) -> ScenarioAgentResult:
-    """세 칸 답을 만든다. `message` 는 세 칸을 이은 글 — Redis 대화 기록과 구형 화면이
-    그것만 읽으므로, 물은 것까지 들어 있어야 다음 턴이 "그거"를 풀 수 있다.
+    """세 칸 답을 만든다. 질문은 답의 세 번째 칸([AgentReply.asks])에 담긴다(ARTEL-1116).
+
+    `message` 는 세 칸을 이은 글 — Redis 대화 기록과 구형 화면이 그것만 읽으므로, 물은
+    것까지 들어 있어야 다음 턴이 "그거"를 풀 수 있다. 물은 줄에는 `질문:` 을 붙인다 —
+    다음 턴의 모델이 같은 것을 몇 번 물었는지 대화 기록에서 셀 수 있어야, 두 번 넘게
+    되묻지 않는다.
 
     표식(ARTEL-931)은 여기서 한 번에 검사한다. 화면이 읽는 칸(결과·설명·질문 문장)에는
     표식을 남기고 `refs` 로 이름을 붙이며, 사람이 읽는 글(`message`·보기)에는 이름을 쓴다.
@@ -459,16 +463,16 @@ def _answer(
     ]
     changes = changes or []
     listed = "\n".join(f"- {change.title}" for change in changes)
+    asked_label = "질문" if request.locale.value == "ko" else "Question"
     message = "\n".join(
         _spoken(part, found, prefix=True)
-        for part in (result, listed, detail, *(q.text for q in asked)) if part
+        for part in (result, listed, detail, *(f"{asked_label}: {q.text}" for q in asked)) if part
     )
     return ScenarioAgentResult(
         message=message,
         scenarios=[],
         reviewed=reviewed,
-        reply=AgentReply(result=result, detail=detail, changes=changes),
-        questions=asked,
+        reply=AgentReply(result=result, detail=detail, changes=changes, asks=asked),
         refs=list(found.values()),
     )
 

@@ -272,7 +272,7 @@ def test_workflow_question_returns_early(monkeypatch) -> None:
         _request(user_input="애매한 요청", test_case_list=_case_list()), _CTX, channel,
     ))
 
-    assert [q.text for q in out.questions] == ["엔딩 전이 보스 포함인가요?"]
+    assert [q.text for q in out.reply.asks] == ["엔딩 전이 보스 포함인가요?"]
     assert channel.submitted == [] and not calls["c"]
 
 
@@ -623,7 +623,7 @@ def test_modify_workflow_asks_when_the_target_is_unclear(monkeypatch) -> None:
         _CTX, channel,
     ))
 
-    assert [q.text for q in out.questions] == ["어느 시나리오를 고칠까요?"]
+    assert [q.text for q in out.reply.asks] == ["어느 시나리오를 고칠까요?"]
     assert channel.submitted == []
 
 
@@ -647,8 +647,8 @@ def test_modify_workflow_refuses_a_ghost_scenario_id(monkeypatch) -> None:
     assert channel.submitted == []
     # 제목으로 가리키고 되묻는다. **번호는 붙이지 않는다** — 내부 id 는 사용자에게 안 나간다.
     assert "그대로 두었어요" in out.reply.result
-    assert any("상점 여정" in o.label for o in out.questions[0].options)
-    shown = out.message + "".join(o.label for q in out.questions for o in q.options)
+    assert any("상점 여정" in o.label for o in out.reply.asks[0].options)
+    shown = out.message + "".join(o.label for q in out.reply.asks for o in q.options)
     assert "id" not in shown and "7" not in shown
 
 
