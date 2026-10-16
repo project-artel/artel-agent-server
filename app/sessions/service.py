@@ -173,6 +173,7 @@ class SessionService:
             scene_edges=record.scene_edges,
             starting_values=record.starting_values,
             history=self._replay_messages(record),
+            history_truncated=record.history_dropped > 0,
             draft=draft,
             current_scenarios=record.current_scenarios,
             model=record.model,
@@ -196,5 +197,6 @@ class SessionService:
             )
         )
         if len(record.history) > self._history_max_messages:
+            record.history_dropped += len(record.history) - self._history_max_messages
             record.history = record.history[-self._history_max_messages :]
         return result

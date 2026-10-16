@@ -233,6 +233,49 @@ def _render_current(request: ScenarioAgentRequest) -> str:
 # 다음 런이 같은 prefix 를 0.1배로 되읽는다.
 
 
+def _history_limits() -> tuple[int, int]:
+    """(대화 전체 글자 수 상한, 메시지 하나 글자 수 상한). 근거는 `Settings` 에 있다."""
+    settings = get_settings()
+    return settings.scenario_history_max_chars, settings.scenario_history_message_max_chars
+
+
+def _conversation(request: ScenarioAgentRequest) -> str:
+    """B·E 가 읽는 과거 대화 (ARTEL-942). 대화가 없으면 빈 글 — 칸 자체를 싣지 않는다.
+
+    **tail 맨 앞에, 이번 요청보다 먼저** 둔다. prefix(규칙·게임 모양·TC 전량)는 대화가 있든
+    없든 같아야 캐시가 프로젝트 단위로 나눠 쓰인다. 그리고 지난 턴의 대화가 이번 턴 tail 의
+    앞부분과 같으므로, 그 부분까지 캐시에서 읽힌다(POC: 같은 대화를 다시 보내면 비용 절반).
+
+    크기는 대화 수(세션 창)와 글자 수 둘 다로 묶는다. 넘치면 오래된 것부터 빠지고, 빠졌다는
+    것을 적는다 — 모델이 "원래 없던 말" 과 "기억 밖으로 밀려난 말" 을 가를 수 있게. 압축은
+    하지 않는다: 요약 호출이 그 자체로 대화 전체를 읽는 값이고, 무엇을 버렸는지 통제가 안 된다.
+    """
+    if not request.history:
+        return ""
+    budget, per_message = _history_limits()
+    kept: list[str] = []
+    used = 0
+    for message in reversed(request.history):
+        text = str(message.content or "").strip()
+        if len(text) > per_message:
+            text = text[:per_message] + " …(이하 생략)"
+        who = "사용자" if isinstance(message, HumanMessage) else "Artel"
+        line = f"{who}: " + text.replace("\n", "\n  ")
+        # 가장 최근 것은 늘 남긴다 — "방금" 이 가리키는 곳이 사라지면 대화가 끊긴다.
+        if kept and used + len(line) > budget:
+            break
+        kept.append(line)
+        used += len(line)
+    kept.reverse()
+    cut = request.history_truncated or len(kept) < len(request.history)
+    note = (
+        "(Earlier turns of this conversation were cut off — something said before this"
+        " may not be here.)\n"
+        if cut else ""
+    )
+    return "=== CONVERSATION SO FAR (oldest first) ===\n" + note + "\n".join(kept) + "\n\n"
+
+
 def _modify_prompt(request: ScenarioAgentRequest, feedback: str = "") -> tuple[str, str]:
     shape = render_game_shape(
         request.test_case_list, request.entry_scene, request.scene_edges, request.starting_values
@@ -244,7 +287,8 @@ def _modify_prompt(request: ScenarioAgentRequest, feedback: str = "") -> tuple[s
     )
     feedback_tail = f"\n\n=== REVIEWER FEEDBACK (fix exactly this) ===\n{feedback}" if feedback else ""
     tail = (
-        f"=== CURRENT SCENARIOS ===\n{_render_current(request)}\n\n"
+        _conversation(request)
+        + f"=== CURRENT SCENARIOS ===\n{_render_current(request)}\n\n"
         f"=== USER REQUEST ===\n{request.user_input}{feedback_tail}\n\nAnswer via the schema."
     )
     return prefix, tail
@@ -459,7 +503,8 @@ def _grouping_prompt(
         else ""
     )
     tail = (
-        f"=== EXISTING SCENARIOS (this run) ===\n{_existing_scenarios(request)}\n\n"
+        _conversation(request)
+        + f"=== EXISTING SCENARIOS (this run) ===\n{_existing_scenarios(request)}\n\n"
         f"=== USER REQUEST ===\n{request.user_input}{findings_tail}\n\nAnswer via the schema."
     )
     return prefix, tail

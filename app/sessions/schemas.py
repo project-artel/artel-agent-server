@@ -42,6 +42,8 @@ class SessionRecord(BaseModel):
     starting_values: dict[str, str] = Field(default_factory=dict)
     # Full conversation turns; windowed for prompt reconstruction by the service.
     history: list[HistoryTurn] = Field(default_factory=list)
+    # 창을 넘어 잘라 낸 메시지 수(ARTEL-942). 0 이 아니면 이 세션의 앞 대화가 기억에 없다.
+    history_dropped: int = 0
     # First user input, consumed when the WS connects to run the first turn.
     pending_user_input: str | None = None
     model: LLMModel = DEFAULT_MODEL
