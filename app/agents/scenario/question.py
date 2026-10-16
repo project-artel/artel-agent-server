@@ -74,10 +74,12 @@ _SYSTEM_KO = """너는 게임 QA 서비스 Artel 의 도우미다. 사용자의 
 
 ## 답하는 법
 - 추측하지 말고 도구로 확인한 것만 말한다. 찾지 못했으면 찾지 못했다고 말한다.
-- 사용자가 말하는 "TC 3" 같은 번호는 화면의 시나리오 안 순번이지 케이스 id 가 아니다. 그 번호로 get 하지 않는다.
-  시나리오를 get 하면 스텝마다 `tc_no`(화면의 TC 번호)와 `case_ref` 가 있다 — 어느 시나리오인지 알면 그것으로 짚고,
-  모르면 내용으로 찾거나 어느 시나리오인지 되묻는다.
-- id 는 도구 결과에서 얻은 것만 쓴다.
+- **사용자가 말하는 번호("TC 3", "97번 TC", "3번째 거")는 절대 DB id 가 아니다.** 뜻은 둘 중 하나다.
+  1. 시나리오 안 몇 번째 TC — 시나리오를 get 하면 스텝마다 `tc_no`(화면의 TC 번호)와 `case` 가 있다.
+  2. 이 대화에서 앞서 보인 목록 · 표의 몇 번째.
+  어느 쪽인지 알면 그것으로 짚고, 모르면 되묻는다. 그런 번호가 없으면 "N번째 TC 는 없다" 고 말하고 시나리오별 TC 개수를 알려 준다.
+  답에 "TC 97" 처럼 번호를 케이스 이름처럼 쓰지 않는다.
+- id 는 도구 결과에서 얻은 것만 쓴다. 결과에 없던 id 로 get 하면 도구가 거절한다.
 - 사용자가 TC 번호를 몰라도 된다 — 말한 내용으로 find_resource 를 먼저 부른다.
 - "지금까지 · 전체 중에서" 처럼 여러 실행을 견주는 질문은 이 테스트 런이 아니라 find_resource(qa_run) 로 프로젝트 전체를 본다.
   qa_run 결과의 `failed_verifications` 가 실패한 검증 수다.
@@ -104,6 +106,7 @@ async def run_question_workflow(
     channel: ScenarioChannel,
 ) -> ScenarioAgentResult:
     found: dict[tuple[str, int], Ref] = {}
+    seen: set[int] = set()
     calls: list[str] = []
 
     async def ask(payload: dict) -> str:
@@ -114,6 +117,7 @@ async def run_question_workflow(
         if answer is None:
             return json.dumps({"note": "조회가 시간 안에 답하지 않았다."}, ensure_ascii=False)
         _remember(found, answer.get("items", []))
+        _collect_ids(seen, answer.get("items", []))
         return json.dumps(answer, ensure_ascii=False, default=str)
 
     @tool
@@ -126,6 +130,8 @@ async def run_question_workflow(
     async def get_resource(kind: str, id: int | None = None) -> str:  # noqa: A002 - the contract field is `id`
         """Read one resource in detail. kind: case | scenario | test_run | qa_run | qa_try | build.
         Omit id with kind=test_run to read the test run this conversation belongs to."""
+        if id is not None and id not in seen:
+            return _UNSEEN_ID
         payload: dict = {"op": "get", "kind": kind}
         if id is not None:
             payload["id"] = id
@@ -134,6 +140,8 @@ async def run_question_workflow(
     @tool
     async def related_resources(kind: str, id: int, relation: str, limit: int = 10) -> str:  # noqa: A002
         """Follow a relation listed in a result's `relations`."""
+        if id not in seen:
+            return _UNSEEN_ID
         return await ask({"op": "related", "kind": kind, "id": id, "relation": relation, "limit": limit})
 
     from app.agents.scenario.agent import limit_middleware
@@ -198,6 +206,30 @@ def _remember(found: dict[tuple[str, int], Ref], item: object) -> None:
     for value in item.values():
         if isinstance(value, (dict, list)):
             _remember(found, value)
+
+
+# 사용자가 말한 번호는 DB id 가 아니다. 그 번호로 바로 읽으면 엉뚱한 케이스가 나오거나 "없다" 고 잘못 답한다.
+_UNSEEN_ID = json.dumps({"note": (
+    "이 id 는 앞선 도구 결과에 없던 번호라 읽지 않았다. 사용자가 말한 번호는 DB id 가 아니다 — 시나리오 안 몇 번째 TC"
+    "(시나리오 get 의 `tc_no`)나 이 대화에서 앞서 보인 목록의 몇 번째다. find_resource 나 시나리오 get 으로 먼저 짚어라."
+)}, ensure_ascii=False)
+
+
+def _collect_ids(seen: set[int], item: object) -> None:
+    """도구 결과에 나온 id 를 모은다. get · related 는 이 안의 id 만 받는다."""
+    if isinstance(item, list):
+        for each in item:
+            _collect_ids(seen, each)
+        return
+    if not isinstance(item, dict):
+        return
+    for key, value in item.items():
+        if isinstance(value, (dict, list)):
+            _collect_ids(seen, value)
+        elif isinstance(value, int) and not isinstance(value, bool) and (key == "id" or key.endswith("_id")):
+            seen.add(value)
+        elif isinstance(value, str) and (match := _MARKER.fullmatch(value)) is not None:
+            seen.add(int(match.group(2)))
 
 
 def _MARKER_KEY(key: tuple[str, int]) -> str:  # noqa: N802 - reads as the marker it builds

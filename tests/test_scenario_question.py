@@ -54,6 +54,18 @@ def test_nested_refs_carry_names_and_spoken_prefixes_are_dropped() -> None:
     assert question._checked("@TC [[tc:359]] 와 @QA [[qa:17]]", found) == "[[tc:359]] 와 [[qa:17]]"
 
 
+def test_only_ids_a_tool_returned_can_be_read() -> None:
+    # 사용자가 말한 "97번 TC" 의 97 은 DB id 가 아니다. 도구 결과에서 본 id 만 get · related 에 쓸 수 있다.
+    seen: set[int] = set()
+    question._collect_ids(seen, [{"id": 411, "ref": "[[tc:411]]", "fields": {
+        "tries": [{"qa_try_id": 52, "attempt": 3}],
+        "steps": [{"tc_no": 97, "case": {"ref": "[[tc:359]]", "label": "x"}}],
+    }}])
+
+    assert seen == {411, 52, 359}
+    assert 97 not in seen
+
+
 def test_only_mixed_looking_messages_are_split() -> None:
     from app.agents.scenario.requests import looks_multiple
 
