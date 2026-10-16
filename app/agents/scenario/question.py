@@ -54,8 +54,10 @@ class QuestionAnswer(BaseModel):
 _SYSTEM_KO = """너는 게임 QA 서비스 Artel 의 도우미다. 사용자의 질문에 서비스 데이터를 읽어 답한다.
 
 ## 도구
-- find_resource(kind, text): 말로 찾는다. kind = case · scenario · test_run · qa_run · build.
+- find_resource(kind, text): 말로 찾는다. kind = case · scenario · test_run · qa_run · build · issue.
+  case 는 뜻으로도 찾으니 사용자가 한 말을 그대로 넣어도 된다.
 - get_resource(kind, id): 하나를 자세히 읽는다. kind = case · scenario · test_run · qa_run · qa_try · build.
+  "이 테스트 런" 은 get_resource(kind="test_run") 에 id 를 주지 않으면 읽힌다.
 - related_resources(kind, id, relation): 관계를 따라간다. 결과의 `relations` 에 있는 이름만 쓴다.
   - case: versions(빌드별 내용 · 판정 · 이 TR 버전과 다른 칸), verdicts(QA 판정 · 실패 이유 · 앞서 막힌 스텝), scenarios
   - scenario: cases, test_runs / test_run: scenarios, qa_runs / qa_run: tries / qa_try: issues
@@ -67,8 +69,15 @@ _SYSTEM_KO = """너는 게임 QA 서비스 Artel 의 도우미다. 사용자의 
 
 ## 답하는 법
 - 추측하지 말고 도구로 확인한 것만 말한다. 찾지 못했으면 찾지 못했다고 말한다.
-- 번호가 있으면(예: "TC 359", "QA 17") 찾지 말고 get_resource 로 바로 읽는다.
+- 사용자가 말하는 "TC 3" 같은 번호는 화면의 시나리오 안 순번이지 케이스 id 가 아니다. 그 번호로 get 하지 않는다.
+  시나리오를 get 하면 스텝마다 `tc_no`(화면의 TC 번호)와 `case_ref` 가 있다 — 어느 시나리오인지 알면 그것으로 짚고,
+  모르면 내용으로 찾거나 어느 시나리오인지 되묻는다.
+- id 는 도구 결과에서 얻은 것만 쓴다.
 - 사용자가 TC 번호를 몰라도 된다 — 말한 내용으로 find_resource 를 먼저 부른다.
+- "지금까지 · 전체 중에서" 처럼 여러 실행을 견주는 질문은 이 테스트 런이 아니라 find_resource(qa_run) 로 프로젝트 전체를 본다.
+  qa_run 결과의 `failed_verifications` 가 실패한 검증 수다.
+- 케이스에 `version_note` 가 있으면 그 말대로 답한다(어느 버전에도 없는 케이스를 "이전 버전" 이라 하지 않는다).
+- 최신 빌드는 `latest_game_version: true` 인 것이다. editor 빌드는 게임 버전이 아니다.
 - find 결과가 여럿이면 질문에 맞는 것을 모두 확인한다. 하나만 보고 "없다" 고 단정하지 않는다.
 - 실패 이유를 물으면 verdicts 를 읽는다. `earlier_failed_steps` 가 있으면 앞 스텝이 막혀 확인 자체를 못 한 것일 수 있다
   — 게임 결함인지 사전조건이 안 선 것인지를 나눠 말한다.
@@ -101,13 +110,17 @@ async def run_question_workflow(
 
     @tool
     async def find_resource(kind: str, text: str = "", limit: int = 10) -> str:
-        """Find resources by words. kind: case | scenario | test_run | qa_run | build."""
+        """Find resources by words. kind: case | scenario | test_run | qa_run | build | issue."""
         return await ask({"op": "find", "kind": kind, "text": text, "limit": limit})
 
     @tool
-    async def get_resource(kind: str, id: int) -> str:  # noqa: A002 - the contract field is `id`
-        """Read one resource in detail. kind: case | scenario | test_run | qa_run | qa_try | build."""
-        return await ask({"op": "get", "kind": kind, "id": id})
+    async def get_resource(kind: str, id: int | None = None) -> str:  # noqa: A002 - the contract field is `id`
+        """Read one resource in detail. kind: case | scenario | test_run | qa_run | qa_try | build.
+        Omit id with kind=test_run to read the test run this conversation belongs to."""
+        payload: dict = {"op": "get", "kind": kind}
+        if id is not None:
+            payload["id"] = id
+        return await ask(payload)
 
     @tool
     async def related_resources(kind: str, id: int, relation: str, limit: int = 10) -> str:  # noqa: A002
