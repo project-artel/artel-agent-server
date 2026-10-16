@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 
 from pydantic import ValidationError
 
+from app.agents.planner_executer.runner import PlannerExecuterRunner
 from app.agents.qa.arch import DEFAULT_ARCH, QaArchSpec
 from app.agents.qa.reset import DEFAULT_RESET_POLICY, ResetPolicy
 from app.agents.qa.runner import QaRunner
@@ -31,6 +32,13 @@ from app.sessions.store import SessionExpired
 logger = logging.getLogger(__name__)
 
 Send = Callable[[dict], Awaitable[None]]
+
+
+def _build_runner(*, config: RunConfig) -> QaRunner | PlannerExecuterRunner:
+    """The runner for the engine the run asked for (`QaArchSpec.engine`)."""
+    if config.arch.engine == "planner_executer":
+        return PlannerExecuterRunner(config)
+    return QaRunner(config)
 
 
 def _build_adjudicator(run_config: RunConfig) -> ScreenSelectorAdjudicator:
@@ -70,13 +78,13 @@ class QaExecutionService:
     def __init__(
         self,
         store: QaSessionStore,
-        runner_factory: Callable[..., QaRunner] | None = None,
+        runner_factory: Callable[..., QaRunner | PlannerExecuterRunner] | None = None,
         reset_policy: ResetPolicy | None = None,
         adjudicator_factory: Callable[[RunConfig], ScreenSelectorAdjudicator] | None = None,
         namer_factory: Callable[[RunConfig], ScreenNamer] | None = None,
     ) -> None:
         self._store = store
-        self._runner_factory = runner_factory or (lambda *, config: QaRunner(config))
+        self._runner_factory = runner_factory or _build_runner
         # 시나리오 사이 게임 초기화 정책(seam). 기본은 전체 초기화; 나중에 최소-초기화로 교체.
         self._reset_policy = reset_policy or DEFAULT_RESET_POLICY
         # 화면 제안을 판정하는 자리(seam, ARTEL-656). 채널과 나란히 두고 함께 버린다 —

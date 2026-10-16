@@ -321,7 +321,8 @@ def _questions(asks: list[Ask]) -> list[ScenarioQuestion]:
 
 
 # `[[tc:153]]` / `[[ts:615]]` — 모델과 코드가 TC·TS 를 가리키는 표식(ARTEL-931).
-_MARKER = re.compile(r"\[\[(tc|ts):(\d+)\]\]")
+# 아직 승인되지 않은 draft 는 음수 번호(`[[ts:-1]]`)로 온다(ARTEL-1078). 그 번호도 표식이다.
+_MARKER = re.compile(r"\[\[(tc|ts):(-?\d+)\]\]")
 
 
 def _tc(case_id: int) -> str:

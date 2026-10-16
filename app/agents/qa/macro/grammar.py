@@ -138,6 +138,70 @@ def operator_names(operators: tuple[MacroOperator, ...]) -> str:
     return ", ".join(operator.value for operator in operators)
 
 
+# --- 숫자를 돌려주는 `def` 와 산술식 (ARTEL-1066) ---------------------------------
+
+
+class MacroArithmetic(StrEnum):
+    """산술식의 연산 여섯. 이항 연산 넷과 인자를 여럿 받는 `min`·`max` 둘이다.
+
+    단항 `-` 는 따로 두지 않는다. parser 가 `-x` 를 `0 - x` 로 읽으므로 `subtract` 행이 같이
+    받는다. `//`·`%`·`**` 는 없다 — 거절 문장이 이 여섯을 이름으로 댄다.
+    """
+
+    add = "+"
+    subtract = "-"
+    multiply = "*"
+    divide = "/"
+    minimum = "min"
+    maximum = "max"
+
+
+# 이름으로 부르는 둘. `min(a, b, ...)` 와 `max(a, b, ...)` 이고 인자가 둘 이상이다.
+ARITHMETIC_FUNCTIONS: dict[str, MacroArithmetic] = {
+    MacroArithmetic.minimum.value: MacroArithmetic.minimum,
+    MacroArithmetic.maximum.value: MacroArithmetic.maximum,
+}
+
+# 비교 표와 같은 모양의 표. 산술은 number 에만 된다. 나머지 여섯 행이 빈 것은 빠뜨린 것이
+# 아니라 거절이다 — 문자열 잇기·vector 연산은 이번에 열지 않는다(ARTEL-1066 Non-goals).
+_ALLOWED_ARITHMETIC: dict[MacroShape, tuple[MacroArithmetic, ...]] = {
+    MacroShape.number: tuple(MacroArithmetic),
+    MacroShape.string: (),
+    MacroShape.bool_: (),
+    MacroShape.vector2: (),
+    MacroShape.vector3: (),
+    MacroShape.object_: (),
+    MacroShape.other: (),
+}
+
+ARITHMETIC_TABLE: dict[tuple[MacroShape, MacroArithmetic], bool] = {
+    (shape, arithmetic): arithmetic in allowed
+    for shape, allowed in _ALLOWED_ARITHMETIC.items()
+    for arithmetic in MacroArithmetic
+}
+
+if len(ARITHMETIC_TABLE) != len(MacroShape) * len(MacroArithmetic):
+    # `COMPARISON_TABLE` 과 같은 이유다. 모양을 하나 더하는 사람이 이 표를 안 고쳤다는 것을
+    # import 시점에 알려 준다.
+    raise RuntimeError(
+        "ARITHMETIC_TABLE is missing a row: every MacroShape needs an entry in "
+        "_ALLOWED_ARITHMETIC, with one cell per MacroArithmetic."
+    )
+
+
+def arithmetic_allowed(shape: MacroShape, arithmetic: MacroArithmetic) -> bool:
+    return ARITHMETIC_TABLE[(shape, arithmetic)]
+
+
+# `def` 줄의 반환 타입 중 숫자 둘. `-> None` 은 동작하고 `-> bool` 은 predicate 이며, 이 둘이
+# 숫자를 돌려주는 `def` 다. 숫자 `def` 는 predicate 와 같은 몸통 규칙을 받는다 — 대입·`if`·
+# `return` 셋뿐이고 동기로 평가된다.
+NUMBER_RETURNS: dict[str, MacroType] = {
+    MacroType.int_.value: MacroType.int_,
+    MacroType.float_.value: MacroType.float_,
+}
+
+
 # --- tool 열넷 -----------------------------------------------------------------
 
 
@@ -324,6 +388,9 @@ class ReaderSpec:
     takes_target: bool = False
     takes_key: bool = False
     shape: MacroShape | None = None
+    # target 을 빼고 key 하나만 받아도 되는가. `at_start` 하나다 — target 이 있으면
+    # `member` 처럼, 없으면 `static` 처럼 읽는다.
+    target_optional: bool = False
 
 
 READERS: tuple[ReaderSpec, ...] = (
@@ -341,7 +408,22 @@ READERS: tuple[ReaderSpec, ...] = (
     ReaderSpec("absent", takes_target=True, shape=MacroShape.bool_),
 )
 
-READERS_BY_NAME: dict[str, ReaderSpec] = {spec.name: spec for spec in READERS}
+# 지금 step 이 시작될 때의 값을 읽는 reader. `at_start(target, "Type.member")` 는
+# `member` 처럼, `at_start("Type.member")` 는 `static` 처럼 읽는다. 값은 host 가 step 이
+# 시작될 때 잡아 둔 `pulse` 에서 오고, 그것을 들지 않는 host 에서는 `AT_START_UNAVAILABLE`
+# 로 멈춘다(`runner.StepStartValues`).
+#
+# `READERS` 에 넣지 않는다. `READER_NAMES` 와 `READER_NAME_LIST` 는 QA agent 의 macro skill
+# (`reference.py`)과 거절 문장에 그대로 실리는데, QA 런의 host 는 step 시작 값을 들지 않아
+# 쓰는 쪽이 아직 없다. 쓰는 쪽이 생기면 그때 `READERS` 로 옮기고 skill 을 고친다.
+AT_START = "at_start"
+STEP_START_READERS: tuple[ReaderSpec, ...] = (
+    ReaderSpec(AT_START, takes_target=True, takes_key=True, target_optional=True),
+)
+
+READERS_BY_NAME: dict[str, ReaderSpec] = {
+    spec.name: spec for spec in READERS + STEP_START_READERS
+}
 READER_NAMES: tuple[str, ...] = tuple(spec.name for spec in READERS)
 READER_NAME_LIST = ", ".join(f"{name}()" for name in READER_NAMES)
 

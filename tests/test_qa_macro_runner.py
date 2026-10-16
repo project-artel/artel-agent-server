@@ -2169,3 +2169,451 @@ def test_jev_unavailable_on_ask_stops_with_jev_failed() -> None:
     assert result.failure.payload["reason"] == "no API key"
     assert str(result.stopped_at) == "m step 1 of 2"
     assert host.sent == []
+
+
+# --- 숫자 `def`·산술식·`at_start` (ARTEL-1066) ------------------------------------
+#
+# planner–executer 엔진의 executer 가 `progress`·`risk`·`setbacks` 를 매 턴 부른다. 그 셋을
+# 본뜬 step module 하나로 조건 자리 넷과 `evaluate_number` 를 잰다.
+
+import copy  # noqa: E402
+
+from app.agents.qa.macro.errors import (  # noqa: E402
+    ARITHMETIC_REJECTED,
+    AT_START_UNAVAILABLE,
+    DIVIDED_BY_ZERO,
+    MacroFailure,
+)
+from app.agents.qa.macro.runner import StepStartValues, evaluate_number  # noqa: E402
+
+PROGRESS_MODULE = '''
+def step() -> None:
+    if progress() >= 0.5:
+        flag("half way")
+    require(setbacks() == 0, "The player lost a life; replan.")
+
+def progress() -> float:
+    enemy: object = find(name="Enemy")
+    hp: float = member(enemy, "Enemy.Hp")
+    start: float = at_start(enemy, "Enemy.Hp")
+    if start <= 0:
+        return 1
+    return max(0, min(1, (start - hp) / start))
+
+def risk(weight: int = 1) -> float:
+    return weight * (1 - progress())
+
+def setbacks() -> int:
+    lost: int = at_start("Game.Lives") - static("Game.Lives")
+    return max(lost, 0)
+
+def ratio(a: float, b: float) -> float:
+    return a / b
+
+def plain(weight: float = 2.5) -> float:
+    return -weight + 2 * 3 - max(1, 2, 3)
+'''
+
+
+def fight_scene(hp, lives) -> SceneMemory:
+    return scene_with(
+        enemy_with_hp(hp),
+        statics=[{"declaring": "Game.Game", "member": "Lives", "value": lives}],
+    )
+
+
+class StepStartHost(FakeHost):
+    """step 이 시작될 때의 `pulse` 를 들고 있는 host. planner–executer 엔진이 이 모양이다."""
+
+    def __init__(self, memory: SceneMemory, at_start: SceneMemory | None) -> None:
+        super().__init__(memory)
+        self.at_start = None if at_start is None else copy.deepcopy(at_start.pulse)
+
+    def pulse_at_step_start(self):
+        return self.at_start
+
+
+def progress_module() -> MacroDefinition:
+    return macro_definition_from_source("step", PROGRESS_MODULE)
+
+
+def test_a_host_that_keeps_step_start_values_is_a_step_start_values() -> None:
+    assert isinstance(StepStartHost(fight_scene(40, 3), fight_scene(80, 3)), StepStartValues)
+    assert not isinstance(FakeHost(fight_scene(40, 3)), StepStartValues)
+
+
+def test_evaluate_number_returns_progress_from_the_step_start_value() -> None:
+    host = StepStartHost(fight_scene(20, 3), at_start=fight_scene(80, 3))
+
+    assert evaluate_number(host, progress_module(), "progress") == 0.75
+    assert evaluate_number(host, progress_module(), "setbacks") == 0
+
+
+def test_evaluate_number_passes_arguments_and_nested_number_defs() -> None:
+    host = StepStartHost(fight_scene(60, 3), at_start=fight_scene(80, 3))
+
+    assert evaluate_number(host, progress_module(), "risk") == 0.75
+    assert evaluate_number(host, progress_module(), "risk", {"weight": 2}) == 1.5
+    assert evaluate_number(host, progress_module(), "ratio", {"a": 3, "b": 4}) == 0.75
+
+
+def test_evaluate_number_does_unary_minus_and_precedence_like_python() -> None:
+    host = FakeHost(fight_scene(1, 1))
+
+    assert evaluate_number(host, progress_module(), "plain") == -2.5 + 6 - 3
+    assert evaluate_number(host, progress_module(), "plain", {"weight": 1}) == 2
+
+
+def test_min_and_max_clamp_the_progress() -> None:
+    # 시작보다 hp 가 많아지면 0 아래로, 0 이 되면 1 위로 가지 않는다.
+    healed = StepStartHost(fight_scene(100, 3), at_start=fight_scene(80, 3))
+    dead = StepStartHost(fight_scene(-10, 3), at_start=fight_scene(80, 3))
+
+    assert evaluate_number(healed, progress_module(), "progress") == 0
+    assert evaluate_number(dead, progress_module(), "progress") == 1
+
+
+def test_setbacks_counts_lives_lost_since_the_step_began() -> None:
+    host = StepStartHost(fight_scene(80, 1), at_start=fight_scene(80, 3))
+
+    assert evaluate_number(host, progress_module(), "setbacks") == 2
+    assert isinstance(evaluate_number(host, progress_module(), "setbacks"), int)
+
+
+def test_evaluate_number_refuses_a_name_that_is_not_a_number_def() -> None:
+    host = FakeHost(fight_scene(1, 1))
+
+    with pytest.raises(ValueError):
+        evaluate_number(host, progress_module(), "step")
+    with pytest.raises(ValueError):
+        evaluate_number(host, progress_module(), "ratio", {"a": 1})
+
+
+def test_division_by_zero_stops_with_its_own_code() -> None:
+    host = FakeHost(fight_scene(1, 1))
+
+    with pytest.raises(MacroFailure) as failed:
+        evaluate_number(host, progress_module(), "ratio", {"a": 1, "b": 0})
+
+    assert failed.value.code == DIVIDED_BY_ZERO
+    assert failed.value.payload["number_def"] == "ratio step 1"
+
+
+def test_at_start_without_host_support_stops_with_its_own_code() -> None:
+    host = FakeHost(fight_scene(20, 3))
+
+    with pytest.raises(MacroFailure) as failed:
+        evaluate_number(host, progress_module(), "progress")
+
+    assert failed.value.code == AT_START_UNAVAILABLE
+    assert "keeps no such values" in failed.value.reason
+    assert failed.value.payload["number_def"] == "progress step 3"
+
+
+def test_at_start_with_no_step_begun_yet_stops_with_the_same_code() -> None:
+    host = StepStartHost(fight_scene(20, 3), at_start=None)
+
+    with pytest.raises(MacroFailure) as failed:
+        evaluate_number(host, progress_module(), "setbacks")
+
+    assert failed.value.code == AT_START_UNAVAILABLE
+
+
+def test_at_start_of_an_object_missing_at_step_start_stops() -> None:
+    host = StepStartHost(fight_scene(20, 3), at_start=scene_with(statics=[]))
+
+    with pytest.raises(MacroFailure) as failed:
+        evaluate_number(host, progress_module(), "progress")
+
+    assert failed.value.code == AT_START_UNAVAILABLE
+    assert "was not in the pulse when this step began" in failed.value.reason
+
+
+def test_at_start_of_a_member_missing_at_step_start_names_what_was_there() -> None:
+    host = StepStartHost(fight_scene(20, 3), at_start=scene_with(statics=[]))
+
+    with pytest.raises(MacroFailure) as failed:
+        evaluate_number(host, progress_module(), "setbacks")
+
+    assert failed.value.code == AT_START_UNAVAILABLE
+    assert failed.value.payload["available"] == []
+
+
+def test_at_start_reads_an_object_that_is_gone_now() -> None:
+    """step 이 시작될 때 있던 object 는 지금 사라졌어도 그때의 값을 읽는다."""
+    source = (
+        "def m() -> None:\n"
+        '    require(at_start(selector("Root[0]/Enemy[7]"), "Enemy.Hp") == 80, "x")\n'
+    )
+    host = StepStartHost(scene_with(), at_start=fight_scene(80, 3))
+
+    assert drive(host, source, "m", {}).passed
+
+
+def test_a_reader_that_arrives_as_text_is_refused_in_arithmetic() -> None:
+    source = (
+        "def m() -> None:\n"
+        '    require(p() > 0, "x")\n\n'
+        "def p() -> float:\n"
+        '    return static("Game.Name") * 2\n'
+    )
+    host = FakeHost(
+        scene_with(statics=[{"declaring": "Game.Game", "member": "Name", "value": "hero"}])
+    )
+    result = drive(host, source, "m", {})
+
+    assert result.failure.code == ARITHMETIC_REJECTED
+    assert result.failure.payload["number_def"] == "p step 1"
+
+
+def test_a_number_def_returning_a_reader_of_another_shape_is_refused() -> None:
+    source = (
+        "def m() -> None:\n"
+        '    require(p() > 0, "x")\n\n'
+        "def p() -> float:\n"
+        '    return static("Game.Name")\n'
+    )
+    host = FakeHost(
+        scene_with(statics=[{"declaring": "Game.Game", "member": "Name", "value": "hero"}])
+    )
+    result = drive(host, source, "m", {})
+
+    assert result.failure.code == ARITHMETIC_REJECTED
+
+
+@pytest.mark.parametrize(
+    ("hp", "flagged"),
+    [(20, True), (60, False)],
+    ids=["past half", "before half"],
+)
+def test_a_number_def_drives_an_if(hp: int, flagged: bool) -> None:
+    host = StepStartHost(fight_scene(hp, 3), at_start=fight_scene(80, 3))
+    result = asyncio.run(run_macro(host, progress_module(), {}, 2))
+
+    assert result.passed
+    assert bool(result.flags) is flagged
+
+
+def test_a_number_def_drives_a_require_and_reports_what_it_returned() -> None:
+    host = StepStartHost(fight_scene(80, 2), at_start=fight_scene(80, 3))
+    result = asyncio.run(run_macro(host, progress_module(), {}, 2))
+
+    assert result.failure.code == SCENE_MISMATCH
+    assert result.failure.payload["observed"]["setbacks()"] == "1"
+    assert result.failure.payload["observed"]["setbacks returned at"] == "'step 2'"
+
+
+def test_a_number_def_drives_a_while() -> None:
+    """한 회마다 hp 가 20 씩 준다. `progress` 가 0.5 에 닿으면 반복이 끝난다."""
+
+    class Hits(StepStartHost):
+        async def run(self, actions, summary: str, step: int) -> ActionOutcome:
+            outcome = await super().run(actions, summary, step)
+            members = self.memory.pulse.held["Battle/Root[0]/Enemy[7]"].members
+            hp = next(iter(members.values())).value
+            self.memory = fight_scene(hp - 20, 3)
+            return outcome
+
+    source = PROGRESS_MODULE.replace(
+        '    if progress() >= 0.5:\n        flag("half way")\n',
+        '    while progress() < 0.5:\n        press_key("Space", 0.1)\n',
+    )
+    host = Hits(fight_scene(80, 3), at_start=fight_scene(80, 3))
+    result = drive(host, source, "step", {})
+
+    assert result.passed
+    assert len(host.sent) == 2
+
+
+def test_a_number_def_drives_a_wait_until() -> None:
+    class StepStartPulseHost(PulseHost):
+        def pulse_at_step_start(self):
+            return copy.deepcopy(fight_scene(80, 3).pulse)
+
+    host = StepStartPulseHost(
+        fight_scene(80, 3), [(MacroPulseWait(1, 0.5), fight_scene(30, 3))]
+    )
+    source = PROGRESS_MODULE.replace(
+        '    if progress() >= 0.5:\n        flag("half way")\n',
+        '    wait_until(progress() >= 0.5, 5, "The enemy did not lose half its hp.")\n',
+    )
+    result = drive(host, source, "step", {})
+
+    assert result.passed
+    assert "was true after 0.5s (1 pulses)" in result.waits[0]
+
+
+# 산술과 `at_start` 없이 도는 숫자 `def`(ARTEL-1066). `evaluate_number` 와 조건 자리를 잰다.
+
+NUMBER_MODULE = '''
+def step() -> None:
+    if hp() <= 40:
+        flag("half way")
+    while hp() > 0:
+        press_key("Space", 0.1)
+    require(lives() == 3, "The player lost a life; replan.")
+
+def hp() -> float:
+    enemy: object = find(name="Enemy")
+    return member(enemy, "Enemy.Hp")
+
+def remaining() -> float:
+    return hp()
+
+def lives() -> int:
+    return static("Game.Lives")
+
+def threshold(limit: float = 40) -> float:
+    return limit
+
+def scaled(value: float) -> float:
+    return value
+'''
+
+
+def number_module() -> MacroDefinition:
+    return macro_definition_from_source("step", NUMBER_MODULE)
+
+
+class LosingHp(FakeHost):
+    """action 이 하나 나갈 때마다 적의 hp 가 20 준다."""
+
+    def __init__(self, hp: int, lives: int) -> None:
+        super().__init__(fight_scene(hp, lives))
+        self.hp = hp
+        self.lives = lives
+
+    async def run(self, actions, summary: str, step: int) -> ActionOutcome:
+        outcome = await super().run(actions, summary, step)
+        self.hp -= 20
+        self.memory = fight_scene(self.hp, self.lives)
+        return outcome
+
+
+def test_evaluate_number_returns_what_a_number_def_reads() -> None:
+    host = FakeHost(fight_scene(30, 3))
+
+    assert evaluate_number(host, number_module(), "hp") == 30
+    assert evaluate_number(host, number_module(), "lives") == 3
+    assert isinstance(evaluate_number(host, number_module(), "lives"), int)
+
+
+def test_evaluate_number_takes_arguments_defaults_and_nested_calls() -> None:
+    host = FakeHost(fight_scene(30, 3))
+
+    assert evaluate_number(host, number_module(), "threshold") == 40
+    assert evaluate_number(host, number_module(), "threshold", {"limit": 7.5}) == 7.5
+    assert evaluate_number(host, number_module(), "remaining") == 30
+
+
+def test_evaluate_number_refuses_the_entry_point_and_a_missing_argument() -> None:
+    host = FakeHost(fight_scene(30, 3))
+
+    with pytest.raises(ValueError):
+        evaluate_number(host, number_module(), "step")
+    with pytest.raises(ValueError):
+        evaluate_number(host, number_module(), "scaled")
+
+
+def test_a_number_def_that_fails_names_its_own_step() -> None:
+    host = FakeHost(scene_with(statics=[]))
+
+    with pytest.raises(MacroFailure) as failed:
+        evaluate_number(host, number_module(), "remaining")
+
+    assert failed.value.code == SELECTOR_NOT_FOUND
+    assert failed.value.payload["number_def"] == "hp step 1"
+
+
+def test_a_number_def_drives_if_while_and_require() -> None:
+    host = LosingHp(hp=60, lives=3)
+    result = asyncio.run(run_macro(host, number_module(), {}, 2))
+
+    assert result.passed
+    # 60 → 40 → 20 → 0. `if` 는 60 에서 판정해 `flag` 를 건너뛴다.
+    assert len(host.sent) == 3
+    assert result.flags == []
+
+
+def test_a_number_def_in_a_failed_require_reports_what_it_returned() -> None:
+    host = LosingHp(hp=0, lives=2)
+    result = asyncio.run(run_macro(host, number_module(), {}, 2))
+
+    assert result.failure.code == SCENE_MISMATCH
+    assert [one.message for one in result.flags] == ["half way"]
+    assert result.failure.payload["observed"]["lives()"] == "2"
+    assert result.failure.payload["observed"]["lives returned at"] == "'step 1'"
+
+
+def test_a_number_def_without_arithmetic_drives_a_wait_until() -> None:
+    host = PulseHost(fight_scene(80, 3), [(MacroPulseWait(1, 0.5), fight_scene(30, 3))])
+    source = NUMBER_MODULE.replace(
+        '    if hp() <= 40:\n        flag("half way")\n',
+        '    wait_until(hp() <= 40, 5, "The enemy did not lose half its hp.")\n',
+    ).replace('    while hp() > 0:\n        press_key("Space", 0.1)\n', "")
+    result = drive(host, source, "step", {})
+
+    assert result.passed
+    assert "was true after 0.5s (1 pulses)" in result.waits[0]
+
+
+# 산술식(ARTEL-1076). `at_start` 없이 도는 식으로 잰다.
+
+ARITHMETIC_MODULE = '''
+def m() -> None:
+    require(lost() >= 0.5, "The enemy still has more than half its hp.")
+
+def lost() -> float:
+    return 1 - hp() / 80
+
+def hp() -> float:
+    enemy: object = find(name="Enemy")
+    return member(enemy, "Enemy.Hp")
+
+def ratio(a: float, b: float) -> float:
+    return a / b
+
+def plain(weight: float = 2.5) -> float:
+    return -weight + 2 * 3 - max(1, 2, 3)
+
+def clamped(value: float) -> float:
+    return max(0, min(1, value))
+'''
+
+
+def arithmetic_module() -> MacroDefinition:
+    return macro_definition_from_source("m", ARITHMETIC_MODULE)
+
+
+def test_arithmetic_follows_python_precedence_and_unary_minus() -> None:
+    host = FakeHost(fight_scene(80, 3))
+
+    assert evaluate_number(host, arithmetic_module(), "plain") == -2.5 + 2 * 3 - 3
+    assert evaluate_number(host, arithmetic_module(), "plain", {"weight": 1}) == 2
+
+
+@pytest.mark.parametrize(("value", "expected"), [(1.7, 1), (-0.3, 0), (0.25, 0.25)])
+def test_min_and_max_clamp_a_value(value: float, expected: float) -> None:
+    host = FakeHost(fight_scene(80, 3))
+
+    assert evaluate_number(host, arithmetic_module(), "clamped", {"value": value}) == expected
+
+
+def test_dividing_by_zero_stops_with_its_own_code() -> None:
+    host = FakeHost(fight_scene(80, 3))
+
+    with pytest.raises(MacroFailure) as failed:
+        evaluate_number(host, arithmetic_module(), "ratio", {"a": 1, "b": 0})
+
+    assert failed.value.code == DIVIDED_BY_ZERO
+    assert failed.value.payload["number_def"] == "ratio step 1"
+
+
+@pytest.mark.parametrize(("hp", "passed"), [(20, True), (60, False)], ids=["lost 3/4", "lost 1/4"])
+def test_arithmetic_over_a_reader_drives_a_require(hp: int, passed: bool) -> None:
+    result = asyncio.run(run_macro(FakeHost(fight_scene(hp, 3)), arithmetic_module(), {}, 2))
+
+    assert result.passed is passed
+    if not passed:
+        assert result.failure.code == SCENE_MISMATCH
+        assert result.failure.payload["observed"]["lost()"] == "0.25"

@@ -320,6 +320,21 @@ def test_a_ts_marker_names_the_current_scenario(monkeypatch) -> None:
     assert "@TS 상점 여정" in out.message
 
 
+def test_a_draft_marker_names_the_unsaved_draft(monkeypatch) -> None:
+    """승인 전 draft 는 음수 번호로 온다(ARTEL-1078). 그 표식도 남기고 draft 제목으로 칩을 붙인다."""
+    import app.agents.scenario.workflow as wf
+
+    plans = [wf.ModifyPlan(
+        scenario_id=-1, steps=[_case_step(), _case_step()],
+        detail="[[ts:-1]] 끝에 보상 확인을 더했어요.",
+    )]
+    out, _ = _modify(monkeypatch, plans, current=[_current_scenario(-1, "첫 스테이지 클리어")])
+
+    assert "[[ts:-1]]" in out.reply.detail
+    assert [(r.kind, r.id, r.label) for r in out.refs] == [("ts", -1, "첫 스테이지 클리어")]
+    assert "@TS 첫 스테이지 클리어" in out.message
+
+
 def test_the_unplaced_question_points_with_a_marker(monkeypatch) -> None:
     import app.agents.scenario.workflow as wf
 

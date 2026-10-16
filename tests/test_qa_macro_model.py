@@ -442,3 +442,69 @@ def test_old_json_without_imports_defaults_to_none() -> None:
     del stored["imports"]
 
     assert MacroDefinition.model_validate(stored).imports == ()
+
+
+def test_return_statement_carries_an_expression_as_its_one_slot() -> None:
+    """숫자 `def` 의 `return` 은 `expression` 하나만 든다(ARTEL-1066)."""
+    from app.agents.qa.macro.grammar import MacroShape
+    from app.agents.qa.macro.model import MacroLiteral, MacroLiteralOperand
+
+    number = MacroLiteralOperand(literal=MacroLiteral(shape=MacroShape.number, value=1))
+
+    assert MacroReturnStatement(source="return 1", expression=number).expression == number
+    with pytest.raises(ValidationError):
+        MacroReturnStatement(source="return both", value=True, expression=number)
+
+
+def test_number_def_and_arithmetic_survive_a_json_round_trip() -> None:
+    """parser 를 거치지 않고 모델을 직접 만든다. 재는 것은 중첩된 식의 왕복이다."""
+    from app.agents.qa.macro.grammar import MacroArithmetic, MacroShape
+    from app.agents.qa.macro.model import (
+        MacroArithmeticOperand,
+        MacroComputeValue,
+        MacroExtremumOperand,
+        MacroFunction,
+        MacroLiteral,
+        MacroLiteralOperand,
+        MacroNameOperand,
+        MacroNumberCallOperand,
+        MacroReaderCall,
+        MacroReaderOperand,
+        MacroStringLiteral,
+    )
+
+    one = MacroLiteralOperand(literal=MacroLiteral(shape=MacroShape.number, value=1))
+    lives = MacroReaderOperand(
+        call=MacroReaderCall(reader="at_start", key=MacroStringLiteral(value="Game.Lives"))
+    )
+    lost = MacroAssignStatement(
+        source="lost: int = ...",
+        name="lost",
+        declared_type=MacroType.int_,
+        value=MacroComputeValue(
+            expression=MacroArithmeticOperand(
+                left=lives, operator=MacroArithmetic.subtract, right=one
+            )
+        ),
+    )
+    returned = MacroReturnStatement(
+        source="return max(lost, other())",
+        expression=MacroExtremumOperand(
+            operator=MacroArithmetic.maximum,
+            operands=(
+                MacroNameOperand(name="lost", declared_type=MacroType.int_),
+                MacroNumberCallOperand(callee="other"),
+            ),
+        ),
+    )
+    definition = MacroDefinition(
+        name="play",
+        source="...",
+        entry=MacroFunction(name="play"),
+        helpers=(MacroFunction(name="setbacks", returns="int", statements=(lost, returned)),),
+    )
+
+    restored = MacroDefinition.model_validate(json.loads(definition.model_dump_json()))
+
+    assert restored == definition
+    assert restored.helpers[0].returns == "int"

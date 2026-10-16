@@ -2081,3 +2081,384 @@ def test_under_refuses_anything_but_one_path_or_object(argument: str, expected: 
     )
 
     assert expected in reason
+
+
+# --- 숫자 `def`·산술식·`at_start` (ARTEL-1066) -----------------------------------
+#
+# planner–executer 엔진의 step module 이 `progress`·`risk`·`setbacks` 를 Python 대신 macro 로
+# 적을 수 있게 하는 문법이다. 기존 문법의 거절 문장은 그대로여야 하므로, 숫자 `def` 밖에서
+# 산술이 여전히 예전 문장으로 거절되는 것까지 잰다.
+
+STEP_MODULE = '''
+def step() -> None:
+    if progress() >= 0.5:
+        flag("half way")
+    while risk(2) > 0.8:
+        press_key("Space", 0.1)
+    wait_until(progress() >= 1, 10, "Wait for the enemy to fall.")
+    require(setbacks() == 0, "The player lost a life; replan.")
+
+def progress() -> float:
+    enemy: object = find(name="Enemy")
+    hp: float = member(enemy, "Enemy.Hp")
+    start: float = at_start(enemy, "Enemy.Hp")
+    if start <= 0:
+        return 1
+    return max(0, min(1, (start - hp) / start))
+
+def risk(weight: int = 1) -> float:
+    return weight * (1 - progress())
+
+def setbacks() -> int:
+    lost: int = at_start("Game.Lives") - static("Game.Lives")
+    return max(lost, 0)
+'''
+
+
+def test_a_step_module_with_number_defs_passes() -> None:
+    definition = parse(STEP_MODULE, "step")
+
+    assert [helper.returns for helper in definition.helpers] == ["float", "float", "int"]
+    returned = definition.helpers[0].statements[-1]
+    assert isinstance(returned, MacroReturnStatement)
+    assert returned.expression is not None and returned.expression.kind == "extremum"
+    condition = definition.entry.statements[0].condition
+    assert condition.left.kind == "number_call" and condition.left.callee == "progress"
+    risk = definition.entry.statements[1].condition.left
+    assert risk.arguments[0].literal.value == 2
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        'if progress() >= 0.5:\n        flag("x")',
+        'while progress() < 1:\n        press_key("Space", 0.1)',
+        'require(progress() > 0, "Hit the enemy.")',
+        'wait_until(progress() >= 1, 5, "Wait.")',
+        'require(0.5 <= progress(), "Hit the enemy.")',
+    ],
+    ids=["if", "while", "require", "wait_until", "right side"],
+)
+def test_a_number_def_stands_on_a_comparison_in_every_condition(kind: str) -> None:
+    parse(
+        f"def m() -> None:\n    {kind}\n\n"
+        "def progress() -> float:\n    return member(selector(\"E[0]\"), \"Enemy.Hp\")\n"
+    )
+
+
+def test_a_predicate_may_compare_a_number_def() -> None:
+    parse(
+        'def m() -> None:\n    require(done(), "Wait.")\n\n'
+        "def done() -> bool:\n    return progress() >= 1\n\n"
+        "def progress() -> float:\n    return 0.5\n"
+    )
+
+
+def test_an_entry_point_cannot_return_a_number() -> None:
+    reason = rejection("def m() -> float:\n    return 1.0\n")
+
+    assert "Declare the entry point `-> None`" in reason and "`-> float`" in reason
+
+
+def test_a_number_def_must_return_on_every_path() -> None:
+    reason = rejection(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        "def p() -> float:\n    if scene() == \"A\":\n        return 1\n"
+    )
+
+    assert reason == "every path through a `-> float` def must end in `return`."
+
+
+def test_a_statement_after_a_number_return_is_refused() -> None:
+    reason = rejection(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        "def p() -> int:\n    return 1\n    x: int = 2\n"
+    )
+
+    assert "End this def body at the `return`" in reason
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'click(selector("A"))',
+        'wait_until(scene() == "A", 1, "Wait.")',
+        "checkpoint()",
+        'flag("x")',
+        'ask_verdict("x")',
+        "for i in range(2):\n        x: int = 1",
+        'while scene() == "A":\n        x: int = 1',
+        'match decide("What?"):\n        case "a":\n            x: int = 1\n        case "b":\n            x: int = 2',
+    ],
+    ids=["tool", "wait_until", "checkpoint", "flag", "ask_verdict", "for", "while", "match"],
+)
+def test_a_number_def_allows_only_assignment_if_and_return(body: str) -> None:
+    reason = rejection(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        f"def p() -> float:\n    {body}\n    return 1\n"
+    )
+
+    assert "a `-> float` def allows only a typed assignment, `if`, and `return`" in reason
+
+
+def test_ask_and_decide_are_refused_inside_a_number_def() -> None:
+    asked = rejection(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        'def p() -> float:\n    if ask("Winning?"):\n        return 1\n    return 0\n'
+    )
+    decided = rejection(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        'def p() -> float:\n    return decide("Which?")\n'
+    )
+    returned_ask = rejection(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        'def p() -> float:\n    return ask("Which?")\n'
+    )
+
+    assert "`ask(...)` is not allowed inside a `-> float` def" in asked
+    assert "`decide(...)` stands only as the subject of a `match`" in decided
+    assert "`ask(...)` is not allowed inside a `-> float` def" in returned_ask
+
+
+def test_the_predicate_refusals_keep_their_sentences() -> None:
+    """숫자 `def` 와 같은 code path 를 타도 predicate 의 거절 문장은 그대로다."""
+    assert rejection(
+        'def m() -> None:\n    require(p(), "x")\n\ndef p() -> bool:\n    flag("x")\n'
+    ) == "a `-> bool` predicate allows only a typed assignment, `if`, and `return`."
+    assert rejection(
+        'def m() -> None:\n    require(p(), "x")\n\n'
+        'def p() -> bool:\n    if scene() == "A":\n        return True\n'
+    ) == "every path through a `-> bool` predicate must end in `return`."
+    assert rejection(
+        'def m() -> None:\n    require(p(), "x")\n\n'
+        "def p() -> bool:\n    return True\n    x: int = 1\n"
+    ) == "a statement after `return` cannot run. End this predicate body at the `return`."
+
+
+@pytest.mark.parametrize(
+    ("returned", "expected"),
+    [
+        ("", "bare `return` is not allowed"),
+        ("True", "true or false"),
+        ("scene() == \"A\"", "true or false"),
+        ('"fast"', "has to be a number, and this is a string"),
+        ("text(selector(\"A\"))", "has to be a number, and this is a string"),
+        ("label", "has to be a number, and this is a string"),
+        ('find(name="A")', "`find(...)` cannot stand in what `p` returns"),
+        ("helper()", "`helper(...)` cannot stand in what `p` returns"),
+    ],
+    ids=["bare", "bool", "comparison", "string", "text", "string name", "find", "none def"],
+)
+def test_a_number_def_returns_only_a_number(returned: str, expected: str) -> None:
+    reason = rejection(
+        'def m() -> None:\n    require(p("x") > 0, "x")\n\n'
+        f"def p(label: string) -> float:\n    return {returned}\n\n"
+        'def helper() -> None:\n    flag("x")\n'
+    )
+
+    assert expected in reason
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ('1 + "a"', "`+` is not allowed on a string"),
+        ("ready * 2", "`*` is not allowed on a bool"),
+        ("card - 1", "`-` is not allowed on a object"),
+        ('min(1, text(card))', "`min` is not allowed on a string"),
+        ('-label', "`-` is not allowed on a string"),
+        ("1 // 2", "that operator is not allowed"),
+        ("2 ** 3", "that operator is not allowed"),
+        ("min(1)", "`min` takes two or more numbers"),
+        ("max(a=1, b=2)", "`max` takes two or more numbers"),
+    ],
+    ids=["string", "bool", "object", "min text", "negate", "floor", "power", "one arg", "keywords"],
+)
+def test_arithmetic_takes_numbers_only(expression: str, expected: str) -> None:
+    reason = rejection(
+        'def m(card: object) -> None:\n    require(p(card) > 0, "x")\n\n'
+        "def p(card: object, ready: bool = True, label: string = \"x\") -> float:\n"
+        f"    return {expression}\n"
+    )
+
+    assert expected in reason
+
+
+def test_arithmetic_on_a_reader_of_unknown_shape_waits_for_the_value() -> None:
+    """`member`·`static`·`at_start` 의 모양은 값이 도착해야 안다. 거절은 runner 가 한다."""
+    parse(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        'def p() -> float:\n    return static("Game.Score") / at_start("Game.Score") - 1\n'
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'def m() -> None:\n    hp: float = 1 + 2\n',
+        'def m() -> None:\n    require(member(selector("E"), "E.hp") - 1 > 0, "x")\n',
+        'def m() -> None:\n    hp: float = -static("Game.Hp")\n',
+    ],
+    ids=["assign in -> None", "condition in -> None", "negate in -> None"],
+)
+def test_arithmetic_outside_a_number_def_keeps_the_old_refusal(source: str) -> None:
+    reason = rejection(source)
+
+    assert (
+        "Arithmetic and any other call are refused" in reason
+        or "arithmetic is not allowed in a condition" in reason
+    )
+
+
+def test_arithmetic_inside_a_predicate_keeps_the_old_refusal() -> None:
+    reason = rejection(
+        'def m() -> None:\n    require(p(), "x")\n\n'
+        'def p() -> bool:\n    return static("Game.Score") + 1 > 3\n'
+    )
+
+    assert "arithmetic is not allowed in a condition" in reason
+
+
+def test_a_number_def_cannot_be_bound_or_called_outside_number_defs() -> None:
+    bound = rejection(
+        "def m() -> None:\n    x: float = p()\n    flag(\"x\")\n\n"
+        "def p() -> float:\n    return 1.0\n"
+    )
+    called = rejection(
+        "def m() -> None:\n    p()\n\ndef p() -> float:\n    return 1.0\n"
+    )
+    bare = rejection(
+        'def m() -> None:\n    require(p(), "x")\n\ndef p() -> float:\n    return 1.0\n'
+    )
+
+    assert "Arithmetic and any other call are refused" in bound
+    assert "`p` is declared `-> float` and returns a number" in called
+    assert "is not a condition on its own" in bare
+
+
+def test_arithmetic_is_allowed_in_assignments_and_conditions_inside_a_number_def() -> None:
+    definition = parse(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        "def p() -> float:\n"
+        '    hp: float = member(selector("E[0]"), "Enemy.Hp")\n'
+        "    ratio: float = hp / 100\n"
+        "    if ratio * 2 < 0.5:\n"
+        "        return -ratio\n"
+        "    return ratio\n"
+    )
+
+    ratio = definition.helpers[0].statements[1]
+    assert isinstance(ratio, MacroAssignStatement) and ratio.value.kind == "compute"
+    negated = definition.helpers[0].statements[2].body[0].expression
+    assert negated.kind == "arithmetic" and negated.left.literal.value == 0
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def p() -> int:\n    return 1 / 2\n",
+        "def p() -> int:\n    return 1.5\n",
+        "def p(speed: float = 1.5) -> int:\n    return speed + 1\n",
+        "def p() -> int:\n    return max(1, q())\n\ndef q() -> float:\n    return 1.0\n",
+        "def p() -> int:\n    x: int = 3 / 2\n    return x\n",
+    ],
+    ids=["divide", "float literal", "float name", "float def", "int assignment"],
+)
+def test_an_int_def_refuses_what_can_have_a_fraction(source: str) -> None:
+    reason = rejection('def m() -> None:\n    require(p() > 0, "x")\n\n' + source)
+
+    assert "can have a fraction" in reason
+
+
+def test_an_int_def_accepts_whole_numbers_and_readers() -> None:
+    parse(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        'def p() -> int:\n    return max(at_start("Game.Lives") - static("Game.Lives"), 0) * 2\n'
+    )
+
+
+def test_a_number_assignment_must_be_declared_a_number() -> None:
+    reason = rejection(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        "def p() -> float:\n    x: string = 1 + 2\n    return 1\n"
+    )
+
+    assert "Declare it `int` or `float`" in reason
+
+
+def test_number_def_recursion_is_refused() -> None:
+    reason = rejection(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        "def p() -> float:\n    return q()\n\n"
+        "def q() -> float:\n    return p()\n"
+    )
+
+    assert "this macro calls itself" in reason and "p → q → p" in reason
+
+
+def test_number_defs_count_toward_depth_and_statements() -> None:
+    """숫자 `def` 도 predicate 처럼 호출 그래프의 한 단계이고, 그 statement 가 세진다."""
+    chain = "".join(
+        f"def p{index}() -> float:\n    return p{index + 1}()\n\n"
+        for index in range(1, MAX_CALL_DEPTH)
+    ) + f"def p{MAX_CALL_DEPTH}() -> float:\n    return 1\n"
+    reason = rejection('def m() -> None:\n    require(p1() > 0, "x")\n\n' + chain)
+
+    assert f"limit is {MAX_CALL_DEPTH}" in reason
+
+    padding = "".join(f"    x{index}: int = {index}\n" for index in range(MAX_STATEMENTS))
+    reason = rejection(
+        'def m() -> None:\n    require(p() > 0, "x")\n\n'
+        f"def p() -> int:\n{padding}    return 1\n"
+    )
+    assert f"the limit is {MAX_STATEMENTS}" in reason
+
+
+def test_a_number_def_takes_arguments_like_a_helper() -> None:
+    reason = rejection(
+        'def m() -> None:\n    require(p("fast") > 0, "x")\n\n'
+        "def p(weight: int) -> float:\n    return weight\n"
+    )
+
+    assert "`weight` of `p` wants `int`" in reason or "declared `int` but holds" in reason
+
+
+@pytest.mark.parametrize(
+    "reading",
+    [
+        'at_start(enemy, "Enemy.Hp")',
+        'at_start(selector("Root[0]/Enemy[1]"), "Enemy.Hp")',
+        'at_start("Game.Lives")',
+    ],
+    ids=["object", "selector", "static"],
+)
+def test_at_start_reads_like_member_or_static(reading: str) -> None:
+    definition = parse(
+        "def m() -> None:\n"
+        '    enemy: object = find(name="Enemy")\n'
+        f"    before: float = {reading}\n"
+        f'    require(before > 0, "x")\n'
+        f'    require({reading} > 0, "x")\n'
+    )
+
+    assert definition.entry.statements[1].value.call.reader == "at_start"
+
+
+@pytest.mark.parametrize(
+    "reading",
+    ["at_start()", 'at_start(enemy, "A.b", "c")', "at_start(enemy)", 'at_start(key="A.b")'],
+    ids=["none", "three", "no key", "keyword"],
+)
+def test_at_start_refuses_other_argument_shapes(reading: str) -> None:
+    reason = rejection(
+        "def m() -> None:\n"
+        '    enemy: object = find(name="Enemy")\n'
+        f'    require({reading} > 0, "x")\n'
+    )
+
+    assert "at_start" in reason
+
+
+def test_at_start_is_kept_out_of_the_reader_list_the_qa_agent_reads() -> None:
+    """QA agent 의 skill 과 거절 문장은 `READER_NAMES` 를 쓴다. 쓰는 쪽이 생길 때까지 그대로다."""
+    assert "at_start" not in READER_NAMES

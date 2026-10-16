@@ -24,25 +24,33 @@
   그 기록에 없다.
 
 그리고 비교의 거절이 `COMPARISON_REJECTED` 다. 게임이 틀린 것이 아니라 macro 가 못
-묻는 것을 물은 것이라 `REQUIRE_FAILED` 와 같은 코드로 낼 수 없다.
+묻는 것을 물은 것이라 `REQUIRE_FAILED` 와 같은 코드로 낼 수 없다. 숫자 `def` 의 산술이
+같은 이유로 `ARITHMETIC_REJECTED` 와 `DIVIDED_BY_ZERO` 를 낸다(ARTEL-1066).
 """
 
+import operator as python_operator
 from dataclasses import dataclass
 from typing import Any
 
 from app.agents.qa.macro.errors import (
     ACTION_REJECTED,
+    ARITHMETIC_REJECTED,
+    AT_START_UNAVAILABLE,
     COMPARISON_REJECTED,
+    DIVIDED_BY_ZERO,
     SELECTOR_AMBIGUOUS,
     SELECTOR_NOT_FOUND,
     STALE_BINDING,
     MacroFailure,
 )
 from app.agents.qa.macro.grammar import (
+    AT_START,
+    MacroArithmetic,
     MacroOperator,
     MacroShape,
     MacroType,
     allowed_operators,
+    arithmetic_allowed,
     comparison_allowed,
     operator_names,
 )
@@ -98,9 +106,15 @@ class LateSelector:
 
 @dataclass(frozen=True)
 class MacroMemories:
-    """macro 가 읽는 것 전부. `observable()` 하나만 `SceneMemory` 쪽을 본다."""
+    """macro 가 읽는 것 전부. `observable()` 하나만 `SceneMemory` 쪽을 본다.
+
+    `step_start` 는 지금 step 이 시작될 때 잡아 둔 `pulse` 다. `at_start(...)` 만 읽는다.
+    host 는 이것을 채우지 않는다 — runner 가 host 의 `StepStartValues` capability 에서 받아
+    채우고, 그것이 없는 host(QA 런의 `run_macro`)에서는 `None` 이다.
+    """
 
     scene: SceneMemory
+    step_start: PulseMemory | None = None
 
     @property
     def pulse(self) -> PulseMemory:
@@ -410,6 +424,8 @@ def read(memories: MacroMemories, scope: MacroScope, call: MacroReaderCall) -> A
     reader = call.reader
     if reader == "scene":
         return memories.scene_name
+    if reader == AT_START:
+        return _at_start(memories, scope, call)
     if reader == "observable":
         return _observable(memories, scope, call)
     if reader == "static":
@@ -463,6 +479,75 @@ def _static(memories: MacroMemories, scope: MacroScope, call: MacroReaderCall) -
             {"asked": name, "available": sorted(named)},
         )
     return named[name]
+
+
+def _at_start(memories: MacroMemories, scope: MacroScope, call: MacroReaderCall) -> Any:
+    """step 이 시작될 때의 값. 이름을 맞추는 규칙은 `member`·`static` 과 같다.
+
+    target 이 있으면 `member`, 없으면 `static` 처럼 읽는다. 같은 규칙인 이유는 agent 가
+    화면에서 읽은 이름을 그대로 적기 때문이다 — 두 reader 가 다른 이름을 받으면 같은 글자가
+    한쪽에서만 맞는다.
+    """
+    asked = describe(call)
+    snapshot = memories.step_start
+    if snapshot is None:
+        raise MacroFailure(
+            AT_START_UNAVAILABLE,
+            f"{asked} reads the value from when this step began, and whoever runs this "
+            "macro keeps no such values — a QA run's `run_macro` does not. Read the "
+            "value now with `member(...)` or `static(...)` instead.",
+            {"asked": asked},
+        )
+    name = scope.text(call.key)
+    if call.target is None:
+        named = _static_names(snapshot)
+    else:
+        record = _record_at_start(scope, call.target, snapshot)
+        if record is None:
+            raise MacroFailure(
+                AT_START_UNAVAILABLE,
+                f"{asked} names an object that was not in the pulse when this step "
+                "began, so there is no value from then to read.",
+                {"asked": asked},
+            )
+        named = _member_names(record)
+    if name not in named:
+        raise MacroFailure(
+            AT_START_UNAVAILABLE,
+            f"{asked} asks for {name!r}, which the pulse did not carry when this step "
+            "began.",
+            {"asked": asked, "available": sorted(named)},
+        )
+    return named[name]
+
+
+def _record_at_start(
+    scope: MacroScope, target: MacroTarget, snapshot: PulseMemory
+) -> _HeldObject | None:
+    """target 하나를 step 시작 때의 `pulse` 에서 찾는다. 지금 살아 있는지는 묻지 않는다.
+
+    `find(...)` 로 bind 한 이름은 그 기록의 key 로, selector 는 `_by_selector` 와 같은
+    규칙(`selector` 나 `path` 가 같은 것)으로 찾는다. 지금 사라진 object 의 처음 값을 읽는
+    것이 이 reader 의 쓸모라서, `resolve_target` 처럼 지금의 memory 에 대고 풀지 않는다.
+    """
+    if isinstance(target, MacroSelectorTarget):
+        selector = target.selector
+    else:
+        bound = scope.value(target.name)
+        if isinstance(bound, FoundObject):
+            record = snapshot.held.get(bound.key)
+            return record if record is not None and record.live else None
+        if not isinstance(bound, LateSelector):
+            raise MacroFailure(
+                ACTION_REJECTED,
+                f"`{target.name}` holds {bound!r}, which is not an object to read.",
+                {"name": target.name},
+            )
+        selector = bound.selector
+    for _key, record in _live(snapshot):
+        if record.selector == selector or record.path == selector:
+            return record
+    return None
 
 
 def _member(found: FoundObject, scope: MacroScope, call: MacroReaderCall) -> Any:
@@ -657,6 +742,68 @@ def _apply(operator: MacroOperator, left: Any, right: Any) -> bool:
     if operator is MacroOperator.greater_or_equal:
         return bool(left >= right)
     return bool(left <= right)
+
+
+# --- 산술 (ARTEL-1066) -------------------------------------------------------------
+
+# 이항 연산 넷이 하는 일. 어느 칸이 되는지는 `grammar.ARITHMETIC_TABLE` 이 정하고, 여기는
+# 된 칸의 계산만 든다.
+_BINARY: dict[MacroArithmetic, Any] = {
+    MacroArithmetic.add: python_operator.add,
+    MacroArithmetic.subtract: python_operator.sub,
+    MacroArithmetic.multiply: python_operator.mul,
+    MacroArithmetic.divide: python_operator.truediv,
+}
+_GATHERING: dict[MacroArithmetic, Any] = {
+    MacroArithmetic.minimum: min,
+    MacroArithmetic.maximum: max,
+}
+
+
+def calculate(arithmetic: MacroArithmetic, values: list[Any]) -> int | float:
+    """도착한 값들에 산술 하나를 한다. 표에 없는 모양이면 `ARITHMETIC_REJECTED` 다.
+
+    저장 때 모양을 아는 피연산자는 parser 가 이미 같은 표로 걸렀다. 여기 닿는 거절은
+    `member`·`static`·`observable`·`at_start` 처럼 값이 도착해야 모양을 아는 것이다.
+    """
+    for value in values:
+        shape = shape_of(value)
+        if arithmetic_allowed(shape, arithmetic):
+            continue
+        raise MacroFailure(
+            ARITHMETIC_REJECTED,
+            f"`{arithmetic.value}` cannot be used on a {shape.value}, and the value that "
+            f"arrived is one ({value!r}). Nothing was sent to the game. Arithmetic takes "
+            "numbers only.",
+            {"shape": shape.value, "operator": arithmetic.value, "arrived": repr(value)},
+        )
+    if arithmetic in _GATHERING:
+        return _GATHERING[arithmetic](values)
+    left, right = values
+    if arithmetic is MacroArithmetic.divide and right == 0:
+        raise MacroFailure(
+            DIVIDED_BY_ZERO,
+            f"{left!r} / {right!r} divides by zero. Nothing was sent to the game. Guard "
+            "the division with an `if` on the divisor before it.",
+            {"left": repr(left), "right": repr(right)},
+        )
+    return _BINARY[arithmetic](left, right)
+
+
+def require_number(value: Any, what: str) -> int | float:
+    """숫자 `def` 가 돌려줄 값이 숫자인지. 아니면 `ARITHMETIC_REJECTED` 다.
+
+    `return member(...)` 처럼 산술 없이 reader 하나를 돌려주면 `calculate` 를 안 거친다.
+    """
+    shape = shape_of(value)
+    if shape is MacroShape.number:
+        return value
+    raise MacroFailure(
+        ARITHMETIC_REJECTED,
+        f"{what} has to be a number, and the value that arrived is a {shape.value} "
+        f"({value!r}). Nothing was sent to the game.",
+        {"shape": shape.value, "arrived": repr(value)},
+    )
 
 
 # --- 조건 하나 -----------------------------------------------------------------

@@ -21,7 +21,12 @@ from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.agents.qa.macro.grammar import MacroOperator, MacroShape, MacroType
+from app.agents.qa.macro.grammar import (
+    MacroArithmetic,
+    MacroOperator,
+    MacroShape,
+    MacroType,
+)
 
 
 class _Frozen(BaseModel):
@@ -165,15 +170,51 @@ class MacroSelectorOperand(_Frozen):
     selector: str
 
 
+# 아래 셋은 숫자를 내는 피연산자다(ARTEL-1066). 숫자 `def` 호출은 비교의 한쪽 어디에나
+# 서고, 산술식 둘은 숫자 `def` 안에서만 선다. 셋 다 runner 가 평가한다 — 숫자 `def` 를
+# 부르려면 frame 이 필요해서 `binding.operand_value` 로는 못 푼다.
+
+
+class MacroNumberCallOperand(_Frozen):
+    """`-> int`·`-> float` 인 `def` 하나를 부르는 피연산자. 인자 모양은 helper 호출과 같다."""
+
+    kind: Literal["number_call"] = "number_call"
+    callee: str
+    arguments: tuple[MacroArgument, ...] = ()
+
+
+class MacroArithmeticOperand(_Frozen):
+    """`left <+ - * /> right`. `-x` 는 `0 - x` 로 든다."""
+
+    kind: Literal["arithmetic"] = "arithmetic"
+    left: "MacroOperand"
+    operator: MacroArithmetic
+    right: "MacroOperand"
+
+
+class MacroExtremumOperand(_Frozen):
+    """`min(a, b, ...)` 나 `max(a, b, ...)`. 인자가 둘 이상이다."""
+
+    kind: Literal["extremum"] = "extremum"
+    operator: MacroArithmetic
+    operands: tuple["MacroOperand", ...]
+
+
 MacroOperand = Annotated[
     Union[
         MacroLiteralOperand,
         MacroNameOperand,
         MacroReaderOperand,
         MacroSelectorOperand,
+        MacroNumberCallOperand,
+        MacroArithmeticOperand,
+        MacroExtremumOperand,
     ],
     Field(discriminator="kind"),
 ]
+
+MacroArithmeticOperand.model_rebuild()
+MacroExtremumOperand.model_rebuild()
 
 
 class MacroComparisonCondition(_Frozen):
@@ -333,8 +374,25 @@ class MacroReadValue(_Frozen):
     call: MacroReaderCall
 
 
+class MacroComputeValue(_Frozen):
+    """숫자 `def` 안에서만 서는 대입의 오른쪽. 산술식이나 숫자 `def` 호출 하나다.
+
+    reader 하나와 리터럴 하나는 이것이 아니라 예전 그대로 `MacroReadValue`·
+    `MacroLiteralValue` 로 든다.
+    """
+
+    kind: Literal["compute"] = "compute"
+    expression: MacroOperand
+
+
 MacroAssignValue = Annotated[
-    Union[MacroFindValue, MacroSelectorValue, MacroLiteralValue, MacroReadValue],
+    Union[
+        MacroFindValue,
+        MacroSelectorValue,
+        MacroLiteralValue,
+        MacroReadValue,
+        MacroComputeValue,
+    ],
     Field(discriminator="kind"),
 ]
 
@@ -479,20 +537,27 @@ class MacroWaitUntilStatement(_Statement):
 
 
 class MacroReturnStatement(_Statement):
-    """predicate `def` 안에서만 서는 `return`. 둘 중 정확히 하나가 찬다.
+    """predicate 와 숫자 `def` 안에서만 서는 `return`. 셋 중 정확히 하나가 찬다.
 
-    `return True`·`return False` 는 `value` 이고, 그 밖은 조건 하나인 `condition` 이다.
-    조건 문법에 bool 리터럴 하나뿐인 조건을 따로 열지 않으려고 둘을 가른다.
+    predicate 에서 `return True`·`return False` 는 `value` 이고, 그 밖은 조건 하나인
+    `condition` 이다. 조건 문법에 bool 리터럴 하나뿐인 조건을 따로 열지 않으려고 둘을 가른다.
+    숫자 `def` 의 `return` 은 숫자 식 하나인 `expression` 이다(ARTEL-1066).
     """
 
     kind: Literal["return"] = "return"
     condition: MacroCondition | None = None
     value: bool | None = None
+    expression: MacroOperand | None = None
 
     @model_validator(mode="after")
     def _exactly_one(self) -> "MacroReturnStatement":
-        if (self.condition is None) == (self.value is None):
-            raise ValueError("a `return` carries exactly one of `condition` and `value`")
+        filled = sum(
+            one is not None for one in (self.condition, self.value, self.expression)
+        )
+        if filled != 1:
+            raise ValueError(
+                "a `return` carries exactly one of `condition`, `value` and `expression`"
+            )
         return self
 
 
@@ -576,9 +641,9 @@ class MacroFunction(_Frozen):
     # `statements` 에 없고 runner 가 보지 않는다. 기본값 `None` 은 이 field 가 생기기 전에
     # 저장된 JSON 이 `extra="forbid"` 아래에서도 그대로 읽히게 한다.
     docstring: str | None = None
-    # `-> None` 이면 "none", predicate 이면 "bool". 기본값은 `docstring` 과 같은 이유로
-    # 이 field 가 생기기 전에 저장된 JSON 이 그대로 읽히게 한다.
-    returns: Literal["none", "bool"] = "none"
+    # `-> None` 이면 "none", predicate 이면 "bool", 숫자 `def` 면 "int"·"float". 기본값은
+    # `docstring` 과 같은 이유로 이 field 가 생기기 전에 저장된 JSON 이 그대로 읽히게 한다.
+    returns: Literal["none", "bool", "int", "float"] = "none"
     statements: tuple[MacroStatement, ...] = ()
 
 
