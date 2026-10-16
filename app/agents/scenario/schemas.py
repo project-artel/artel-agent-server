@@ -457,7 +457,8 @@ class Ref(BaseModel):
     [detail](사전조건·기대값)을 보여 준다 — TC 를 따로 볼 화면이 없어서다.
     """
 
-    kind: Literal["tc", "ts"]
+    # tr · qa · issue · build 는 질문 답이 서비스 페이지로 보내는 표식이다(ARTEL-1097).
+    kind: Literal["tc", "ts", "tr", "qa", "issue", "build"]
     id: int
     label: str
     detail: str | None = None
