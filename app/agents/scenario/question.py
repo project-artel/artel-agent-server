@@ -33,7 +33,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_MARKER = re.compile(r"\[\[(tc|ts):(-?\d+)\]\]")
+_MARKER = re.compile(r"\[\[(tc|ts|tr|qa|issue|build):(-?\d+)\]\]")
+# 대화 기록은 표식을 "@TC 이름" 으로 적는다. 모델이 그것을 보고 답에 "@TC" 를 따라 쓰면 칩이 아니라 글자로 남는다.
+_SPOKEN_PREFIX = re.compile(r"@(?:TC|TS|TR|QA|ISSUE|BUILD)\s*", re.IGNORECASE)
 
 # 한 질문의 천장. 관계를 몇 번 따라가면 답이 나오는 것이 정상이고, 그보다 길면 헛돌고 있는 것이다.
 # 실측(TR 99, "최근 QA 결과 요약")에서 28 걸음 한도에 걸려 턴이 죽었다 — 걸음은 도구 호출의 두 배 남짓에 답 도구가
@@ -84,7 +86,10 @@ _SYSTEM_KO = """너는 게임 QA 서비스 Artel 의 도우미다. 사용자의 
 - find 결과가 여럿이면 질문에 맞는 것을 모두 확인한다. 하나만 보고 "없다" 고 단정하지 않는다.
 - 실패 이유를 물으면 verdicts 를 읽는다. `earlier_failed_steps` 가 있으면 앞 스텝이 막혀 확인 자체를 못 한 것일 수 있다
   — 게임 결함인지 사전조건이 안 선 것인지를 나눠 말한다.
-- TC · TS 는 결과의 `ref` 표식([[tc:N]] · [[ts:N]])을 그대로 쓴다. 표식을 지어내지 않는다.
+- 무엇을 가리킬 때는 결과의 `ref` 표식을 그대로 쓴다 — 케이스 [[tc:N]], 시나리오 [[ts:N]], 테스트 런 [[tr:N]], QA 실행
+  [[qa:N]], 이슈 [[issue:N]], 빌드 [[build:N]]. 화면이 이름 칩으로 그리고 누르면 그 페이지로 간다. 표식을 지어내지 않는다.
+- **번호를 글로 쓰지 않는다.** "TC 411", "케이스 359", "이슈 #9" 처럼 쓰지 말고 표식만 쓴다. "@" 도 쓰지 않는다.
+- 케이스를 설명할 때는 사전조건과 기대 결과를 각각 한 줄로, 줄 머리에 `사전조건:` · `기대 결과:` 를 붙여 쓴다.
 - result 는 한 줄 결론, detail 은 근거를 짧게. 한국어 해요체로 답한다."""
 
 _SYSTEM_EN = _SYSTEM_KO.replace("한국어 해요체로 답한다.", "Answer in English.")
@@ -103,13 +108,8 @@ async def run_question_workflow(
         answer = await channel.query_resource(payload)
         if answer is None:
             return json.dumps({"note": "조회가 시간 안에 답하지 않았다."}, ensure_ascii=False)
-        for item in answer.get("items", []):
-            _remember(found, item)
-        text = json.dumps(answer, ensure_ascii=False, default=str)
-        # 결과 안쪽 칸(실패 스텝의 case_ref 등)에 실린 표식도 쓸 수 있게 한다. 이름은 모르니 번호로 부른다.
-        for kind, ref_id in _MARKER.findall(text):
-            found.setdefault((kind, int(ref_id)), Ref(kind=kind, id=int(ref_id), label=f"{kind.upper()} {ref_id}"))
-        return text
+        _remember(found, answer.get("items", []))
+        return json.dumps(answer, ensure_ascii=False, default=str)
 
     @tool
     async def find_resource(kind: str, text: str = "", limit: int = 10, all_versions: bool = False) -> str:
@@ -174,15 +174,25 @@ async def run_question_workflow(
     )
 
 
-def _remember(found: dict[tuple[str, int], Ref], item: dict) -> None:
-    """도구가 돌려준 TC · TS 를 기억한다. 답의 표식은 이 안에 있는 것만 남긴다."""
-    match = _MARKER.fullmatch(item.get("ref") or "")
-    if match is None:
+def _remember(found: dict[tuple[str, int], Ref], item: object) -> None:
+    """도구가 돌려준 표식을 이름과 함께 기억한다. 결과 안쪽(실패 스텝의 케이스 등)의 `{ref, label}` 도 찾아 들어간다.
+    답의 표식은 이 안에 있는 것만 남긴다."""
+    if isinstance(item, list):
+        for each in item:
+            _remember(found, each)
         return
-    kind, ref_id = match.group(1), int(match.group(2))
-    fields = item.get("fields") or {}
-    detail = fields.get("expected") if kind == "tc" else fields.get("description")
-    found[(kind, ref_id)] = Ref(kind=kind, id=ref_id, label=str(item.get("label") or ""), detail=detail or None)
+    if not isinstance(item, dict):
+        return
+    match = _MARKER.fullmatch(str(item.get("ref") or ""))
+    if match is not None and item.get("label"):
+        kind, ref_id = match.group(1), int(match.group(2))
+        fields = item.get("fields") or {}
+        detail = fields.get("expected") if kind == "tc" else fields.get("description")
+        # 위쪽(항목 자체)에서 본 이름이 안쪽 요약보다 낫다 — 먼저 본 것을 지킨다.
+        found.setdefault((kind, ref_id), Ref(kind=kind, id=ref_id, label=str(item["label"]), detail=detail or None))
+    for value in item.values():
+        if isinstance(value, (dict, list)):
+            _remember(found, value)
 
 
 def _MARKER_KEY(key: tuple[str, int]) -> str:  # noqa: N802 - reads as the marker it builds
@@ -190,14 +200,17 @@ def _MARKER_KEY(key: tuple[str, int]) -> str:  # noqa: N802 - reads as the marke
 
 
 def _checked(text: str, found: dict[tuple[str, int], Ref]) -> str:
-    """도구에서 본 번호의 표식만 남긴다. 모르는 번호는 지운다 — 누를 곳이 없는 칩이 된다."""
+    """도구에서 본 번호의 표식만 남긴다. 모르는 번호는 지운다 — 누를 곳이 없는 칩이 된다. "@TC" 같은 기록 형식이
+    새어 들어왔으면 걷어 낸다."""
+    text = _SPOKEN_PREFIX.sub("", text)
     return _MARKER.sub(lambda m: m.group(0) if (m.group(1), int(m.group(2))) in found else "", text).strip()
 
 
 def _spoken(text: str, found: dict[tuple[str, int], Ref]) -> str:
-    """대화 기록에는 표식 대신 이름을 쓴다(`@TC 이름`) — 다른 갈래와 같다."""
+    """대화 기록에는 표식 대신 이름을 쓴다."""
     def name(match: re.Match) -> str:
         ref = found.get((match.group(1), int(match.group(2))))
-        return f"@{ref.kind.upper()} {ref.label}" if ref else ""
+        # 질문 답의 기록은 이름만 남긴다. "@TC" 를 기록에 남기면 다음 답이 그것을 따라 쓴다.
+        return ref.label if ref else ""
 
     return _MARKER.sub(name, text)

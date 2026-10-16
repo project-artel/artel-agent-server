@@ -35,6 +35,7 @@ from app.agents.scenario.prompt import build_messages, build_system_prompt
 from app.agents.scenario.ordering import UnreachableClimb, unreachable_climbs
 from app.agents.scenario import trace
 from app.agents.scenario.replier import ASK_WHICH, ScenarioReplier
+from app.agents.scenario.requests import looks_multiple, rest_note, split_requests
 from app.agents.scenario.router import Route, ScenarioRouter
 from app.agents.scenario.workflow import run_authoring_workflow, run_modify_workflow
 from app.agents.scenario.schemas import (
@@ -162,6 +163,27 @@ class ScenarioAgent:
         self._replier = replier or ScenarioReplier()
 
     async def run(
+        self,
+        request: ScenarioAgentRequest,
+        context: AgentContext,
+        channel: ScenarioChannel,
+    ) -> ScenarioAgentResult:
+        # **한 번에 한 요청**(ARTEL-1086): 요청이 여럿 섞인 말은 처음 요청만 갈래로 보내고 나머지는 다시 말해 달라고 한다.
+        # 이미 갈래가 정해진 재진입(질문의 소형 턴 등)에는 걸지 않는다.
+        if (
+            getattr(get_settings(), "scenario_single_request_enabled", False)
+            and self._router is not None
+            and request.current_route is None
+            and looks_multiple(request.user_input)
+        ):
+            split = await split_requests(request.model, request.user_input)
+            if split is not None and split.rest:
+                trace.record(request.run_id, "요청이 여럿 — 첫 요청만", f"처리: {split.first}\n미룸: {split.rest}")
+                result = await self._run_one(request.model_copy(update={"user_input": split.first}), context, channel)
+                return _with_note(result, rest_note(split.rest, request.locale.value))
+        return await self._run_one(request, context, channel)
+
+    async def _run_one(
         self,
         request: ScenarioAgentRequest,
         context: AgentContext,
@@ -491,3 +513,12 @@ class ScenarioAgent:
         return answer.scenarios[0].model_copy(
             update={"scenario_id": scenario.scenario_id, "title": scenario.title}
         )
+
+
+def _with_note(result: ScenarioAgentResult, note: str) -> ScenarioAgentResult:
+    """처리하지 않은 요청의 안내를 답 끝에 붙인다. 두 칸 답이면 설명 칸 끝에, 아니면 글 끝에."""
+    message = f"{result.message}\n\n{note}" if result.message else note
+    if result.reply is None:
+        return result.model_copy(update={"message": message})
+    detail = f"{result.reply.detail}\n\n{note}" if result.reply.detail else note
+    return result.model_copy(update={"message": message, "reply": result.reply.model_copy(update={"detail": detail})})

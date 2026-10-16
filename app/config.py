@@ -186,6 +186,8 @@ class Settings(BaseSettings):
     # 질문 갈래가 리소스 도구(find · get · related)로 서비스 전반을 읽으며 답한다(ARTEL-1086, POC).
     # 끄면 질문 갈래는 예전처럼 케이스 검색만 붙은 소형 턴이다. 실험 스위치 — 기본은 끈다.
     scenario_resource_tools_enabled: bool = False
+    # 한 메시지에 요청이 여럿이면 첫 요청만 처리한다(ARTEL-1086). 저작 · 수정 갈래에도 걸리므로 따로 켠다. 기본은 끈다.
+    scenario_single_request_enabled: bool = False
     scenario_max_model_calls: int = 40
     scenario_max_tool_calls: int = 30
     game_context_prompt_version: str | None = None
