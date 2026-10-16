@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
 from langchain.agents.structured_output import ToolStrategy
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable
 
 from langgraph.errors import GraphRecursionError
@@ -36,7 +36,7 @@ from app.agents.scenario.ordering import UnreachableClimb, unreachable_climbs
 from app.agents.scenario import trace
 from app.agents.scenario.replier import ASK_WHICH, ScenarioReplier
 from app.agents.scenario.requests import combine, looks_multiple, split_requests
-from app.agents.scenario.router import Route, ScenarioRouter
+from app.agents.scenario.router import PreviousTurn, Route, ScenarioRouter
 from app.agents.scenario.workflow import run_authoring_workflow, run_modify_workflow
 from app.agents.scenario.schemas import (
     ScenarioAgentRequest,
@@ -132,13 +132,52 @@ _CANNED = {
         "이 런의 TC에 연결해 드려요. 어떤 흐름을 테스트할까요?"
     ),
     Route.OFFTOPIC: "그건 제가 도와드리기 어려워요. 테스트 시나리오를 만들거나 이 런의 TC에 대해 물어봐 주세요.",
+    Route.DECLINE: "알겠어요. 지금 시나리오는 그대로 둘게요.",
+    Route.UNSUPPORTED: "그건 제가 할 수 없는 일이에요. 저는 이 프로젝트의 TC로 시나리오를 만들고 고치는 일을 해요.",
 }
+
+# 시나리오를 쓰지 않고 문구 한마디로 끝나는 갈래.
+_REPLY_ONLY = (Route.GREETING, Route.OFFTOPIC, Route.DECLINE, Route.UNSUPPORTED)
+
+
+def _previous_turn(request: ScenarioAgentRequest) -> PreviousTurn | None:
+    """대화 기록의 직전 턴 — 마지막 Agent 답과 그 앞의 사용자 말. 메시지당 상한으로 자른다.
+
+    대화 기록에는 사용자 말과 **Agent 자신의 답**만 있다. orche 가 따로 띄운 알림·질문은
+    없으므로 여기도 없다 — 라우터가 운영에서 보는 문맥이 측정에서 쓴 문맥과 같다.
+    """
+    from app.agents.scenario.workflow import _history_limits
+
+    _, per_message = _history_limits()
+
+    def cut(text: str) -> str:
+        return text if len(text) <= per_message else text[:per_message] + " …(이하 생략)"
+
+    history = list(request.history)
+    for index in range(len(history) - 1, -1, -1):
+        if isinstance(history[index], AIMessage):
+            assistant = str(history[index].content)
+            user = next(
+                (str(m.content) for m in reversed(history[:index]) if isinstance(m, HumanMessage)), ""
+            )
+            return PreviousTurn(user=cut(user), assistant=cut(assistant))
+    return None
 
 
 def _hint(request: ScenarioAgentRequest) -> str:
-    """라우터에게 주는 문맥 한 줄 — 최근 대화의 마지막 사용자·어시스턴트 발화만."""
-    tail = [m for m in request.history[-2:]]
-    return " / ".join(str(getattr(m, "content", ""))[:120] for m in tail)
+    """라우터에게 주는 문맥 — 직전 턴(마지막 사용자·Agent 발화)을 **자르지 않고** (ARTEL-942).
+
+    "그거 말고", "응 그렇게 해줘" 는 직전 답을 모르면 수정인지 새 저작인지 가를 수 없다. 예전에는
+    120자에서 잘랐는데, 답은 평균 344자라 사용자가 가리키는 것(답 끝의 질문, 뺀 것)이 잘려
+    나갔다. 실측(POC 3, 지칭어 후속 말 6개×2회): 120자 9/12, 직전 턴 12/12, 창 전체 8/12.
+    창 전체는 2배 비용에 오히려 나빴다 — 대화가 길면 직전 답이 묻힌다. 직전 턴은 호출당
+    +$0.0002 다. 아주 긴 메시지는 B·E 와 같은 상한으로 자른다.
+    """
+    from app.agents.scenario.workflow import _history_limits
+
+    _, per_message = _history_limits()
+    tail = [str(getattr(m, "content", "")) for m in request.history[-2:]]
+    return " / ".join(t if len(t) <= per_message else t[:per_message] + " …(이하 생략)" for t in tail)
 
 
 class ScenarioAgent:
@@ -198,12 +237,14 @@ class ScenarioAgent:
         # 현행의 낭비는 "안녕하세요"에도 74k 가 나가던 것이다. 모르면 AUTHORING 이고,
         # 그 갈래는 아래 루프 그대로라 오분류가 무동작이 되지 않는다.
         if self._router is not None and request.current_route is None:
-            verdict = await self._router.route(request.user_input, context_hint=_hint(request))
+            verdict = await self._router.route(
+                request.user_input, context_hint=_hint(request), previous=_previous_turn(request)
+            )
             if verdict.route is Route.ASK:
                 # **되묻는다.** 결정 모델 라우터가 갈래와 대상이 어긋났다고 말한 자리다.
                 # 모델을 부르지 않는다 — 물어볼 것이 언제나 같은 하나다.
                 return ScenarioAgentResult(message=ASK_WHICH, scenarios=[])
-            if verdict.route in (Route.GREETING, Route.OFFTOPIC):
+            if verdict.route in _REPLY_ONLY:
                 # 저작 없이 끝나지만 문구는 필요하다. 라우터가 문구까지 만들던 구조는 라우터가
                 # 자유 텍스트를 낼 수 있을 때만 서므로(결정 모델은 못 쓴다), 문구를 못 받았으면
                 # 문구 노드에 맡기고 그마저 실패하면 고정 문구로 떨어진다.

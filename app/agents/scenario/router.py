@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from enum import Enum
 from typing import Awaitable, Callable
 
@@ -30,6 +31,12 @@ logger = logging.getLogger(__name__)
 class Route(str, Enum):
     GREETING = "greeting"
     OFFTOPIC = "offtopic"
+    # 아무것도 바꾸지 말라는 말 — 거절·보류·취소. 갈래가 없던 동안 "하지 마"·"그대로 둬" 가
+    # modify 로 가서, 하지 말라는 말에 시나리오를 다시 쓸 수 있었다(실측 2026-10-07).
+    DECLINE = "decline"
+    # 이 게임과 관련은 있지만 도우미가 할 수 없는 일 — 이슈 생성, TC 자체 생성, 테스트 실행.
+    # 갈래가 없던 동안 authoring 으로 가서 엉뚱한 시나리오가 생겼다.
+    UNSUPPORTED = "unsupported"
     QUESTION = "question"
     AUTHORING = "authoring"
     # 기존 시나리오 수정 — 전용 수정 단계가 받는다. 신규 저작과 갈라 두는 이유:
@@ -44,7 +51,7 @@ class Route(str, Enum):
 
 class RouteVerdict(BaseModel):
     route: Route
-    # 인사·가드레일일 때만 쓰는 응답 문구. 질문·저작은 다음 갈래가 답한다.
+    # 인사·가드레일·거절·불가일 때만 쓰는 응답 문구. 질문·저작은 다음 갈래가 답한다.
     reply: str = Field(default="")
 
 
@@ -68,6 +75,14 @@ def router_model() -> LLMModel:
 RouterCall = Callable[[str], Awaitable[RouteVerdict]]
 
 
+@dataclass(frozen=True)
+class PreviousTurn:
+    """직전 턴 — 마지막 사용자 말과 그에 대한 Agent 답. 길면 이미 잘려서 온다(`agent._previous_turn`)."""
+
+    user: str
+    assistant: str
+
+
 async def _call_model(prompt: str) -> RouteVerdict:
     # 추론 끔(max_tokens=0) — 669토큰짜리 분류에 추론이 지연 13초·출력 수백 토큰을
     # 쓰던 실측(2026-09-09). 라우터가 느리면 모든 갈래가 그만큼 늦게 시작한다.
@@ -82,7 +97,11 @@ class ScenarioRouter:
     def __init__(self, caller: RouterCall | None = None) -> None:
         self._caller = caller or _call_model
 
-    async def route(self, user_input: str, context_hint: str = "") -> RouteVerdict:
+    async def route(
+        self, user_input: str, context_hint: str = "", previous: PreviousTurn | None = None
+    ) -> RouteVerdict:
+        # `previous` 는 결정 전용 모델이 칸으로 받는 같은 문맥이다. 이 라우터는 산문 하나로 받으므로
+        # `context_hint` 만 읽는다.
         # 분류 문구는 버전 파일에 있다 (`app/prompts/scenario_router/`) — 잠금과
         # 버전 기록을 다른 프롬프트와 같은 방식으로 받기 위해서다.
         prompt = load_prompt("scenario_router", "system").body.format(
@@ -158,7 +177,22 @@ class JevScenarioRouter(ScenarioRouter):
             await self._http.aclose()
             self._http = None
 
-    async def _decide(self, user_input: str) -> dict:
+    @staticmethod
+    def _state(user_input: str, previous: PreviousTurn | None) -> dict[str, str]:
+        """모델이 판단할 재료. 직전 턴은 **칸을 나눠** 싣는다 — 누가 한 말인지 섞이지 않게.
+
+        직전 답을 모르면 "그거 말고"·"후자로"·"응" 을 가를 수 없다. 넣어 쟀더니(2026-10-07,
+        217건 × 2회) 대화 없이 92.2% → 직전 턴 94.9%, 실제 대화 쌍은 89% → 94%. 첫 말에 관계없는
+        답을 붙인 37건은 37건 모두 그대로 맞혀, 문맥이 상관없는 판단을 흔들지 않았다.
+        """
+        state = {"user_message": user_input}
+        if previous is not None and previous.assistant:
+            if previous.user:
+                state["previous_user_message"] = previous.user
+            state["previous_assistant_message"] = previous.assistant
+        return state
+
+    async def _decide(self, state: dict[str, str]) -> dict:
         """결정 model 에 두 질문을 보내고 `answers` 를 돌려준다.
 
         관리자가 결정 model 로 Jev 가 아닌 model 을 골랐으면 그 model 이 같은 질문에 답한다
@@ -170,7 +204,7 @@ class JevScenarioRouter(ScenarioRouter):
             self._client(),
             {
                 "model": JEV_MODEL,
-                "state": {"user_message": user_input},
+                "state": state,
                 "questions": {
                     "target": {
                         "type": "choice",
@@ -187,11 +221,12 @@ class JevScenarioRouter(ScenarioRouter):
         )
         return answer["answers"]
 
-    async def route(self, user_input: str, context_hint: str = "") -> RouteVerdict:
-        # `context_hint` 는 아직 쓰지 않는다. 측정이 문맥 없이 이뤄졌으므로 넣는 것은 재 본
-        # 뒤의 일이다 — 문맥을 주면 분류가 달라질 수 있고 그 방향은 측정이 없다.
+    async def route(
+        self, user_input: str, context_hint: str = "", previous: PreviousTurn | None = None
+    ) -> RouteVerdict:
+        # 산문 문맥(`context_hint`)은 읽지 않는다 — 같은 내용을 `previous` 로 칸을 나눠 받는다.
         try:
-            answers = await self._decide(user_input)
+            answers = await self._decide(self._state(user_input, previous))
             picked = Route(answers["route"]["choice"])
             target = answers["target"]["choice"]
         except Exception as error:  # noqa: BLE001 — 라우터 실패가 턴을 죽이면 안 된다
