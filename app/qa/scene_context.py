@@ -624,11 +624,10 @@ async def fetch_scene_context(
     is strictly worse: the block makes a good run better, and its absence costs
     nothing the agent cannot get from a tool.
 
-    `None` is also the answer when the caller has no ids to ask with. Today
-    Orchestration's session open does not send `project_id`/`game_build_id`
-    (`QaSessionOpenContext` carries `game_instance_id` and `qa_run_id`), so this
-    lands on the same path as a failed lookup until it does — deliberately, so
-    the feature ships dark rather than shipping a run that refuses to open.
+    `None` is also the answer when the caller has no ids to ask with.
+    Orchestration's session open sends `project_id`/`game_build_id`
+    (`QaSessionOpenContext`); a caller that leaves them out lands on the same
+    path as a failed lookup rather than on a run that refuses to open.
     """
     if project_id is None or game_build_id is None:
         return None
