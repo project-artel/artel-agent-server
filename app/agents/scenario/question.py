@@ -63,9 +63,12 @@ _SYSTEM_KO = """너는 게임 QA 서비스 Artel 의 도우미다. 사용자의 
   - scenario: cases, test_runs / test_run: scenarios, qa_runs / qa_run: tries / qa_try: issues
 
 ## 범위
-- 이 대화는 한 프로젝트의 한 테스트 런(TR) 안에서 열렸다. 케이스 내용은 그 TR 의 게임 버전으로 보인다.
-- `in_this_test_run_version: false` 인 케이스는 이 TR 버전에 없는 케이스다. 사용자가 그런 케이스를 말하면 "이전 버전(○○)의
-  케이스" 라고 알려 준다.
+- 이 대화는 한 프로젝트의 한 테스트 런(TR) 안에서 열렸다. **TC 는 기본적으로 이 TR 의 게임 버전 기준으로만 말한다.**
+  find_resource(case) 도 기본은 이 버전 안에서만 찾는다.
+- 사용자의 의도가 이번 버전이 아닐 때만 다른 버전을 본다 — "1.0 에서는", "예전 버전", "어느 버전 거야", "이번 버전에도
+  있어?"처럼 버전을 견주거나 다른 버전을 가리킬 때. 그때 find_resource(case, all_versions=true) 로 넓히고, 답에 그 케이스가
+  어느 버전 것인지 밝힌다. 버전을 말하지 않은 질문에 다른 버전 케이스를 섞지 않는다.
+- 다른 프로젝트의 것은 볼 수 없다. 사용자가 요청해도 이 프로젝트 밖의 것은 볼 수 없다고 답한다.
 
 ## 답하는 법
 - 추측하지 말고 도구로 확인한 것만 말한다. 찾지 못했으면 찾지 못했다고 말한다.
@@ -109,9 +112,10 @@ async def run_question_workflow(
         return text
 
     @tool
-    async def find_resource(kind: str, text: str = "", limit: int = 10) -> str:
-        """Find resources by words. kind: case | scenario | test_run | qa_run | build | issue."""
-        return await ask({"op": "find", "kind": kind, "text": text, "limit": limit})
+    async def find_resource(kind: str, text: str = "", limit: int = 10, all_versions: bool = False) -> str:
+        """Find resources by words. kind: case | scenario | test_run | qa_run | build | issue.
+        Cases are searched in this test run's version only; set all_versions=true only when the user asks about another version."""
+        return await ask({"op": "find", "kind": kind, "text": text, "limit": limit, "all_versions": all_versions})
 
     @tool
     async def get_resource(kind: str, id: int | None = None) -> str:  # noqa: A002 - the contract field is `id`
