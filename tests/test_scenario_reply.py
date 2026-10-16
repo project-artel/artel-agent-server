@@ -181,6 +181,20 @@ def test_an_unclear_target_asks_with_the_titles_as_choices(monkeypatch) -> None:
     assert any("전투 여정" in label for label in labels)
 
 
+def test_a_deliberate_hold_does_not_ask_which_scenario(monkeypatch) -> None:
+    """두 번 물었는데 답이 없으면 모델은 고치지 않고 설명만 낸다(ARTEL-1116). 그것을 "대상을 못
+    가렸다" 로 받아 "어느 시나리오를 고칠까요?" 를 다시 물으면 안 된다."""
+    import app.agents.scenario.workflow as wf
+
+    plans = [wf.ModifyPlan(detail="말씀하신 조건을 알려 주시면 그때 고칠게요.")]
+    out, channel = _modify(monkeypatch, plans)
+
+    assert channel.submitted == []
+    assert out.reply is not None and out.reply.asks == []
+    assert "고치지 않았어요" in out.reply.result
+    assert out.reply.detail == "말씀하신 조건을 알려 주시면 그때 고칠게요."
+
+
 def test_a_modify_question_is_relayed_as_a_question(monkeypatch) -> None:
     import app.agents.scenario.workflow as wf
 

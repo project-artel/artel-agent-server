@@ -466,7 +466,9 @@ def _answer(
     asked_label = "질문" if request.locale.value == "ko" else "Question"
     message = "\n".join(
         _spoken(part, found, prefix=True)
-        for part in (result, listed, detail, *(f"{asked_label}: {q.text}" for q in asked)) if part
+        # 물은 줄은 결과 바로 뒤다. 대화 기록은 메시지 하나를 앞에서부터 잘라 담으므로(설정
+        # `scenario_history_message_max_chars`), 긴 설명 뒤에 두면 잘려 나가 몇 번 물었는지 못 센다.
+        for part in (result, *(f"{asked_label}: {q.text}" for q in asked), listed, detail) if part
     )
     return ScenarioAgentResult(
         message=message,
@@ -957,6 +959,15 @@ async def run_modify_workflow(
             "먼저 확인할 게 있어서 아직 아무것도 고치지 않았어요."
             if ko else "Nothing changed yet — I need to check something first.",
             plan.detail, _questions(plan.questions),
+        )
+    if not plan.steps and not plan.questions and plan.detail.strip():
+        # 일부러 아무것도 고치지 않은 턴이다(ARTEL-1116) — 같은 것을 두 번 물었는데 답이 없으면 더
+        # 묻지 않고 그대로 둔다. 이것을 아래의 "대상을 못 가렸다" 로 받으면 엉뚱하게 "어느 시나리오를
+        # 고칠까요?" 를 다시 묻게 된다(실측 2026-10-16, 같은 요청 세 번째 턴).
+        return _answer(
+            request,
+            "이번에는 아무것도 고치지 않았어요." if ko else "I left everything as it is this time.",
+            plan.detail,
         )
     if plan.scenario_id not in known_scenario_ids or not plan.steps:
         # 대상을 못 가리키면 고치지 않는다 — 짐작으로 남의 시나리오를 갈아끼우는 것이
