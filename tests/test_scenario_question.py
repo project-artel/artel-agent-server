@@ -62,14 +62,22 @@ def test_only_mixed_looking_messages_are_split() -> None:
     assert not looks_multiple("보스전 시나리오 만들고 보상 확인까지 넣어 줘")
 
 
-def test_the_rest_note_goes_to_the_end_of_the_explanation() -> None:
-    from app.agents.scenario.agent import _with_note
-    from app.agents.scenario.requests import rest_note
-    from app.agents.scenario.schemas import AgentReply, ScenarioAgentResult
+def test_requests_are_combined_into_one_numbered_answer() -> None:
+    from app.agents.scenario.requests import combine
+    from app.agents.scenario.schemas import AgentReply, Ref, ScenarioAgentResult, ScenarioChange
 
-    result = ScenarioAgentResult(message="m", scenarios=[], reply=AgentReply(result="r", detail="d"))
-    noted = _with_note(result, rest_note(["지금 TC 는 몇 개야?"], "ko"))
+    first = ScenarioAgentResult(
+        message="m1", scenarios=[],
+        reply=AgentReply(result="1건을 수정했어요.", detail="뺐어요.", changes=[ScenarioChange(action="updated", title="맵 진입")]),
+    )
+    second = ScenarioAgentResult(
+        message="m2", scenarios=[], reply=AgentReply(result="87건이에요.", detail="이 버전 기준."),
+        refs=[Ref(kind="tr", id=105, label="데모")],
+    )
 
-    assert noted.reply.detail.startswith("d\n\n한 번에 한 가지씩")
-    assert "“지금 TC 는 몇 개야?”" in noted.reply.detail
-    assert noted.reply.result == "r"
+    merged = combine([("마지막 스텝을 빼 줘", first), ("TC 는 몇 개야?", second)])
+
+    assert merged.reply.result == "1. 1건을 수정했어요.\n2. 87건이에요."
+    assert "**1. 마지막 스텝을 빼 줘**" in merged.reply.detail and "**2. TC 는 몇 개야?**" in merged.reply.detail
+    assert [c.title for c in merged.reply.changes] == ["맵 진입"]
+    assert [(r.kind, r.id) for r in merged.refs] == [("tr", 105)]

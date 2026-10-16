@@ -1,8 +1,8 @@
-"""한 메시지에 요청이 여럿이면 첫 요청만 처리한다 (ARTEL-1086).
+"""한 메시지의 여러 요청을 하나씩 제 갈래로 처리하고 한 답으로 모은다 (ARTEL-1086).
 
 "21번 스텝을 빼 줘. 아 그리고 지금 TC 는 몇 개야?" 처럼 고치기와 질문이 한 말에 섞이면, 한 갈래가 둘을 함께 받아
-고치기도 대충 하고 질문도 엉뚱한 범위로 답했다(런 104). 요청마다 맞는 갈래가 다르므로 **처음 말한 요청만** 그 갈래로
-보내고, 나머지는 따로 다시 말해 달라고 안내한다.
+고치기도 대충 하고 질문도 엉뚱한 범위로 답했다(런 104). 요청마다 맞는 갈래가 다르므로 나눠서 **차례로** 제 갈래에
+보내고, 결과를 요청별 단락으로 모아 한 번에 보고한다.
 
 모든 말에 모델을 부르지 않는다. 섞였을 법한 말(이어 주는 말 · 물음 여럿)만 골라 그때만 나눈다.
 """
@@ -14,8 +14,13 @@ import re
 
 from pydantic import BaseModel, Field
 
+from typing import TYPE_CHECKING
+
 from app.llm.chat_model import structured
 from app.llm.models import LLMModel, ReasoningConfig
+
+if TYPE_CHECKING:
+    from app.agents.scenario.schemas import ScenarioAgentResult
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +62,35 @@ async def split_requests(model: LLMModel, text: str) -> SplitRequests | None:
     return answer
 
 
-def rest_note(rest: list[str], locale: str) -> str:
-    """처리하지 않은 요청을 알린다."""
-    joined = " / ".join(f"“{one.strip()}”" for one in rest if one.strip())
-    if locale == "ko":
-        return f"한 번에 한 가지씩 처리해요. 이번에는 첫 요청만 처리했어요 — {joined} 은(는) 이어서 다시 말씀해 주세요."
-    return f"I handle one request at a time and only did the first one. Please send {joined} again separately."
+def combine(parts: list[tuple[str, "ScenarioAgentResult"]]) -> "ScenarioAgentResult":
+    """요청별 결과를 한 답으로. 결과 줄은 요청 순서대로 번호를 붙이고, 설명은 요청마다 단락으로 나눈다. 바뀐 시나리오 ·
+    질문 · 표식은 모두 모은다."""
+    from app.agents.scenario.schemas import AgentReply, ReviewedCases, ScenarioAgentResult
+
+    results, details, messages = [], [], []
+    changes, questions, scenarios, refs = [], [], [], {}
+    included, excluded, reviewed_any = [], [], False
+    for index, (text, part) in enumerate(parts, start=1):
+        head = part.reply.result if part.reply is not None else part.message.split("\n", 1)[0]
+        results.append(f"{index}. {head}")
+        body = part.reply.detail if part.reply is not None else part.message
+        details.append(f"**{index}. {text.strip()}**\n\n{body}".rstrip())
+        messages.append(f"{index}. {part.message}")
+        if part.reply is not None:
+            changes += part.reply.changes
+        questions += part.questions
+        scenarios += part.scenarios
+        for ref in part.refs:
+            refs[(ref.kind, ref.id)] = ref
+        if part.reviewed is not None:
+            reviewed_any = True
+            included += part.reviewed.included
+            excluded += part.reviewed.excluded
+    return ScenarioAgentResult(
+        message="\n\n".join(messages),
+        scenarios=scenarios,
+        reviewed=ReviewedCases(**{"in": sorted(set(included)), "out": sorted(set(excluded) - set(included))}) if reviewed_any else None,
+        reply=AgentReply(result="\n".join(results), detail="\n\n".join(details), changes=changes),
+        questions=questions,
+        refs=list(refs.values()),
+    )

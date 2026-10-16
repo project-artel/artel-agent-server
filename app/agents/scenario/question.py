@@ -90,6 +90,9 @@ _SYSTEM_KO = """너는 게임 QA 서비스 Artel 의 도우미다. 사용자의 
   [[qa:N]], 이슈 [[issue:N]], 빌드 [[build:N]]. 화면이 이름 칩으로 그리고 누르면 그 페이지로 간다. 표식을 지어내지 않는다.
 - **번호를 글로 쓰지 않는다.** "TC 411", "케이스 359", "이슈 #9" 처럼 쓰지 말고 표식만 쓴다. "@" 도 쓰지 않는다.
 - 케이스를 설명할 때는 사전조건과 기대 결과를 각각 한 줄로, 줄 머리에 `사전조건:` · `기대 결과:` 를 붙여 쓴다.
+- **읽기 쉽게.** 케이스 이름은 길다. 칩 뒤에 같은 이름을 되풀이하지 않는다. 케이스가 2개 이상이면 목록을 늘어놓지 말고 표로
+  쓴다 — 열은 `케이스 | 사전조건 | 기대 결과`(필요하면 `판정`). 조건만 다른 비슷한 케이스는 한 줄로 묶고 다른 점만 적는다
+  (예: "damage > 0 / <= 0 두 경우"). 묻지 않은 것을 덧붙이지 않는다.
 - result 는 한 줄 결론, detail 은 근거를 짧게. 한국어 해요체로 답한다."""
 
 _SYSTEM_EN = _SYSTEM_KO.replace("한국어 해요체로 답한다.", "Answer in English.")
@@ -105,6 +108,8 @@ async def run_question_workflow(
 
     async def ask(payload: dict) -> str:
         calls.append(json.dumps(payload, ensure_ascii=False))
+        # 대기 중 화면에 지금 무엇을 읽는지 한 줄로 보인다(ARTEL-1086).
+        await channel.report(_stage_of(payload))
         answer = await channel.query_resource(payload)
         if answer is None:
             return json.dumps({"note": "조회가 시간 안에 답하지 않았다."}, ensure_ascii=False)
@@ -214,3 +219,21 @@ def _spoken(text: str, found: dict[tuple[str, int], Ref]) -> str:
         return ref.label if ref else ""
 
     return _MARKER.sub(name, text)
+
+
+def _stage_of(payload: dict) -> str:
+    """조회 하나를 진행 단계 이름으로. 화면은 단계마다 한 줄을 쌓는다."""
+    kind, relation = payload.get("kind"), payload.get("relation")
+    if relation == "versions":
+        return "reading_versions"
+    if relation == "verdicts":
+        return "reading_verdicts"
+    if kind in ("qa_run", "qa_try") or relation in ("qa_runs", "tries"):
+        return "reading_qa_runs"
+    if kind == "issue" or relation == "issues":
+        return "reading_issues"
+    if kind in ("scenario", "test_run") or relation in ("scenarios", "test_runs"):
+        return "reading_scenarios"
+    if kind == "build":
+        return "reading_builds"
+    return "reading_cases"
