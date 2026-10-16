@@ -18,8 +18,16 @@ from dataclasses import dataclass
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.agents.planner_executer.arch import PlannerExecuterArchSpec
+from app.agents.planner_executer.developer_macros import UsableDeveloperMacro
 from app.agents.planner_executer.macros import RegisteredMacros, StepMacros, parse_step
-from app.agents.planner_executer.prompts import RULES_ROLE, game_map, prompt_text, screen, this_step
+from app.agents.planner_executer.prompts import (
+    RULES_ROLE,
+    developer_macro_list,
+    game_map,
+    prompt_text,
+    screen,
+    this_step,
+)
 from app.agents.qa.macro.errors import MacroRejection
 from app.llm.chat_model import build_chat_model
 from app.qa.channel import QaRunChannel
@@ -56,11 +64,14 @@ class Planner:
         spec: PlannerExecuterArchSpec,
         registered: RegisteredMacros,
         ask: Ask | None = None,
+        developer_macros: list[UsableDeveloperMacro] | None = None,
     ) -> None:
         self._config = config
         self._channel = channel
         self._spec = spec
         self._registered = registered
+        # 런 동안 바뀌지 않으므로 한 번 그린다.
+        self._developer_macros = developer_macro_list(developer_macros or [])
         self._system = prompt_text(RULES_ROLE, config.prompt_version)
         self._ask = ask or self._ask_model
         self._model = None
@@ -95,6 +106,7 @@ class Planner:
         drawn = game_map(self._channel.scene.scene_context)
         return (
             (f"Game map:\n{drawn}\n\n" if drawn else "")
+            + (f"{self._developer_macros}\n\n" if self._developer_macros else "")
             + f"Scenario: {scenario.title}\n\n"
             + f"Write step {step} now:\n{this_step(scenario, step)}\n\n"
             + f"Current screen:\n{screen(self._channel.scene.pulse)}\n"

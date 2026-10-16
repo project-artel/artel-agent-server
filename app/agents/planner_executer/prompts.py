@@ -6,6 +6,7 @@
 | macro grammar  | `app/agents/qa/macro/reference.py`, in `rules`          | planner   |
 | evaluator      | `evaluator.md`                                          | evaluator |
 | game map       | `scene_context`: scenes and what the code lets a player do | planner |
+| developer macros | the project's developer macros that parse, with their build | planner |
 | the step       | the scenario's step, the current screen                 | both      |
 
 `rules` 의 `{macro_grammar}` 자리에는 tool loop agent 가 읽는 것과 같은 macro 문법 글
@@ -18,6 +19,8 @@ prompt 파일에 두지 않는 이유는 macro package 가 바뀌는 중이라 �
 import hashlib
 import json
 
+from app.agents.planner_executer.developer_macros import UsableDeveloperMacro
+from app.agents.qa.macro.model import MacroDefinition
 from app.agents.qa.macro.reference import GRAMMAR, NUMBER_EQUALITY
 from app.prompts import load_prompt, resolve_version, roles_in
 from app.qa.pulse import PulseMemory
@@ -104,6 +107,41 @@ def game_map(context: SceneContext | None) -> str | None:
         if len(doable) > MAX_CAPABILITIES_PER_SCENE:
             lines.append(f"  ({len(doable) - MAX_CAPABILITIES_PER_SCENE} more)")
     return "\n".join(lines)
+
+
+def developer_macro_list(usable: list[UsableDeveloperMacro]) -> str | None:
+    """프로젝트의 developer macro: 호출 모양, 기준 build, docstring. 없으면 `None`.
+
+    build 로 거르지 않으므로 이 런의 build 가 아닌 build 를 기준으로 쓴 macro 도 실린다. 그런
+    macro 에는 그 사실만 적는다 — 쓸지는 planner 가 화면과 docstring 으로 정한다.
+    """
+    if not usable:
+        return None
+    lines = [
+        "Developer macros of this project, written by its developers. To use one, put "
+        "`from macros import <name>` at the top of your source and call it inside one of your "
+        "actions, like a helper, with its arguments:"
+    ]
+    for item in usable:
+        macro = item.macro
+        build = macro.build_version + (f" ({macro.build_label})" if macro.build_label else "")
+        written = f"written against build {build}"
+        if macro.other_build:
+            written += ", a different build from this run's"
+        lines.append(f"- `{_call(item.definition)}` — {written}")
+        docstring = item.definition.entry.docstring or ""
+        lines.extend(f"    {line}" if line else "" for line in docstring.splitlines())
+    return "\n".join(lines)
+
+
+def _call(definition: MacroDefinition) -> str:
+    parameters = []
+    for parameter in definition.entry.parameters:
+        text = f"{parameter.name}: {parameter.declared_type.value}"
+        if parameter.default is not None:
+            text += f" = {parameter.default.value!r}"
+        parameters.append(text)
+    return f"{definition.name}({', '.join(parameters)})"
 
 
 def _capability(capability: SceneCapability) -> str:

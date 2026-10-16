@@ -11,8 +11,9 @@ The planner answers each step with one macro source and nothing else:
 Every `-> None` def is an action Jev may pick; its docstring is the option's description. `done`
 is a predicate. The text is read by `macro_definition_from_source`, the same parser the tool loop
 uses when a macro is written, once per action with that action as the entry. Imports
-(`from macros import ...`) are resolved against the macros registered for this build, asked for
-with `MACRO_READ` the way the tool loop's `_parsed` asks. The macro package itself is not changed.
+(`from macros import ...`) are resolved first against the project's developer macros
+(`developer_macros.py`), then against the macros registered for this build, asked for with
+`MACRO_READ` the way the tool loop's `_parsed` asks. The macro package itself is not changed.
 
 `done` is a predicate, and the runner only runs an entry that acts. To read it on its own the
 source is parsed once more with a generated entry, `executer_probe_done`, that does nothing but
@@ -20,6 +21,7 @@ source is parsed once more with a generated entry, `executer_probe_done`, that d
 """
 
 import ast
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from app.agents.qa.macro.errors import MacroRejection
@@ -48,10 +50,16 @@ class StepMacros:
 
 
 class RegisteredMacros:
-    """`from macros import` 가 가리키는 이 build 의 등록된 macro. 한 run 에서 한 번씩만 묻는다."""
+    """`from macros import` 가 가리키는 macro. 한 run 에서 한 번씩만 묻는다.
 
-    def __init__(self, channel: QaRunChannel) -> None:
+    프로젝트의 developer macro(`developer_sources`, 이름 → 원문)를 먼저 보고, 없는 이름만 이 build
+    의 등록된 macro 를 `MACRO_READ` 로 묻는다. planner 가 보는 목록이 developer macro 이므로 이름이
+    겹치면 developer macro 가 이긴다.
+    """
+
+    def __init__(self, channel: QaRunChannel, developer_sources: Mapping[str, str] | None = None) -> None:
         self._channel = channel
+        self._developer_sources = dict(developer_sources or {})
         # 이름 → 파싱된 정의, 또는 못 가져온 이유.
         self._found: dict[str, MacroDefinition | str] = {}
 
@@ -64,19 +72,24 @@ class RegisteredMacros:
             return known, ""
         if isinstance(known, str):
             return None, known
-        try:
-            answer = await self._channel.read_macro(MacroReadPayload(name=name))
-        except QaCancelled:
-            raise
-        except Exception as error:  # noqa: BLE001 - 조회 하나로 런이 끝나면 안 된다
-            return None, f"The content map could not be asked — {error}."
-        if isinstance(answer, KnowledgeRequestFailed):
-            problem = f"The content map does not have it — {answer.reason}."
-        elif answer is None:
-            problem = "The content map did not answer."
+        if name in self._developer_sources:
+            entry, source, problem = name, self._developer_sources[name], ""
         else:
             try:
-                definition = await self.parse(answer.name or name, answer.source, importing)
+                answer = await self._channel.read_macro(MacroReadPayload(name=name))
+            except QaCancelled:
+                raise
+            except Exception as error:  # noqa: BLE001 - 조회 하나로 런이 끝나면 안 된다
+                return None, f"The content map could not be asked — {error}."
+            if isinstance(answer, KnowledgeRequestFailed):
+                entry, source, problem = name, None, f"The content map does not have it — {answer.reason}."
+            elif answer is None:
+                entry, source, problem = name, None, "The content map did not answer."
+            else:
+                entry, source, problem = answer.name or name, answer.source, ""
+        if source is not None:
+            try:
+                definition = await self.parse(entry, source, importing)
             except MacroRejection as rejection:
                 problem = f"It is registered but no longer parses: {rejection.render()}"
             else:
