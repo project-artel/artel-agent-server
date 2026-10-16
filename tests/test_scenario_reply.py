@@ -181,6 +181,18 @@ def test_an_unclear_target_asks_with_the_titles_as_choices(monkeypatch) -> None:
     assert any("전투 여정" in label for label in labels)
 
 
+def test_a_bold_scenario_title_becomes_a_ts_link(monkeypatch) -> None:
+    """모델이 제목을 굵게만 쓰면 화면에 누를 곳이 없다 — 이 런의 제목과 같으면 TS 표식으로 바꾼다."""
+    import app.agents.scenario.workflow as wf
+
+    plans = [wf.ModifyPlan(detail="**상점 여정**에는 체력 확인이 없어요. **없는 제목**도 있어요.")]
+    out, _ = _modify(monkeypatch, plans, current=[_current_scenario(7, "상점 여정")])
+
+    assert "[[ts:7]]" in out.reply.detail
+    assert "**없는 제목**" in out.reply.detail
+    assert any(ref.kind == "ts" and ref.id == 7 for ref in out.refs)
+
+
 def test_a_deliberate_hold_does_not_ask_which_scenario(monkeypatch) -> None:
     """두 번 물었는데 답이 없으면 모델은 고치지 않고 설명만 낸다(ARTEL-1116). 그것을 "대상을 못
     가렸다" 로 받아 "어느 시나리오를 고칠까요?" 를 다시 물으면 안 된다."""

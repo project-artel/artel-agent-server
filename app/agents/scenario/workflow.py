@@ -399,6 +399,32 @@ def _ref_of(request: ScenarioAgentRequest, kind: str, ref_id: int) -> Ref | None
     return Ref(kind="ts", id=ref_id, label=scenario.title, detail=scenario.description or None)
 
 
+def _linked_titles(text: str, request: ScenarioAgentRequest) -> str:
+    """굵게 쓴 시나리오 제목을 TS 표식으로 바꾼다(ARTEL-1116).
+
+    프롬프트는 시나리오를 `[[ts:N]]` 로 가리키라고 하지만, 모델은 제목을 `**제목**` 으로 쓸 때가
+    잦다(실측 런 183: 세 턴 중 두 턴). 그러면 화면에 누를 곳이 없다. 이 런의 시나리오 제목과
+    **글자 그대로 같은** 굵은 글씨만 바꾼다 — 비슷한 제목을 짐작해 잇지 않는다.
+    """
+    titles = {
+        s.title.strip(): s.scenario_id
+        for s in request.current_scenarios
+        if s.scenario_id is not None and s.title.strip()
+    }
+    if not titles:
+        return text
+
+    def link(match: re.Match) -> str:
+        scenario_id = titles.get(match.group(1).strip())
+        return match.group(0) if scenario_id is None else _ts(scenario_id)
+
+    return re.sub(r"\*\*([^*\n]+)\*\*", link, text)
+
+
+def _ts(scenario_id: int) -> str:
+    return f"[[ts:{scenario_id}]]"
+
+
 def _checked(text: str, request: ScenarioAgentRequest, found: dict[tuple[str, int], Ref]) -> str:
     """아는 번호의 표식만 남긴다. 모르는 번호는 지운다 — 누를 곳이 없는 칩이 된다."""
 
@@ -446,10 +472,10 @@ def _answer(
     """
     found: dict[tuple[str, int], Ref] = {}
     result = _checked(result, request, found)
-    detail = _checked(detail, request, found)
+    detail = _checked(_linked_titles(detail, request), request, found)
     asked = [
         question.model_copy(update={
-            "text": _checked(question.text, request, found),
+            "text": _checked(_linked_titles(question.text, request), request, found),
             "why": _checked(question.why, request, found) if question.why else question.why,
         })
         for question in questions or []
