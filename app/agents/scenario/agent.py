@@ -35,6 +35,7 @@ from app.agents.scenario.prompt import build_messages, build_system_prompt
 from app.agents.scenario.ordering import UnreachableClimb, unreachable_climbs
 from app.agents.scenario import trace
 from app.agents.scenario.replier import ASK_WHICH, ScenarioReplier
+from app.agents.scenario.requests import combine, looks_multiple, split_requests
 from app.agents.scenario.router import PreviousTurn, Route, ScenarioRouter
 from app.agents.scenario.workflow import run_authoring_workflow, run_modify_workflow
 from app.agents.scenario.schemas import (
@@ -206,6 +207,32 @@ class ScenarioAgent:
         context: AgentContext,
         channel: ScenarioChannel,
     ) -> ScenarioAgentResult:
+        # **여러 요청은 하나씩 제 갈래로**(ARTEL-1086): 요청이 섞인 말은 나눠서 차례로 처리하고 한 답으로 모은다.
+        # 이미 갈래가 정해진 재진입(질문의 소형 턴 등)에는 걸지 않는다.
+        if (
+            getattr(get_settings(), "scenario_single_request_enabled", False)
+            and self._router is not None
+            and request.current_route is None
+            and looks_multiple(request.user_input)
+        ):
+            await channel.report("splitting")
+            split = await split_requests(request.model, request.user_input)
+            if split is not None and split.rest:
+                asks = [split.first, *split.rest]
+                trace.record(request.run_id, "요청이 여럿 — 차례로 처리", "\n".join(asks))
+                parts = []
+                for ask in asks:
+                    part = await self._run_one(request.model_copy(update={"user_input": ask}), context, channel)
+                    parts.append((ask, part))
+                return combine(parts)
+        return await self._run_one(request, context, channel)
+
+    async def _run_one(
+        self,
+        request: ScenarioAgentRequest,
+        context: AgentContext,
+        channel: ScenarioChannel,
+    ) -> ScenarioAgentResult:
         # **입구 라우팅**(워크플로 재편 Step 1). 케이스 전량을 싣기 전에 갈래를 가른다 —
         # 현행의 낭비는 "안녕하세요"에도 74k 가 나가던 것이다. 모르면 AUTHORING 이고,
         # 그 갈래는 아래 루프 그대로라 오분류가 무동작이 되지 않는다.
@@ -231,6 +258,12 @@ class ScenarioAgent:
                 # **E 수정 갈래**(Step 3): 오케가 실어 준 current_scenarios 에서 대상을
                 # 가리키고, scenario_id 교체 저장으로 되돌린다. 모델 1회 + 반려 시 1회.
                 return await run_modify_workflow(request, context, channel)
+            if verdict.route is Route.QUESTION and get_settings().scenario_resource_tools_enabled:
+                # **범용 질문**(ARTEL-1086, POC): 케이스 · 버전 · 판정 · 시나리오 · TR · QA 실행을 리소스 도구로
+                # 따라가며 답한다. 스위치를 끄면 아래의 예전 소형 턴이다.
+                from app.agents.scenario.question import run_question_workflow
+
+                return await run_question_workflow(request, context, channel)
             if verdict.route is Route.QUESTION:
                 # **새 기계가 아니라 설계된 폴백을 탄다**: 전량을 비우면 프롬프트가
                 # 검색 안내(NO_TEST_CASE_LIST_NOTICE)로 갈리고 검색 도구가 켜진다
@@ -526,3 +559,4 @@ class ScenarioAgent:
         return answer.scenarios[0].model_copy(
             update={"scenario_id": scenario.scenario_id, "title": scenario.title}
         )
+
