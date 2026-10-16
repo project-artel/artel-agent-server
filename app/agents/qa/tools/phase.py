@@ -138,6 +138,13 @@ _TOOL_PHASE: dict[str, RunPhase] = {
     # 에 있고, 등록은 아래 `UPDATE_MEMORY` 다(`REVIEW_DRAFT` 의 답도 된다).
     "run_macro": RunPhase.act,
     "resume_macro": RunPhase.act,
+    # 게임 function 중 게임을 움직이는 둘(ARTEL-1054). cheat 는 precondition 을 만드는 조작이고,
+    # behavior 를 켜는 것도 조작이다. `stop_behavior` 와 `extend_behavior` 는 일부러 표에 없다 —
+    # 도는 behavior 는 step 과 phase 를 넘어 살아서, 멈추거나 늘리는 일이 어느 phase 에서든
+    # 생긴다. `ALWAYS_ALLOWED` 에 안 넣는 이유는 `load_skill` 과 같다: locked `phase_directive` 가
+    # 그 목록을 다 적어야 하는데 축이 꺼진 run 에는 그 tool 이 없다.
+    "run_cheat": RunPhase.act,
+    "start_behavior": RunPhase.act,
     # VERIFY — 판정 하나.
     "report_step": RunPhase.verify,
     "report_case": RunPhase.verify,

@@ -116,6 +116,8 @@ def test_the_directive_names_the_same_tools_the_table_does() -> None:
         ("v22", "on"),
         ("v23", "off"),
         ("v23", "on"),
+        ("v24", "off"),
+        ("v24", "on"),
     ):
         _the_directive_names_what_this_structure_offers(version, macros)
 

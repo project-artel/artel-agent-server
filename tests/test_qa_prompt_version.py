@@ -315,8 +315,12 @@ def test_the_default_qa_version_is_v21() -> None:
 
     v23 raises the macro call depth limit from 3 to 9 (ARTEL-1056): only the
     macro skill's limits paragraph changes.
+
+    v24 ships with the game function tools (ARTEL-1054): `tool_run_cheat.md`,
+    `tool_start_behavior.md`, `tool_stop_behavior.md`, `tool_extend_behavior.md`, and the
+    `cheats` and `behaviors` skills. Every v23 role is carried over unchanged.
     """
-    assert resolve_version("qa_run") == "v23"
+    assert resolve_version("qa_run") == "v24"
 
 
 # v20 이 고쳐 쓴 v19 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
@@ -1068,3 +1072,24 @@ def test_v23_changes_only_the_call_depth_in_the_macro_limits() -> None:
         v22 = load_prompt("qa_run", role, "v22")
         v23 = load_prompt("qa_run", role, "v23")
         assert v23.body_sha256 == v22.body_sha256, role
+
+
+# v24 가 v23 위에 더한 파일. 나머지 role 은 한 글자도 안 바뀌어야 한다 (ARTEL-1054).
+V24_ADDED_ROLES = {
+    "tool_run_cheat",
+    "tool_start_behavior",
+    "tool_stop_behavior",
+    "tool_extend_behavior",
+    "skill_cheats",
+    "skill_behaviors",
+}
+
+
+def test_v24_adds_the_game_function_tools_and_keeps_every_v23_role() -> None:
+    """v24 는 v23 을 그대로 옮기고 game function tool 설명 넷과 skill 둘만 더한다."""
+    v23_roles = set(roles_in("qa_run", "v23"))
+    v24_roles = set(roles_in("qa_run", "v24"))
+
+    assert v24_roles - v23_roles == V24_ADDED_ROLES
+    for role in sorted(v23_roles):
+        assert load_prompt("qa_run", role, "v24").body == load_prompt("qa_run", role, "v23").body, role
