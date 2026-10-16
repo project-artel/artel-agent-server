@@ -12,7 +12,7 @@ carries `QaRunState.build_summary`, so Orchestration grades both engines' runs t
 import asyncio
 
 from app.agents.planner_executer import evaluator
-from app.agents.planner_executer.developer_macros import DeveloperMacro, usable_developer_macros
+from app.agents.planner_executer.developer_macros import DeveloperMacro, load_developer_macros
 from app.agents.planner_executer.evaluator import Evaluator, Judge
 from app.agents.planner_executer.executer import Executer
 from app.agents.planner_executer.macros import RegisteredMacros
@@ -78,12 +78,9 @@ class PlannerExecuterRunner:
     ) -> None:
         if not channel.scene.pulse.seen:
             await channel.wait_for_reading(FIRST_READING_SECONDS)
-        registered = RegisteredMacros(
-            channel, {macro.name: macro.source for macro in self._developer_macros}
-        )
-        usable = await usable_developer_macros(self._developer_macros, registered)
+        developer = await load_developer_macros(self._developer_macros)
         planner = Planner(
-            self._config, channel, self._spec, registered, ask=self._ask, developer_macros=usable
+            self._config, channel, self._spec, RegisteredMacros(channel), ask=self._ask, developer=developer
         )
         executer = Executer(channel, self._spec, jev)
         judge = Evaluator(self._config, self._judge)

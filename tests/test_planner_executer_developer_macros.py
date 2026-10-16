@@ -14,9 +14,10 @@ from app.agents.planner_executer import executer as executer_module
 from app.agents.planner_executer.developer_macros import (
     DeveloperMacro,
     fetch_developer_macros,
-    usable_developer_macros,
+    load_developer_macros,
 )
 from app.agents.planner_executer.macros import RegisteredMacros
+from app.agents.planner_executer.planner import Planner
 from app.agents.planner_executer.runner import PlannerExecuterRunner
 from app.agents.qa.arch import QaArchSpec
 from app.qa.jev import JevClient
@@ -149,22 +150,80 @@ def test_a_run_without_a_project_does_not_ask(caplog) -> None:
 
 # --- planner and executer ------------------------------------------------------------------------
 
-# planner 가 Start 누르기를 developer macro `tap_start` 로 쓴 답이다.
-IMPORTING = "from macros import tap_start\n\n" + MACROS.replace(
-    '    start: object = find(name="Start")\n    click(start)\n', "    tap_start()\n"
-)
+# Start 를 누르는 developer macro 다. 인자를 받는 판: 무엇을 누를지는 planner 가 묶는다.
+PRESS = '''def press(target: object) -> None:
+    """Press `target` and wait for the map."""
+    click(target)
+    wait_until(scene() == "Map", 1, "The press did not open the map.")
+'''
+
+# 다른 developer macro 를 가져오는 developer macro.
+START_AND_WAIT = '''from macros import tap_start
 
 
-def _run(fake: FakeGame, asked: Asked, developer_macros: tuple[DeveloperMacro, ...]):
-    config = _config(no_action_grace_seconds=0.2)
+def start_and_wait() -> None:
+    """Press Start, then wait for the map."""
+    tap_start()
+    wait_until(scene() == "Map", 1, "Start did not open the map.")
+'''
+
+# 이 build 에 등록된(agent) macro. developer macro `tap_start` 와 이름만 같고 하는 일이 다르다.
+AGENT_TAP_START = '''def tap_start() -> None:
+    """Press Quit."""
+    quit: object = selector("Root/Quit")
+    click(quit)
+'''
+
+ONLY_DONE = '''def done() -> bool:
+    return scene() == "Map"
+'''
+
+
+class Answered:
+    """The planner's model answering with whole texts, so an answer can carry a ```developer block."""
+
+    def __init__(self, *answers: str) -> None:
+        self.answers = list(answers)
+        self.calls: list[tuple[str, str]] = []
+
+    async def __call__(self, system: str, user: str) -> str:
+        self.calls.append((system, user))
+        return self.answers.pop(0)
+
+
+def _answer(source: str, *calls: str) -> str:
+    developer = "```developer\n" + "".join(f"{call}\n" for call in calls) + "```\n" if calls else ""
+    return f"```python\n{source}```\n{developer}"
+
+
+def _start_menu() -> FakeGame:
+    fake = _menu()
+    fake.objects["Root/Quit"] = {"text": "Quit"}
+    return fake
+
+
+def _run(fake: FakeGame, asked, developer_macros: tuple[DeveloperMacro, ...], jev: FakeJev | None = None, **knobs):
+    config = _config(no_action_grace_seconds=0.2, **knobs)
     judge, _ = _judge({"passed": True, "reason": "The map opens."})
 
     async def go():
         fake.push_reading()
         runner = PlannerExecuterRunner(
-            config, ask=asked, judge=judge, jev=JevClient(post=FakeJev()), developer_macros=developer_macros
+            config, ask=asked, judge=judge, jev=JevClient(post=jev or FakeJev()), developer_macros=developer_macros
         )
         return await runner.run_with_deadline(fake.channel, _scenario())
+
+    return asyncio.run(go())
+
+
+def _write(fake: FakeGame, asked, developer_macros: tuple[DeveloperMacro, ...], **knobs):
+    config = _config(**knobs)
+
+    async def go():
+        fake.push_reading()
+        developer = await load_developer_macros(developer_macros)
+        planner = Planner(config, fake.channel, config.arch.planner, RegisteredMacros(fake.channel), ask=asked, developer=developer)
+        return await planner.write(_scenario(), 1)
 
     return asyncio.run(go())
 
@@ -179,7 +238,8 @@ def test_the_planner_sees_each_developer_macro_with_its_build() -> None:
     _run(_menu(), asked, macros)
 
     (_system, user), = asked.calls
-    assert "`from macros import <name>`" in user
+    assert "add a ```developer block after your python block" in user
+    assert "from macros import" not in user
     assert (
         "- `tap_start()` — written against build 1.2.0 (beta)\n"
         "    Press Start on the title screen.\n"
@@ -192,31 +252,114 @@ def test_the_planner_sees_each_developer_macro_with_its_build() -> None:
     ) in user
 
 
-def test_an_action_that_imports_a_developer_macro_is_played() -> None:
+def test_a_parameterless_developer_macro_is_picked_by_jev_and_runs_in_a_step_with_no_def_of_its_own() -> None:
     fake = _menu()
+    jev = FakeJev(picks=("developer:tap_start",))
 
-    state, failure = _run(fake, Asked(IMPORTING), (_macro("tap_start", TAP_START),))
+    state, failure = _run(fake, Answered(_answer(ONLY_DONE, "tap_start")), (_macro("tap_start", TAP_START),), jev)
 
     assert failure is None and state.step_results[0].passed
-    # 원문이 런에 실려 왔으므로 content map 에 묻지 않는다.
+    (pick,) = jev.asked("choice")[:1]
+    options = pick["questions"]["answer"]["criteria"]
+    assert set(options) == {"developer:tap_start", "none_fits"}
+    assert options["developer:tap_start"]["what"].startswith("Press Start on the title screen.")
     assert fake.frames("MACRO_READ") == []
     (action,) = fake.frames("ACTION")
     assert action["payload"]["message"] == "click(start)"
     assert fake.scene == "Map"
 
 
-def test_a_developer_macro_that_does_not_parse_is_skipped(caplog) -> None:
+def test_a_developer_macro_with_parameters_runs_with_the_arguments_the_planner_bound() -> None:
     fake = _menu()
+    jev = FakeJev(picks=("developer:press",))
+    answer = _answer(ONLY_DONE, 'press(find(name="Start"))')
+
+    state, failure = _run(fake, Answered(answer), (_macro("press", PRESS),), jev)
+
+    assert failure is None and state.step_results[0].passed
+    description = jev.asked("choice")[0]["questions"]["answer"]["criteria"]["developer:press"]["what"]
+    assert description == 'Press `target` and wait for the map.\n\nCalled in this step as `press(find(name="Start"))`.'
+    assert fake.actions[0][0] == "move_mouse" and fake.actions[0][1][0] == "Root/Start"
+    assert fake.scene == "Map"
+
+
+@pytest.mark.parametrize(
+    ("call", "said"),
+    [
+        ("press()", "`press` is missing target"),
+        ("press(2)", "the developer macro call `press(2)` is refused"),
+        ("tap_start", "`tap_start` in the ```developer block is not a developer macro of this project"),
+        ("press(", "is not a developer macro's name or a call of one"),
+    ],
+)
+def test_a_refused_developer_call_goes_back_for_a_rewrite(call: str, said: str) -> None:
+    asked = Answered(_answer(ONLY_DONE, call), _answer(ONLY_DONE, 'press(selector("Root/Start"))'))
+
+    written = _write(_menu(), asked, (_macro("press", PRESS),))
+
+    assert written.refusal is None and list(written.macros.actions) == ["developer:press"]
+    assert len(asked.calls) == 2
+    assert said in asked.calls[1][1]
+
+
+def test_one_developer_macro_bound_twice_gets_two_keys() -> None:
+    answer = _answer(ONLY_DONE, 'press(find(name="Start"))', 'press(selector("Root/Start"))')
+
+    written = _write(_menu(), Answered(answer), (_macro("press", PRESS),))
+
+    assert list(written.macros.actions) == ["developer:press", "developer:press#2"]
+
+
+def test_a_developer_macro_and_an_agent_macro_of_the_same_name_stay_apart() -> None:
+    """`from macros import` in the planner's source reaches the build's macro, the ```developer
+    block the project's; neither hides the other."""
+    fake = _start_menu()
+    fake.macros = {"tap_start": AGENT_TAP_START}
+    source = "from macros import tap_start\n\n" + MACROS.replace(
+        '    start: object = find(name="Start")\n    click(start)\n', "    tap_start()\n"
+    )
+
+    written = _write(fake, Answered(_answer(source, "tap_start")), (_macro("tap_start", TAP_START),))
+
+    assert written.refusal is None
+    actions = written.macros.actions
+    (agent,) = actions["press_start"].imports
+    (developer,) = actions["developer:tap_start"].imports
+    assert agent.source == AGENT_TAP_START and developer.source == TAP_START
+    assert [frame["payload"]["name"] for frame in fake.frames("MACRO_READ")] == ["tap_start"]
+
+
+def test_the_planner_cannot_import_a_developer_macro() -> None:
+    fake = _menu()
+    source = "from macros import press\n\n" + MACROS
+
+    written = _write(fake, Answered(_answer(source), _answer(source)), (_macro("press", PRESS),), max_rewrites=1)
+
+    assert written.macros is None
+    assert "`press` is imported but cannot be found" in written.refusal
+
+
+def test_a_developer_macro_importing_another_resolves_among_the_projects_developer_macros() -> None:
+    fake = _menu()
+    # 같은 이름의 agent macro 가 있어도 developer macro 의 import 는 그쪽으로 가지 않는다.
+    fake.macros = {"tap_start": AGENT_TAP_START}
+    jev = FakeJev(picks=("developer:start_and_wait",))
+    macros = (_macro("start_and_wait", START_AND_WAIT), _macro("tap_start", TAP_START))
+
+    state, failure = _run(fake, Answered(_answer(ONLY_DONE, "start_and_wait")), macros, jev)
+
+    assert failure is None and state.step_results[0].passed
+    assert fake.frames("MACRO_READ") == []
+    assert fake.scene == "Map"
+
+
+def test_a_developer_macro_that_does_not_parse_is_skipped(caplog) -> None:
     macros = (_macro("broken", BROKEN), _macro("tap_start", TAP_START))
 
-    async def go():
-        registered = RegisteredMacros(fake.channel, {macro.name: macro.source for macro in macros})
-        return await usable_developer_macros(macros, registered)
-
     with caplog.at_level(logging.WARNING):
-        usable = asyncio.run(go())
+        loaded = asyncio.run(load_developer_macros(macros))
 
-    assert [item.macro.name for item in usable] == ["tap_start"]
+    assert list(loaded.usable) == ["tap_start"]
     assert "developer macro broken skipped" in caplog.text
 
 

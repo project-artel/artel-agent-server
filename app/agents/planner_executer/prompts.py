@@ -18,6 +18,7 @@ prompt 파일에 두지 않는 이유는 macro package 가 바뀌는 중이라 �
 
 import hashlib
 import json
+from collections.abc import Iterable
 
 from app.agents.planner_executer.developer_macros import UsableDeveloperMacro
 from app.agents.qa.macro.model import MacroDefinition
@@ -109,18 +110,23 @@ def game_map(context: SceneContext | None) -> str | None:
     return "\n".join(lines)
 
 
-def developer_macro_list(usable: list[UsableDeveloperMacro]) -> str | None:
+def developer_macro_list(usable: Iterable[UsableDeveloperMacro]) -> str | None:
     """프로젝트의 developer macro: 호출 모양, 기준 build, docstring. 없으면 `None`.
 
     build 로 거르지 않으므로 이 런의 build 가 아닌 build 를 기준으로 쓴 macro 도 실린다. 그런
     macro 에는 그 사실만 적는다 — 쓸지는 planner 가 화면과 docstring 으로 정한다.
     """
+    usable = list(usable)
     if not usable:
         return None
     lines = [
-        "Developer macros of this project, written by its developers. To use one, put "
-        "`from macros import <name>` at the top of your source and call it inside one of your "
-        "actions, like a helper, with its arguments:"
+        "Developer macros of this project, written by its developers. To let the executer use "
+        "some of them in this step, add a ```developer block after your python block, one per "
+        "line: the name alone for a macro without parameters, or a call with its arguments "
+        "written as macro expressions, such as `buy_item(find(name=\"Potion\"), 2)`. Each line "
+        "becomes one more action the decision model may pick, described by the macro's "
+        "docstring. A step may select only developer macros; its python block then holds just "
+        "`done()`."
     ]
     for item in usable:
         macro = item.macro

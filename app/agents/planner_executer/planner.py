@@ -18,7 +18,12 @@ from dataclasses import dataclass
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.agents.planner_executer.arch import PlannerExecuterArchSpec
-from app.agents.planner_executer.developer_macros import UsableDeveloperMacro
+from app.agents.planner_executer.developer_macros import (
+    NO_DEVELOPER_MACROS,
+    LoadedDeveloperMacros,
+    bind_developer_calls,
+    split_developer_block,
+)
 from app.agents.planner_executer.macros import RegisteredMacros, StepMacros, parse_step
 from app.agents.planner_executer.prompts import (
     RULES_ROLE,
@@ -64,14 +69,15 @@ class Planner:
         spec: PlannerExecuterArchSpec,
         registered: RegisteredMacros,
         ask: Ask | None = None,
-        developer_macros: list[UsableDeveloperMacro] | None = None,
+        developer: LoadedDeveloperMacros = NO_DEVELOPER_MACROS,
     ) -> None:
         self._config = config
         self._channel = channel
         self._spec = spec
         self._registered = registered
+        self._developer = developer
         # 런 동안 바뀌지 않으므로 한 번 그린다.
-        self._developer_macros = developer_macro_list(developer_macros or [])
+        self._developer_macros = developer_macro_list(developer.usable.values())
         self._system = prompt_text(RULES_ROLE, config.prompt_version)
         self._ask = ask or self._ask_model
         self._model = None
@@ -88,9 +94,12 @@ class Planner:
                 LogCategory.THOUGHT,
                 step,
             )
-            source = extract_code(await self._ask(self._system, self._request(scenario, step, feedback)))
+            answer = await self._ask(self._system, self._request(scenario, step, feedback))
+            rest, calls = split_developer_block(answer)
+            source = extract_code(rest)
             try:
-                written = Written(source, await parse_step(source, self._registered))
+                developer_actions = await bind_developer_calls(calls, self._developer)
+                written = Written(source, await parse_step(source, self._registered, developer_actions))
             except MacroRejection as rejection:
                 written = Written(source, None, rejection.render())
                 feedback = (
