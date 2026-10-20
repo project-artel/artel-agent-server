@@ -15,6 +15,7 @@ from app.llm.models import (
     validate_reasoning,
 )
 from app.qa.envelope import ErrorPayload, MessageType, outbound_envelope
+from app.qa.game_functions import GameFunctionEntry
 from app.qa.run_config import RunConfig
 from app.qa.schemas import QaRunScenario, QaScenario
 from app.qa.service import QaExecutionService
@@ -41,6 +42,11 @@ class QaContext(BaseModel):
     # 건너뛴 채 런이 그대로 돈다.
     project_id: int | None = None
     game_build_id: int | None = None
+    # 이 run 이 부를 수 있는 cheat 와 behavior 의 catalog entry (ARTEL-1054). orchestration 이
+    # run 의 허용 목록으로 걸러서 보내고, 비었거나 그 mode 가 `off` 면 안 보낸다. 그때
+    # `arch.cheats` / `arch.behaviors` 도 안 오므로 tool 이 없다.
+    cheats: list[GameFunctionEntry] = []
+    behaviors: list[GameFunctionEntry] = []
 
     # --- 레거시 단일 시나리오 (하위호환) ---
     qa_try_id: int | None = None
@@ -160,6 +166,8 @@ async def open_qa_session(
         reasoning=payload.reasoning,
         arch=payload.arch,
         llm_key=payload.llm_key,
+        cheats=payload.context.cheats,
+        behaviors=payload.context.behaviors,
     )
     return OpenQaSessionResponse(session_id=session_id, run_config=run_config)
 

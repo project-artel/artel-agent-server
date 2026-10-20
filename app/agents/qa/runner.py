@@ -26,12 +26,15 @@ from app.agents.qa.context import (
 )
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.agents.qa.tools import QaRunState, build_tools
+from app.agents.qa.tools.game_function_tools import focus
+from app.agents.qa.tools.tool_context import ToolContext
 from app.agents.qa.vision import QaCaptureVisionMiddleware
 from app.llm.chat_model import build_chat_model
 from app.llm.models import get_model_spec
 from app.prompts import load_prompt, load_skill, skill_descriptions, skill_names
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory
+from app.qa.game_functions import render_catalog
 from app.qa.reach import UnreachedJudge
 from app.qa.relevance import PulseRelevanceJudge
 from app.qa.schemas import QaScenario, QaStep
@@ -199,6 +202,19 @@ def _macro_discovery(arch: ResolvedArch, channel: QaRunChannel) -> str:
         return ""
     context = channel.scene.scene_context
     return context.macro_section() if context is not None else ""
+
+
+def _game_functions(arch: ResolvedArch, channel: QaRunChannel) -> str:
+    """첫 메시지 끝에 붙는, 이 run 이 부를 수 있는 cheat 와 behavior 의 catalog (ARTEL-1054).
+
+    축이 켜진 쪽만 적는다. 둘 다 꺼진 run 은 빈 문자열이라 첫 메시지가 종전 그대로다. 첫
+    메시지인 이유는 `_macro_discovery` 와 같다.
+    """
+    catalog = channel.game_functions
+    return render_catalog(
+        catalog.cheats if arch.cheats == "on" else None,
+        catalog.behaviors if arch.behaviors == "on" else None,
+    )
 
 
 def _step_plan(scenario: QaScenario) -> list[tuple[int | None, bool]]:
@@ -622,9 +638,14 @@ class QaRunner:
             arch.skills,
             withheld_skills(arch),
         )
-        first_message = _plan(scenario) + _macro_discovery(arch, channel)
+        first_message = (
+            _plan(scenario) + _macro_discovery(arch, channel) + _game_functions(arch, channel)
+        )
         total_steps = len(scenario.steps)
         tools = build_tools(channel, state, arch, prompt.version)
+        # view 의 function 줄을 1번 step 의 TC 기준으로 둔다. 다음부터는 tool 이 옮긴다.
+        if arch.cheats == "on" or arch.behaviors == "on":
+            focus(ToolContext(channel, state, arch), 1)
 
         # The whole starting context in one place. Reading a run afterwards means
         # knowing what the model was actually given, and the prompt is assembled
@@ -860,6 +881,10 @@ class QaRunner:
             step_meta=step_meta,
             step_texts=[step.action for step in scenario.steps],
             execution_mode=scenario.execution_mode,
+            step_functions=[
+                step.case.functions if step.case is not None else None
+                for step in scenario.steps
+            ],
         )
         if scenario.execution_mode == "FREE":
             # FREE run 은 실패 판정이 미도달인지 Jev 에 묻는다(`app/qa/reach.py`).
