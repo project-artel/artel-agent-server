@@ -17,6 +17,7 @@ from app.agents.qa.tools import QaRunState, build_tools
 from app.api.qa_sessions import OpenQaSessionRequest
 from app.qa.schemas import QaCaseRef, QaRunScenario, QaScenario, QaStep
 from app.prompts import load_prompt
+from app.prompts.loader import PROMPTS_ROOT
 from app.prompts.loader import resolve_version, roles_in
 from app.qa.channel import QaRunChannel
 from app.qa.run_config import resolve_run_config
@@ -315,8 +316,20 @@ def test_the_default_qa_version_is_v21() -> None:
 
     v23 raises the macro call depth limit from 3 to 9 (ARTEL-1056): only the
     macro skill's limits paragraph changes.
+
+    v24 adds `tool_verdict_checks.md` for the `verdict_evidence` axis (ARTEL-1133). Every
+    other file is v23's with only the version line moved, so a run with the axis off reads
+    what it read under v23.
     """
-    assert resolve_version("qa_run") == "v23"
+    assert resolve_version("qa_run") == "v24"
+
+
+def test_v24_is_v23_plus_the_verdict_checks_description() -> None:
+    root = PROMPTS_ROOT / "qa_run"
+    v23 = {p.name: p.read_text().split("---\n", 2)[2] for p in (root / "v23").glob("*.md")}
+    v24 = {p.name: p.read_text().split("---\n", 2)[2] for p in (root / "v24").glob("*.md")}
+    assert set(v24) - set(v23) == {"tool_verdict_checks.md"}
+    assert all(v24[name] == body for name, body in v23.items())
 
 
 # v20 이 고쳐 쓴 v19 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
