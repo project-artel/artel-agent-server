@@ -94,7 +94,12 @@ class ProjectAgent:
     ) -> ProjectAgentResult:
         model = request.model or DEFAULT_MODEL
         chat = self._model_factory(model, request.tools_enabled)
-        system = build_system_prompt(request.page_catalog.pages, request.locale)
+        system = build_system_prompt(
+            request.page_catalog.pages,
+            request.locale,
+            links=request.page_catalog.links,
+            guides=request.page_catalog.guides,
+        )
         prompt: list[BaseMessage] = [
             SystemMessage(content=system),
             *to_langchain_messages(request.messages),

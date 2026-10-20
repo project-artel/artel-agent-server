@@ -1,4 +1,4 @@
-"""The eight tools, as schemas only.
+"""The nine tools, as schemas only.
 
 The model proposes a call and the browser runs it, so nothing here executes. The
 argument shapes are pydantic models so that the JSON Schema bound to the model
@@ -79,6 +79,10 @@ class AuthorScenariosArgs(BaseModel):
     instruction: str
 
 
+class ReadGuideArgs(BaseModel):
+    topic: str = Field(description="Guide id from the Guides list in the system prompt.")
+
+
 _TOOLS: tuple[tuple[str, str, type[BaseModel]], ...] = (
     (
         "open_page",
@@ -113,6 +117,12 @@ _TOOLS: tuple[tuple[str, str, type[BaseModel]], ...] = (
         "Show a progress card for a running job and return at once. The browser reports "
         "the outcome later as an event message.",
         WatchJobArgs,
+    ),
+    (
+        "read_guide",
+        "Read the body of one how-to guide by its id. Returns the guide as markdown, "
+        "with its commands and links.",
+        ReadGuideArgs,
     ),
     (
         "author_scenarios",

@@ -38,11 +38,15 @@ class ProjectAgentMessage(BaseModel):
 
 
 class PageCatalog(BaseModel):
-    """Opaque JSON from the browser. Only `pages` being a list is checked."""
+    """Opaque JSON from the browser. Only `pages`, `links` and `guides` being lists is checked."""
 
     model_config = {"extra": "allow"}
 
     pages: list[dict[str, Any]] = Field(default_factory=list)
+    # Console pages outside the project: {id, title, url, description}.
+    links: list[dict[str, Any]] = Field(default_factory=list)
+    # How-to documents: {id, title, summary}. Bodies come from the read_guide tool.
+    guides: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ProjectAgentRequest(BaseModel):

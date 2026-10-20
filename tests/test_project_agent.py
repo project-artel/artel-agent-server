@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 import openai
 import pytest
+from pydantic import ValidationError
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from langchain_core.language_models import BaseChatModel
@@ -21,6 +22,7 @@ from app.agents.project_agent import (
 )
 from app.agents.project_agent.agent import flatten_content, to_langchain_messages
 from app.agents.project_agent.prompt import build_system_prompt, render_page_catalog
+from app.agents.project_agent.schemas import PageCatalog
 from app.agents.project_agent.tools import tool_schemas
 from app.api.project_agent import router
 
@@ -138,7 +140,7 @@ def test_block_list_content_is_flattened_to_text() -> None:
 
 EXPECTED_TOOLS = [
     "open_page", "read_page", "set_field", "call_action",
-    "ask_choice", "query", "watch_job", "author_scenarios",
+    "ask_choice", "query", "watch_job", "read_guide", "author_scenarios",
 ]
 
 
@@ -182,7 +184,7 @@ HISTORY_WITH_TOOLS = [
 ]
 
 
-def test_default_factory_binds_eight_tools_and_turns_reasoning_off(monkeypatch) -> None:
+def test_default_factory_binds_nine_tools_and_turns_reasoning_off(monkeypatch) -> None:
     recorder, reasoning = _use_recorder(monkeypatch, AIMessage(content="ok"))
 
     asyncio.run(
@@ -206,7 +208,7 @@ def test_tools_disabled_keeps_tools_bound_but_drops_calls(monkeypatch) -> None:
         )
     )
 
-    assert len(recorder.bound) == 8
+    assert len(recorder.bound) == 9
     assert result.content == "wrap up" and result.tool_calls == []
     assert isinstance(recorder.sent[-1], HumanMessage)
     assert "Do not call tools" in recorder.sent[-1].content
@@ -402,3 +404,47 @@ def test_scope_is_set_to_project_agent_with_conversation_id(monkeypatch) -> None
     client.post("/internal/project-agent/step", json=_body())
 
     assert seen == [("PROJECT_AGENT", 12)]
+
+
+LINKS = [
+    {"id": "projects", "title": "프로젝트 목록", "url": "/projects", "description": "프로젝트를 고른다."},
+    {"id": "account", "title": "계정", "url": "/account"},
+]
+GUIDES = [
+    {"id": "cli-install", "title": "CLI 설치", "summary": "npm 으로 artel-cli 를 설치한다."},
+]
+
+
+def test_page_catalog_accepts_and_omits_links_and_guides() -> None:
+    full = PageCatalog(pages=[], links=LINKS, guides=GUIDES)
+    bare = PageCatalog(pages=[])
+
+    assert full.links == LINKS and full.guides == GUIDES
+    assert bare.links == [] and bare.guides == []
+    with pytest.raises(ValidationError):
+        PageCatalog(links="nope")
+
+
+def test_system_prompt_renders_outside_links_and_guides() -> None:
+    text = build_system_prompt(CATALOG["pages"], "ko", links=LINKS, guides=GUIDES)
+
+    assert "# Outside this project" in text and "# Guides" in text
+    assert "- [프로젝트 목록](/projects): 프로젝트를 고른다." in text
+    assert "- [계정](/account)" in text
+    assert "- cli-install - CLI 설치: npm 으로 artel-cli 를 설치한다." in text
+    assert text.index("start [risk: approve]") < text.index("# Outside this project")
+    assert "read_guide" in text and "do not call `open_page`" in text
+
+
+def test_system_prompt_without_links_and_guides_says_none() -> None:
+    text = build_system_prompt(CATALOG["pages"], "ko")
+
+    assert "# Outside this project" in text and "(none)" in text
+
+
+def test_read_guide_schema_is_present_and_portable() -> None:
+    by_name = {t["function"]["name"]: t["function"]["parameters"] for t in tool_schemas()}
+
+    assert len(by_name) == 9
+    assert by_name["read_guide"]["properties"]["topic"]["type"] == "string"
+    assert by_name["read_guide"]["required"] == ["topic"]
