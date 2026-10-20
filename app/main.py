@@ -10,11 +10,13 @@ from fastapi.responses import JSONResponse
 from redis.asyncio import from_url as redis_from_url
 
 from app.agents import GameContextAgent, KnowledgeQueryAgent, StepPhrasingAgent
+from app.agents.project_agent import ProjectAgent
 from app.api.embeddings import router as embeddings_router
 from app.api.extract import router as extract_router
 from app.api.knowledge_queries import router as knowledge_queries_router
 from app.api.llm_cache import router as llm_cache_router
 from app.api.macros import router as macros_router
+from app.api.project_agent import router as project_agent_router
 from app.api.qa_sessions import router as qa_sessions_router
 from app.api.routes import router as api_router
 from app.api.sessions import router as sessions_router
@@ -81,6 +83,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.knowledge_query_agent = KnowledgeQueryAgent()
     app.state.knowledge_query_batch_limit = settings.knowledge_query_batch_limit
     app.state.step_phrasing_agent = StepPhrasingAgent()
+    app.state.project_agent = ProjectAgent()
 
     # LLM spend collection. No-op without ORCHESTRATION_BASE_URL; stop() sends
     # the partial batch, without which every deploy loses one.
@@ -130,6 +133,7 @@ def create_app() -> FastAPI:
     app.include_router(knowledge_queries_router, prefix=INTERNAL_PREFIX)
     app.include_router(specs_v2_router, prefix=INTERNAL_PREFIX)
     app.include_router(step_phrasing_router, prefix=INTERNAL_PREFIX)
+    app.include_router(project_agent_router, prefix=INTERNAL_PREFIX)
     app.include_router(llm_cache_router, prefix=INTERNAL_PREFIX)
     app.include_router(macros_router, prefix=INTERNAL_PREFIX)
     app.add_exception_handler(ModelCatalogUnavailableError, _model_catalog_unavailable)
