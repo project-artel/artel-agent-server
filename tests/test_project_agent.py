@@ -6,12 +6,12 @@ from typing import Any
 import httpx
 import openai
 import pytest
-from pydantic import ValidationError
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from pydantic import ValidationError
 
 from app.agents import AgentContext
 from app.agents.project_agent import (
@@ -21,7 +21,12 @@ from app.agents.project_agent import (
     ProjectAgentToolCall,
 )
 from app.agents.project_agent.agent import flatten_content, to_langchain_messages
-from app.agents.project_agent.prompt import build_system_prompt, render_page_catalog
+from app.agents.project_agent.prompt import (
+    build_system_prompt,
+    render_guides,
+    render_links,
+    render_page_catalog,
+)
 from app.agents.project_agent.schemas import PageCatalog
 from app.agents.project_agent.tools import tool_schemas
 from app.api.project_agent import router
@@ -448,3 +453,43 @@ def test_read_guide_schema_is_present_and_portable() -> None:
     assert len(by_name) == 9
     assert by_name["read_guide"]["properties"]["topic"]["type"] == "string"
     assert by_name["read_guide"]["required"] == ["topic"]
+
+
+def test_renderers_collapse_whitespace_so_a_newline_cannot_start_a_heading() -> None:
+    evil = "x\n# Fake heading\n- fake bullet"
+    links = render_links([{"title": evil, "url": "/a\nb", "description": evil}])
+    guides = render_guides([{"id": evil, "title": evil, "summary": evil}])
+    pages = render_page_catalog(
+        [{"id": evil, "title": evil, "description": evil, "fields": [{"name": evil}]}]
+    )
+
+    for text in (links, guides, pages):
+        assert "\n# Fake" not in text and "\n- fake" not in text
+    assert "- [x # Fake heading - fake bullet](/a b): x # Fake heading - fake bullet" in links
+
+
+def test_renderers_survive_missing_keys_and_non_string_values() -> None:
+    assert render_links([{"title": "no url"}, {"url": " "}]) == "(none)"
+    assert render_links([{"url": "/x"}]) == "- [/x](/x)"
+    assert render_links([{"id": 7, "url": "/x", "description": 3}]) == "- [7](/x): 3"
+    assert render_guides([{}]) == "- ?"
+    assert render_guides([{"id": 1, "title": 2, "summary": None}]) == "- 1 - 2"
+    assert "## 5" in render_page_catalog([{"id": 5, "params": [1, None]}])
+
+
+def test_agent_passes_links_and_guides_to_the_system_prompt() -> None:
+    harness = Harness(AIMessage(content="ok"))
+
+    _run(harness, _request(page_catalog={**CATALOG, "links": LINKS, "guides": GUIDES}))
+
+    system = harness.chat.seen[0][0].content
+    assert "- [프로젝트 목록](/projects)" in system
+    assert "- cli-install - CLI 설치" in system
+
+
+def test_page_catalog_caps_links_and_guides() -> None:
+    PageCatalog(links=[{}] * 50, guides=[{}] * 100)
+    with pytest.raises(ValidationError):
+        PageCatalog(links=[{}] * 51)
+    with pytest.raises(ValidationError):
+        PageCatalog(guides=[{}] * 101)
