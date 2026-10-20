@@ -77,7 +77,8 @@ def _names_object(cited: str, *names: str | None) -> bool:
 
 
 def _names_member(cited: str, on: str | None, member: str | None) -> bool:
-    kind, _, name = cited.rpartition("::")
+    # `Type::member` 가 판독 표기지만 `Type.member` 로도 적는다(런 19: `DraggableCard.canvasGroup`).
+    kind, _, name = cited.rpartition("::") if "::" in cited else cited.rpartition(".")
     if (member or "").lower() != name.strip().lower():
         return False
     return not kind or (on or "").lower().endswith(kind.strip().lower())
@@ -86,6 +87,9 @@ def _names_member(cited: str, on: str | None, member: str | None) -> bool:
 def _pulse_values(source: EvidenceSource, pulse: PulseMemory) -> list[Any] | None:
     """그 객체 · member 의 기록 값들. 그런 것이 기록에 없으면 None."""
     found: list[Any] = []
+    # 오브젝트 칸에 정적 값을 `Type.member` 로 적은 근거(런 19: `CombineZone.Instance`)는 정적 값으로 찾는다.
+    if source.object and source.member is None and "/" not in source.object and "." in source.object:
+        found.extend(s.value for s in pulse.statics.values() if _names_member(source.object, s.declaring, s.member))
     if source.object:
         for held in pulse.held.values():
             if not _names_object(source.object, held.selector, held.path):

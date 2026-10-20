@@ -154,3 +154,20 @@ def test_화면_오브젝트를_씬으로_적어도_오브젝트로_대조한다
     )
     assert status == "verified"
     assert [s["citation"] for s in checks[0]["sources"]] == ["match", "match"]
+
+
+def test_타입_점_멤버로_적은_근거도_찾는다() -> None:
+    pulse = memory()
+    pulse.apply(PulseReading.model_validate({
+        "schema": 2, "reading": 2, "frame": 11, "scene": "Map_scene", "whole": False,
+        "statics": [{"declaring": "Combat.CombineZone", "member": "Instance", "value": {"active": False}}],
+        "active": [], "deactive": [], "changed": [], "watching": 2, "unresolved": 0, "unwatchable": 0,
+    }))
+    checks, status = cite(
+        [check("yes",
+               EvidenceSource(kind="pulse", object="CombineZone.Instance", value="False"),
+               EvidenceSource(kind="pulse", object="Enemy[3]", member="Combat.Enemy.hp", value="10"))],
+        pulse, set(), "Map_scene",
+    )
+    assert [s["citation"] for s in checks[0]["sources"]] == ["match", "match"]
+    assert status == "verified"
