@@ -28,11 +28,11 @@ class EvidenceSource(BaseModel):
     """판정이 근거로 댄 것 하나."""
 
     kind: Literal["pulse", "capture", "scene"] = Field(
-        description="pulse: a value from the pulse view · capture: a screenshot · scene: the current scene"
+        description="pulse: an object (or one of its values) in the pulse view · capture: a screenshot · scene: ONLY the scene name"
     )
     object: str | None = Field(
         default=None,
-        description="pulse: the object's path or selector as the view prints it · capture: the capture id · scene: the scene name",
+        description="pulse: the object's path or selector as the view prints it (with no member, its presence or text is checked) · capture: the capture id · scene: the scene name",
     )
     member: str | None = Field(
         default=None, description="pulse only: the member, `Type::member` or `member`, as the view prints it"
@@ -118,7 +118,10 @@ def cite(
             if source.kind == "capture":
                 citation: Citation = "match" if (source.object or "") in captures else "missing"
                 recorded = source.object if citation == "match" else None
-            elif source.kind == "scene":
+            elif source.kind == "scene" and (scene is None or _plain(source.object or "") == _plain(scene)
+                                             or _pulse_values(source, pulse) is None):
+                # 실측(2026-10-20 런 18): 모델이 화면 위 오브젝트를 `scene` 으로 적었다. 씬 이름이 아니고 판독
+                # 기록에 있는 오브젝트면 아래 `pulse` 갈래로 오브젝트를 대조한다.
                 recorded = scene
                 citation = "missing" if scene is None else "match" if _plain(source.object or "") == _plain(scene) else "mismatch"
             else:

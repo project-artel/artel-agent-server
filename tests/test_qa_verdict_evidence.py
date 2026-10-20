@@ -144,3 +144,13 @@ def test_검증이_아닌_스텝은_항목_없이_적힌다() -> None:
         assert statuses(sent)[0]["checks"] is None
 
     asyncio.run(run())
+
+
+def test_화면_오브젝트를_씬으로_적어도_오브젝트로_대조한다() -> None:
+    # 실측(런 18): `Canvas[7]/Button (Legacy)[0]` 같은 오브젝트를 kind="scene" 으로 적었다.
+    checks, status = cite(
+        [check("yes", EvidenceSource(kind="scene", object="MapScene[1]"), EvidenceSource(kind="scene", object="Map_scene"))],
+        memory(), set(), "Map_scene",
+    )
+    assert status == "verified"
+    assert [s["citation"] for s in checks[0]["sources"]] == ["match", "match"]
