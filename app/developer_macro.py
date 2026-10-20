@@ -28,10 +28,14 @@ DEVELOPER_MACRO_RULES = (
     "The entry `def` is named exactly like the macro and declared `-> None`.",
     "The entry `def` opens with a docstring saying what the macro does and when it is "
     "the right move. A macro without one is refused.",
-    "`from macros import <name>` imports another developer macro of the same project. "
-    "That macro must already be published there.",
+    "`from macros import <name>` imports another developer macro of the same project: "
+    "one already published there, or one sent in the same `publish_macros` call. Send "
+    "related macros together in one call; their order inside it does not matter.",
     'A `selector("...")` must not be a `#id`, `-` or an empty string: a `#id` changes '
     "between game launches, and the other two name nothing.",
+    "Publishing checks the source statically — parsing, the rules above, and imports. It "
+    "does not run the macro in the game, so passing does not mean it works there; a QA "
+    "run finds that out.",
 )
 
 
