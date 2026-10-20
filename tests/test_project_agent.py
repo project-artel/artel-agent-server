@@ -330,6 +330,15 @@ def test_system_prompt_has_rules_catalog_and_language() -> None:
     assert "start [risk: approve]" in ko
 
 
+def test_system_prompt_tells_the_agent_not_to_treat_a_missing_snapshot_entry_as_absent() -> None:
+    text = build_system_prompt(CATALOG["pages"], "ko")
+
+    assert "Never conclude that a list is empty or that an option does not exist" in text
+    assert "say you cannot see it from here (not that it does not exist)" in text
+    assert "believe the user and call `read_page` once" in text
+    assert 'Read-only fields whose description says "read-only list" hold ids as values' in text
+
+
 def _client(agent: ProjectAgent) -> TestClient:
     app = FastAPI()
     app.state.project_agent = agent
