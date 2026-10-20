@@ -399,6 +399,32 @@ def _ref_of(request: ScenarioAgentRequest, kind: str, ref_id: int) -> Ref | None
     return Ref(kind="ts", id=ref_id, label=scenario.title, detail=scenario.description or None)
 
 
+def _linked_titles(text: str, request: ScenarioAgentRequest) -> str:
+    """굵게 쓴 시나리오 제목을 TS 표식으로 바꾼다(ARTEL-1116).
+
+    프롬프트는 시나리오를 `[[ts:N]]` 로 가리키라고 하지만, 모델은 제목을 `**제목**` 으로 쓸 때가
+    잦다(실측 런 183: 세 턴 중 두 턴). 그러면 화면에 누를 곳이 없다. 이 런의 시나리오 제목과
+    **글자 그대로 같은** 굵은 글씨만 바꾼다 — 비슷한 제목을 짐작해 잇지 않는다.
+    """
+    titles = {
+        s.title.strip(): s.scenario_id
+        for s in request.current_scenarios
+        if s.scenario_id is not None and s.title.strip()
+    }
+    if not titles:
+        return text
+
+    def link(match: re.Match) -> str:
+        scenario_id = titles.get(match.group(1).strip())
+        return match.group(0) if scenario_id is None else _ts(scenario_id)
+
+    return re.sub(r"\*\*([^*\n]+)\*\*", link, text)
+
+
+def _ts(scenario_id: int) -> str:
+    return f"[[ts:{scenario_id}]]"
+
+
 def _checked(text: str, request: ScenarioAgentRequest, found: dict[tuple[str, int], Ref]) -> str:
     """아는 번호의 표식만 남긴다. 모르는 번호는 지운다 — 누를 곳이 없는 칩이 된다."""
 
@@ -434,18 +460,22 @@ def _answer(
     reviewed: ReviewedCases | None = None,
     changes: list[ScenarioChange] | None = None,
 ) -> ScenarioAgentResult:
-    """세 칸 답을 만든다. `message` 는 세 칸을 이은 글 — Redis 대화 기록과 구형 화면이
-    그것만 읽으므로, 물은 것까지 들어 있어야 다음 턴이 "그거"를 풀 수 있다.
+    """세 칸 답을 만든다. 질문은 답의 세 번째 칸([AgentReply.asks])에 담긴다(ARTEL-1116).
+
+    `message` 는 세 칸을 이은 글 — Redis 대화 기록과 구형 화면이 그것만 읽으므로, 물은
+    것까지 들어 있어야 다음 턴이 "그거"를 풀 수 있다. 물은 줄에는 `질문:` 을 붙인다 —
+    다음 턴의 모델이 같은 것을 몇 번 물었는지 대화 기록에서 셀 수 있어야, 두 번 넘게
+    되묻지 않는다.
 
     표식(ARTEL-931)은 여기서 한 번에 검사한다. 화면이 읽는 칸(결과·설명·질문 문장)에는
     표식을 남기고 `refs` 로 이름을 붙이며, 사람이 읽는 글(`message`·보기)에는 이름을 쓴다.
     """
     found: dict[tuple[str, int], Ref] = {}
     result = _checked(result, request, found)
-    detail = _checked(detail, request, found)
+    detail = _checked(_linked_titles(detail, request), request, found)
     asked = [
         question.model_copy(update={
-            "text": _checked(question.text, request, found),
+            "text": _checked(_linked_titles(question.text, request), request, found),
             "why": _checked(question.why, request, found) if question.why else question.why,
         })
         for question in questions or []
@@ -459,16 +489,18 @@ def _answer(
     ]
     changes = changes or []
     listed = "\n".join(f"- {change.title}" for change in changes)
+    asked_label = "질문" if request.locale.value == "ko" else "Question"
     message = "\n".join(
         _spoken(part, found, prefix=True)
-        for part in (result, listed, detail, *(q.text for q in asked)) if part
+        # 물은 줄은 결과 바로 뒤다. 대화 기록은 메시지 하나를 앞에서부터 잘라 담으므로(설정
+        # `scenario_history_message_max_chars`), 긴 설명 뒤에 두면 잘려 나가 몇 번 물었는지 못 센다.
+        for part in (result, *(f"{asked_label}: {q.text}" for q in asked), listed, detail) if part
     )
     return ScenarioAgentResult(
         message=message,
         scenarios=[],
         reviewed=reviewed,
-        reply=AgentReply(result=result, detail=detail, changes=changes),
-        questions=asked,
+        reply=AgentReply(result=result, detail=detail, changes=changes, asks=asked),
         refs=list(found.values()),
     )
 
@@ -953,6 +985,15 @@ async def run_modify_workflow(
             "먼저 확인할 게 있어서 아직 아무것도 고치지 않았어요."
             if ko else "Nothing changed yet — I need to check something first.",
             plan.detail, _questions(plan.questions),
+        )
+    if not plan.steps and not plan.questions and plan.detail.strip():
+        # 일부러 아무것도 고치지 않은 턴이다(ARTEL-1116) — 같은 것을 두 번 물었는데 답이 없으면 더
+        # 묻지 않고 그대로 둔다. 이것을 아래의 "대상을 못 가렸다" 로 받으면 엉뚱하게 "어느 시나리오를
+        # 고칠까요?" 를 다시 묻게 된다(실측 2026-10-16, 같은 요청 세 번째 턴).
+        return _answer(
+            request,
+            "이번에는 아무것도 고치지 않았어요." if ko else "I left everything as it is this time.",
+            plan.detail,
         )
     if plan.scenario_id not in known_scenario_ids or not plan.steps:
         # 대상을 못 가리키면 고치지 않는다 — 짐작으로 남의 시나리오를 갈아끼우는 것이

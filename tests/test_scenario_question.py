@@ -76,14 +76,17 @@ def test_only_mixed_looking_messages_are_split() -> None:
 
 def test_requests_are_combined_into_one_numbered_answer() -> None:
     from app.agents.scenario.requests import combine
-    from app.agents.scenario.schemas import AgentReply, Ref, ScenarioAgentResult, ScenarioChange
+    from app.agents.scenario.schemas import AgentReply, Ref, ScenarioAgentResult, ScenarioChange, ScenarioQuestion
 
     first = ScenarioAgentResult(
         message="m1", scenarios=[],
         reply=AgentReply(result="1건을 수정했어요.", detail="뺐어요.", changes=[ScenarioChange(action="updated", title="맵 진입")]),
     )
     second = ScenarioAgentResult(
-        message="m2", scenarios=[], reply=AgentReply(result="87건이에요.", detail="이 버전 기준."),
+        message="m2", scenarios=[], reply=AgentReply(
+            result="87건이에요.", detail="이 버전 기준.",
+            asks=[ScenarioQuestion(id="agent:q1", text="어느 버전 기준으로 셀까요?")],
+        ),
         refs=[Ref(kind="tr", id=105, label="데모")],
     )
 
@@ -93,3 +96,4 @@ def test_requests_are_combined_into_one_numbered_answer() -> None:
     assert "**1. 마지막 스텝을 빼 줘**" in merged.reply.detail and "**2. TC 는 몇 개야?**" in merged.reply.detail
     assert [c.title for c in merged.reply.changes] == ["맵 진입"]
     assert [(r.kind, r.id) for r in merged.refs] == [("tr", 105)]
+    assert [q.id for q in merged.reply.asks] == ["agent:q1"]
