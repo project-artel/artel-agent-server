@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-PAGE_IDS = (
+PageId = Literal[
     "home",
     "documents",
     "testCases",
@@ -25,15 +25,11 @@ PAGE_IDS = (
     "qaRun",
     "testRun",
     "testRunEdit",
-)
+]
 
 
 class OpenPageArgs(BaseModel):
-    page: Literal[
-        "home", "documents", "testCases", "testRuns", "qa", "qaHistory", "contentMap",
-        "macros", "performance", "issues", "knowledge", "usage", "qaRun", "testRun",
-        "testRunEdit",
-    ] = Field(description="Page id from the page catalog.")
+    page: PageId = Field(description="Page id from the page catalog.")
     params: dict[str, str] = Field(
         default_factory=dict,
         description="Path and query params the page needs, such as runId or build.",
@@ -126,15 +122,40 @@ _TOOLS: tuple[tuple[str, str, type[BaseModel]], ...] = (
     ),
 )
 
-TOOL_NAMES = tuple(name for name, _description, _args in _TOOLS)
+def _portable(node: Any, defs: dict[str, Any], *, in_properties: bool = False) -> Any:
+    """Inline `$ref`, collapse `X | None` to X, and drop `title` keys at every level.
+
+    Providers differ in what they accept (`$defs`, `anyOf` with null), so the bound
+    schema uses only plain types, enums, arrays and objects.
+    """
+    if isinstance(node, list):
+        return [_portable(item, defs) for item in node]
+    if not isinstance(node, dict):
+        return node
+    if in_properties:
+        # Keys here are property names, so a property called "title" is kept.
+        return {key: _portable(value, defs) for key, value in node.items()}
+    if "$ref" in node:
+        return _portable(defs[node["$ref"].rsplit("/", 1)[-1]], defs)
+    options = node.get("anyOf")
+    if options:
+        non_null = [option for option in options if option.get("type") != "null"]
+        if len(non_null) == 1:
+            rest = {k: v for k, v in node.items() if k != "anyOf"}
+            return _portable({**non_null[0], **rest}, defs)
+    return {
+        key: _portable(value, defs, in_properties=(key == "properties"))
+        for key, value in node.items()
+        if key not in ("title", "$defs")
+    }
 
 
 def tool_schemas() -> list[dict[str, Any]]:
     """OpenAI-style function schemas, which `bind_tools` converts for every provider."""
     schemas: list[dict[str, Any]] = []
     for name, description, args in _TOOLS:
-        parameters = args.model_json_schema()
-        parameters.pop("title", None)
+        raw = args.model_json_schema()
+        parameters = _portable(raw, raw.get("$defs", {}))
         schemas.append(
             {
                 "type": "function",

@@ -21,7 +21,7 @@ from app.agents.project_agent import (
 )
 from app.agents.project_agent.agent import flatten_content, to_langchain_messages
 from app.agents.project_agent.prompt import build_system_prompt, render_page_catalog
-from app.agents.project_agent.tools import TOOL_NAMES, tool_schemas
+from app.agents.project_agent.tools import tool_schemas
 from app.api.project_agent import router
 
 
@@ -136,33 +136,123 @@ def test_block_list_content_is_flattened_to_text() -> None:
     assert flatten_content(None) == ""
 
 
-def test_tools_enabled_false_binds_no_tools() -> None:
-    harness = Harness(AIMessage(content="text"))
-
-    _run(harness, _request(tools_enabled=False))
-    assert harness.bound == []
-
-    _run(harness, _request(tools_enabled=True))
-    assert len(harness.bound) == 1
+EXPECTED_TOOLS = [
+    "open_page", "read_page", "set_field", "call_action",
+    "ask_choice", "query", "watch_job", "author_scenarios",
+]
 
 
-def test_default_factory_binds_eight_tool_schemas(monkeypatch) -> None:
+class _Recorder:
+    def __init__(self, reply: AIMessage) -> None:
+        self.reply = reply
+        self.bound: list[dict] | None = None
+        self.sent: list[BaseMessage] = []
+
+    def bind_tools(self, tools):
+        self.bound = tools
+        return self
+
+    async def ainvoke(self, messages, config=None):
+        self.sent = list(messages)
+        return self.reply
+
+
+def _use_recorder(monkeypatch, reply: AIMessage) -> tuple[_Recorder, list]:
     from app.agents.project_agent import agent as module
 
-    bound: dict[str, Any] = {}
+    recorder = _Recorder(reply)
+    reasoning: list = []
 
-    class Recorder:
-        def bind_tools(self, tools):
-            bound["tools"] = tools
-            return "bound"
+    def build(model, reasoning_config=None, *args):
+        reasoning.append(reasoning_config)
+        return recorder
 
-    monkeypatch.setattr(module, "build_chat_model", lambda model: Recorder())
+    monkeypatch.setattr(module, "build_chat_model", build)
+    return recorder, reasoning
 
-    assert module._default_model_factory("m", True) == "bound"
-    names = [t["function"]["name"] for t in bound["tools"]]
-    assert names == list(TOOL_NAMES)
-    assert len(names) == 8
-    assert module._default_model_factory("m", False).__class__ is Recorder
+
+HISTORY_WITH_TOOLS = [
+    {"role": "user", "content": "QA 돌려 줘"},
+    {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"id": "call_1", "name": "read_page", "args": {}}],
+    },
+    {"role": "tool", "tool_call_id": "call_1", "content": "{}"},
+]
+
+
+def test_default_factory_binds_eight_tools_and_turns_reasoning_off(monkeypatch) -> None:
+    recorder, reasoning = _use_recorder(monkeypatch, AIMessage(content="ok"))
+
+    asyncio.run(
+        ProjectAgent().run(_request(messages=HISTORY_WITH_TOOLS), AgentContext(session_id="t"))
+    )
+
+    assert [t["function"]["name"] for t in recorder.bound] == EXPECTED_TOOLS
+    assert reasoning[0] is not None and reasoning[0].disabled
+
+
+def test_tools_disabled_keeps_tools_bound_but_drops_calls(monkeypatch) -> None:
+    recorder, _ = _use_recorder(
+        monkeypatch,
+        AIMessage(content="wrap up", tool_calls=[{"id": "c", "name": "read_page", "args": {}}]),
+    )
+
+    result = asyncio.run(
+        ProjectAgent().run(
+            _request(messages=HISTORY_WITH_TOOLS, tools_enabled=False),
+            AgentContext(session_id="t"),
+        )
+    )
+
+    assert len(recorder.bound) == 8
+    assert result.content == "wrap up" and result.tool_calls == []
+    assert isinstance(recorder.sent[-1], HumanMessage)
+    assert "Do not call tools" in recorder.sent[-1].content
+    assert any(isinstance(m, ToolMessage) for m in recorder.sent)
+
+
+def test_tools_enabled_sends_no_extra_instruction(monkeypatch) -> None:
+    recorder, _ = _use_recorder(monkeypatch, AIMessage(content="ok"))
+
+    asyncio.run(ProjectAgent().run(_request(), AgentContext(session_id="t")))
+
+    assert "Do not call tools" not in str(recorder.sent[-1].content)
+
+
+def test_message_validation() -> None:
+    for bad in (
+        {"role": "tool", "content": "x"},
+        {"role": "tool", "tool_call_id": " ", "content": "x"},
+        {"role": "user", "content": "", },
+        {"role": "user", "content": "hi", "tool_calls": [{"id": "a", "name": "n"}]},
+    ):
+        with pytest.raises(ValueError):
+            ProjectAgentMessage(**bad)
+
+
+def test_invalid_message_is_422() -> None:
+    client = _client(ProjectAgent(model_factory=Harness(AIMessage(content="")).factory))
+
+    response = client.post(
+        "/internal/project-agent/step",
+        json=_body(messages=[{"role": "tool", "content": "x"}]),
+    )
+
+    assert response.status_code == 422
+
+
+def test_tool_schemas_are_portable() -> None:
+    import json
+
+    text = json.dumps(tool_schemas())
+
+    assert "$ref" not in text and "$defs" not in text and "anyOf" not in text
+    assert '"title"' not in text
+    by_name = {t["function"]["name"]: t["function"]["parameters"] for t in tool_schemas()}
+    assert by_name["watch_job"]["properties"]["label"]["type"] == "string"
+    assert by_name["ask_choice"]["properties"]["options"]["items"]["type"] == "object"
 
 
 def test_tool_schemas_carry_argument_shapes() -> None:
