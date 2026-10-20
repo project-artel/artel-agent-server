@@ -1,0 +1,51 @@
+"""Request and result of one project agent step.
+
+The agent is stateless. Orchestration stores the conversation, sends all of it
+on every call, executes the tool calls that come back through the browser, and
+calls again. See `.plan/general/2026-10-20-project-agent-wire-contract.md`.
+"""
+
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
+
+from app.llm.models import EnabledLLMModel
+
+
+class ProjectAgentToolCall(BaseModel):
+    id: str
+    name: str
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProjectAgentMessage(BaseModel):
+    role: Literal["user", "assistant", "tool"]
+    content: str = ""
+    # Only on an assistant message: the calls it made.
+    tool_calls: list[ProjectAgentToolCall] = Field(default_factory=list)
+    # Only on a tool message: which call it answers.
+    tool_call_id: str | None = None
+
+
+class PageCatalog(BaseModel):
+    """Opaque JSON from the browser. Only `pages` being a list is checked."""
+
+    model_config = {"extra": "allow"}
+
+    pages: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ProjectAgentRequest(BaseModel):
+    conversation_id: int
+    project_id: int | None = None
+    # None means DEFAULT_MODEL. An unknown or disabled id is a 422.
+    model: EnabledLLMModel | None = None
+    locale: str = "ko"
+    tools_enabled: bool = True
+    page_catalog: PageCatalog = Field(default_factory=PageCatalog)
+    messages: list[ProjectAgentMessage]
+
+
+class ProjectAgentResult(BaseModel):
+    content: str = ""
+    tool_calls: list[ProjectAgentToolCall] = Field(default_factory=list)
