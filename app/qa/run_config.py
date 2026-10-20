@@ -215,10 +215,7 @@ def resolve_run_config(
     spec = get_model_spec(model)
     resolved_arch = resolve_arch(arch, model)
     if resolved_arch.engine == "planner_executer":
-        if execution_mode != "ORDERED":
-            # planner_executer 는 스텝을 순서대로 하나씩 건다. FREE 시나리오의 `report_case` 를
-            # 모르므로 그 모양으로 기록되기 전에 거절한다.
-            raise QaArchError("engine='planner_executer' runs ORDERED scenarios only.")
+        # FREE 도 돈다(ARTEL-1149). 시나리오마다 `execution_mode` 로 갈라 도는 것은 runner 의 몫이다.
         # Imported here: that module builds a `RunConfig`, which is defined in this one.
         from app.agents.planner_executer.run_config import resolve_planner_executer_config
 

@@ -44,9 +44,13 @@ def test_planner_knobs_are_refused_on_the_tool_loop() -> None:
         QaArchSpec(planner=PlannerExecuterArchSpec())
 
 
-def test_the_planner_executer_runs_ordered_scenarios_only() -> None:
-    with pytest.raises(QaArchError, match="ORDERED scenarios only"):
-        resolve_run_config(arch=PLANNER_EXECUTER, execution_mode="FREE")
+def test_the_planner_executer_opens_a_free_session() -> None:
+    # FREE 도 돈다(ARTEL-1149). 같은 엔진이라 같은 label 과 digest 로 기록된다.
+    free = resolve_run_config(arch=PLANNER_EXECUTER, execution_mode="FREE")
+    ordered = resolve_run_config(arch=PLANNER_EXECUTER)
+
+    assert free.agent_arch == ordered.agent_arch
+    assert free.agent_fingerprint == ordered.agent_fingerprint
 
 
 def test_the_planner_executer_run_is_filed_under_its_own_label_and_digest() -> None:
@@ -55,7 +59,7 @@ def test_the_planner_executer_run_is_filed_under_its_own_label_and_digest() -> N
 
     assert config.arch.engine == "planner_executer"
     assert config.arch.planner == PlannerExecuterArchSpec()
-    assert config.agent_arch == PLANNER_EXECUTER_LABEL == "pe1-skeleton"
+    assert config.agent_arch == PLANNER_EXECUTER_LABEL == "pe2-free"
     assert config.agent_fingerprint != agent.agent_fingerprint
     assert config.decision_model == resolve_decision_model()
     assert config.citation_reporting is False and config.compaction_model is None

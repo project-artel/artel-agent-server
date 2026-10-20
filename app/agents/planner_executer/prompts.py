@@ -26,7 +26,7 @@ from app.agents.qa.macro.reference import GRAMMAR, NUMBER_EQUALITY
 from app.prompts import load_prompt, resolve_version, roles_in
 from app.qa.pulse import PulseMemory
 from app.qa.scene_context import SceneCapability, SceneContext
-from app.qa.schemas import QaScenario
+from app.qa.schemas import QaScenario, QaStep
 
 PROMPT_AGENT = "qa_planner"
 RULES_ROLE = "rules"
@@ -66,11 +66,27 @@ def screen(pulse: PulseMemory) -> str:
     return pulse.render(since=0, advance=False) or "(the game has sent no reading yet)"
 
 
+def step_text(item: QaStep) -> str:
+    """What the step asks a player to do. A FREE step has no `action`; its test case's step is it."""
+    if item.action.strip():
+        return item.action.strip()
+    if item.case and item.case.test_step:
+        return item.case.test_step.strip()
+    return "(no action)"
+
+
 def this_step(scenario: QaScenario, step: int) -> str:
-    """The step as JSON: what to do, and for a test case's last step the result to verify."""
+    """The step as JSON: what to do, and for a test case's last step the result to verify.
+
+    A FREE step is one whole test case: it also carries the scene the case is checked in, so the
+    planner knows where play has to get to first.
+    """
     item = scenario.steps[step - 1]
     following = scenario.steps[step].case_id if step < len(scenario.steps) else None
-    shown: dict = {"step": step, "do": item.action.strip() or "(no action)"}
+    shown: dict = {"step": step}
+    if scenario.execution_mode == "FREE" and item.case and item.case.scene:
+        shown["scene"] = item.case.scene
+    shown["do"] = step_text(item)
     if item.hint:
         shown["try"] = item.hint.strip()
     if item.input:
