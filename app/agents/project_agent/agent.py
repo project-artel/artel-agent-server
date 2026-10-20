@@ -22,14 +22,25 @@ from app.agents.project_agent.schemas import (
 )
 from app.agents.project_agent.tools import tool_schemas
 from app.llm.chat_model import build_chat_model
-from app.llm.models import DEFAULT_MODEL
+from app.llm.models import DEFAULT_MODEL, ReasoningConfig
 
 ModelFactory = Callable[[str, bool], Runnable]
 
 
+# Stateless replay sends earlier assistant tool_use turns without their thinking
+# blocks, which Anthropic and Bedrock reject while thinking is on. So reasoning is off.
+REASONING_OFF = ReasoningConfig(max_tokens=0)
+
+# Appended as the last message when the turn has used its tool calls.
+NO_TOOLS_INSTRUCTION = "Do not call tools. Answer the user in text now."
+
+
 def _default_model_factory(model: str, tools_enabled: bool) -> Runnable:
-    chat: BaseChatModel = build_chat_model(model)
-    return chat.bind_tools(tool_schemas()) if tools_enabled else chat
+    # Always bound: a history that holds tool_use / tool_result blocks is rejected by
+    # Anthropic and Bedrock Converse when no tools are declared. `tools_enabled=False`
+    # is enforced by the instruction and by dropping the returned calls (`run`).
+    chat: BaseChatModel = build_chat_model(model, REASONING_OFF)
+    return chat.bind_tools(tool_schemas())
 
 
 def to_langchain_messages(messages: list[ProjectAgentMessage]) -> list[BaseMessage]:
@@ -84,10 +95,13 @@ class ProjectAgent:
         model = request.model or DEFAULT_MODEL
         chat = self._model_factory(model, request.tools_enabled)
         system = build_system_prompt(request.page_catalog.pages, request.locale)
-        reply = await chat.ainvoke(
-            [SystemMessage(content=system), *to_langchain_messages(request.messages)],
-            context.trace_config("project-agent"),
-        )
+        prompt: list[BaseMessage] = [
+            SystemMessage(content=system),
+            *to_langchain_messages(request.messages),
+        ]
+        if not request.tools_enabled:
+            prompt.append(HumanMessage(content=NO_TOOLS_INSTRUCTION))
+        reply = await chat.ainvoke(prompt, context.trace_config("project-agent"))
         tool_calls = [
             ProjectAgentToolCall(
                 id=call.get("id") or f"call_{uuid.uuid4().hex}",
@@ -95,5 +109,6 @@ class ProjectAgent:
                 args=call.get("args") or {},
             )
             for call in getattr(reply, "tool_calls", None) or []
+            if request.tools_enabled
         ]
         return ProjectAgentResult(content=flatten_content(reply.content), tool_calls=tool_calls)

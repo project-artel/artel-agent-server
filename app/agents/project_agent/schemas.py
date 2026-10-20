@@ -7,7 +7,7 @@ calls again. See `.plan/general/2026-10-20-project-agent-wire-contract.md`.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.llm.models import EnabledLLMModel
 
@@ -25,6 +25,16 @@ class ProjectAgentMessage(BaseModel):
     tool_calls: list[ProjectAgentToolCall] = Field(default_factory=list)
     # Only on a tool message: which call it answers.
     tool_call_id: str | None = None
+
+    @model_validator(mode="after")
+    def check_role_fields(self) -> "ProjectAgentMessage":
+        if self.role == "tool" and not (self.tool_call_id or "").strip():
+            raise ValueError("A tool message needs a non-empty tool_call_id.")
+        if self.role != "assistant" and self.tool_calls:
+            raise ValueError("tool_calls are allowed only on assistant messages.")
+        if self.role == "user" and not self.content.strip():
+            raise ValueError("A user message needs non-empty content.")
+        return self
 
 
 class PageCatalog(BaseModel):
