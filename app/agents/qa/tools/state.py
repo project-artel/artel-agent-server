@@ -13,6 +13,7 @@ from app.agents.qa.macro.lift import DispatchRecord
 from app.agents.qa.macro.session import MacroSession
 from app.qa.jev import JevClient
 from app.qa.envelope import ActionResultItem, JsonRpcAction
+from app.qa.failure_site import FailureSite
 from app.qa.game_functions import CaseFunctions, UsedCheat
 from app.qa.schemas import QaStepResult
 
@@ -116,6 +117,9 @@ class QaRunState:
         # 스텝마다 미도달이라 돌려보낸 횟수.
         self.unreached_refusals: dict[int, int] = {}
         self.finished = False
+        # run 이 예외나 timeout 으로 멈췄을 때 `run_with_deadline` 이 채운다. 취소와
+        # "닫지 않고 멈춤" 은 예외가 아니므로 `None` 으로 남는다.
+        self.failure_site: FailureSite | None = None
         # The observation the agent last saw, so the next look is a diff.
         self.watermark = 0
         # 마지막 행위가 끝난 Unity 프레임. 판독의 창이 여기서 시작한다 — 타이머가 아니라
