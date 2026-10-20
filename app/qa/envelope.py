@@ -1505,6 +1505,11 @@ class ErrorPayload(BaseModel):
     code: str
     retryable: bool = False
     detail: dict | None = None
+    # run 이 예외로 멈췄을 때만 채운다. 클래스 이름과 `module:function:line` 뿐이고
+    # 예외 메시지와 파일 경로는 싣지 않는다(`app/qa/failure_site.py`).
+    # wire 이름은 camelCase 다 — `outbound_envelope` 가 alias 로 내보낸다.
+    exception_type: str | None = Field(default=None, serialization_alias="exceptionType")
+    frames: list[str] | None = None
 
 
 def outbound_envelope(
@@ -1526,5 +1531,5 @@ def outbound_envelope(
         "correlationId": correlation_id,
         "sequence": sequence,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "payload": payload.model_dump(),
+        "payload": payload.model_dump(by_alias=True),
     }

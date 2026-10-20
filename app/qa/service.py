@@ -303,8 +303,16 @@ class QaExecutionService:
             if failure is not None:
                 # The agent never closed this scenario, so nothing else will say it
                 # ended. Report it and carry on to the next scenario.
+                # 테스트용 가짜 runner 는 state 가 `None` 일 수 있다.
+                failure_site = getattr(state, "failure_site", None)
                 await channel.emit(
-                    MessageType.ERROR, ErrorPayload(message=failure, code="run_incomplete")
+                    MessageType.ERROR,
+                    ErrorPayload(
+                        message=failure,
+                        code="run_incomplete",
+                        exception_type=failure_site.exception_type if failure_site else None,
+                        frames=failure_site.frames if failure_site else None,
+                    ),
                 )
                 await self._send_terminal(
                     channel, StepStatus.FAILED, RunResult.FAILED, failure, state
