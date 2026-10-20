@@ -11,6 +11,7 @@ QA 판정은 모델이 내린다. 사용자가 그 판정을 믿으려면 **왜*
 맞았고 1건은 틀렸다 — 다른 적 개체의 HP 를 인용하거나, 한 번도 읽지 않은 값을 댔다.
 """
 
+import ast
 import json
 import re
 from typing import Any, Literal
@@ -62,13 +63,38 @@ def _shown(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
+def _parsed(text: str) -> Any:
+    """적힌 값을 값으로 읽는다: JSON, 파이썬식 사전(`{'path': …}`), `칸: 값` 쌍(`active: False`). 못 읽으면 글자 그대로."""
+    for read in (json.loads, ast.literal_eval):
+        try:
+            return read(text)
+        except (ValueError, SyntaxError, TypeError):
+            pass
+    pairs = re.findall(r"([A-Za-z_][\w.]*)\s*:\s*([^,{}]+)", text)
+    if pairs and ":" in text:
+        return {key: value.strip() for key, value in pairs}
+    return text
+
+
+def _norm(value: Any) -> str:
+    text = _shown(value).strip().strip("\"'").lower()
+    return {"none": "null", "true": "true", "false": "false"}.get(text, text)
+
+
 def _same(cited: str, recorded: Any) -> bool:
-    """인용한 값이 기록과 맞는가. 기록이 객체면 그 안의 글자 하나와 맞아도 된다(`{"label": "Stage : 0"}`)."""
-    want = cited.strip().strip("\"'").lower()
+    """인용한 값이 기록과 맞는가. 기록이 객체면 그 안의 값 하나와 맞아도 되고, 인용이 객체면 그 칸들이 기록과 맞으면 된다."""
+    if _norm(cited) == _norm(recorded):
+        return True
+    wanted = _parsed(cited)
+    if isinstance(wanted, dict) and isinstance(recorded, dict):
+        # 적은 칸이 모두 기록에 있고 값이 같으면 맞다. 기록에만 있는 칸은 상관없다.
+        # `Stage : 0` 같은 글자도 칸처럼 읽히므로, 칸이 안 맞으면 아래 글자 비교로 넘어간다.
+        keyed = [(_dig(recorded, [str(key)]), value) for key, value in wanted.items()]
+        if keyed and all(got is not _MISSING and _same(_shown(value), got) for got, value in keyed):
+            return True
     if isinstance(recorded, dict):
-        return any(_same(cited, value) for value in recorded.values()) or want == _shown(recorded).lower()
-    got = _shown(recorded).strip().strip("\"'").lower()
-    return want == got
+        return any(_same(cited, value) for value in recorded.values())
+    return False
 
 
 def _names_object(cited: str, *names: str | None) -> bool:
@@ -84,24 +110,93 @@ def _names_member(cited: str, on: str | None, member: str | None) -> bool:
     return not kind or (on or "").lower().endswith(kind.strip().lower())
 
 
+def _dig(value: Any, path: list[str]) -> Any:
+    """멤버 값 안의 칸을 따라간다: `magicTypeCards.Count` 의 `Count`, 정적 값 `{active: …}` 의 `active`."""
+    for part in path:
+        if isinstance(value, dict) and part in value:
+            value = value[part]
+        elif isinstance(value, dict) and part.lower() in {k.lower() for k in value}:
+            value = next(v for k, v in value.items() if k.lower() == part.lower())
+        elif isinstance(value, list) and part.lower() == "count":
+            value = len(value)
+        else:
+            return _MISSING
+    return value
+
+
+_MISSING = object()
+
+
+def _split(source: EvidenceSource, pulse: PulseMemory) -> tuple[str | None, str | None]:
+    """판독 화면 표기를 오브젝트 · 멤버로 나눈다.
+
+    모델은 화면에 보인 표기를 그대로 옮긴다(실측 런 18 · 19 · 21): 변경 목록의 `씬/오브젝트|Type::member`,
+    오브젝트 앞의 씬 이름(`TurnBattleScene/RangedCat(Clone)[18]`). 씬 이름은 떼고, `|` 뒤는 멤버로 읽는다.
+    """
+    obj, member = source.object, source.member
+    if obj and "|" in obj:
+        obj, _, tail = obj.partition("|")
+        member = member or tail
+    if obj and "/" in obj:
+        head, _, rest = obj.partition("/")
+        scenes = {held.scene for held in pulse.held.values() if held.scene} | ({pulse.scene} if pulse.scene else set())
+        if head in scenes and rest:
+            obj = rest
+    return obj or None, member or None
+
+
+def _member_values(cited: str, members: Any) -> list[Any]:
+    """`Type::member`, `Type.member`, 그리고 그 값 안의 칸(`member.Count`)까지."""
+    found: list[Any] = []
+    for m in members:
+        if _names_member(cited, m.on, m.member):
+            found.append(m.value)
+            continue
+        # `member.칸` — 앞부분이 멤버 이름이면 나머지로 값 안을 따라간다.
+        head = cited.rpartition("::")[2] if "::" in cited else cited
+        parts = head.split(".")
+        for cut in range(1, len(parts)):
+            name, rest = ".".join(parts[:cut]), parts[cut:]
+            if (m.member or "").lower() == name.lower() or (m.member or "").lower() == parts[cut - 1].lower():
+                value = _dig(m.value, rest)
+                if value is not _MISSING:
+                    found.append(value)
+                break
+    return found
+
+
 def _pulse_values(source: EvidenceSource, pulse: PulseMemory) -> list[Any] | None:
     """그 객체 · member 의 기록 값들. 그런 것이 기록에 없으면 None."""
+    obj, member = _split(source, pulse)
     found: list[Any] = []
-    # 오브젝트 칸에 정적 값을 `Type.member` 로 적은 근거(런 19: `CombineZone.Instance`)는 정적 값으로 찾는다.
-    if source.object and source.member is None and "/" not in source.object and "." in source.object:
-        found.extend(s.value for s in pulse.statics.values() if _names_member(source.object, s.declaring, s.member))
-    if source.object:
+    # 오브젝트 칸에 정적 값을 `Type.member` 로 적은 근거(`CombineZone.Instance`, `CombineZone.Instance::active`).
+    if obj and "/" not in obj and "." in obj:
+        for static in pulse.statics.values():
+            if _names_member(obj, static.declaring, static.member):
+                value = static.value if member is None else _dig(static.value, member.replace("::", ".").split("."))
+                if value is not _MISSING:
+                    found.append(value)
+    if obj and not found and member and "/" not in obj and "[" not in obj:
+        # 오브젝트 칸에 경로 대신 타입 이름을 적은 근거(`CombineZone::magicTypeCards.Count`) — 그 타입의 멤버를 찾는다.
         for held in pulse.held.values():
-            if not _names_object(source.object, held.selector, held.path):
+            found.extend(_member_values(f"{obj}::{member}", held.members.values()))
+        for static in pulse.statics.values():
+            if (static.declaring or "").lower().endswith(obj.lower()):
+                value = _dig(static.value, member.split("."))
+                if value is not _MISSING:
+                    found.append(value)
+    if obj and not found:
+        for held in pulse.held.values():
+            if not _names_object(obj, held.selector, held.path):
                 continue
-            if source.member is None:
+            if member is None:
                 found.append(held.text if held.text is not None else held.live)
                 continue
-            found.extend(m.value for m in held.members.values() if _names_member(source.member, m.on, m.member))
-    elif source.member:
-        found.extend(s.value for s in pulse.statics.values() if _names_member(source.member, s.declaring, s.member))
+            found.extend(_member_values(member, held.members.values()))
+    elif member:
+        found.extend(s.value for s in pulse.statics.values() if _names_member(member, s.declaring, s.member))
         for held in pulse.held.values():
-            found.extend(m.value for m in held.members.values() if _names_member(source.member, m.on, m.member))
+            found.extend(_member_values(member, held.members.values()))
     return found or None
 
 

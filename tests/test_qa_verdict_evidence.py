@@ -171,3 +171,34 @@ def test_타입_점_멤버로_적은_근거도_찾는다() -> None:
     )
     assert [s["citation"] for s in checks[0]["sources"]] == ["match", "match"]
     assert status == "verified"
+
+
+def test_판독_화면_표기를_그대로_옮긴_근거도_찾는다() -> None:
+    # 실측(런 21): 씬 이름을 붙인 오브젝트, 정적 값 안의 칸, 멤버 값 안의 칸을 화면 표기대로 적었다.
+    pulse = memory()
+    pulse.apply(PulseReading.model_validate({
+        "schema": 2, "reading": 2, "frame": 11, "scene": "Map_scene", "whole": False,
+        "statics": [{"declaring": "Combat.CombineZone", "member": "Instance", "value": {"active": False}}],
+        "active": [{"scene": "Map_scene", "id": 3, "path": "Zone", "selector": "Zone[2]",
+                    "members": [{"on": "Combat.CombineZone", "member": "spellCards", "value": []}]}],
+        "deactive": [], "changed": [], "watching": 3, "unresolved": 0, "unwatchable": 0,
+    }))
+    checks, status = cite(
+        [check("yes",
+               EvidenceSource(kind="pulse", object="Map_scene/Enemy[3]", member="hp", value="10"),
+               EvidenceSource(kind="pulse", object="CombineZone.Instance", member="active", value="False"),
+               EvidenceSource(kind="pulse", object="Zone[2]", member="CombineZone::spellCards.Count", value="0"),
+               EvidenceSource(kind="pulse", object="Map_scene/Enemy[3]|Combat.Enemy::hp", value="10"))],
+        pulse, set(), "Map_scene",
+    )
+    assert [s["citation"] for s in checks[0]["sources"]] == ["match", "match", "match", "match"]
+    assert status == "verified"
+
+
+def test_값을_다른_꼴로_적어도_뜻이_같으면_맞다() -> None:
+    from app.qa.verdict_evidence import _same
+
+    assert _same("active: False", {"active": False})
+    assert _same("{'path': 'Card(Clone)', 'active': True}", {"path": "Card(Clone)", "active": True, "world": {"x": 1}})
+    assert _same("None", None)
+    assert not _same("active: True", {"active": False})
