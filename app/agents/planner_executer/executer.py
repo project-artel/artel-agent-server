@@ -58,6 +58,10 @@ MAX_REASON_CHARS = 400
 # 보낸 것이 없으면 게임이 그대로이니 다시 골라도 같은 자리에서 실패한다. 한 번은 봐준다 — 첫 reading 이
 # 아직 안 온 `SELECTOR_NOT_FOUND` 처럼 곧 풀리는 실패가 있다.
 SENDLESS_FAILURES_BEFORE_DROP = 2
+# 입력을 보냈는데도 실패한 것까지 합쳐 같은 씬에서 이만큼 실패한 action 도 뺀다. 성공한 다른 action 이 사이에
+# 끼면 연속 실패 수가 0 으로 돌아가므로, 보내고 실패한 action 도 같은 자리에서 수십 번 돌았다
+# (`close_combine_zone` 이 시간 초과를 40번 넘게, 로컬 try 169).
+FAILURES_BEFORE_DROP = 3
 # Largest turn record sent as one `LOG`. Orchestration's socket closes on frames over 64 KiB.
 MAX_TURN_LOG_BYTES = 48_000
 
@@ -107,8 +111,9 @@ class Executer:
         started = clock()
         none_since: float | None = None
         failures = disagreements = 0
-        # action 이름 → 지금 씬에서 아무것도 못 보내고 실패한 횟수. 씬이 바뀌면 비운다.
+        # action 이름 → 지금 씬에서 아무것도 못 보내고 실패한 횟수와, 보냈든 안 보냈든 실패한 횟수. 씬이 바뀌면 비운다.
         sendless: dict[str, int] = {}
+        failed: dict[str, int] = {}
         sendless_scene = self._scene()
         try:
             for turn in range(spec.max_turns_per_step):
@@ -138,16 +143,17 @@ class Executer:
                         )
                         break
                 if record["scene"] != sendless_scene:
-                    sendless, sendless_scene = {}, record["scene"]
-                dropped = sorted(name for name, count in sendless.items() if count >= SENDLESS_FAILURES_BEFORE_DROP)
+                    sendless, failed, sendless_scene = {}, {}, record["scene"]
+                dropped = sorted(
+                    {name for name, count in sendless.items() if count >= SENDLESS_FAILURES_BEFORE_DROP}
+                    | {name for name, count in failed.items() if count >= FAILURES_BEFORE_DROP}
+                )
                 options = {name: macros.description(name) for name in macros.actions if name not in dropped}
                 if dropped:
                     record["dropped"] = dropped
                 if not options:
                     await self._send(record)
-                    play.stopped = (
-                        f"every action failed here without sending anything: {', '.join(dropped)}"
-                    )
+                    play.stopped = f"every action kept failing here: {', '.join(dropped)}"
                     break
                 record["question"] = f"{PICK_QUESTION} The step: {action}"
                 record["options"] = list(options)
@@ -166,6 +172,8 @@ class Executer:
                 record.update(outcome=outcome, reason=reason, sent=sent)
                 await self._send(record)
                 failures = failures + 1 if outcome == "failed" else 0
+                if outcome == "failed":
+                    failed[picked] = failed.get(picked, 0) + 1
                 if outcome == "failed" and not sent:
                     # 성공한 다른 action 이 사이에 끼면 `failures` 는 0 으로 돌아간다. 그래서 이 action 이
                     # 같은 자리에서 수십 번 실패해도 위 상한에 안 걸렸다(로컬 try 166). 이름으로 따로 센다.
