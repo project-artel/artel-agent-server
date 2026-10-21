@@ -54,6 +54,10 @@ SETTLE_ROUNDS = 8
 
 # A failure reason as kept in the turn record.
 MAX_REASON_CHARS = 400
+# 같은 씬에서 아무것도 보내지 못하고 이만큼 실패한 action 은 그 씬을 떠날 때까지 선택지에서 뺀다(ARTEL-1189).
+# 보낸 것이 없으면 게임이 그대로이니 다시 골라도 같은 자리에서 실패한다. 한 번은 봐준다 — 첫 reading 이
+# 아직 안 온 `SELECTOR_NOT_FOUND` 처럼 곧 풀리는 실패가 있다.
+SENDLESS_FAILURES_BEFORE_DROP = 2
 # Largest turn record sent as one `LOG`. Orchestration's socket closes on frames over 64 KiB.
 MAX_TURN_LOG_BYTES = 48_000
 
@@ -103,6 +107,9 @@ class Executer:
         started = clock()
         none_since: float | None = None
         failures = disagreements = 0
+        # action 이름 → 지금 씬에서 아무것도 못 보내고 실패한 횟수. 씬이 바뀌면 비운다.
+        sendless: dict[str, int] = {}
+        sendless_scene = self._scene()
         try:
             for turn in range(spec.max_turns_per_step):
                 await self._settle()
@@ -130,7 +137,18 @@ class Executer:
                             "did not see the goal reached"
                         )
                         break
-                options = {name: macros.description(name) for name in macros.actions}
+                if record["scene"] != sendless_scene:
+                    sendless, sendless_scene = {}, record["scene"]
+                dropped = sorted(name for name, count in sendless.items() if count >= SENDLESS_FAILURES_BEFORE_DROP)
+                options = {name: macros.description(name) for name in macros.actions if name not in dropped}
+                if dropped:
+                    record["dropped"] = dropped
+                if not options:
+                    await self._send(record)
+                    play.stopped = (
+                        f"every action failed here without sending anything: {', '.join(dropped)}"
+                    )
+                    break
                 record["question"] = f"{PICK_QUESTION} The step: {action}"
                 record["options"] = list(options)
                 record["picked"] = picked = await self._pick(record["question"], options)
@@ -148,6 +166,10 @@ class Executer:
                 record.update(outcome=outcome, reason=reason, sent=sent)
                 await self._send(record)
                 failures = failures + 1 if outcome == "failed" else 0
+                if outcome == "failed" and not sent:
+                    # 성공한 다른 action 이 사이에 끼면 `failures` 는 0 으로 돌아간다. 그래서 이 action 이
+                    # 같은 자리에서 수십 번 실패해도 위 상한에 안 걸렸다(로컬 try 166). 이름으로 따로 센다.
+                    sendless[picked] = sendless.get(picked, 0) + 1
                 if failures >= spec.max_failures_in_a_row:
                     play.stopped = f"{failures} actions failed in a row (last: {picked}: {reason})"
                     break

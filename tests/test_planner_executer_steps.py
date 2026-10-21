@@ -280,6 +280,40 @@ def test_actions_failing_in_a_row_stop_play() -> None:
     assert play.stopped.startswith("2 actions failed in a row (last: press_start: WAIT_TIMEOUT")
 
 
+def test_an_action_that_keeps_failing_without_sending_is_dropped_between_successes() -> None:
+    """성공한 action 이 사이에 끼면 연속 실패 수가 0 으로 돌아가 상한에 안 걸린다(로컬 try 166, ARTEL-1189).
+
+    아무것도 못 보낸 실패는 이름으로 따로 세어, 같은 씬에서 두 번이면 선택지에서 뺀다.
+    """
+    fake = FakeGame("Menu", {"Root/Title": {"text": "Title"}})  # Start 가 없어 press_start 는 아무것도 못 보낸다
+
+    play = _play(
+        fake,
+        FakeJev(picks=("press_start", "look_around", "press_start", "look_around", "look_around")),
+        max_turns_per_step=5,
+    )
+
+    outcomes = [(turn["picked"], turn["outcome"]) for turn in play.turns]
+    assert outcomes[:4] == [
+        ("press_start", "failed"), ("look_around", "passed"), ("press_start", "failed"), ("look_around", "passed"),
+    ]
+    assert play.turns[0]["reason"].startswith("SELECTOR_NOT_FOUND")
+    assert "press_start" in play.turns[2]["options"]
+    assert play.turns[4]["dropped"] == ["press_start"]
+    assert play.turns[4]["options"] == ["look_around"]
+
+
+def test_play_stops_when_every_action_failed_without_sending() -> None:
+    fake = FakeGame("Other", {"Root/Title": {"text": "Title"}})  # 두 action 모두 이 화면에서 아무것도 못 보낸다
+
+    play = _play(
+        fake, FakeJev(picks=("press_start", "look_around", "press_start", "look_around")), max_failures_in_a_row=10
+    )
+
+    assert play.stopped == "every action failed here without sending anything: look_around, press_start"
+    assert play.turns[-1]["dropped"] == ["look_around", "press_start"]
+
+
 def test_play_stops_at_the_turn_cap() -> None:
     play = _play(_menu(), FakeJev(picks=("look_around",)), max_turns_per_step=2)
 
