@@ -325,7 +325,7 @@ def test_play_stops_when_every_action_failed_without_sending() -> None:
         fake, FakeJev(picks=("press_start", "look_around", "press_start", "look_around")), max_failures_in_a_row=10
     )
 
-    assert play.stopped == "every action kept failing here: look_around, press_start"
+    assert play.stopped == "every action kept failing or ran out of picks here: look_around, press_start"
     assert play.turns[-1]["dropped"] == ["look_around", "press_start"]
 
 
@@ -343,6 +343,18 @@ def test_an_action_that_sends_and_keeps_failing_is_dropped_after_three() -> None
     assert picks.count(("press_start", "failed")) == 3
     assert play.turns[0]["sent"]  # 보낸 실패다
     assert play.turns[6]["dropped"] == ["press_start"]
+
+
+def test_an_action_picked_too_often_in_one_play_is_dropped(monkeypatch) -> None:
+    """실패 없이 통과하며 진전이 없는 action 은 다른 상한에 안 걸린다(로컬 try 170 의 toggle_combine_panel 200번)."""
+    monkeypatch.setattr(executer_module, "MAX_PICKS_PER_ACTION", 3)
+
+    play = _play(_menu(), FakeJev(picks=("look_around", "look_around", "look_around", "press_start")))
+
+    assert [turn.get("picked") for turn in play.turns[:4]] == ["look_around"] * 3 + ["press_start"]
+    assert play.turns[3]["dropped"] == ["look_around"]
+    assert play.turns[3]["options"] == ["press_start"]
+    assert play.stopped == "done"
 
 
 def test_play_stops_at_the_turn_cap() -> None:

@@ -62,6 +62,10 @@ SENDLESS_FAILURES_BEFORE_DROP = 2
 # 끼면 연속 실패 수가 0 으로 돌아가므로, 보내고 실패한 action 도 같은 자리에서 수십 번 돌았다
 # (`close_combine_zone` 이 시간 초과를 40번 넘게, 로컬 try 169).
 FAILURES_BEFORE_DROP = 3
+# play 하나에서 한 action 을 고를 수 있는 횟수. 실패 없이 "통과" 하면서 진전이 없는 action 은 위의 어느 상한에도
+# 안 걸린다 — 로컬 FREE 런에서 `move_on_map` 이 215번, `toggle_combine_panel` 이 200번 돌며 play 의 시간
+# 상한(8분)을 다 썼다(try 167·170). 정상 반복은 대사 넘기기가 많게는 40번, 나머지는 23번 이하였다.
+MAX_PICKS_PER_ACTION = 30
 # Largest turn record sent as one `LOG`. Orchestration's socket closes on frames over 64 KiB.
 MAX_TURN_LOG_BYTES = 48_000
 
@@ -114,6 +118,8 @@ class Executer:
         # action 이름 → 지금 씬에서 아무것도 못 보내고 실패한 횟수와, 보냈든 안 보냈든 실패한 횟수. 씬이 바뀌면 비운다.
         sendless: dict[str, int] = {}
         failed: dict[str, int] = {}
+        # action 이름 → 이 play 에서 고른 횟수. 씬이 바뀌어도 비우지 않는다.
+        picks: dict[str, int] = {}
         sendless_scene = self._scene()
         try:
             for turn in range(spec.max_turns_per_step):
@@ -147,13 +153,14 @@ class Executer:
                 dropped = sorted(
                     {name for name, count in sendless.items() if count >= SENDLESS_FAILURES_BEFORE_DROP}
                     | {name for name, count in failed.items() if count >= FAILURES_BEFORE_DROP}
+                    | {name for name, count in picks.items() if count >= MAX_PICKS_PER_ACTION}
                 )
                 options = {name: macros.description(name) for name in macros.actions if name not in dropped}
                 if dropped:
                     record["dropped"] = dropped
                 if not options:
                     await self._send(record)
-                    play.stopped = f"every action kept failing here: {', '.join(dropped)}"
+                    play.stopped = f"every action kept failing or ran out of picks here: {', '.join(dropped)}"
                     break
                 record["question"] = f"{PICK_QUESTION} The step: {action}"
                 record["options"] = list(options)
@@ -168,6 +175,7 @@ class Executer:
                     await channel.wait_for_reading(min(remaining, IDLE_LOOK_SECONDS))
                     continue
                 none_since = None
+                picks[picked] = picks.get(picked, 0) + 1
                 outcome, reason, sent = await self._run(macros.actions[picked], step)
                 record.update(outcome=outcome, reason=reason, sent=sent)
                 await self._send(record)
