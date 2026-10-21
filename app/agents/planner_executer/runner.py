@@ -32,7 +32,7 @@ from app.agents.planner_executer.executer import Executer, StepPlay
 from app.agents.planner_executer.free import FreeCase, candidates, free_cases, next_scene, same_scene
 from app.agents.planner_executer.macros import RegisteredMacros
 from app.agents.planner_executer.planner import Ask, Planner
-from app.agents.planner_executer.prompts import screen, step_text
+from app.agents.planner_executer.prompts import screen, step_text, travel_goal
 from app.agents.qa.runner import _step_plan
 from app.agents.qa.tools import QaRunState
 from app.qa.channel import QaCancelled, QaRunChannel
@@ -291,7 +291,7 @@ class PlannerExecuterRunner:
         written = await planner.write_travel(scenario, target.step, scene)
         stopped = f"the move was still refused after {self._spec.max_rewrites} rewrites: {written.refusal}"
         if written.macros is not None:
-            play = await executer.play(target.step, f"Go to the scene `{scene}`.", written.macros)
+            play = await executer.play(target.step, travel_goal(scene), written.macros)
             stopped = play.stopped
         arrived = channel.scene.pulse.scene
         waiting = [case.step for case in pending.values() if same_scene(case.scene, scene)]

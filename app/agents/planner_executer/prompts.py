@@ -114,6 +114,20 @@ def candidate_list(scenario: QaScenario, steps: list[int]) -> str:
     return json.dumps([case_view(scenario, step) for step in steps], ensure_ascii=False, indent=2)
 
 
+def travel_goal(scene: str) -> str:
+    """이동 play 에서 Jev 가 읽는 목표 글(ARTEL-1189).
+
+    "Go to the scene X." 한 줄이면 Jev 는 X 로 바로 가는 action 만 목표에 맞는다고 본다. 로컬 FREE 런에서
+    Map_scene 에서 GameClearScene 으로 가는 이동이 대사 넘기기·전투 입장 action 을 두고도 세 턴 모두
+    `none_fits` 로 끝났다(try 168·169). 중간 씬을 거치는 것과 앞을 막는 것을 치우는 것도 진행이라고 적는다.
+    """
+    return (
+        f"Go to the scene `{scene}`. It may take several scenes on the way: an action that brings the game "
+        f"one scene closer to `{scene}`, or that clears what blocks input on the way (a dialogue waiting for "
+        "a key, a tutorial, a confirmation), is progress toward it."
+    )
+
+
 def travel_step(step: int, scene: str) -> str:
     """A FREE scenario's move to another scene, written as an ordinary step for the rules prompt."""
     return json.dumps(
