@@ -808,6 +808,39 @@ def test_a_press_that_reached_nothing_stops_the_macro() -> None:
     assert [place.number for place in result.pending] == [3, 4]
 
 
+def test_a_press_that_reached_nothing_but_moved_the_screen_does_not_stop() -> None:
+    """`reached` 가 비어도 화면이 움직였으면 게임이 받은 것이다(ARTEL-1174).
+
+    SDK 는 UGUI 버튼이 받은 누름을 `reached` 에 적지 않는다. stage 런 157 에서
+    `Canvas/continue` 클릭이 씬을 바꾸고도 여기서 멈췄다.
+    """
+    moved = ActionOutcome(
+        text="  mouse_down: 닿은 것 없음 — 그 자리에 누를 것이 없다",
+        screen=ScreenChange.moved,
+        landings=(PressLanding.reached_nothing, PressLanding.reached_nothing),
+    )
+    host = FakeHost(battle(), answers=[moved, moved, moved, moved])
+    result = clicks(host)
+
+    assert result.passed, result.failure
+    assert len(host.sent) == 4
+
+
+def test_a_press_that_reached_nothing_with_no_screen_to_read_stops_the_macro() -> None:
+    """화면을 모르면(`unknown`) 움직였다는 근거가 없다. 지금처럼 멈춘다."""
+    unknown = ActionOutcome(
+        text="  mouse_down: 닿은 것 없음 — 그 자리에 누를 것이 없다",
+        screen=ScreenChange.unknown,
+        landings=(PressLanding.reached_nothing, PressLanding.reached_nothing),
+    )
+    host = FakeHost(battle(), answers=[unknown])
+    result = clicks(host)
+
+    assert not result.passed
+    assert result.failure.code == REQUIRE_FAILED
+    assert len(host.sent) == 1
+
+
 def test_a_press_the_person_took_the_mouse_from_stops_the_macro() -> None:
     """`ACTION_REJECTED` 다. 게임도 macro 도 아니라 사람이 마우스를 쥐고 있었다."""
     host = FakeHost(battle(), answers=[held_by_person()])
@@ -1098,7 +1131,7 @@ def test_nested_loops_hit_the_executed_statement_limit() -> None:
 
 def test_a_failure_inside_a_loop_names_the_pass_it_stopped_on() -> None:
     """두 번째 회의 클릭이 빈 자리에 떨어진다. 몇 회째인지가 payload 에 있어야 한다."""
-    empty = ActionOutcome(text="  empty", screen=ScreenChange.moved, landings=(PressLanding.reached_nothing,))
+    empty = ActionOutcome(text="  empty", screen=ScreenChange.still, landings=(PressLanding.reached_nothing,))
     host = FakeHost(battle(), answers=[reached(), empty])
     source = (
         "def m(card: object) -> None:\n"
@@ -1117,7 +1150,7 @@ def test_a_failure_inside_a_loop_names_the_pass_it_stopped_on() -> None:
 
 def test_an_if_skipped_on_an_earlier_pass_is_pending_again_on_a_later_one() -> None:
     """지난 회의 `skipped` 가 이번 회의 `pending` 을 가리면, 실패 뒤의 분기가 "원래 안 간다" 로 읽힌다."""
-    empty = ActionOutcome(text="  empty", screen=ScreenChange.moved, landings=(PressLanding.reached_nothing,))
+    empty = ActionOutcome(text="  empty", screen=ScreenChange.still, landings=(PressLanding.reached_nothing,))
     host = FakeHost(battle(), answers=[reached(), empty])
     source = (
         "def m(card: object) -> None:\n"
