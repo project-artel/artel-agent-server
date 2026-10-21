@@ -733,6 +733,22 @@ def test_a_written_button_overrides_the_default() -> None:
     assert host.sent[0][0][1].params == [1]
 
 
+def test_a_key_press_without_a_duration_presses_for_the_default() -> None:
+    """`press_key` 의 지속 시간은 안 적어도 된다(ARTEL-1189). planner 가 빼먹어 계획이 거듭 거절됐다."""
+    host = FakeHost(battle())
+    drive(host, 'def m() -> None:\n    press_key("Space")\n', "m", {})
+
+    assert host.sent[0][0][0].method == "key_click"
+    assert host.sent[0][0][0].params == ["Space", 0.1]
+
+
+def test_a_written_key_duration_overrides_the_default() -> None:
+    host = FakeHost(battle())
+    drive(host, 'def m() -> None:\n    press_key("Space", 0.5)\n', "m", {})
+
+    assert host.sent[0][0][0].params == ["Space", 0.5]
+
+
 # --- 상한은 여기서 세지 않는다 --------------------------------------------------
 
 

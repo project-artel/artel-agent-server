@@ -304,7 +304,9 @@ TOOLS: tuple[ToolSpec, ...] = (
         "press_key",
         (
             ToolParameter("key_code", MacroType.string),
-            ToolParameter("duration_seconds", MacroType.float_),
+            # 한 번 누르는 것이 거의 전부라 기본값을 둔다. 필수였을 때 planner 가 이 인자를 빼먹어 계획이
+            # 거절된 것이 로컬 FREE 런 한 번에 여덟 번이었다(try 168, ARTEL-1189).
+            ToolParameter("duration_seconds", MacroType.float_, default=0.1, required=False),
         ),
         (ActionStep("key_click", ("key_code", "duration_seconds")),),
     ),
