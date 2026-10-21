@@ -191,11 +191,15 @@ def test_the_planner_moves_to_a_scene_that_still_has_cases() -> None:
     fake = _resettable_menu()
     asked = Raw(MOVE, _plan([7], actions=""))
     judge, _ = _judge(_verdicts_of((7, True)))
+    jev = FakeJev()
 
-    _run_free(fake, _free(MAP_CASE), asked, judge, FakeJev())
+    _run_free(fake, _free(MAP_CASE), asked, judge, jev)
 
     # The menu has no case: the planner writes the move to the map, then plans the map.
     assert "Go to the scene `Map`." in asked.calls[0][1]
+    # Jev 는 중간 씬을 거치는 것도 진행으로 읽는다(ARTEL-1189).
+    (pick, *_) = jev.asked("choice")
+    assert "It may take several scenes on the way" in pick["questions"]["answer"]["instructions"]
     assert asked.calls[0][0].startswith("You write ONE test step of a game as macros.")
     assert [(v["case_id"], v["status"]) for v in _verdicts(fake)] == [(7, "COMPLETED")]
 
