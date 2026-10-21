@@ -88,6 +88,24 @@ class StepPlay:
     seconds: float = 0.0
 
 
+@dataclass
+class FailureMemory:
+    """같은 씬에서 action 마다 몇 번 실패했는지. 씬이 바뀌면 비운다(ARTEL-1189).
+
+    FREE 의 씬 계획 하나는 여러 case 가 같은 action 을 나눠 쓴다. play 마다 새로 세면 case 가 넘어갈 때마다
+    같은 실패를 두세 번 되풀이한다 — 로컬 try 171 에서 `drag_shoot_card_to_zone` 이 case 마다 두 번씩
+    `SELECTOR_AMBIGUOUS` 로 실패했다. 계획 하나의 case 들에 같은 기억을 넘긴다.
+    """
+
+    scene: str | None = None
+    sendless: dict[str, int] = field(default_factory=dict)
+    failed: dict[str, int] = field(default_factory=dict)
+
+    def at(self, scene: str | None) -> None:
+        if scene != self.scene:
+            self.scene, self.sendless, self.failed = scene, {}, {}
+
+
 class JevStopped(Exception):
     """Jev did not answer; the step's play stops with this."""
 
@@ -107,7 +125,9 @@ class Executer:
         self._jev = jev
         self._clock = clock
 
-    async def play(self, step: int, action: str, macros: StepMacros) -> StepPlay:
+    async def play(
+        self, step: int, action: str, macros: StepMacros, failure_memory: FailureMemory | None = None
+    ) -> StepPlay:
         """Play step `step` (`action` is its text) with `macros` until it stops."""
         channel, spec, clock = self._channel, self._spec, self._clock
         await self._settle()
@@ -116,11 +136,11 @@ class Executer:
         none_since: float | None = None
         failures = disagreements = 0
         # action 이름 → 지금 씬에서 아무것도 못 보내고 실패한 횟수와, 보냈든 안 보냈든 실패한 횟수. 씬이 바뀌면 비운다.
-        sendless: dict[str, int] = {}
-        failed: dict[str, int] = {}
+        # 넘겨받으면 같은 계획의 앞 case 가 센 것을 이어 쓴다.
+        memory = failure_memory if failure_memory is not None else FailureMemory()
+        memory.at(self._scene())
         # action 이름 → 이 play 에서 고른 횟수. 씬이 바뀌어도 비우지 않는다.
         picks: dict[str, int] = {}
-        sendless_scene = self._scene()
         try:
             for turn in range(spec.max_turns_per_step):
                 await self._settle()
@@ -148,11 +168,10 @@ class Executer:
                             "did not see the goal reached"
                         )
                         break
-                if record["scene"] != sendless_scene:
-                    sendless, failed, sendless_scene = {}, {}, record["scene"]
+                memory.at(record["scene"])
                 dropped = sorted(
-                    {name for name, count in sendless.items() if count >= SENDLESS_FAILURES_BEFORE_DROP}
-                    | {name for name, count in failed.items() if count >= FAILURES_BEFORE_DROP}
+                    {name for name, count in memory.sendless.items() if count >= SENDLESS_FAILURES_BEFORE_DROP}
+                    | {name for name, count in memory.failed.items() if count >= FAILURES_BEFORE_DROP}
                     | {name for name, count in picks.items() if count >= MAX_PICKS_PER_ACTION}
                 )
                 options = {name: macros.description(name) for name in macros.actions if name not in dropped}
@@ -181,11 +200,11 @@ class Executer:
                 await self._send(record)
                 failures = failures + 1 if outcome == "failed" else 0
                 if outcome == "failed":
-                    failed[picked] = failed.get(picked, 0) + 1
+                    memory.failed[picked] = memory.failed.get(picked, 0) + 1
                 if outcome == "failed" and not sent:
                     # 성공한 다른 action 이 사이에 끼면 `failures` 는 0 으로 돌아간다. 그래서 이 action 이
                     # 같은 자리에서 수십 번 실패해도 위 상한에 안 걸렸다(로컬 try 166). 이름으로 따로 센다.
-                    sendless[picked] = sendless.get(picked, 0) + 1
+                    memory.sendless[picked] = memory.sendless.get(picked, 0) + 1
                 if failures >= spec.max_failures_in_a_row:
                     play.stopped = f"{failures} actions failed in a row (last: {picked}: {reason})"
                     break
