@@ -24,6 +24,9 @@ class FreeCase:
     # 아직 보고하지 않은 이유: planner 가 `later` 로 둔 까닭, 닿지 못한 씬, 목표에 닿지 못한 play 의 판정.
     # 상한에 닿아 실패로 보고할 때 같이 적는다.
     last_reason: str = "not played"
+    # `last_reason` 의 종류. UNREACHED 보고가 "씬에 못 갔다" 와 "play 했는데 목표에 못 닿았다" 를 가르는 값이다
+    # (ARTEL-1186). `NOT_PLAYED`·`DEFERRED`·`LEFT_SCENE`·`SCENE_UNREACHED`·`GOAL_UNREACHED`.
+    cause: str = "NOT_PLAYED"
 
 
 def free_cases(scenario: QaScenario) -> list[FreeCase]:

@@ -25,6 +25,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 
 from app.agents.planner_executer import evaluator
+from app.agents.planner_executer.decisions import MAX_REFUSAL_CHARS, clip, note_decision
 from app.agents.planner_executer.developer_macros import NO_DEVELOPER_MACROS, LoadedDeveloperMacros
 from app.agents.planner_executer.evaluator import Evaluator, Judge, SceneEvaluator
 from app.agents.planner_executer.executer import Executer, StepPlay
@@ -154,7 +155,18 @@ class PlannerExecuterRunner:
             await evaluator.report(channel, state, step, passed, message)
             del pending[step]
 
+        rounds = 0
         while pending:
+            rounds += 1
+            await note_decision(
+                channel,
+                "free_round",
+                f"FREE round {rounds}: {len(pending)} cases left, starting in {channel.scene.pulse.scene or '?'}",
+                scene=channel.scene.pulse.scene,
+                round=rounds,
+                resets=resets,
+                pending=list(pending),
+            )
             tried: set[int] = set()
             while pending:
                 untried = [case for case in pending.values() if case.step not in tried]
@@ -176,9 +188,30 @@ class PlannerExecuterRunner:
             if not pending:
                 return
             if resets >= spec.free_max_resets:
-                for case in list(pending.values()):
-                    await settle(case.step, False, unreached(case.attempts, resets, case.last_reason))
+                left = list(pending.values())
+                causes: dict[str, int] = {}
+                for case in left:
+                    causes[case.cause] = causes.get(case.cause, 0) + 1
+                await note_decision(
+                    channel,
+                    "free_end",
+                    f"FREE ends after {resets} resets: {len(left)} cases unreached ("
+                    + ", ".join(f"{cause} {count}" for cause, count in sorted(causes.items()))
+                    + ")",
+                    resets=resets,
+                    causes=causes,
+                    unreached={str(case.step): case.cause for case in left},
+                )
+                for case in left:
+                    await settle(case.step, False, unreached(case.attempts, resets, case.cause, case.last_reason))
                 return
+            await note_decision(
+                channel,
+                "reset",
+                f"Resetting the game after round {rounds}: {len(pending)} cases left",
+                round=rounds,
+                pending=list(pending),
+            )
             await reset_game(channel)
             resets += 1
 
@@ -213,6 +246,7 @@ class PlannerExecuterRunner:
             return []
         for step, reason in plan.later.items():
             pending[step].last_reason = f"the planner left it for later in {scene or 'an unknown scene'}: {reason}"
+            pending[step].cause = "DEFERRED"
         first_screen = screen(channel.scene.pulse)
         played: list[tuple[int, StepPlay]] = []
         unplayed: list[int] = []
@@ -221,6 +255,7 @@ class PlannerExecuterRunner:
                 # A case before it left the scene; this one was planned for the scene it left.
                 unplayed.append(step)
                 pending[step].last_reason = f"play left {scene or 'the scene'} before the case's turn"
+                pending[step].cause = "LEFT_SCENE"
                 continue
             pending[step].attempts += 1
             case_id = scenario.steps[step - 1].case_id
@@ -235,9 +270,10 @@ class PlannerExecuterRunner:
             if passed or reached(play):
                 await settle(step, passed, message)
             elif case.attempts >= self._spec.free_case_attempts:
-                await settle(step, False, unreached(case.attempts, resets, message))
+                await settle(step, False, unreached(case.attempts, resets, "GOAL_UNREACHED", message))
             else:
                 case.last_reason = message
+                case.cause = "GOAL_UNREACHED"
         return unplayed
 
     async def _travel(
@@ -251,16 +287,42 @@ class PlannerExecuterRunner:
     ) -> bool:
         """Move to `target`'s scene. `False`, with why on that scene's cases, when play does not get there."""
         scene = target.scene or ""
+        origin = channel.scene.pulse.scene
         written = await planner.write_travel(scenario, target.step, scene)
         stopped = f"the move was still refused after {self._spec.max_rewrites} rewrites: {written.refusal}"
         if written.macros is not None:
             play = await executer.play(target.step, f"Go to the scene `{scene}`.", written.macros)
             stopped = play.stopped
-        if same_scene(scene, channel.scene.pulse.scene):
+        arrived = channel.scene.pulse.scene
+        waiting = [case.step for case in pending.values() if same_scene(case.scene, scene)]
+        if same_scene(scene, arrived):
+            await note_decision(
+                channel,
+                "travel",
+                f"Travel {origin or '?'} → {scene}: reached",
+                target.step,
+                origin=origin,
+                target=scene,
+                reached=True,
+            )
             return True
         for case in pending.values():
             if same_scene(case.scene, scene):
                 case.last_reason = f"play could not reach the scene {scene} ({stopped})"
+                case.cause = "SCENE_UNREACHED"
+        await note_decision(
+            channel,
+            "travel",
+            f"Travel {origin or '?'} → {scene}: not reached, ended in {arrived or '?'} ({clip(stopped, 200)}); "
+            f"{len(waiting)} cases of {scene} wait for the next round",
+            target.step,
+            origin=origin,
+            target=scene,
+            reached=False,
+            ended_in=arrived,
+            stopped=clip(stopped, MAX_REFUSAL_CHARS),
+            deferred=waiting,
+        )
         return False
 
 
@@ -269,9 +331,19 @@ def reached(play: StepPlay) -> bool:
     return play.stopped == "done" or any(turn.get("done") for turn in play.turns)
 
 
-def unreached(attempts: int, resets: int, last: str) -> str:
+# UNREACHED 보고의 첫 문장. 씬에 못 간 case 와 play 했는데 목표에 못 닿은 case 가 같은 문구였다(ARTEL-1186).
+_UNREACHED_SAYS = {
+    "GOAL_UNREACHED": "play never reached the case's goal",
+    "SCENE_UNREACHED": "play could not reach the case's scene, so it was not played",
+    "DEFERRED": "the planner kept leaving it for later, so it was not played",
+    "LEFT_SCENE": "play left the scene before the case's turn, so it was not played",
+    "NOT_PLAYED": "it was never offered to a plan, so it was not played",
+}
+
+
+def unreached(attempts: int, resets: int, cause: str, last: str) -> str:
     return (
-        f"UNREACHED (도달 못함): play never reached the case's goal in {attempts} "
+        f"UNREACHED (도달 못함) {cause}: {_UNREACHED_SAYS.get(cause, cause)} — {attempts} "
         f"{'play' if attempts == 1 else 'plays'} and {resets} {'reset' if resets == 1 else 'resets'}. "
         f"Last: {last}"
     )

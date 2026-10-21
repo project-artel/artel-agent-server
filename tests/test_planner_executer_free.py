@@ -221,7 +221,9 @@ def test_a_case_the_planner_keeps_for_later_is_reported_unreached_at_the_limits(
 
     (verdict,) = _verdicts(fake)
     assert verdict["status"] == "FAILED"
-    assert verdict["message"].startswith("UNREACHED (도달 못함): play never reached the case's goal in 0 plays and 1 reset.")
+    assert verdict["message"].startswith(
+        "UNREACHED (도달 못함) DEFERRED: the planner kept leaving it for later, so it was not played — 0 plays and 1 reset."
+    )
     assert "Start needs 10 coins" in verdict["message"]
     assert seen == [] and _resets(fake) == 1
 
@@ -237,7 +239,9 @@ def test_a_case_still_unreached_after_its_plays_is_reported_unreached() -> None:
 
     (verdict,) = _verdicts(fake)
     assert verdict["status"] == "FAILED"
-    assert verdict["message"].startswith("UNREACHED (도달 못함): play never reached the case's goal in 2 plays and 1 reset.")
+    assert verdict["message"].startswith(
+        "UNREACHED (도달 못함) GOAL_UNREACHED: play never reached the case's goal — 2 plays and 1 reset."
+    )
     assert _resets(fake) == 1
 
 
@@ -338,3 +342,77 @@ def test_a_scene_judgement_asks_a_few_cases_at_a_time() -> None:
     assert all(verdicts[step][0] for step in range(1, 8))
     # The second group starts from the screen the fifth case left.
     assert seen[1][1].startswith("Screen before the first case began:\nafter 4")
+
+
+# --- 결정 로그(ARTEL-1186) ---------------------------------------------------------------
+#
+# 런이 끝난 뒤 무엇을 왜 정했는지 `qa_log` 만으로 되짚을 수 있어야 한다. stage 런 157 은 씬 하나에서 16개를
+# 계획하고 play 를 0번 했는데 그 까닭이 어디에도 없었다.
+
+
+def _decisions(fake: FakeGame, kind: str) -> list[dict]:
+    return [f["payload"] for f in fake.frames("LOG") if f["payload"].get("kind") == kind]
+
+
+def test_a_scene_plan_is_logged_with_what_it_verifies_and_what_it_leaves_for_later() -> None:
+    fake = _resettable_menu()
+    later = {"8": "Start needs 10 coins and the wallet is empty."}
+    judge, _ = _judge()
+
+    _run_free(fake, _free(MENU_CASE), Raw(_plan([], later), _plan([], later)), judge, FakeJev())
+
+    plan = _decisions(fake, "scene_plan")[0]
+    assert plan["message"].startswith("Scene Menu: verify 0 of 1 cases now")
+    assert plan["decision"]["later"] == {"1": "Start needs 10 coins and the wallet is empty."}
+    assert plan["decision"]["actions"] and "def " in plan["decision"]["source"]
+    assert [d["decision"]["round"] for d in _decisions(fake, "free_round")] == [1, 2]
+    assert len(_decisions(fake, "reset")) == 1
+    (end,) = _decisions(fake, "free_end")
+    assert end["decision"]["causes"] == {"DEFERRED": 1}
+
+
+def test_a_refused_scene_plan_is_logged_with_the_refusal() -> None:
+    fake = _resettable_menu()
+    no_goal = _plan([8]).replace("def done_8() -> bool:", "def finished() -> bool:")
+    judge, _ = _judge(_verdicts_of((8, True)))
+
+    _run_free(fake, _free(MENU_CASE), Raw(no_goal, _plan([8])), judge, FakeJev())
+
+    (refused,) = _decisions(fake, "scene_plan_refused")
+    assert refused["message"].startswith("Scene Menu: the plan was refused (answer 1 of 3):")
+    assert "done_8" in refused["decision"]["refusal"]
+    assert refused["decision"]["answer"] == 1
+
+
+def test_a_move_is_logged_as_a_travel_with_where_it_went() -> None:
+    fake = _resettable_menu()
+    asked = Raw(MOVE, _plan([7], actions=""))
+    judge, _ = _judge(_verdicts_of((7, True)))
+
+    _run_free(fake, _free(MAP_CASE), asked, judge, FakeJev())
+
+    (macros,) = _decisions(fake, "travel_macros")
+    assert macros["message"].startswith("Travel to `Map` (for step 1):")
+    (travel,) = _decisions(fake, "travel")
+    assert travel["decision"]["origin"] == "Menu" and travel["decision"]["target"] == "Map"
+    assert travel["decision"]["reached"] is True
+    notes = [f["payload"]["message"] for f in fake.frames("LOG")]
+    assert not any(note.startswith("Step 1: the planner is writing macros") for note in notes)
+
+
+def test_a_move_that_does_not_arrive_is_logged_and_its_cases_end_scene_unreached() -> None:
+    fake = _resettable_menu()
+    judge, _ = _judge()
+
+    _run_free(
+        fake, _free(MAP_CASE), Raw(MOVE, MOVE), judge, FakeJev(picks=("look_around",)), max_turns_per_step=2
+    )
+
+    travels = _decisions(fake, "travel")
+    assert [t["decision"]["reached"] for t in travels] == [False, False]
+    assert travels[0]["decision"]["deferred"] == [1]
+    assert travels[0]["message"].startswith("Travel Menu → Map: not reached, ended in Menu")
+    (verdict,) = _verdicts(fake)
+    assert verdict["message"].startswith(
+        "UNREACHED (도달 못함) SCENE_UNREACHED: play could not reach the case's scene, so it was not played"
+    )

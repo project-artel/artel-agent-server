@@ -19,6 +19,13 @@ from dataclasses import dataclass
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.agents.planner_executer.arch import PlannerExecuterArchSpec
+from app.agents.planner_executer.decisions import (
+    MAX_QUOTE_CHARS,
+    MAX_REFUSAL_CHARS,
+    MAX_SOURCE_CHARS,
+    clip,
+    note_decision,
+)
 from app.agents.planner_executer.developer_macros import (
     NO_DEVELOPER_MACROS,
     LoadedDeveloperMacros,
@@ -151,12 +158,14 @@ class Planner:
 
     async def write(self, scenario: QaScenario, step: int) -> Written:
         """Step `step`'s macros; rewritten while the parser refuses them, up to `max_rewrites`."""
-        return await self._write(scenario, step, this_step(scenario, step))
+        return await self._write(scenario, step, this_step(scenario, step), f"Step {step}", "step")
 
     async def write_travel(self, scenario: QaScenario, step: int, scene: str) -> Written:
         """A FREE scenario's move to `scene`, written as an ordinary step (`done()` is that scene).
-        `step` only labels the notes."""
-        return await self._write(scenario, step, travel_step(step, scene))
+        `step` is the case the move is for; it labels the notes."""
+        return await self._write(
+            scenario, step, travel_step(step, scene), f"Travel to `{scene}` (for step {step})", "travel"
+        )
 
     async def plan_scene(self, scenario: QaScenario, steps: list[int]) -> ScenePlan:
         """The plan for the scene on screen: which of the candidate cases (`steps`) to verify now and
@@ -179,19 +188,46 @@ class Planner:
             rest, plan_text = split_plan_block(answer)
             rest, calls = split_developer_block(rest)
             source = extract_code(rest) if _FENCE.search(rest) else ""
+            scene = self._channel.scene.pulse.scene or "?"
             try:
                 verify, later = read_plan(plan_text, candidates)
                 developer_actions = await bind_developer_calls(calls, self._developer)
                 macros = await parse_scene(source, self._registered, verify, developer_actions)
             except MacroRejection as rejection:
                 plan = ScenePlan([], {}, None, rejection.render())
+                await note_decision(
+                    self._channel,
+                    "scene_plan_refused",
+                    f"Scene {scene}: the plan was refused (answer {attempt + 1} of {self._spec.max_rewrites + 1}): "
+                    f"{clip(plan.refusal, MAX_QUOTE_CHARS)}",
+                    steps[0],
+                    scene=scene,
+                    answer=attempt + 1,
+                    refusal=clip(plan.refusal, MAX_REFUSAL_CHARS),
+                    plan=clip(plan_text, MAX_REFUSAL_CHARS),
+                    source=clip(source, MAX_SOURCE_CHARS),
+                )
                 feedback = (
                     "Your previous answer cannot be used as written. It was refused:\n"
                     f"  {plan.refusal}\n"
                     "The refusal names what is accepted instead. Rewrite the whole answer."
                 )
                 continue
-            return ScenePlan([by_case[case_id] for case_id in verify], {by_case[c]: r for c, r in later.items()}, macros)
+            plan = ScenePlan([by_case[case_id] for case_id in verify], {by_case[c]: r for c, r in later.items()}, macros)
+            await note_decision(
+                self._channel,
+                "scene_plan",
+                f"Scene {scene}: verify {len(plan.verify)} of {len(steps)} cases now (steps {plan.verify}), "
+                f"{len(plan.later)} later, {len(macros.actions)} actions",
+                steps[0],
+                scene=scene,
+                offered=steps,
+                verify=plan.verify,
+                later={str(step): reason for step, reason in plan.later.items()},
+                actions=list(macros.actions),
+                source=clip(source, MAX_SOURCE_CHARS),
+            )
+            return plan
         return plan
 
     def _scene_request(self, scenario: QaScenario, steps: list[int], feedback: str) -> str:
@@ -206,12 +242,14 @@ class Planner:
             + (f"\n{feedback}\n" if feedback else "")
         )
 
-    async def _write(self, scenario: QaScenario, step: int, shown: str) -> Written:
+    async def _write(self, scenario: QaScenario, step: int, shown: str, label: str, kind: str) -> Written:
+        """`label` heads the notes ("Step 3", "Travel to `X` (for step 3)"); `kind` names the decision
+        in the log (`step`, `travel`)."""
         feedback = ""
         written = Written("", None, "nothing was written")
         for attempt in range(self._spec.max_rewrites + 1):
             await self._channel.note(
-                f"Step {step}: the planner is writing macros"
+                f"{label}: the planner is writing macros"
                 + (" again (the last answer was refused)" if attempt else "")
                 + f". Prompt {self._config.prompt_version}.",
                 LogCategory.THOUGHT,
@@ -225,12 +263,31 @@ class Planner:
                 written = Written(source, await parse_step(source, self._registered, developer_actions))
             except MacroRejection as rejection:
                 written = Written(source, None, rejection.render())
+                await note_decision(
+                    self._channel,
+                    f"{kind}_macros_refused",
+                    f"{label}: the macros were refused (answer {attempt + 1} of {self._spec.max_rewrites + 1}): "
+                    f"{clip(written.refusal, MAX_QUOTE_CHARS)}",
+                    step,
+                    answer=attempt + 1,
+                    refusal=clip(written.refusal, MAX_REFUSAL_CHARS),
+                    source=clip(source, MAX_SOURCE_CHARS),
+                )
                 feedback = (
                     "Your previous answer cannot be used as written. The macro parser refused it:\n"
                     f"  {written.refusal}\n"
                     "The refusal names what is accepted instead. Rewrite the whole source."
                 )
                 continue
+            actions = list(written.macros.actions)
+            await note_decision(
+                self._channel,
+                f"{kind}_macros",
+                f"{label}: {len(actions)} actions — {', '.join(actions)}",
+                step,
+                actions=actions,
+                source=clip(source, MAX_SOURCE_CHARS),
+            )
             break
         return written
 
