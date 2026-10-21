@@ -80,19 +80,19 @@ def test_a_relabelled_planner_executer_run_keeps_its_digest() -> None:
 def test_the_planner_prompt_is_recorded_with_the_macro_grammar_it_reads() -> None:
     config = resolve_run_config(arch=PLANNER_EXECUTER)
 
-    assert config.prompt_version == "v3"
+    assert config.prompt_version == "v4"
     assert set(config.prompt_hashes) == {"rules", "evaluator", "scene_rules", "scene_evaluator", "macro_grammar"}
     locked = read_lock()["prompts"]
     for role in ("rules", "evaluator", "scene_rules", "scene_evaluator"):
-        assert locked[f"qa_planner/v3/{role}"] == config.prompt_hashes[role]
+        assert locked[f"qa_planner/v4/{role}"] == config.prompt_hashes[role]
     assert config.prompt_hashes["macro_grammar"] == hashlib.sha256(MACRO_GRAMMAR.encode()).hexdigest()
 
 
 def test_the_planner_defaults_to_the_newest_prompt_and_v1_can_still_be_pinned() -> None:
     """`qa_planner` has no `*_PROMPT_VERSION` setting, so the newest version is the default. The
     tool loop's `qa_run` default is not moved by it."""
-    assert available_versions("qa_planner") == ("v1", "v2", "v3")
-    assert resolve_version("qa_planner") == "v3"
+    assert available_versions("qa_planner") == ("v1", "v2", "v3", "v4")
+    assert resolve_version("qa_planner") == "v4"
     assert resolve_run_config().prompt_version == resolve_version("qa_run")
 
     pinned = resolve_run_config(arch=PLANNER_EXECUTER, prompt_version="v1")
@@ -116,6 +116,20 @@ def test_v3_carries_rules_and_evaluator_over_unchanged_and_adds_the_scene_prompt
     scene_rules = load_prompt("qa_planner", "scene_rules", "v3").body
     assert "```plan" in scene_rules and "def done_<case id>() -> bool" in scene_rules
     assert '"verdicts"' in load_prompt("qa_planner", "scene_evaluator", "v3").body
+
+
+def test_v4_adds_only_the_rule_to_clear_what_blocks_input_first() -> None:
+    # 로컬 FREE 런에서 튜토리얼 대사가 입력을 막는데 planner 가 넘기는 action 을 안 썼다(ARTEL-1189).
+    rule = "- What blocks input comes first."
+    for role in ("rules", "scene_rules"):
+        v3 = load_prompt("qa_planner", role, "v3").body
+        v4 = load_prompt("qa_planner", role, "v4").body
+        assert rule in v4 and rule not in v3
+        added = v4[v4.index(rule):]
+        added = added[: added.index("\n- ", 1) + 1]
+        assert v4.replace(added, "") == v3
+    for role in ("evaluator", "scene_evaluator"):
+        assert load_prompt("qa_planner", role, "v4").body == load_prompt("qa_planner", role, "v3").body
 
 
 def test_the_service_builds_the_runner_the_engine_names() -> None:
