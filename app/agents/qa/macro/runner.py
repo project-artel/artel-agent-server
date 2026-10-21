@@ -1258,15 +1258,22 @@ class _Runner:
                 "sent. This is the machine, not the game and not the macro — take your "
                 "hand off the mouse and call the macro again.",
             )
-        if outcome.landings and all(
-            landing is PressLanding.reached_nothing for landing in outcome.landings
+        if (
+            outcome.landings
+            and all(landing is PressLanding.reached_nothing for landing in outcome.landings)
+            and outcome.screen is not ScreenChange.moved
         ):
             # 설계 때 "click 계열 뒤에 닿았는가를 암묵적 `require` 로 붙인다" 고 한 자리다.
             #
             # **batch 의 누름이 하나도 못 닿았을 때만** 멈춘다. `click` 은 `mouse_down`
             # 과 `mouse_up` 둘을 내는데, 누르자마자 사라지는 카드를 누르면 뒤엣것이 빈
-            # 자리에 떨어진다 — 그것까지 실패로 치면 성공한 클릭에서 멈춘다. 전부 비었을
-            # 때는 그런 사정이 없고, 포인터 밑에 처음부터 아무것도 없었다는 뜻이다.
+            # 자리에 떨어진다 — 그것까지 실패로 치면 성공한 클릭에서 멈춘다.
+            #
+            # **화면이 움직였으면 멈추지 않는다.** `reached` 가 비었다는 것은 게임이 못
+            # 받았다는 뜻이 아니다. SDK 는 `OnMouse*` collider 가 받은 것만 거기 적고,
+            # UGUI 버튼이 받은 누름이나 `Update()` 에서 입력을 직접 읽는 게임의 누름은
+            # 늘 비어 온다(ARTEL-1174, ARTEL-951). 입력 경로와 무관하게 믿을 수 있는 것은
+            # 화면이 움직였는지 하나다 — stage 런 157 에서 씬을 바꾼 클릭이 여기서 멈췄다.
             return MacroFailure(
                 REQUIRE_FAILED,
                 f"`{statement.source}` pressed empty space: nothing was under the "
