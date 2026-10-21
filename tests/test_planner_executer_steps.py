@@ -184,7 +184,22 @@ def test_a_refused_answer_goes_back_with_the_refusal_and_the_rewrite_is_used(ref
     written = _write(_menu(), asked)
 
     assert written.macros is not None
-    assert said in asked.calls[1][1] and "The macro parser refused it" in asked.calls[1][1]
+    assert said in asked.calls[1][1] and "Your previous answer cannot be used as written. It was refused:" in asked.calls[1][1]
+
+
+def test_a_second_rewrite_is_told_every_refusal_so_far() -> None:
+    """직전 거절만 돌려주면 하나를 고치며 앞서 고친 실수를 되살린다(로컬 try 167, ARTEL-1189)."""
+    no_goal = MACROS.replace("def done() -> bool:\n    return scene() == \"Map\"\n", "")
+    no_doc = MACROS.replace('    """Wait for the screen to settle. The right move while nothing can be pressed yet."""\n', "")
+    asked = Asked(no_goal, no_doc, MACROS)
+
+    written = _write(_menu(), asked)
+
+    assert written.macros is not None
+    third = asked.calls[2][1]
+    assert "Your previous answers cannot be used as written. Each was refused:" in third
+    assert "  1. " in third and "`def done() -> bool:`" in third
+    assert "  2. " in third and "`def look_around` has no docstring" in third
 
 
 def test_an_answer_still_refused_after_the_rewrites_is_returned_with_its_refusal() -> None:
