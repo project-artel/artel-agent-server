@@ -58,6 +58,21 @@ _PLAN_BLOCK = re.compile(r"```plan\s*\n(.*?)```", re.DOTALL)
 Ask = Callable[[str, str], Awaitable[str]]
 
 
+def refusal_feedback(refusals: list[str], what: str) -> str:
+    """다시 쓰게 할 때 planner 에게 돌려줄 글. 지금까지의 거절을 **모두** 싣는다(ARTEL-1189).
+
+    직전 거절 하나만 돌려주면 planner 가 그것을 고치면서 앞서 고친 실수를 되살린다. 로컬 try 167 의 이동은
+    `press_key` 인자 누락 → `find(...)` 를 인자 안에 씀 → 다시 `press_key` 인자 누락으로 세 답을 다 썼다.
+    """
+    listed = "\n".join(f"  {number}. {refusal}" for number, refusal in enumerate(refusals, start=1))
+    return (
+        f"Your previous {'answers' if len(refusals) > 1 else 'answer'} cannot be used as written. "
+        f"{'Each was' if len(refusals) > 1 else 'It was'} refused:\n{listed}\n"
+        f"Each refusal names what is accepted instead. Rewrite the whole {what} so that none of these "
+        "happens again."
+    )
+
+
 def extract_code(text: str) -> str:
     """The first fenced block, or the whole answer when there is none."""
     match = _FENCE.search(text)
@@ -175,6 +190,7 @@ class Planner:
         by_case = {scenario.steps[step - 1].case_id: step for step in steps}
         candidates = list(by_case)
         feedback = ""
+        refusals: list[str] = []
         plan = ScenePlan([], {}, None, "nothing was written")
         for attempt in range(self._spec.max_rewrites + 1):
             await self._channel.note(
@@ -207,11 +223,8 @@ class Planner:
                     plan=clip(plan_text, MAX_REFUSAL_CHARS),
                     source=clip(source, MAX_SOURCE_CHARS),
                 )
-                feedback = (
-                    "Your previous answer cannot be used as written. It was refused:\n"
-                    f"  {plan.refusal}\n"
-                    "The refusal names what is accepted instead. Rewrite the whole answer."
-                )
+                refusals.append(plan.refusal)
+                feedback = refusal_feedback(refusals, "answer")
                 continue
             plan = ScenePlan([by_case[case_id] for case_id in verify], {by_case[c]: r for c, r in later.items()}, macros)
             await note_decision(
@@ -246,6 +259,7 @@ class Planner:
         """`label` heads the notes ("Step 3", "Travel to `X` (for step 3)"); `kind` names the decision
         in the log (`step`, `travel`)."""
         feedback = ""
+        refusals: list[str] = []
         written = Written("", None, "nothing was written")
         for attempt in range(self._spec.max_rewrites + 1):
             await self._channel.note(
@@ -273,11 +287,8 @@ class Planner:
                     refusal=clip(written.refusal, MAX_REFUSAL_CHARS),
                     source=clip(source, MAX_SOURCE_CHARS),
                 )
-                feedback = (
-                    "Your previous answer cannot be used as written. The macro parser refused it:\n"
-                    f"  {written.refusal}\n"
-                    "The refusal names what is accepted instead. Rewrite the whole source."
-                )
+                refusals.append(written.refusal)
+                feedback = refusal_feedback(refusals, "source")
                 continue
             actions = list(written.macros.actions)
             await note_decision(
