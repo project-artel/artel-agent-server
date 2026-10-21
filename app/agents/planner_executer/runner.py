@@ -28,7 +28,7 @@ from app.agents.planner_executer import evaluator
 from app.agents.planner_executer.decisions import MAX_REFUSAL_CHARS, clip, note_decision
 from app.agents.planner_executer.developer_macros import NO_DEVELOPER_MACROS, LoadedDeveloperMacros
 from app.agents.planner_executer.evaluator import Evaluator, Judge, SceneEvaluator
-from app.agents.planner_executer.executer import Executer, StepPlay
+from app.agents.planner_executer.executer import Executer, FailureMemory, StepPlay
 from app.agents.planner_executer.free import FreeCase, candidates, free_cases, next_scene, same_scene
 from app.agents.planner_executer.macros import RegisteredMacros
 from app.agents.planner_executer.planner import Ask, Planner
@@ -248,6 +248,8 @@ class PlannerExecuterRunner:
             pending[step].last_reason = f"the planner left it for later in {scene or 'an unknown scene'}: {reason}"
             pending[step].cause = "DEFERRED"
         first_screen = screen(channel.scene.pulse)
+        # 계획의 case 들은 action 을 나눠 쓰므로, 실패한 action 의 기억도 함께 쓴다.
+        failures = FailureMemory()
         played: list[tuple[int, StepPlay]] = []
         unplayed: list[int] = []
         for step in plan.verify:
@@ -259,7 +261,9 @@ class PlannerExecuterRunner:
                 continue
             pending[step].attempts += 1
             case_id = scenario.steps[step - 1].case_id
-            play = await executer.play(step, step_text(scenario.steps[step - 1]), plan.macros.for_case(case_id))
+            play = await executer.play(
+                step, step_text(scenario.steps[step - 1]), plan.macros.for_case(case_id), failures
+            )
             played.append((step, play))
         if not played:
             return unplayed

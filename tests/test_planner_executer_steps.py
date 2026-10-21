@@ -110,14 +110,14 @@ def _config(**knobs):
     )
 
 
-def _play(fake: FakeGame, jev: FakeJev, source: str = MACROS, clock=None, **knobs) -> StepPlay:
+def _play(fake: FakeGame, jev: FakeJev, source: str = MACROS, clock=None, failure_memory=None, **knobs) -> StepPlay:
     spec = PlannerExecuterArchSpec(**{"no_action_grace_seconds": 0.2, **knobs})
 
     async def go() -> StepPlay:
         fake.push_reading()
         macros = await parse_step(source, RegisteredMacros(fake.channel))
         executer = Executer(fake.channel, spec, JevClient(post=jev), **({"clock": clock} if clock else {}))
-        return await executer.play(1, "Press Start.", macros)
+        return await executer.play(1, "Press Start.", macros, failure_memory)
 
     return asyncio.run(go())
 
@@ -355,6 +355,19 @@ def test_an_action_picked_too_often_in_one_play_is_dropped(monkeypatch) -> None:
     assert play.turns[3]["dropped"] == ["look_around"]
     assert play.turns[3]["options"] == ["press_start"]
     assert play.stopped == "done"
+
+
+def test_a_failure_memory_carries_drops_into_the_next_case_of_the_plan() -> None:
+    """같은 계획의 case 들은 action 을 나눠 쓴다. 앞 case 에서 빠진 action 은 다음 case 에서도 빠진다(로컬 try 171)."""
+    fake = FakeGame("Menu", {"Root/Title": {"text": "Title"}})  # Start 가 없어 press_start 는 아무것도 못 보낸다
+    memory = executer_module.FailureMemory()
+
+    _play(fake, FakeJev(picks=("press_start", "look_around", "press_start", "look_around")),
+          max_turns_per_step=4, failure_memory=memory)
+    second = _play(fake, FakeJev(picks=("look_around",)), max_turns_per_step=1, failure_memory=memory)
+
+    assert memory.sendless == {"press_start": 2}
+    assert second.turns[0]["dropped"] == ["press_start"]
 
 
 def test_play_stops_at_the_turn_cap() -> None:
