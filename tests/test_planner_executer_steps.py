@@ -325,8 +325,24 @@ def test_play_stops_when_every_action_failed_without_sending() -> None:
         fake, FakeJev(picks=("press_start", "look_around", "press_start", "look_around")), max_failures_in_a_row=10
     )
 
-    assert play.stopped == "every action failed here without sending anything: look_around, press_start"
+    assert play.stopped == "every action kept failing here: look_around, press_start"
     assert play.turns[-1]["dropped"] == ["look_around", "press_start"]
+
+
+def test_an_action_that_sends_and_keeps_failing_is_dropped_after_three() -> None:
+    """입력을 보냈는데 실패한 것도 같은 씬에서 세 번이면 뺀다(로컬 try 169 의 close_combine_zone)."""
+    fake = FakeGame("Menu", {"Root/Start": {"text": "Start"}})  # 눌러도 아무 일이 없다: 보내고 시간 초과
+
+    play = _play(
+        fake,
+        FakeJev(picks=("press_start", "look_around", "press_start", "look_around", "press_start", "look_around")),
+        max_turns_per_step=7,
+    )
+
+    picks = [(turn["picked"], turn["outcome"]) for turn in play.turns[:6]]
+    assert picks.count(("press_start", "failed")) == 3
+    assert play.turns[0]["sent"]  # 보낸 실패다
+    assert play.turns[6]["dropped"] == ["press_start"]
 
 
 def test_play_stops_at_the_turn_cap() -> None:
