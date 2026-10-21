@@ -36,6 +36,8 @@ DONE = "done"
 PROBE = "executer_probe_done"
 PROBE_FLAG = "done"
 _PROBE_SOURCE = f'\n\ndef {PROBE}() -> None:\n    if {DONE}():\n        flag("{PROBE_FLAG}")\n'
+# A FREE scene plan's goal per case: `done_<case_id>` (ARTEL-1149).
+GOAL_PREFIX = "done_"
 
 
 @dataclass(frozen=True)
@@ -200,6 +202,83 @@ async def parse_step(
             "what it does and when it is the right move, or a developer macro selected for the step."
         )
     reject_unstable_selectors(source)
+    parsed = await _parse_actions(actions, source, registered, developer_actions)
+    probe = await registered.parse(PROBE, source.rstrip("\n") + _PROBE_SOURCE)
+    descriptions = {key: action.description for key, action in developer_actions.items()}
+    return StepMacros(source, parsed, probe, descriptions)
+
+
+async def parse_scene(
+    source: str,
+    registered: RegisteredMacros,
+    case_ids: list[int],
+    developer_actions: Mapping[str, DeveloperAction] | None = None,
+) -> "SceneMacros":
+    """A FREE scene plan's macros (ARTEL-1149), or `MacroRejection` with what to write instead.
+
+    The same checks as `parse_step`, except the goal: one `done_<case_id>() -> bool` per case the
+    plan verifies instead of one `done`. Actions are shared by every case and may be none — a case
+    whose result shows on the screen as it is needs no action.
+    """
+    developer_actions = developer_actions or {}
+    try:
+        tree = ast.parse(source) if source.strip() else ast.Module(body=[], type_ignores=[])
+    except SyntaxError as error:
+        raise MacroRejection(f"this is not valid Python syntax — {error.msg}.", error.lineno) from None
+    defs = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+    if PROBE in {node.name for node in defs}:
+        raise MacroRejection(f"`{PROBE}` is a name the executer uses; name the def otherwise.")
+    goals = {node.name: node for node in defs if node.name.startswith(GOAL_PREFIX)}
+    for case_id in case_ids:
+        goal = goals.get(goal_name(case_id))
+        if goal is None or not _returns(goal, "bool") or goal.args.args:
+            raise MacroRejection(
+                f"the plan verifies case {case_id}, so the source needs `def {goal_name(case_id)}() -> bool:` "
+                "with no parameters — a predicate that returns True once that case's goal is reached "
+                "on the screen."
+            )
+    actions = [node for node in defs if _returns(node, "None")]
+    if source.strip():
+        reject_unstable_selectors(source)
+    parsed = await _parse_actions(actions, source, registered, developer_actions)
+    probes = {
+        case_id: await registered.parse(PROBE, source.rstrip("\n") + _probe_source(goal_name(case_id)))
+        for case_id in case_ids
+    }
+    descriptions = {key: action.description for key, action in developer_actions.items()}
+    return SceneMacros(source, parsed, probes, descriptions)
+
+
+@dataclass(frozen=True)
+class SceneMacros:
+    """A FREE scene plan's macros: the shared actions and one goal probe per case."""
+
+    source: str
+    actions: dict[str, MacroDefinition]
+    probes: dict[int, MacroDefinition]
+    descriptions: dict[str, str] = field(default_factory=dict)
+
+    def for_case(self, case_id: int) -> StepMacros:
+        """What the executer plays for one case: the shared actions, that case's goal."""
+        return StepMacros(self.source, self.actions, self.probes[case_id], self.descriptions)
+
+
+def goal_name(case_id: int) -> str:
+    return f"{GOAL_PREFIX}{case_id}"
+
+
+def _probe_source(goal: str) -> str:
+    return f'\n\ndef {PROBE}() -> None:\n    if {goal}():\n        flag("{PROBE_FLAG}")\n'
+
+
+async def _parse_actions(
+    actions: list[ast.FunctionDef],
+    source: str,
+    registered: RegisteredMacros,
+    developer_actions: Mapping[str, DeveloperAction],
+) -> dict[str, MacroDefinition]:
+    """Each action parsed with itself as the entry; refused when it takes parameters or has no
+    docstring. The developer macros selected for the step join them under their keys."""
     parsed: dict[str, MacroDefinition] = {}
     for node in actions:
         if node.args.args:
@@ -218,9 +297,7 @@ async def parse_step(
         parsed[node.name] = definition
     for key, action in developer_actions.items():
         parsed[key] = action.definition
-    probe = await registered.parse(PROBE, source.rstrip("\n") + _PROBE_SOURCE)
-    descriptions = {key: action.description for key, action in developer_actions.items()}
-    return StepMacros(source, parsed, probe, descriptions)
+    return parsed
 
 
 def _returns(node: ast.FunctionDef, name: str) -> bool:

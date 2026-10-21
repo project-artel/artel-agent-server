@@ -21,7 +21,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
 
 from app.agents.planner_executer.executer import StepPlay
-from app.agents.planner_executer.prompts import EVALUATOR_ROLE, prompt_text, this_step
+from app.agents.planner_executer.prompts import EVALUATOR_ROLE, SCENE_EVALUATOR_ROLE, case_view, prompt_text, this_step
 from app.agents.qa.tools import QaRunState
 from app.llm.chat_model import structured
 from app.qa.channel import QaCancelled, QaRunChannel
@@ -33,6 +33,11 @@ from app.qa.schemas import QaScenario, QaStepResult
 ATTEMPTS = 2
 # Turns shown; a long step keeps its last ones, where it stopped.
 MAX_TURNS_SHOWN = 60
+# Turns shown per case when a scene's cases are judged together; the request holds every case's.
+MAX_TURNS_SHOWN_PER_CASE = 20
+# Cases per scene judgement. A plan may verify up to `free_batch_size` cases; each case brings its
+# turns and its end screen, so they are asked about a few at a time.
+CASES_PER_JUDGEMENT = 5
 
 _JSON = re.compile(r"\{.*\}", re.DOTALL)
 
@@ -70,6 +75,105 @@ class Evaluator:
     async def _ask_model(self, system: str, user: str) -> Verdict:
         chain = structured(self._config.model, Verdict, self._config.reasoning)
         return await chain.ainvoke([SystemMessage(system), HumanMessage(user)])
+
+
+class CaseVerdict(BaseModel):
+    case_id: int
+    passed: bool
+    reason: str
+
+
+class SceneVerdicts(BaseModel):
+    verdicts: list[CaseVerdict]
+
+
+class SceneEvaluator:
+    """Judges every case played in one scene of a FREE scenario in one answer (ARTEL-1149)."""
+
+    def __init__(self, config: RunConfig, judge: Judge | None = None) -> None:
+        self._config = config
+        self._system: str | None = None
+        self._judge = judge or self._ask_model
+
+    async def judge(
+        self, scenario: QaScenario, played: list[tuple[int, StepPlay]], first_screen: str
+    ) -> dict[int, tuple[bool, str]]:
+        """`{step: (passed, message)}` for each played case, asked `CASES_PER_JUDGEMENT` at a time in
+        play order. Each group starts from the screen the case before it left."""
+        if self._system is None:
+            self._system = prompt_text(SCENE_EVALUATOR_ROLE, self._config.prompt_version)
+        results: dict[int, tuple[bool, str]] = {}
+        start = first_screen
+        for at in range(0, len(played), CASES_PER_JUDGEMENT):
+            group = played[at : at + CASES_PER_JUDGEMENT]
+            results.update(await self._judge_group(scenario, group, start))
+            start = group[-1][1].end_screen
+        return results
+
+    async def _judge_group(
+        self, scenario: QaScenario, played: list[tuple[int, StepPlay]], first_screen: str
+    ) -> dict[int, tuple[bool, str]]:
+        """One question for a few cases. A case the answers leave out is asked for once more with
+        the rest; one still missing fails with `EVALUATOR-ERROR`."""
+        by_case = {scenario.steps[step - 1].case_id: (step, play) for step, play in played}
+        results: dict[int, tuple[bool, str]] = {}
+        problem = ""
+        for _ in range(ATTEMPTS):
+            waiting = [(step, play) for step, play in played if step not in results]
+            if not waiting:
+                break
+            try:
+                verdicts = _read_scene(await self._judge(self._system, scene_request(scenario, waiting, first_screen)))
+            except QaCancelled:
+                raise
+            except Exception as error:  # noqa: BLE001 - an unreadable answer is asked again
+                problem = f"{type(error).__name__}: {str(error)[:200]}"
+                continue
+            for verdict in verdicts.verdicts:
+                if verdict.case_id not in by_case:
+                    continue
+                step, play = by_case[verdict.case_id]
+                note = "" if play.stopped == "done" else f" (executer stopped: {play.stopped})"
+                results[step] = (verdict.passed, verdict.reason + note)
+            problem = "the answer left cases out"
+        for step, _ in played:
+            if step not in results:
+                results[step] = (False, f"EVALUATOR-ERROR: no readable verdict for the case in {ATTEMPTS} answers ({problem})")
+        return results
+
+    async def _ask_model(self, system: str, user: str) -> SceneVerdicts:
+        chain = structured(self._config.model, SceneVerdicts, self._config.reasoning)
+        return await chain.ainvoke([SystemMessage(system), HumanMessage(user)])
+
+
+def scene_request(scenario: QaScenario, played: list[tuple[int, StepPlay]], first_screen: str) -> str:
+    """What the scene evaluator reads: the screen before the first case, then each case's play."""
+    parts = [f"Screen before the first case began:\n{first_screen}\n"]
+    for step, play in played:
+        shown = play.turns[-MAX_TURNS_SHOWN_PER_CASE:]
+        skipped = len(play.turns) - len(shown)
+        turns = "\n".join(_turn_line(turn) for turn in shown) or "  (no turn was played)"
+        parts.append(
+            f"Case:\n{json.dumps(case_view(scenario, step), ensure_ascii=False, indent=2)}\n\n"
+            f"Why play stopped: {play.stopped}\n\n"
+            f"Turns played ({len(play.turns)}"
+            + (f", the first {skipped} left out" if skipped else "")
+            + f"):\n{turns}\n\n"
+            f"Screen when play stopped:\n{play.end_screen}\n"
+        )
+    return "\n---\n\n".join(parts)
+
+
+def _read_scene(answer: Any) -> SceneVerdicts:
+    """`SceneVerdicts` from what the model returned. Raises when it is not one."""
+    if isinstance(answer, SceneVerdicts):
+        return answer
+    if isinstance(answer, dict):
+        return SceneVerdicts.model_validate(answer)
+    match = _JSON.search(str(answer))
+    if match is None:
+        raise ValueError(f"no JSON object in {str(answer)[:120]!r}")
+    return SceneVerdicts.model_validate(json.loads(match.group(0)))
 
 
 def request(scenario: QaScenario, step: int, play: StepPlay) -> str:
