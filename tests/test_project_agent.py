@@ -4,6 +4,7 @@ import asyncio
 from typing import Any
 
 import httpx
+import anthropic
 import openai
 import pytest
 from fastapi import FastAPI
@@ -30,6 +31,7 @@ from app.agents.project_agent.prompt import (
 from app.agents.project_agent.schemas import PageCatalog
 from app.agents.project_agent.tools import tool_schemas, validate_tool_call
 from app.api.project_agent import router
+from app.llm.chat_model import ClaudeApiKeyMissingError, GptApiKeyMissingError
 
 
 class FakeChat(BaseChatModel):
@@ -618,3 +620,145 @@ def test_page_catalog_caps_links_and_guides() -> None:
         PageCatalog(links=[{}] * 51)
     with pytest.raises(ValidationError):
         PageCatalog(guides=[{}] * 101)
+
+
+# ---- user key and failure causes ----------------------------------------------------------
+
+SECRET = "sk-secret-user-key-123"
+
+
+@pytest.fixture
+def gpt_model(monkeypatch) -> str:
+    """A `gpt/` id the catalog accepts; the fixture catalog carries none."""
+    from tests.conftest import FIXTURE_MODEL_CATALOG
+    import app.llm.models as models
+
+    model = "gpt/gpt-6-luna"
+    spec = next(iter(FIXTURE_MODEL_CATALOG.values()))
+    monkeypatch.setattr(models, "get_model_spec", lambda m: spec)
+    return model
+
+
+def _status_error(cls, status: int, text: str = "boom"):
+    response = httpx.Response(status, request=httpx.Request("POST", "http://x"))
+    return cls(text, response=response, body=None)
+
+
+def _post(error: Exception | None, **overrides: Any):
+    client = _client(ProjectAgent(model_factory=Harness(AIMessage(content=""), error).factory))
+    return client.post("/internal/project-agent/step", json=_body(**overrides))
+
+
+def test_user_key_is_bound_only_during_the_call_and_reaches_build_chat_model(gpt_model) -> None:
+    from app.llm import chat_model
+    from app.llm.credentials import bound_llm_key
+
+    seen: list[tuple] = []
+
+    def factory(model: str, tools_enabled: bool):
+        user_key = chat_model._bound_key_for(model)
+        seen.append((bound_llm_key(), user_key))
+        return FakeChat(reply=AIMessage(content="ok"), seen=[])
+
+    client = _client(ProjectAgent(model_factory=factory))
+    response = client.post(
+        "/internal/project-agent/step",
+        json=_body(model=gpt_model, llm_key={"service": "openai", "api_key": SECRET}),
+    )
+
+    assert response.status_code == 200
+    assert seen[0][0].api_key == SECRET
+    assert seen[0][1] == SECRET
+    assert bound_llm_key() is None
+
+
+def test_key_is_unbound_after_a_failed_call() -> None:
+    from app.llm.credentials import bound_llm_key
+
+    error = openai.APIConnectionError(request=httpx.Request("POST", "http://x"))
+    response = _post(error, llm_key={"service": "openrouter", "api_key": SECRET})
+
+    assert response.status_code == 502
+    assert bound_llm_key() is None
+
+
+def test_user_key_chat_model_stays_out_of_the_process_cache(monkeypatch) -> None:
+    from app.llm import chat_model
+
+    chat_model.build_chat_model.cache_clear() if hasattr(
+        chat_model.build_chat_model, "cache_clear"
+    ) else None
+    from app.llm.credentials import LlmKey, bind_llm_key, session_chat_models
+
+    bind_llm_key(LlmKey(service="openai", api_key=SECRET))
+    try:
+        chat_model.build_chat_model("gpt/gpt-6")
+        assert session_chat_models()
+    finally:
+        bind_llm_key(None)
+    assert session_chat_models() is None
+
+
+def test_gpt_model_without_user_key_is_422_key_missing(gpt_model) -> None:
+    response = _post(None, model=gpt_model)
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "llm_key_missing"
+
+
+def test_invalid_model_is_422_with_cause_code() -> None:
+    response = _post(None, model="nope/none")
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "llm_model_unavailable"
+
+
+def test_other_validation_errors_keep_the_framework_shape() -> None:
+    response = _post(None, messages=[{"role": "user", "content": " "}])
+
+    assert response.status_code == 422
+    assert isinstance(response.json()["detail"], list)
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (ClaudeApiKeyMissingError("x"), "llm_key_missing"),
+        (GptApiKeyMissingError("x"), "llm_key_missing"),
+        (_status_error(openai.AuthenticationError, 401, "Missing Authentication header"), "llm_key_missing"),
+        (_status_error(openai.AuthenticationError, 401, f"Incorrect key {SECRET}"), "llm_auth_failed"),
+        (_status_error(openai.PermissionDeniedError, 403), "llm_auth_failed"),
+        (_status_error(anthropic.AuthenticationError, 401), "llm_auth_failed"),
+        (_status_error(anthropic.PermissionDeniedError, 403), "llm_auth_failed"),
+        (_status_error(openai.RateLimitError, 429), "llm_rate_limited"),
+        (_status_error(anthropic.RateLimitError, 429), "llm_rate_limited"),
+        (_status_error(openai.NotFoundError, 404), "llm_model_unavailable"),
+        (_status_error(anthropic.NotFoundError, 404), "llm_model_unavailable"),
+        (_status_error(openai.InternalServerError, 500), "llm_provider_error"),
+        (openai.APITimeoutError(request=httpx.Request("POST", "http://x")), "llm_provider_error"),
+        (anthropic.APITimeoutError(request=httpx.Request("POST", "http://x")), "llm_provider_error"),
+    ],
+)
+def test_provider_errors_map_to_cause_codes(error: Exception, code: str) -> None:
+    response = _post(error)
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert detail["code"] == code
+    assert set(detail) == {"code", "message"}
+    assert SECRET not in response.text
+
+
+def test_key_never_appears_in_repr_or_logs(caplog) -> None:
+    request = ProjectAgentRequest(
+        conversation_id=1,
+        messages=[ProjectAgentMessage(role="user", content="hi")],
+        llm_key={"service": "openai", "api_key": SECRET},
+    )
+    assert SECRET not in repr(request)
+    assert SECRET not in str(request)
+
+    error = _status_error(openai.AuthenticationError, 401, f"bad {SECRET}")
+    with caplog.at_level("DEBUG"):
+        _post(error, llm_key={"service": "openai", "api_key": SECRET})
+    assert SECRET not in caplog.text
