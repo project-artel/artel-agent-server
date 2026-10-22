@@ -25,6 +25,7 @@ PageId = Literal[
     "qaRun",
     "testRun",
     "testRunEdit",
+    "testScenario",
 ]
 
 
@@ -64,8 +65,23 @@ class AskChoiceArgs(BaseModel):
 
 
 class QueryArgs(BaseModel):
-    kind: Literal["qa_history", "qa_run", "issues", "usage"]
-    args: dict[str, Any] = Field(default_factory=dict)
+    kind: Literal[
+        "qa_history",
+        "qa_run",
+        "issues",
+        "usage",
+        "test_cases",
+        "test_case",
+        "build_versions",
+    ]
+    args: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Filters for the kind. test_cases: ids, search, scene, folderId, "
+            "verificationStatus, gameBuildId, offset. test_case: id (required), "
+            "gameBuildId. build_versions: none."
+        ),
+    )
 
 
 class WatchJobArgs(BaseModel):
@@ -109,7 +125,14 @@ _TOOLS: tuple[tuple[str, str, type[BaseModel]], ...] = (
     ),
     (
         "query",
-        "Read-only lookup of QA history, one QA run, issues, or usage. Returns at most 20 rows.",
+        "Read-only lookup. qa_history, qa_run, issues and usage cover QA runs and costs. "
+        "test_cases lists test cases, filtered by ids, search, scene, folderId, "
+        "verificationStatus, gameBuildId (only cases that have a version in that build) "
+        "and offset. test_case returns everything a person sees about one case: scene, "
+        "step, precondition, expected value, spec status, verification status, origin "
+        "(MAP or MANUAL), folder, evidence gaps, allowed functions, last verified build, "
+        "and which build versions contain it. build_versions lists game builds, newest "
+        "first, with which is latest. Returns at most 20 rows.",
         QueryArgs,
     ),
     (

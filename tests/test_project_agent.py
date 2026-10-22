@@ -341,6 +341,27 @@ def test_system_prompt_tells_the_agent_not_to_treat_a_missing_snapshot_entry_as_
     assert 'Read-only fields whose description says "read-only list" hold ids as values' in text
 
 
+def test_scenario_page_and_query_kinds_are_in_the_schemas() -> None:
+    by_name = {t["function"]["name"]: t["function"] for t in tool_schemas()}
+
+    assert "testScenario" in by_name["open_page"]["parameters"]["properties"]["page"]["enum"]
+    kinds = by_name["query"]["parameters"]["properties"]["kind"]["enum"]
+    assert {"test_cases", "test_case", "build_versions"} <= set(kinds)
+    assert "verificationStatus" in by_name["query"]["description"]
+
+
+def test_system_prompt_v2_is_the_default_and_carries_the_scenario_rules() -> None:
+    text = build_system_prompt(CATALOG["pages"], "ko")
+
+    assert text.startswith("You are the project agent")
+    assert "cases_missing_from_build" in text
+    assert "testScenario.addCasesToBuild" in text
+    assert "testScenario.convertToFree" in text
+    assert "`build-versions`" in text and "`free-scenarios`" in text
+    assert "never from memory or guesses" in text
+    assert "cases_missing_from_build" not in build_system_prompt(CATALOG["pages"], "ko", "v1")
+
+
 def _client(agent: ProjectAgent) -> TestClient:
     app = FastAPI()
     app.state.project_agent = agent
