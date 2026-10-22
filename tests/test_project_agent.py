@@ -28,7 +28,7 @@ from app.agents.project_agent.prompt import (
     render_page_catalog,
 )
 from app.agents.project_agent.schemas import PageCatalog
-from app.agents.project_agent.tools import tool_schemas
+from app.agents.project_agent.tools import tool_schemas, validate_tool_call
 from app.api.project_agent import router
 
 
@@ -348,7 +348,7 @@ def test_scenario_page_and_query_kinds_are_in_the_schemas() -> None:
     assert "verificationStatus" in by_name["query"]["description"]
 
 
-def test_system_prompt_v2_is_the_default_and_carries_the_scenario_rules() -> None:
+def test_system_prompt_v3_is_the_default_and_carries_the_scenario_rules() -> None:
     text = build_system_prompt(CATALOG["pages"], "ko")
 
     assert text.startswith("You are the project agent")
@@ -357,7 +357,102 @@ def test_system_prompt_v2_is_the_default_and_carries_the_scenario_rules() -> Non
     assert "testScenario.convertToFree" in text
     assert "`build-versions`" in text and "`free-scenarios`" in text
     assert "never from memory or guesses" in text
+    assert "only if that id is listed under Guides" in text
+    assert "only if that id is listed under Guides" not in build_system_prompt(CATALOG["pages"], "ko", "v2")
     assert "cases_missing_from_build" not in build_system_prompt(CATALOG["pages"], "ko", "v1")
+
+
+def test_query_schema_declares_typed_args_and_stays_portable() -> None:
+    query = {t["function"]["name"]: t["function"]["parameters"] for t in tool_schemas()}["query"]
+    args = query["properties"]["args"]["properties"]
+
+    assert query["required"] == ["kind"]
+    assert args["id"]["type"] == "string"
+    assert args["ids"]["items"]["type"] == "string"
+    assert args["offset"]["type"] == "integer" and args["offset"]["minimum"] == 0
+    assert "DRAFT" in args["verificationStatus"]["enum"]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"kind": "test_case", "args": {}},
+        {"kind": "test_case", "args": {"id": 3}},
+        {"kind": "test_case", "args": {"id": "a", "search": "x"}},
+        {"kind": "test_cases", "args": {"offset": -1}},
+        {"kind": "test_cases", "args": {"verificationStatus": "NOPE"}},
+        {"kind": "build_versions", "args": {"id": "a"}},
+        {"kind": "qa_run", "args": {}},
+        {"kind": "nope", "args": {}},
+    ],
+)
+def test_validate_tool_call_rejects_invalid_query_args(args: dict) -> None:
+    assert validate_tool_call("query", args)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"kind": "test_case", "args": {"id": "a", "gameBuildId": "b"}},
+        {"kind": "test_cases", "args": {"ids": ["a"], "offset": 20, "verificationStatus": "DRAFT"}},
+        {"kind": "test_cases"},
+        {"kind": "build_versions", "args": {}},
+        {"kind": "qa_run", "args": {"id": "r"}},
+        {"kind": "qa_history", "args": {"testRunId": "t"}},
+        {"kind": "issues", "args": {"status": "OPEN"}},
+        {"kind": "usage"},
+    ],
+)
+def test_validate_tool_call_accepts_valid_query_args(args: dict) -> None:
+    assert validate_tool_call("query", args) is None
+    assert validate_tool_call("read_page", {}) is None
+
+
+class SequenceChat(FakeChat):
+    replies: list[AIMessage] = []
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs: Any) -> ChatResult:
+        self.seen.append(list(messages))
+        return ChatResult(generations=[ChatGeneration(message=self.replies[len(self.seen) - 1])])
+
+
+def _bad_then_good(second: AIMessage) -> Harness:
+    bad = AIMessage(
+        content="",
+        tool_calls=[{"id": "c1", "name": "query", "args": {"kind": "test_case", "args": {}}, "type": "tool_call"}],
+    )
+    harness = Harness(bad)
+    harness.chat = SequenceChat(reply=bad, seen=[], replies=[bad, second])
+    return harness
+
+
+def test_invalid_query_call_is_sent_back_to_the_model_not_the_browser() -> None:
+    good = AIMessage(
+        content="",
+        tool_calls=[
+            {"id": "c2", "name": "query", "args": {"kind": "test_case", "args": {"id": "a"}}, "type": "tool_call"}
+        ],
+    )
+    harness = _bad_then_good(good)
+
+    result = _run(harness, _request())
+
+    assert [c.id for c in result.tool_calls] == ["c2"]
+    assert len(harness.chat.seen) == 2
+    feedback = harness.chat.seen[1][-1]
+    assert feedback.tool_call_id == "c1" and "invalid arguments" in feedback.content
+
+
+def test_invalid_query_call_is_dropped_when_the_model_repeats_it() -> None:
+    bad = AIMessage(
+        content="sorry",
+        tool_calls=[{"id": "c3", "name": "query", "args": {"kind": "test_case", "args": {}}, "type": "tool_call"}],
+    )
+    harness = _bad_then_good(bad)
+
+    result = _run(harness, _request())
+
+    assert result.tool_calls == [] and result.content == "sorry"
 
 
 def _client(agent: ProjectAgent) -> TestClient:
