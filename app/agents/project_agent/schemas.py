@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.llm.credentials import LlmKey
 from app.llm.models import EnabledLLMModel
 
 
@@ -62,6 +63,9 @@ class ProjectAgentRequest(BaseModel):
     tools_enabled: bool = True
     page_catalog: PageCatalog = Field(default_factory=PageCatalog)
     messages: list[ProjectAgentMessage]
+    # 대화 주인이 등록한 key. 이 step 호출에만 쓰고 저장하지 않는다. 없으면 공용 key 다.
+    # 로그·`repr`·응답에 남기지 않는다(`app/llm/credentials.py`).
+    llm_key: LlmKey | None = Field(default=None, repr=False)
 
 
 class ProjectAgentResult(BaseModel):
