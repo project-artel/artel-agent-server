@@ -1,8 +1,9 @@
 """게임 예외를 안 본 수 한 줄과 `get_errors` 로 보이는 규칙 (ARTEL-1219).
 
-SDK 쪽(ARTEL-1218)은 따로 들어간다. 여기 fixture 는 그 계약의 모양이다 — 항목
-`{type, message, stackHead, firstFrame, lastFrame, count}`, 새 항목이나 `count` 가 는 항목만,
-frame 당 20개, 넘치면 `truncated`.
+SDK 쪽(ARTEL-1218, artel-sdk PR #154)은 따로 들어간다. 여기 fixture 는 그 계약의 모양이다 —
+`errors` 는 항목 `{type, message, stackHead, firstFrame, lastFrame, count, truncated}` 의 목록이고,
+새 항목이나 `count` 가 는 항목만 frame 당 20개까지 실린다. 넘친 것은 다음 `pulse` 로 넘어간다.
+`truncated` 는 `message` 가 200자에서 잘렸다는 뜻이다.
 """
 
 import asyncio
@@ -84,17 +85,18 @@ def test_items_differing_in_the_stack_head_are_two_items() -> None:
     assert ledger.unseen_count() == 2
 
 
-def test_both_wire_shapes_and_the_truncated_flag_are_read() -> None:
-    assert errors_in({"errors": [item()], "errorsTruncated": True})[1] is True
-    listed, truncated = errors_in({"errors": {"items": [item(), item("b")], "truncated": True}})
-    assert [entry.message for entry in listed] == ["story advance handler", "b"]
-    assert truncated is True
-    assert errors_in({"reading": 3}) == ([], False)
-    assert errors_in(None) == ([], False)
+def test_errors_are_read_off_a_list_and_nothing_else() -> None:
+    assert [entry.message for entry in errors_in({"errors": [item(), item("b")]})] == [
+        "story advance handler",
+        "b",
+    ]
+    assert errors_in({"reading": 3}) == []
+    assert errors_in({"errors": {"items": [item()]}}) == []
+    assert errors_in(None) == []
 
 
 def test_a_malformed_item_is_dropped_and_the_rest_kept() -> None:
-    listed, _ = errors_in({"errors": [item(), {"count": "many"}, "text"]})
+    listed = errors_in({"errors": [item(), {"count": "many"}, "text"]})
     assert len(listed) == 1
 
 
@@ -150,12 +152,31 @@ def test_a_run_without_errors_reads_no_line() -> None:
     asyncio.run(run())
 
 
-def test_get_errors_says_when_the_sdk_dropped_items() -> None:
+def test_a_message_the_sdk_cut_is_marked() -> None:
     async def run() -> None:
         channel, _state, tools = make()
-        channel.on_pulse(pulse({"items": [item()], "truncated": True}))
+        channel.on_pulse(pulse([item("x" * 200, truncated=True)]))
         listed = await tools["get_errors"].ainvoke({"step": 1, "thought": "x"})
-        assert "limit of 20 per report" in listed
+        assert "[message cut at 200 chars]" in listed
+
+    asyncio.run(run())
+
+
+def test_the_sdks_own_logs_are_listed_apart_and_never_counted() -> None:
+    """SDK 자신의 `[Artel]` Error log 는 게임 결함이 아니다. N 에 넣으면 매 런 오탐 후보가 된다."""
+
+    async def run() -> None:
+        channel, _state, tools = make()
+        channel.on_pulse(pulse([item("[Artel] pulse send failed", type="Error")]))
+        looked = await tools["observe_scene"].ainvoke({"step": 1, "thought": "look"})
+        assert "unseen errors" not in looked
+
+        channel.on_pulse(pulse([item("game broke")]))
+        assert channel.game_errors.summary_line() == "unseen errors: 1"
+        listed = await tools["get_errors"].ainvoke({"step": 1, "thought": "x"})
+        assert listed.startswith("1 unseen error(s), now marked seen:\n- NullReferenceException: game broke")
+        assert "1 log(s) from the ARTEL SDK itself, not from the game" in listed
+        assert "[Artel] pulse send failed" in listed
 
     asyncio.run(run())
 
