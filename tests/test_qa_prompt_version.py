@@ -329,8 +329,11 @@ def test_the_default_qa_version_is_v21() -> None:
 
     v27 adds two sentences to the vision directive (ARTEL-1221): a whole-screen capture on
     the first entry to each scene, and a checklist for reading any capture.
+
+    v28 adds one paragraph to the macro skill (ARTEL-1222): read the text lines a macro
+    answer carries and file blank, placeholder or garbled lines with `report_issue`.
     """
-    assert resolve_version("qa_run") == "v27"
+    assert resolve_version("qa_run") == "v28"
 
 
 # v20 이 고쳐 쓴 v19 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
@@ -1165,3 +1168,14 @@ def test_v27_extends_only_the_vision_directive() -> None:
     assert "first time you enter each scene" in added
     for check in ("empty areas", "no art", "overlap", "clipping", "developer console"):
         assert check in added, check
+
+
+def test_v28_adds_one_paragraph_to_the_macro_skill() -> None:
+    """v28 은 macro skill 의 수명주기 절에 문단 하나만 더한다 (ARTEL-1222)."""
+    assert roles_in("qa_run", "v28") == roles_in("qa_run", "v27")
+    for role in roles_in("qa_run", "v27"):
+        same = load_prompt("qa_run", role, "v28").body == load_prompt("qa_run", role, "v27").body
+        assert same is (role != "skill_macro"), role
+    added = load_prompt("qa_run", "skill_macro", "v28").body
+    assert "**The answer lists the text the game showed while the macro ran**" in added
+    assert "`[MISSING TEXT: STORY_003]`" in added
