@@ -240,6 +240,12 @@ def _step_plan(scenario: QaScenario) -> list[tuple[int | None, bool]]:
     return plan
 
 
+def _procedure_directive(scenario: QaScenario) -> str:
+    if not any(step.case and step.case.verification_procedure for step in scenario.steps):
+        return ""
+    return load_prompt("demonstration", "qa_context", "v1").body + "\n\n"
+
+
 def _plan(scenario: QaScenario) -> str:
     """새 계약(steps[])을 실행 첫 메시지로 변환한다(2단 판정 2026-08-08).
 
@@ -252,20 +258,22 @@ def _plan(scenario: QaScenario) -> str:
         return _free_plan(scenario)
     plan = _step_plan(scenario)
     items: list[dict] = []
-    prev_cid: int | None = None
-    for idx, step in enumerate(scenario.steps):
-        cid, is_verification = plan[idx]
+    previous_case_id: int | None = None
+    for index, step in enumerate(scenario.steps):
+        case_id, is_verification = plan[index]
         case = step.case
-        item: dict = {"step": idx + 1, "do": _action_line(step)}
-        if cid is not None:
-            item["case_id"] = cid
+        item: dict = {"step": index + 1, "do": _action_line(step)}
+        if case_id is not None:
+            item["case_id"] = case_id
             # 구간의 첫 스텝에만 사전조건을 건다(구간 진입 검증).
-            if cid != prev_cid and case and case.precondition:
+            if case_id != previous_case_id and case and case.precondition:
                 item["precondition"] = case.precondition
             if is_verification:
                 item["verify"] = case.expected if case else ""
+            if case_id != previous_case_id and case and case.verification_procedure:
+                item["verification_procedure"] = case.verification_procedure.model_dump(mode="json")
         items.append(item)
-        prev_cid = cid
+        previous_case_id = case_id
     return (
         f"Scenario: {scenario.title} — {scenario.description}\n\n"
         "Execute the steps below in order and call report_step(step, passed, message) for EVERY step.\n"
@@ -277,6 +285,7 @@ def _plan(scenario: QaScenario) -> str:
         "its steps passed=false with a message beginning 'SETUP-FAILED:' and do NOT report_issue "
         "(an unreachable precondition is not a defect).\n"
         "- `try:` and `via:` are advisory hints, not required.\n\n"
+        f"{_procedure_directive(scenario)}"
         f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
         "Begin. Observe the screen first."
     )
@@ -304,6 +313,8 @@ def _free_plan(scenario: QaScenario) -> str:
             item["precondition"] = case.precondition
         item["test_step"] = (case.test_step if case and case.test_step else step.action).strip()
         item["expected"] = case.expected if case else ""
+        if case and case.verification_procedure:
+            item["verification_procedure"] = case.verification_procedure.model_dump(mode="json")
         items.append(item)
     total = len(items)
     return (
@@ -333,6 +344,7 @@ def _free_plan(scenario: QaScenario) -> str:
         "- `test_step` says what to check, not how. Find the way through the game yourself.\n"
         "- If you later see a case behave differently from the verdict you gave it, report "
         "it again with `overwrite=true`. Each case can be overwritten once.\n\n"
+        f"{_procedure_directive(scenario)}"
         f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
         "Begin. Observe the screen first, then plan your route through the cases."
     )

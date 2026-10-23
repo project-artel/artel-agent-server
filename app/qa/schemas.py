@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 from app.llm.credentials import LlmKey
+from app.demonstrations.schemas import ApprovedProcedure
 from app.qa.envelope import QaChatTurn
 from app.qa.game_functions import CaseFunctions, GameFunctionEntry
 from app.qa.run_config import RunConfig
@@ -23,6 +24,7 @@ class QaCaseRef(BaseModel):
     # 이 TC 에서 쓸 수 있는 cheat 와 behavior (ARTEL-1054). 없으면 run 이 받은 것 전부다.
     # run 의 목록을 좁히기만 한다(`app/qa/game_functions.py` 의 `allowed_names`).
     functions: CaseFunctions | None = None
+    verification_procedure: ApprovedProcedure | None = None
 
 
 class QaStep(BaseModel):

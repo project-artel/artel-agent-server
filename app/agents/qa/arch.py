@@ -425,7 +425,10 @@ from app.llm.models import LLMModel, get_model_spec
 # only because `arch.model_dump()` gained four keys (the v4 note above). The label moves anyway,
 # the v8 argument: the structure now has shapes a run must say it was or was not filed under, and
 # orchestration turns the axes on per run from the build's catalog.
-QA_ARCH_LABEL = "v27-game-functions"
+# v28은 TC에 승인된 시연 절차가 있을 때 첫 실행 `context`에 revision과 검증 기준을
+# 추가한다. 과거 시연 결과와 이번 실행의 `evidence`를 구분하도록 명시한다.
+# `tool`과 `middleware`는 같으므로 `fingerprint`는 유지하지만 모델이 읽는 내용은 달라진다.
+QA_ARCH_LABEL = "v28-demonstration-procedures"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

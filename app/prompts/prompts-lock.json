@@ -6,6 +6,8 @@
   "prompts": {
     "decision/v1/human": "2e99200edb4ac9c6e5130286696768fc3bd1cfffecbe92d2e1bdd7869c862d3c",
     "decision/v1/system": "0629163646ce0577292aa8059face48dc4068fcc0f88874f2d3bf95918b44a14",
+    "demonstration/v1/qa_context": "3854dbefe2d2811795b0ae98a732e5523b48ac7d6b0d8376ebcab0bfbcd8235f",
+    "demonstration/v1/system": "1cade37f747b4edde503e24e7cf1f0d3d374e368bcf220485b53b4ab93f8a7c8",
     "game_context/v1/human": "80bcf644a682464baa14d444af01f418c3d05ec076de6fd848c05ad077ddf243",
     "game_context/v1/system": "c61323f87b1ad66869610bb23bbc6605d2453504532e480be868c9b00a7c2d1a",
     "knowledge_query/v1/human": "1a78e2a5de666395f13cb2360eb3292af512c4a08c7ef27a7b29baa076e2718d",
