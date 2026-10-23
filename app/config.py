@@ -105,6 +105,9 @@ class Settings(BaseSettings):
     git_sha: str | None = None
     image_tag: str | None = None
 
+    # `redis` keeps sessions in Redis. `memory` keeps them in this process, with no Redis
+    # connection at all, and loses them on restart (the desktop bundle runs this way).
+    session_store: Literal["redis", "memory"] = "redis"
     redis_url: str = "redis://localhost:6379/0"
     session_ttl_seconds: int = 3600
     history_max_turns: int = 100_000
