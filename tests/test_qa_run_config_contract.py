@@ -116,6 +116,21 @@ def test_a_requested_structure_comes_back_resolved() -> None:
     assert config["agent_fingerprint"] != open_session()["run_config"]["agent_fingerprint"]
 
 
+def test_a_stored_run_config_arch_replays_as_it_was_stored() -> None:
+    """run_config 의 `arch.vision` 은 resolve 된 boolean 이다. 그것을 그대로 다시 보내도 받는다 (ARTEL-1236).
+
+    2026-10-22 에 저장된 arch 로 런을 다시 시작했다가 422 를 받았고, orchestration 이 그것을
+    503 으로 바꿔 agent-server 가 죽은 것처럼 보였다.
+    """
+    stored = open_session(arch={"vision": "off"})["run_config"]
+    replayed = open_session(arch={"vision": stored["arch"]["vision"]})["run_config"]
+    assert replayed["arch"]["vision"] is False
+    assert replayed["agent_fingerprint"] == stored["agent_fingerprint"]
+
+    shown = open_session(arch={"vision": True})["run_config"]
+    assert shown["arch"]["vision"] is True
+
+
 def test_an_out_of_range_knob_is_refused() -> None:
     response = client.post(
         "/internal/qa-sessions",
