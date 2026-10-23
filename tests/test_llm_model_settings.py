@@ -136,3 +136,35 @@ def test_the_invalidate_endpoint_drops_the_model_settings(monkeypatch):
 
     assert response.status_code == 204
     assert provider.get_decision_model() == "second/model"
+
+
+def test_the_effective_value_wins_over_the_stored_one():
+    """orchestration #367 부터 위의 두 값은 저장된 값(null 가능)이고 `effective` 가 쓸 값이다."""
+    provider, _ = build_provider(
+        lambda request: httpx.Response(
+            200,
+            json={
+                "scenarioAuthoringModel": None,
+                "decisionModel": None,
+                "effective": {
+                    "scenarioAuthoringModel": "openai/gpt-6-luna",
+                    "decisionModel": "claude/claude-haiku-5-5",
+                },
+            },
+        )
+    )
+    assert provider.get_decision_model() == "claude/claude-haiku-5-5"
+
+
+def test_a_null_effective_value_means_no_model_even_when_one_is_stored():
+    provider, _ = build_provider(
+        lambda request: httpx.Response(
+            200,
+            json={
+                "scenarioAuthoringModel": None,
+                "decisionModel": "openai/gpt-6-luna",
+                "effective": {"scenarioAuthoringModel": None, "decisionModel": None},
+            },
+        )
+    )
+    assert provider.get_decision_model() is None
