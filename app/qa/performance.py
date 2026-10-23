@@ -3,7 +3,8 @@
 SDK 는 1초마다 `PERFORMANCE` (frame time, fps, hitch 수, CPU, 메모리)를 보내고 orchestration 이
 저장한다. 이 서버는 그 frame 을 받지 않는다 — 중계되는 것은 `PULSE` 와 `ACTION_RESULT` 뿐이다.
 그래서 `GET {orchestration_base_url}/internal/qa-tries/{qaTryId}/performance` 로 묻는다. 응답은
-`{"samples": [{frame, at, frameTimeMs, fps, hitchCount, cpuPercent, memoryMb}]}` 이다.
+`{"samples": [{frame, at, frameTimeMs, fps, hitchCount, cpuPercent, memoryMb}]}` 이다 (orchestration
+#367~#371). 창을 안 주면 orchestration 은 지난 60초를 주고 표본은 600개까지다. 이쪽은 늘 창을 준다.
 
 예외(ARTEL-1219)와 같은 방식이다. tool 결과에는 "지난 10초 hitch N회" 한 줄만 붙고, 자세한 것은
 `get_performance` 로 본다. 성능 이상은 step 판정이 아니라 `report_issue` 로 간다.
@@ -78,7 +79,9 @@ def summarize(samples: list[PerformanceSample]) -> PerformanceSummary:
     fps_values = [sample.fps for sample in samples if sample.fps is not None]
     memory = [sample.memory_mb for sample in samples if sample.memory_mb is not None]
     cpu = [sample.cpu_percent for sample in samples if sample.cpu_percent is not None]
-    frames = [sample.frame for sample in samples if sample.frame is not None]
+    # orchestration 의 `frame` 은 가장 가까운 `pulse`·action frame 에서 어림한 값이고, 그런 frame 이
+    # 없으면 0 이다. 0 은 frame 범위에 넣지 않는다 — 넣으면 "frames 0–670" 처럼 읽힌다.
+    frames = [sample.frame for sample in samples if sample.frame]
     return PerformanceSummary(
         samples=len(samples),
         first_frame=min(frames) if frames else None,

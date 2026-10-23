@@ -74,6 +74,14 @@ def test_the_summary_is_average_p95_hitches_and_memory_growth() -> None:
     assert "`report_issue`" in rendered
 
 
+def test_a_frame_of_zero_means_no_frame_and_stays_out_of_the_range() -> None:
+    """orchestration 은 가까운 frame 이 없으면 `frame: 0` 을 준다."""
+    samples = [PerformanceSample.model_validate({**SAMPLES[0], "frame": 0}), PerformanceSample.model_validate(SAMPLES[1])]
+    summary = summarize(samples)
+    assert (summary.first_frame, summary.last_frame) == (660, 660)
+    assert summarize([PerformanceSample.model_validate({**SAMPLES[0], "frame": 0})]).first_frame is None
+
+
 def test_no_samples_says_so() -> None:
     assert render_summary(summarize([]), "the last 10 s").startswith("No performance samples")
 
