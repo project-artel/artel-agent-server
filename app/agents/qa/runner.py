@@ -38,7 +38,7 @@ from app.qa.failure_site import failure_site_of
 from app.qa.game_functions import render_catalog
 from app.qa.reach import UnreachedJudge
 from app.qa.relevance import PulseRelevanceJudge
-from app.qa.schemas import QaScenario, QaStep
+from app.qa.schemas import QaCaseRef, QaScenario, QaStep
 from app.qa.run_config import (
     COMPACTION_PROMPT_AGENT,
     COMPACTION_ROLE,
@@ -240,6 +240,35 @@ def _step_plan(scenario: QaScenario) -> list[tuple[int | None, bool]]:
     return plan
 
 
+# 사람 판정 기록을 읽는 법 (ARTEL-1257). 기록이 있는 계획에만 붙는다 — 없는 run 의 첫 메시지는 종전 그대로다.
+HUMAN_REVIEW_RULE = (
+    "- `human_review` lists earlier verdicts of the same test case that a person reviewed and "
+    "decided after the run: what the agent said (`ai_said`), what the person decided "
+    "(`person_decided`) and why (`note`). Treat it as a warning about how this case was "
+    "misjudged before, not as the answer. Still judge from what you observe in this run; "
+    "the game may have changed.\n"
+)
+
+
+def _human_review(case: QaCaseRef | None) -> list[dict] | None:
+    """TC 하나의 사람 판정 기록을 계획 항목 모양으로. 없으면 None."""
+    if case is None or not case.reviews:
+        return None
+    return [
+        {
+            key: value
+            for key, value in {
+                "ai_said": "passed" if review.ai_passed else "failed",
+                "person_decided": "passed" if review.human_passed else "failed",
+                "note": review.note,
+                "build": review.game_build_version,
+            }.items()
+            if value is not None
+        }
+        for review in case.reviews
+    ]
+
+
 def _plan(scenario: QaScenario) -> str:
     """새 계약(steps[])을 실행 첫 메시지로 변환한다(2단 판정 2026-08-08).
 
@@ -264,6 +293,8 @@ def _plan(scenario: QaScenario) -> str:
                 item["precondition"] = case.precondition
             if is_verification:
                 item["verify"] = case.expected if case else ""
+                if (reviews := _human_review(case)) is not None:
+                    item["human_review"] = reviews
         items.append(item)
         prev_cid = cid
     return (
@@ -276,7 +307,8 @@ def _plan(scenario: QaScenario) -> str:
         "- A `precondition` must hold before that case's first step. If you cannot reach it, report "
         "its steps passed=false with a message beginning 'SETUP-FAILED:' and do NOT report_issue "
         "(an unreachable precondition is not a defect).\n"
-        "- `try:` and `via:` are advisory hints, not required.\n\n"
+        "- `try:` and `via:` are advisory hints, not required.\n"
+        f"{HUMAN_REVIEW_RULE if any('human_review' in item for item in items) else ''}\n"
         f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
         "Begin. Observe the screen first."
     )
@@ -304,6 +336,8 @@ def _free_plan(scenario: QaScenario) -> str:
             item["precondition"] = case.precondition
         item["test_step"] = (case.test_step if case and case.test_step else step.action).strip()
         item["expected"] = case.expected if case else ""
+        if (reviews := _human_review(case)) is not None:
+            item["human_review"] = reviews
         items.append(item)
     total = len(items)
     return (
@@ -332,7 +366,8 @@ def _free_plan(scenario: QaScenario) -> str:
         "not a defect).\n"
         "- `test_step` says what to check, not how. Find the way through the game yourself.\n"
         "- If you later see a case behave differently from the verdict you gave it, report "
-        "it again with `overwrite=true`. Each case can be overwritten once.\n\n"
+        "it again with `overwrite=true`. Each case can be overwritten once.\n"
+        f"{HUMAN_REVIEW_RULE if any('human_review' in item for item in items) else ''}\n"
         f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
         "Begin. Observe the screen first, then plan your route through the cases."
     )
