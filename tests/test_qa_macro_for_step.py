@@ -173,7 +173,7 @@ def make(macros: str):
 
 async def report(tools, step: int, passed: bool = True) -> str:
     return await tools["report_step"].ainvoke(
-        {"step": step, "passed": passed, "message": "m", "thought": "t"}
+        {"step": step, "performed": True, "passed": passed, "message": "m", "thought": "t"}
     )
 
 

@@ -677,7 +677,7 @@ def test_citing_something_only_glimpsed_is_allowed() -> None:
         await tools["report_step"].ainvoke(
             {
                 "step": 1,
-                "passed": True,
+                "performed": True, "passed": True,
                 "message": "이웃 줄이 말한 대로였다",
                 "thought": "그 한 줄이 판정을 바꿨다",
                 "used_knowledge_ids": ["42"],

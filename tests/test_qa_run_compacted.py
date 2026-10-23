@@ -128,7 +128,7 @@ def verdict(call_id: str, step: int) -> dict:
         "tool_calls": [
             {
                 "name": "report_step",
-                "args": {"step": step, "passed": True, "message": f"{step}번 확인함", "thought": "판정"},
+                "args": {"step": step, "performed": True, "passed": True, "message": f"{step}번 확인함", "thought": "판정"},
                 "id": call_id,
             }
         ]

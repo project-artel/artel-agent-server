@@ -196,11 +196,39 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         found = macros_for_step(next_step, state.macros.registrations, scene_macros)
         return render_step_macro_hint(next_step, found)
 
+    def _unperformed_pass_refusal(step: int, performed: bool, passed: bool) -> str | None:
+        """하지 못한 행동을 통과로 보고하면 한 번 돌려보낼 답. 아니면 `None` (ARTEL-1220).
+
+        2026-10-22 L1 측정에서 Claude Sonnet 5.5 는 거짓 기대값 5개 중 4개를 매번 통과로 보고했다.
+        message 는 "발동 버튼이 표시되지 않아 눌릴 수 없음" 처럼 거부를 맞게 적었고 `passed` 만
+        "그 step 을 마쳤다" 는 뜻으로 썼다. `performed` 를 따로 받으면 그 조합이 판정 자리에서
+        보인다.
+
+        한 step 에 한 번만 돌려보낸다. 기대값 자체가 "누를 수 없다" 인 step 에서는 이 조합이
+        맞으므로, 같은 보고를 다시 보내면 기록한다.
+        """
+        if performed or not passed or step in state.unperformed_pass_refused:
+            return None
+        state.unperformed_pass_refused.add(step)
+        if state.phase_cycle is not None:
+            state.phase_cycle.hold()
+        verdict_tool_name = "report_case" if state.execution_mode == "FREE" else "report_step"
+        return (
+            "Nothing was recorded — you reported `passed=true` for an action you did not "
+            "carry out (`performed=false`). `passed` is whether the expected result matched "
+            "what you observed, not whether you are done with the step. If the expected "
+            "result was something the action should have produced, it did not happen: "
+            f"call `{verdict_tool_name}` again with `passed=false`. If the expected result "
+            "is itself that the action is refused or has no effect, and that is what you "
+            "saw, send the same report again and it is recorded."
+        )
+
     async def _record_verdict(
         step: int,
         passed: bool,
         message: str,
         used_knowledge_ids: list[str],
+        performed: bool = True,
         capability_key: str | None = None,
         learned: str | None = None,
         asks_memory: bool = False,
@@ -216,6 +244,10 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         더 치르지 않아야 한다는 것이 이 축의 조건이다(ARTEL-667).
         """
         notes: list[str] = []
+
+        refusal = _unperformed_pass_refusal(step, performed, passed)
+        if refusal is not None:
+            return refusal
 
         # `learned` 를 안 받았으면 되돌려 보낸다. 판정을 적기 **전**이다 — 뒤에 두면 다시
         # 부른 호출이 같은 스텝의 판정을 두 번 쌓는다.
@@ -406,11 +438,15 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
     # — 아무것도 안 켠 런이 다른 구조로 기록되는 것이 이 축이 피해야 할 첫 번째 일이다.
     if arch.phase_cycle.remembers_in_verdict:
 
+        # 인자 순서가 `message`, `performed`, `passed` 인 것은 모델이 schema 순서대로 채우기
+        # 때문이다(ARTEL-1220). 기대값과 관찰값을 적는 `message` 가 `passed` 보다 먼저 와야 판정이
+        # 그 두 줄을 보고 내려진다.
         @tool(description=load_tool_description("report_step_memory").body)
         async def report_step(
             step: int,
-            passed: bool,
             message: str,
+            performed: bool,
+            passed: bool,
             thought: str,
             used_knowledge_ids: list[str] = [],
             capability_key: str | None = None,
@@ -422,6 +458,7 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
                 passed,
                 message,
                 used_knowledge_ids,
+                performed=performed,
                 capability_key=capability_key,
                 learned=learned,
                 asks_memory=True,
@@ -432,13 +469,16 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         @tool(description=load_tool_description("report_step").body)
         async def report_step(
             step: int,
-            passed: bool,
             message: str,
+            performed: bool,
+            passed: bool,
             thought: str,
             used_knowledge_ids: list[str] = [],
         ) -> str:
             # What the agent reads is `qa_run/<version>/tool_report_step.md`.
-            return await _record_verdict(step, passed, message, used_knowledge_ids)
+            return await _record_verdict(
+                step, passed, message, used_knowledge_ids, performed=performed
+            )
 
 
     async def _unreached_refusal(
@@ -541,8 +581,9 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         @tool(description=load_tool_description("report_case_memory").body)
         async def report_case(
             case_id: int,
-            passed: bool,
             message: str,
+            performed: bool,
+            passed: bool,
             thought: str,
             used_knowledge_ids: list[str] = [],
             capability_key: str | None = None,
@@ -556,6 +597,7 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
                 message,
                 used_knowledge_ids,
                 overwrite,
+                performed=performed,
                 capability_key=capability_key,
                 learned=learned,
                 asks_memory=True,
@@ -567,14 +609,17 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         @tool(description=load_tool_description("report_case").body)
         async def report_case(
             case_id: int,
-            passed: bool,
             message: str,
+            performed: bool,
+            passed: bool,
             thought: str,
             used_knowledge_ids: list[str] = [],
             overwrite: bool = False,
         ) -> str:
             # What the agent reads is `qa_run/<version>/tool_report_case.md`.
-            return await _report_case(case_id, passed, message, used_knowledge_ids, overwrite)
+            return await _report_case(
+                case_id, passed, message, used_knowledge_ids, overwrite, performed=performed
+            )
 
         verdict_tool = report_case
 

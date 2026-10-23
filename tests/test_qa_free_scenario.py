@@ -83,14 +83,20 @@ def free_scenario() -> QaScenario:
     )
 
 
-# ARTEL-1029 전 develop 의 `_plan` 이 위 `ordered_scenario` 에 낸 글 그대로다.
+# ARTEL-1029 전 develop 의 `_plan` 이 위 `ordered_scenario` 에 낸 글이다. ARTEL-1220 이 판정 규칙
+# 줄만 바꿨다 — `report_step` 이 `performed` 를 따로 받고, 검증 step 이 아닌 step 의 `passed` 도
+# "행동을 했는가" 가 아니게 됐다. 나머지는 그대로다.
 _ORDERED_PLAN_BEFORE_FREE = (
     "Scenario: 상점 구매 — 골드로 물약을 산다.\n\n"
-    "Execute the steps below in order and call report_step(step, passed, message) for EVERY step.\n"
+    "Execute the steps below in order and call report_step(step, message, performed, passed) "
+    "for EVERY step.\n"
     "- A step with `verify` is the TEST CASE's verdict: `passed` = whether that expected result "
     "actually occurred. That verdict is the whole case's verdict.\n"
-    "- Any other step: `passed` = whether you carried the action out (did it happen), not a "
-    "quality judgment.\n"
+    "- Any other step: `passed` = whether the effect its `do` describes actually happened, not "
+    "a quality judgment.\n"
+    "- `performed` = whether you carried the action out. It never decides `passed`: an action "
+    "the game refused is `performed=false`, and `passed` still compares expected with "
+    "observed.\n"
     "- A `precondition` must hold before that case's first step. If you cannot reach it, report "
     "its steps passed=false with a message beginning 'SETUP-FAILED:' and do NOT report_issue "
     "(an unreachable precondition is not a defect).\n"
@@ -157,7 +163,7 @@ def test_free_plan_lists_every_case_and_no_hints() -> None:
     text = _plan(scenario)
 
     assert "You choose the order and the method" in text
-    assert "report_case(case_id, passed, message) once for EVERY test case" in text
+    assert "report_case(case_id, message, performed, passed) once for EVERY test case" in text
     assert "Not having reached a case yet is NOT a verdict" in text
     assert "There is no time or token budget for you to save" in text
     assert "SETUP-FAILED:" in text
@@ -226,7 +232,7 @@ def make_free(judge: FakeJudge | None = None):
 def report(tools, case_id: int, passed: bool, message: str = "", overwrite: bool = False):
     args = {
         "case_id": case_id,
-        "passed": passed,
+        "performed": True, "passed": passed,
         "message": message or f"TC {case_id}",
         "thought": "판정한다",
     }
@@ -441,7 +447,7 @@ def test_learned_refusal_names_report_case_in_a_free_run() -> None:
     tools = {tool.name: tool for tool in build_tools(channel, state, arch=arch)}
     answer = asyncio.run(
         tools["report_case"].ainvoke(
-            {"case_id": 21, "passed": True, "message": "줄었다", "thought": "판정한다"}
+            {"case_id": 21, "performed": True, "passed": True, "message": "줄었다", "thought": "판정한다"}
         )
     )
     assert "Call `report_case` again" in answer
