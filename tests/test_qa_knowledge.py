@@ -1810,7 +1810,7 @@ def test_a_run_searches_knowledge_and_carries_on_to_its_verdict(
                         "name": "report_step",
                         "args": {
                             "step": 1,
-                            "passed": True,
+                            "performed": True, "passed": True,
                             "message": "문서대로 버튼이 비활성이다",
                             "thought": "판정",
                         },
@@ -1989,7 +1989,7 @@ def test_a_run_corrects_an_entry_by_deleting_it_and_recording_the_new_one(
                         "name": "report_step",
                         "args": {
                             "step": 1,
-                            "passed": True,
+                            "performed": True, "passed": True,
                             "message": "구매가 가능했다",
                             "thought": "판정",
                         },
@@ -2116,7 +2116,7 @@ def test_a_run_corrects_an_entry_in_place_with_the_update_tool(
                         "name": "report_step",
                         "args": {
                             "step": 1,
-                            "passed": True,
+                            "performed": True, "passed": True,
                             "message": "구매가 가능했다",
                             "thought": "판정",
                         },

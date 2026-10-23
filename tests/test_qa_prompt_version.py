@@ -319,8 +319,12 @@ def test_the_default_qa_version_is_v21() -> None:
     v24 ships with the game function tools (ARTEL-1054): `tool_run_cheat.md`,
     `tool_start_behavior.md`, `tool_stop_behavior.md`, `tool_extend_behavior.md`, and the
     `cheats` and `behaviors` skills. Every v23 role is carried over unchanged.
+
+    v25 changes how a step is judged (ARTEL-1220): `## How to work` step 4 asks for
+    `expected:` and `observed:` lines before the verdict, and the four verdict tool
+    descriptions describe the new `performed` argument.
     """
-    assert resolve_version("qa_run") == "v24"
+    assert resolve_version("qa_run") == "v25"
 
 
 # v20 이 고쳐 쓴 v19 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
@@ -1093,3 +1097,32 @@ def test_v24_adds_the_game_function_tools_and_keeps_every_v23_role() -> None:
     assert v24_roles - v23_roles == V24_ADDED_ROLES
     for role in sorted(v23_roles):
         assert load_prompt("qa_run", role, "v24").body == load_prompt("qa_run", role, "v23").body, role
+
+
+# v25 가 v24 에서 고쳐 쓴 role. 나머지 role 은 한 글자도 안 바뀌어야 한다 (ARTEL-1220).
+V25_REWRITTEN_ROLES = {
+    "system",
+    "tool_report_step",
+    "tool_report_step_memory",
+    "tool_report_case",
+    "tool_report_case_memory",
+}
+
+
+def test_v25_rewrites_only_the_verdict_rules_and_keeps_every_other_v24_role() -> None:
+    """v25 는 판정 규칙을 적은 다섯 role 만 고친다. role 목록과 나머지 본문은 v24 그대로다."""
+    assert roles_in("qa_run", "v25") == roles_in("qa_run", "v24")
+    for role in roles_in("qa_run", "v24"):
+        same = load_prompt("qa_run", role, "v25").body == load_prompt("qa_run", role, "v24").body
+        assert same is (role not in V25_REWRITTEN_ROLES), role
+
+
+def test_v25_asks_for_expected_and_observed_before_the_verdict() -> None:
+    """판정 전에 두 값을 나란히 적게 하고, 거부된 행동을 실패로 적는 예시를 둔다 (ARTEL-1220)."""
+    system = load_prompt("qa_run", "system", "v25").body
+    assert "`expected:`" in system and "`observed:`" in system
+    assert "`performed=false`, `passed=false`" in system
+    for role in V25_REWRITTEN_ROLES - {"system"}:
+        body = load_prompt("qa_run", role, "v25").body
+        assert "`performed`" in body, role
+        assert "`expected:` and `observed:`" in body, role

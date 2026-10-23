@@ -304,7 +304,7 @@ def run_step(tools) -> str:
             await tools["press_key"].ainvoke({"step": 1, "thought": "t", "key_code": "Space", "duration_seconds": 0.1})
         await tools["click"].ainvoke({"step": 1, "thought": "t", "target": "#41"})
         return await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "dialogue advanced", "thought": "t"}
+            {"step": 1, "performed": True, "passed": True, "message": "dialogue advanced", "thought": "t"}
         )
 
     return asyncio.run(scenario())

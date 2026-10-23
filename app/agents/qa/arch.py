@@ -425,7 +425,21 @@ from app.llm.models import LLMModel, get_model_spec
 # only because `arch.model_dump()` gained four keys (the v4 note above). The label moves anyway,
 # the v8 argument: the structure now has shapes a run must say it was or was not filed under, and
 # orchestration turns the axes on per run from the build's catalog.
-QA_ARCH_LABEL = "v27-game-functions"
+#
+# v28 because `report_step` and `report_case` take a separate `performed` argument, and their
+# arguments now come in the order `message`, `performed`, `passed` (ARTEL-1220). Before this,
+# `passed` meant "I carried the action out" on every step that had no `verify`, and Claude Sonnet
+# 5.5 read it that way on verifying steps too: on 2026-10-22 it reported 4 of L1's 5 false
+# expectations passed in every run, each time with a message that described the refusal correctly
+# ("발동 버튼이 표시되지 않아 눌릴 수 없음" → passed). `passed` now means only that the expected
+# result matched the observed one, and the model is asked to write the two side by side in
+# `message` before it reaches `passed` in the schema. A report with `performed=false` and
+# `passed=true` is sent back once per step, since that is the combination the measurement found;
+# the second identical report is recorded, because a step whose expected result is the refusal
+# itself is judged that way correctly. The first message's step rules say the same. Two tool
+# schemas moved, so `arch_fingerprint` moves with the label. Checked before picking the number:
+# no branch on origin carries a label above v27.
+QA_ARCH_LABEL = "v28-verdict-expected-observed"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

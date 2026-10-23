@@ -50,7 +50,7 @@ def _tools(report_step_view: bool):
     return channel, tools
 
 
-_VERDICT = {"step": 1, "passed": True, "message": "됐다", "thought": "HP 가 줄었다"}
+_VERDICT = {"step": 1, "performed": True, "passed": True, "message": "됐다", "thought": "HP 가 줄었다"}
 
 
 def test_report_step_view_is_on_by_default() -> None:
