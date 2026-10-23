@@ -17,6 +17,7 @@ from app.agents.qa.tools import QaRunState, build_tools
 from app.api.qa_sessions import OpenQaSessionRequest
 from app.qa.schemas import QaCaseRef, QaRunScenario, QaScenario, QaStep
 from app.prompts import load_prompt
+from app.prompts.loader import PROMPTS_ROOT
 from app.prompts.loader import resolve_version, roles_in
 from app.qa.channel import QaRunChannel
 from app.qa.run_config import resolve_run_config
@@ -319,8 +320,20 @@ def test_the_default_qa_version_is_v21() -> None:
     v24 ships with the game function tools (ARTEL-1054): `tool_run_cheat.md`,
     `tool_start_behavior.md`, `tool_stop_behavior.md`, `tool_extend_behavior.md`, and the
     `cheats` and `behaviors` skills. Every v23 role is carried over unchanged.
+
+    v25 adds `tool_verdict_checks.md` for the `verdict_evidence` axis (ARTEL-1133). Every
+    other file is v24's with only the version line moved, so a run with the axis off reads
+    what it read under v24.
     """
-    assert resolve_version("qa_run") == "v24"
+    assert resolve_version("qa_run") == "v25"
+
+
+def test_v25_is_v24_plus_the_verdict_checks_description() -> None:
+    root = PROMPTS_ROOT / "qa_run"
+    v24 = {p.name: p.read_text().split("---\n", 2)[2] for p in (root / "v24").glob("*.md")}
+    v25 = {p.name: p.read_text().split("---\n", 2)[2] for p in (root / "v25").glob("*.md")}
+    assert set(v25) - set(v24) == {"tool_verdict_checks.md"}
+    assert all(v25[name] == body for name, body in v24.items())
 
 
 # v20 이 고쳐 쓴 v19 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.

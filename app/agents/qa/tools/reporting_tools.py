@@ -4,7 +4,8 @@
 전체의 판정을 낸다. `wait_for_operator` 와 `reply_to_operator` 는 사람과의 왕복이다.
 """
 
-from langchain_core.tools import BaseTool, tool
+from langchain_core.tools import BaseTool, StructuredTool, tool
+from pydantic import Field, create_model
 
 from app.agents.qa.macro.for_step import macros_for_step, render_step_macro_hint
 from app.agents.qa.macro.lift import draft_for_step, offer
@@ -29,6 +30,7 @@ from app.qa.envelope import (
 )
 from app.qa.reach import MAX_UNREACHED_REFUSALS, UNREACHED_THRESHOLD
 from app.qa.schemas import QaStepResult
+from app.qa.verdict_evidence import VerdictCheck, cite, contradiction
 
 
 def render_closing_asks(state: QaRunState) -> str:
@@ -99,10 +101,47 @@ def render_closing_asks(state: QaRunState) -> str:
     return f"\n{listed}\n{closer}"
 
 
+def _with_checks(base: BaseTool, state: QaRunState) -> BaseTool:
+    """`verdict_evidence` 를 켠 런의 판정 도구: 원래 인자에 `checks` 하나를 더한다(ARTEL-1133).
+
+    판정 도구는 기억 축과 FREE 여부로 이미 네 모양이다. 거기에 근거 축을 곱하지 않고 감싼다 —
+    `checks` 를 `state.pending_checks` 에 두고 원래 도구를 부르면 `_record_verdict` 가 집어 간다.
+    설명은 원래 설명 뒤에 `tool_verdict_checks.md` 를 붙인다.
+    """
+    fields = {name: (field.annotation, field) for name, field in base.args_schema.model_fields.items()}
+    schema = create_model(
+        f"{base.name}_with_checks",
+        **fields,
+        checks=(
+            list[VerdictCheck],
+            Field(default_factory=list, description="One entry per expected item of a verifying step."),
+        ),
+    )
+
+    async def run(checks: list[VerdictCheck] | None = None, **kwargs: object) -> str:
+        state.pending_checks = [
+            check if isinstance(check, VerdictCheck) else VerdictCheck.model_validate(check)
+            for check in checks or []
+        ]
+        try:
+            return await base.coroutine(**kwargs)
+        finally:
+            state.pending_checks = None
+
+    return StructuredTool.from_function(
+        coroutine=run,
+        name=base.name,
+        description=f"{base.description}\n\n{load_tool_description('verdict_checks').body}",
+        args_schema=schema,
+    )
+
+
 def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
     # 아래 tool 이 closure 로 잡는 것. 되묶는 이유는 `tool_context.py` 에 있다.
     channel, state, arch = ctx.channel, ctx.state, ctx.arch
     _answer = ctx.answer
+    evidence_on = arch.verdict_evidence == "on"
+    state.cites_captures = evidence_on
 
     @tool(description=load_tool_description("wait_for_operator").body)
     async def wait_for_operator(
@@ -205,6 +244,8 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         learned: str | None = None,
         asks_memory: bool = False,
         replaces: bool = False,
+        thought: str | None = None,
+        checks: list[VerdictCheck] | None = None,
     ) -> str:
         """두 `report_step` 모양과 FREE 의 `report_case` 가 함께 쓰는 몸통.
 
@@ -216,6 +257,30 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         더 치르지 않아야 한다는 것이 이 축의 조건이다(ARTEL-667).
         """
         notes: list[str] = []
+        if checks is None:
+            checks = state.pending_checks
+        verifying = 0 <= step - 1 < len(state.step_meta) and state.step_meta[step - 1][1]
+        # 검증이 아닌 스텝(행동만 하는 스텝)은 기대 결과가 없으니 항목을 비워도 된다.
+        if checks is not None and not checks and not verifying:
+            checks = None
+
+        # 근거를 받는 런(ARTEL-1133)에서 판정과 항목이 서로 반대면, 또는 검증 스텝에 항목이 없으면
+        # 적지 않고 돌려보낸다. `learned` 와 같은 산수로 연속 상한을 둔다 — 상한에 닿으면 그대로 적는다.
+        if checks is not None:
+            problem = (
+                "`checks` is empty — give at least one expected item and what you saw for it"
+                if not checks
+                else contradiction(passed, checks)
+            )
+            if problem is not None and state.evidence_refusals < MAX_CONSECUTIVE_REFUSALS:
+                state.evidence_refusals += 1
+                if state.phase_cycle is not None:
+                    state.phase_cycle.hold()
+                return (
+                    f"Nothing was recorded — {problem}. Look again and report this step once "
+                    "more with a verdict and `checks` that agree."
+                )
+            state.evidence_refusals = 0
 
         # `learned` 를 안 받았으면 되돌려 보낸다. 판정을 적기 **전**이다 — 뒤에 두면 다시
         # 부른 호출이 같은 스텝의 판정을 두 번 쌓는다.
@@ -301,6 +366,23 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         #
         # `capability_key` 와 `learned` 도 같은 이유로 프레임에 안 실린다. 둘은 모델이 쓴
         # 인자 그대로 `qa_log` 의 tool 호출 행에 남고, 파일럿이 세는 자리가 거기다.
+        # 근거는 판정 시점의 판독 기록과 맞춰 본 결과와 함께 싣는다(ARTEL-1133). 어긋난 근거는
+        # 판정을 막지 않고 말해 준다 — 판정은 이미 적혔고, 다음 판정에서 고치면 된다.
+        cited_checks, evidence = (None, None)
+        if checks is not None:
+            pulse = channel.scene.pulse
+            cited_checks, evidence = cite(checks, pulse, state.shown_captures, pulse.scene or channel.scene.scene)
+            off = [
+                f"{source['key']} = {source['value']}" + (f" (record: {source['recorded']})" if source["recorded"] else " (not in the record)")
+                for check in cited_checks
+                for source in check["sources"]
+                if source["citation"] != "match"
+            ]
+            if off:
+                notes.append(
+                    "These cited values do not match what this run read, so the verdict is marked "
+                    f"uncertain: {off}. Cite only values the pulse view printed."
+                )
         await channel.emit(
             MessageType.STATUS,
             StatusPayload(
@@ -311,6 +393,9 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
                 message=message,
                 used_knowledge_ids=cited,
                 rejected_knowledge_id_count=len(rejected),
+                reason=(thought or "").strip() or None,
+                checks=cited_checks,
+                evidence=evidence,
                 # 모델이 아니라 이쪽이 채운다(ARTEL-1054). 축이 꺼지면 `None` 이고 frame 에서
                 # key 가 빠진다.
                 used_cheats=list(state.used_cheats) if arch.cheats == "on" else None,
@@ -425,6 +510,7 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
                 capability_key=capability_key,
                 learned=learned,
                 asks_memory=True,
+                thought=thought,
             )
 
     else:
@@ -438,7 +524,7 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             used_knowledge_ids: list[str] = [],
         ) -> str:
             # What the agent reads is `qa_run/<version>/tool_report_step.md`.
-            return await _record_verdict(step, passed, message, used_knowledge_ids)
+            return await _record_verdict(step, passed, message, used_knowledge_ids, thought=thought)
 
 
     async def _unreached_refusal(
@@ -559,6 +645,7 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
                 capability_key=capability_key,
                 learned=learned,
                 asks_memory=True,
+                thought=thought,
             )
 
         verdict_tool = report_case
@@ -574,9 +661,14 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             overwrite: bool = False,
         ) -> str:
             # What the agent reads is `qa_run/<version>/tool_report_case.md`.
-            return await _report_case(case_id, passed, message, used_knowledge_ids, overwrite)
+            return await _report_case(
+                case_id, passed, message, used_knowledge_ids, overwrite, thought=thought
+            )
 
         verdict_tool = report_case
+
+    if evidence_on:
+        verdict_tool = _with_checks(verdict_tool, state)
 
     @tool(
         description=load_tool_description("report_issue").body.format(

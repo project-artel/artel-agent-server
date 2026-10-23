@@ -248,6 +248,15 @@ class QaRunState:
         # return the image itself — an image block on a tool result is rejected by
         # the chat/completions API every model here is reached through.
         self._pending_captures: list[PendingCapture] = []
+        # 이 런에서 모델 앞에 놓인 캡처의 id(ARTEL-1133). 판정이 근거로 댄 캡처가 실제로 본
+        # 사진인지 이것과 맞춰 본다. `cites_captures` 는 `verdict_evidence` 를 켠 런에서 켜지고,
+        # 그때만 사진 설명에 id 를 적어 모델이 인용할 수 있게 한다.
+        self.shown_captures: set[str] = set()
+        self.cites_captures = False
+        # `verdict_evidence` 런의 판정 도구가 `_record_verdict` 에 넘기는 기대 항목, 그리고 판정과
+        # 항목이 어긋나 돌려보낸 연속 횟수.
+        self.pending_checks: list | None = None
+        self.evidence_refusals = 0
         # Set by `compact_context`, read and cleared by the compaction middleware
         # before the next model call. A flag rather than the tool doing the work
         # itself: the tool runs inside the tools node, where its own AIMessage is
@@ -412,6 +421,14 @@ class QaRunState:
 
     def add_pending_capture(self, capture: PendingCapture) -> None:
         self._pending_captures.append(capture)
+
+    def saw_capture(self, capture_id: str, caption: str) -> str:
+        """모델 앞에 놓인 캡처를 적고, 그 사진에 붙일 설명을 돌려준다."""
+        if capture_id:
+            self.shown_captures.add(capture_id)
+        if self.cites_captures and capture_id:
+            return f"{caption} (capture {capture_id})"
+        return caption
 
     def take_pending_captures(self) -> list[PendingCapture]:
         pending = self._pending_captures

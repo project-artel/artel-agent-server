@@ -325,7 +325,10 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
 
             messages.append(
                 build_capture_message(
-                    capture.capture_id, encoded, capture.mime_type, capture.caption
+                    capture.capture_id,
+                    encoded,
+                    capture.mime_type,
+                    self._state.saw_capture(capture.capture_id, capture.caption),
                 )
             )
 
@@ -491,5 +494,5 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
             capture_id=capture.capture_id,
             mime_type=capture.mime_type,
             encoded=encoded,
-            caption=capture.caption,
+            caption=self._state.saw_capture(capture.capture_id, capture.caption),
         )
