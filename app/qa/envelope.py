@@ -1445,6 +1445,15 @@ class StatusPayload(BaseModel):
     # itself a comparison between models — discarded in silence, that signal is
     # gone, and a model that invents ids scores exactly like one that does not.
     rejected_knowledge_id_count: int = 0
+    # 판정의 근거(ARTEL-1133). 사용자가 판정이 왜 그렇게 났는지 보게 하려고 싣는다.
+    # `reason` 은 판정한 쪽이 쓴 이유다 — `report_step` 의 `thought`, 평가기의 `reason`. 전에는
+    # tool 호출 행에만 남고 판정에는 이어지지 않았다.
+    reason: str | None = None
+    # 기대 항목마다 무엇을 보았고 그 근거가 판독 기록과 맞는지(`app/qa/verdict_evidence.py`).
+    # `verdict_evidence` axis 를 켠 런의 판정만 싣는다. 끈 런은 `None` 이다.
+    checks: list[dict] | None = None
+    # 근거 전체의 상태: `verified` · `uncertain` · `none`. `checks` 와 함께만 실린다.
+    evidence: str | None = None
     # 이 step 에서 쓴 cheat 와 판정할 때 돌던 behavior (ARTEL-1054). 모델이 아니라 agent-server 가
     # 채운다. `None` 이면 frame 에서 key 를 뺀다 — 축이 꺼진 run 의 `STATUS` 는 이 두 필드가
     # 생기기 전과 같은 key 를 싣는다.
