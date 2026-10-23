@@ -18,6 +18,11 @@ from langchain_core.tools import BaseTool
 from app.agents.qa.arch import ResolvedArch, default_resolved_arch
 from app.agents.qa.tools.action_tools import build_action_tools
 from app.agents.qa.tools.capability_tools import build_capability_tools
+from app.agents.qa.tools.game_function_tools import (
+    build_behavior_tools,
+    build_cheat_tools,
+    with_behavior_endings,
+)
 from app.agents.qa.tools.knowledge_tools import build_knowledge_tools
 from app.agents.qa.tools.macro_tools import build_macro_tools
 from app.agents.qa.tools.observation_tools import build_capture_tool, build_observation_tools
@@ -76,6 +81,14 @@ def build_tools(
     if ctx.arch.skills == "on_demand":
         tools.extend(build_skill_tools(ctx, prompt_version))
 
+    # 게임이 등록한 function 의 tool (ARTEL-1054). 맨 뒤라서 두 축이 꺼진 run 은 목록도 순서도
+    # 종전 그대로다. `run_cheat` 와 `start_behavior` 는 게임을 움직이므로 `phase.py` 표에서 `ACT`
+    # 이고, `stop_behavior` 와 `extend_behavior` 는 표에 없어 아래 gate 를 지나간다.
+    if ctx.arch.cheats == "on":
+        tools.extend(build_cheat_tools(ctx))
+    if ctx.arch.behaviors == "on":
+        tools.extend(build_behavior_tools(ctx))
+
     # 검사하는 자리가 여기 하나다. tool 은 `phase.py` 의 표에서 자기 phase 를 선언만 한다 —
     # tool 마다 스스로 세게 하면 tool 이 늘 때마다 하나씩 빠진다(`state.py` 의 docstring 이
     # 같은 이유를 적어 뒀다).
@@ -85,9 +98,12 @@ def build_tools(
     # 종전 그대로라는 것이 읽는 사람에게 보인다.
     cycle = build_phase_cycle(ctx.arch.phase_cycle, frozenset(one.name for one in tools))
     state.phase_cycle = cycle
-    if cycle is None:
-        return tools
-    return [_phase_gated(one, cycle) for one in tools]
+    if cycle is not None:
+        tools = [_phase_gated(one, cycle) for one in tools]
+    # gate 바깥에서 감싼다. gate 가 거절한 호출의 결과에도 끝난 behavior 의 소식이 붙는다.
+    if ctx.arch.behaviors == "on":
+        tools = [with_behavior_endings(one, ctx) for one in tools]
+    return tools
 
 
 def _phase_gated(tool: BaseTool, cycle: PhaseCycle) -> BaseTool:

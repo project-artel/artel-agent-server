@@ -7,26 +7,44 @@ Each step: the planner writes the step's macros, the executer plays them with Je
 judges the step and sends the verdict the way the agent's `report_step` does. A step whose macros
 are still refused after the planner's rewrites fails without being played. The closing `STATUS`
 carries `QaRunState.build_summary`, so Orchestration grades both engines' runs the same way.
+
+An ORDERED scenario plays its steps in order. A FREE scenario is a set of test cases, one per step,
+in no order (ARTEL-1149), played scene by scene. In each scene the planner gets the cases still to
+verify there (`free.candidates`) and answers which to verify now, in what order, with shared actions
+and one goal per case; the executer plays them one after another while the scene stays, and the
+scene evaluator judges them a few at a time. A scene with more cases than one plan takes is planned
+again with the rest. Then the planner writes a move to the next scene that still has cases
+(`free.next_scene`). A case put off — left `later` by the planner, in a scene play could not reach,
+or played without ever reaching its goal — waits for the next round, after `reset_game`, up to
+`free_max_resets` resets and `free_case_attempts` plays per case; what is still left is reported
+failed as UNREACHED. The branch is per scenario: a session that mixes ORDERED and FREE scenarios is
+recorded as ORDERED, and its FREE scenarios still play this way.
 """
 
 import asyncio
+from collections.abc import Awaitable, Callable
 
 from app.agents.planner_executer import evaluator
+from app.agents.planner_executer.decisions import MAX_REFUSAL_CHARS, clip, note_decision
 from app.agents.planner_executer.developer_macros import NO_DEVELOPER_MACROS, LoadedDeveloperMacros
-from app.agents.planner_executer.evaluator import Evaluator, Judge
-from app.agents.planner_executer.executer import Executer
+from app.agents.planner_executer.evaluator import Evaluator, Judge, SceneEvaluator
+from app.agents.planner_executer.executer import Executer, StepPlay
+from app.agents.planner_executer.free import FreeCase, candidates, free_cases, next_scene, same_scene
 from app.agents.planner_executer.macros import RegisteredMacros
 from app.agents.planner_executer.planner import Ask, Planner
+from app.agents.planner_executer.prompts import screen, step_text
 from app.agents.qa.runner import _step_plan
 from app.agents.qa.tools import QaRunState
 from app.qa.channel import QaCancelled, QaRunChannel
-from app.qa.envelope import MessageType, RunResult, StatusPayload, StepStatus
+from app.qa.envelope import JsonRpcAction, MessageType, RunResult, StatusPayload, StepStatus
 from app.qa.jev import JevClient
 from app.qa.run_config import RunConfig
 from app.qa.schemas import QaScenario
 
 # How long the run waits for a first reading before it writes from an empty screen.
 FIRST_READING_SECONDS = 5.0
+# How long a FREE round waits for the game's first reading after `reset_game`.
+RESET_READING_SECONDS = 10.0
 
 
 class PlannerExecuterRunner:
@@ -56,7 +74,8 @@ class PlannerExecuterRunner:
         state = QaRunState(
             total_steps=len(scenario.steps),
             step_meta=_step_plan(scenario),
-            step_texts=[step.action for step in scenario.steps],
+            step_texts=[step_text(step) for step in scenario.steps],
+            execution_mode=scenario.execution_mode,
         )
         jev = self._jev or JevClient()
         deadline = self._config.arch.deadline_seconds
@@ -83,18 +102,22 @@ class PlannerExecuterRunner:
         )
         executer = Executer(channel, self._spec, jev)
         judge = Evaluator(self._config, self._judge)
-        for step in range(1, len(scenario.steps) + 1):
-            written = await planner.write(scenario, step)
-            if written.macros is None:
-                await evaluator.report(
-                    channel, state, step, False,
-                    f"PLANNER-REFUSED: the step's macros were still refused after "
-                    f"{self._spec.max_rewrites} rewrites: {written.refusal}",
-                )
-                continue
-            play = await executer.play(step, scenario.steps[step - 1].action, written.macros)
-            passed, message = await judge.judge(scenario, step, play)
-            await evaluator.report(channel, state, step, passed, message)
+
+        if scenario.execution_mode == "FREE":
+            await self._run_free(channel, scenario, state, planner, executer, SceneEvaluator(self._config, self._judge))
+        else:
+            for step in range(1, len(scenario.steps) + 1):
+                written = await planner.write(scenario, step)
+                if written.macros is None:
+                    await evaluator.report(
+                        channel, state, step, False,
+                        f"PLANNER-REFUSED: the step's macros were still refused after "
+                        f"{self._spec.max_rewrites} rewrites: {written.refusal}",
+                    )
+                    continue
+                play = await executer.play(step, step_text(scenario.steps[step - 1]), written.macros)
+                passed, message = await judge.judge(scenario, step, play)
+                await evaluator.report(channel, state, step, passed, message)
         state.finished = True
         passed = all(result.passed for result in state.step_results)
         await channel.emit(
@@ -106,3 +129,229 @@ class PlannerExecuterRunner:
                 summary=state.build_summary(),
             ),
         )
+
+    async def _run_free(
+        self,
+        channel: QaRunChannel,
+        scenario: QaScenario,
+        state: QaRunState,
+        planner: Planner,
+        executer: Executer,
+        scene_judge: SceneEvaluator,
+    ) -> None:
+        """Plays a FREE scenario scene by scene, round after round, until every case is reported.
+
+        `tried` holds the cases offered to a plan this round, or skipped because play could not
+        reach their scene. A round goes on while the scene on screen has untried cases — plan after
+        plan, `free_batch_size` cases at a time — or another scene with untried cases can be reached.
+        """
+        spec = self._spec
+        pending = {case.step: case for case in free_cases(scenario)}
+        context = channel.scene.scene_context
+        known = {scene.scene_name.strip().casefold() for scene in (context.scenes if context else []) if scene.scene_name}
+        resets = 0
+
+        async def settle(step: int, passed: bool, message: str) -> None:
+            await evaluator.report(channel, state, step, passed, message)
+            del pending[step]
+
+        rounds = 0
+        while pending:
+            rounds += 1
+            await note_decision(
+                channel,
+                "free_round",
+                f"FREE round {rounds}: {len(pending)} cases left, starting in {channel.scene.pulse.scene or '?'}",
+                scene=channel.scene.pulse.scene,
+                round=rounds,
+                resets=resets,
+                pending=list(pending),
+            )
+            tried: set[int] = set()
+            while pending:
+                untried = [case for case in pending.values() if case.step not in tried]
+                offered = candidates(untried, channel.scene.pulse.scene, known, spec.free_batch_size)
+                if offered:
+                    tried.update(case.step for case in offered)
+                    unplayed = await self._play_scene(
+                        channel, scenario, planner, executer, scene_judge, offered, pending, resets, settle
+                    )
+                    # Cases the plan meant to verify but play left the scene before: offered again,
+                    # in that scene, without spending a play.
+                    tried.difference_update(unplayed)
+                    continue
+                target = next_scene(untried, channel.scene.pulse.scene, known)
+                if target is None:
+                    break
+                if not await self._travel(channel, scenario, planner, executer, target, pending):
+                    tried.update(case.step for case in untried if same_scene(case.scene, target.scene))
+            if not pending:
+                return
+            if resets >= spec.free_max_resets:
+                left = list(pending.values())
+                causes: dict[str, int] = {}
+                for case in left:
+                    causes[case.cause] = causes.get(case.cause, 0) + 1
+                await note_decision(
+                    channel,
+                    "free_end",
+                    f"FREE ends after {resets} resets: {len(left)} cases unreached ("
+                    + ", ".join(f"{cause} {count}" for cause, count in sorted(causes.items()))
+                    + ")",
+                    resets=resets,
+                    causes=causes,
+                    unreached={str(case.step): case.cause for case in left},
+                )
+                for case in left:
+                    await settle(case.step, False, unreached(case.attempts, resets, case.cause, case.last_reason))
+                return
+            await note_decision(
+                channel,
+                "reset",
+                f"Resetting the game after round {rounds}: {len(pending)} cases left",
+                round=rounds,
+                pending=list(pending),
+            )
+            await reset_game(channel)
+            resets += 1
+
+    async def _play_scene(
+        self,
+        channel: QaRunChannel,
+        scenario: QaScenario,
+        planner: Planner,
+        executer: Executer,
+        scene_judge: SceneEvaluator,
+        offered: list[FreeCase],
+        pending: dict[int, FreeCase],
+        resets: int,
+        settle: Callable[[int, bool, str], Awaitable[None]],
+    ) -> list[int]:
+        """One plan: the planned cases played in order while the scene stays, then judged.
+
+        Returns the planned cases left unplayed because the scene changed before their turn.
+        """
+        scene = channel.scene.pulse.scene
+        plan = await planner.plan_scene(scenario, [case.step for case in offered])
+        if plan.macros is None:
+            # The plan never parsed. The scene's own cases fail as a refused step does; the cases
+            # offered only because their scene is unknown wait for another scene.
+            for case in offered:
+                if same_scene(case.scene, scene):
+                    await settle(
+                        case.step, False,
+                        f"PLANNER-REFUSED: the scene plan was still refused after {self._spec.max_rewrites} "
+                        f"rewrites: {plan.refusal}",
+                    )
+            return []
+        for step, reason in plan.later.items():
+            pending[step].last_reason = f"the planner left it for later in {scene or 'an unknown scene'}: {reason}"
+            pending[step].cause = "DEFERRED"
+        first_screen = screen(channel.scene.pulse)
+        played: list[tuple[int, StepPlay]] = []
+        unplayed: list[int] = []
+        for step in plan.verify:
+            if unplayed or not (same_scene(channel.scene.pulse.scene, scene) or channel.scene.pulse.scene == scene):
+                # A case before it left the scene; this one was planned for the scene it left.
+                unplayed.append(step)
+                pending[step].last_reason = f"play left {scene or 'the scene'} before the case's turn"
+                pending[step].cause = "LEFT_SCENE"
+                continue
+            pending[step].attempts += 1
+            case_id = scenario.steps[step - 1].case_id
+            play = await executer.play(step, step_text(scenario.steps[step - 1]), plan.macros.for_case(case_id))
+            played.append((step, play))
+        if not played:
+            return unplayed
+        verdicts = await scene_judge.judge(scenario, played, first_screen)
+        for step, play in played:
+            passed, message = verdicts[step]
+            case = pending[step]
+            if passed or reached(play):
+                await settle(step, passed, message)
+            elif case.attempts >= self._spec.free_case_attempts:
+                await settle(step, False, unreached(case.attempts, resets, "GOAL_UNREACHED", message))
+            else:
+                case.last_reason = message
+                case.cause = "GOAL_UNREACHED"
+        return unplayed
+
+    async def _travel(
+        self,
+        channel: QaRunChannel,
+        scenario: QaScenario,
+        planner: Planner,
+        executer: Executer,
+        target: FreeCase,
+        pending: dict[int, FreeCase],
+    ) -> bool:
+        """Move to `target`'s scene. `False`, with why on that scene's cases, when play does not get there."""
+        scene = target.scene or ""
+        origin = channel.scene.pulse.scene
+        written = await planner.write_travel(scenario, target.step, scene)
+        stopped = f"the move was still refused after {self._spec.max_rewrites} rewrites: {written.refusal}"
+        if written.macros is not None:
+            play = await executer.play(target.step, f"Go to the scene `{scene}`.", written.macros)
+            stopped = play.stopped
+        arrived = channel.scene.pulse.scene
+        waiting = [case.step for case in pending.values() if same_scene(case.scene, scene)]
+        if same_scene(scene, arrived):
+            await note_decision(
+                channel,
+                "travel",
+                f"Travel {origin or '?'} → {scene}: reached",
+                target.step,
+                origin=origin,
+                target=scene,
+                reached=True,
+            )
+            return True
+        for case in pending.values():
+            if same_scene(case.scene, scene):
+                case.last_reason = f"play could not reach the scene {scene} ({stopped})"
+                case.cause = "SCENE_UNREACHED"
+        await note_decision(
+            channel,
+            "travel",
+            f"Travel {origin or '?'} → {scene}: not reached, ended in {arrived or '?'} ({clip(stopped, 200)}); "
+            f"{len(waiting)} cases of {scene} wait for the next round",
+            target.step,
+            origin=origin,
+            target=scene,
+            reached=False,
+            ended_in=arrived,
+            stopped=clip(stopped, MAX_REFUSAL_CHARS),
+            deferred=waiting,
+        )
+        return False
+
+
+def reached(play: StepPlay) -> bool:
+    """Whether play got to the step's goal: `done()` held on some turn."""
+    return play.stopped == "done" or any(turn.get("done") for turn in play.turns)
+
+
+# UNREACHED 보고의 첫 문장. 씬에 못 간 case 와 play 했는데 목표에 못 닿은 case 가 같은 문구였다(ARTEL-1186).
+_UNREACHED_SAYS = {
+    "GOAL_UNREACHED": "play never reached the case's goal",
+    "SCENE_UNREACHED": "play could not reach the case's scene, so it was not played",
+    "DEFERRED": "the planner kept leaving it for later, so it was not played",
+    "LEFT_SCENE": "play left the scene before the case's turn, so it was not played",
+    "NOT_PLAYED": "it was never offered to a plan, so it was not played",
+}
+
+
+def unreached(attempts: int, resets: int, cause: str, last: str) -> str:
+    return (
+        f"UNREACHED (도달 못함) {cause}: {_UNREACHED_SAYS.get(cause, cause)} — {attempts} "
+        f"{'play' if attempts == 1 else 'plays'} and {resets} {'reset' if resets == 1 else 'resets'}. "
+        f"Last: {last}"
+    )
+
+
+async def reset_game(channel: QaRunChannel) -> None:
+    """Restart the game from its first scene before the next FREE round, and wait for a reading."""
+    await channel.dispatch_actions(
+        [JsonRpcAction(id=1, method="reset_game", params=[])], "Resetting the game for the next round"
+    )
+    await channel.wait_for_reading(RESET_READING_SECONDS)

@@ -42,7 +42,14 @@ USAGE_PATH = "/internal/llm-usage"
 # rather than sent as one oversized one.
 MAX_RECORDS_PER_REQUEST = 200
 
-Service = Literal["QA_RUN", "SCENARIO", "KNOWLEDGE_QUERY", "GAME_CONTEXT", "EMBEDDING"]
+Service = Literal[
+    "QA_RUN",
+    "SCENARIO",
+    "KNOWLEDGE_QUERY",
+    "GAME_CONTEXT",
+    "EMBEDDING",
+    "PROJECT_AGENT",
+]
 
 # 그 호출을 누구의 key 로 했는가. `user` 는 세션에 묶인 사용자 key(`app/llm/credentials.py`),
 # `platform` 은 관리자가 넣은 공용 key 다. orchestration 은 `llm_usage.key_source` 에 남겨

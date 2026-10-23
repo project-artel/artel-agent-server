@@ -1,6 +1,6 @@
 """developer macro 의 문법 글과 검사 (ARTEL-1087).
 
-orchestration 이 MCP 서버의 `macro_grammar`·`check_macro`·`publish_macro` 를 받아 이 둘을
+orchestration 이 MCP 서버의 `macro_grammar`·`publish_macros` 를 받아 이 둘을
 부른다. 저장은 orchestration 의 몫이고 여기는 읽고 판정만 한다.
 
 macro 의 잘못은 200 에 `ok: false` 로 돌려준다. 400대로 내면 orchestration 이 "요청이 틀렸다"

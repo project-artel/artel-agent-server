@@ -10,7 +10,9 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_serializer
+
+from app.qa.game_functions import ActiveBehavior, UsedCheat
 
 
 class MessageType(StrEnum):
@@ -209,6 +211,13 @@ class MessageType(StrEnum):
     # [MACRO_SEARCH] 의 답. 범위 밖의 요청과 `content_map` 이 없는 런은 요청의
     # `correlationId` 를 문 `ERROR` 를 받는다.
     MACRO_SEARCH_RESULT = "MACRO_SEARCH_RESULT"
+    # Orchestration -> Agent
+    #
+    # 게임이 돌리던 behavior 하나가 끝났다(ARTEL-1054). orchestration 이 SDK frame 에서 `type` 만
+    # 빼고 payload 로 중계한다. 계약은 workspace 의
+    # `.plan/general/2026-10-14-game-functions-wire-contract.md` 다. 묻고 받는 답이 아니라서
+    # 풀어 줄 `future` 가 없고, 다음 tool 결과 끝에 붙는다.
+    BEHAVIOR_ENDED = "BEHAVIOR_ENDED"
     # Bidirectional
     ERROR = "ERROR"
     # Bidirectional. The operator talking to the Agent mid-run, and its reply.
@@ -382,7 +391,11 @@ class ActionResultItem(BaseModel):
     # What the action produced, for the actions that produce something. Absent on
     # every action that does not, which is why it cannot be required. `capture_screen`
     # puts the uploaded image's URL here; the bytes never travel over this socket.
-    returnValue: dict | None = None
+    #
+    # `Any` 인 이유: `invoke_cheat` 의 답이 handler 가 돌려준 값을 싣는다(ARTEL-1054). 계약은
+    # 지금 dict 만 적지만, 읽는 쪽이 dict 인지 보고 읽으면 다른 모양이 와도 frame 하나 때문에
+    # `ACTION_RESULT` 전체가 검증에서 떨어지지 않는다.
+    returnValue: Any | None = None
 
     @property
     def status(self) -> ActionItemStatus:
@@ -1441,6 +1454,19 @@ class StatusPayload(BaseModel):
     checks: list[dict] | None = None
     # 근거 전체의 상태: `verified` · `uncertain` · `none`. `checks` 와 함께만 실린다.
     evidence: str | None = None
+    # 이 step 에서 쓴 cheat 와 판정할 때 돌던 behavior (ARTEL-1054). 모델이 아니라 agent-server 가
+    # 채운다. `None` 이면 frame 에서 key 를 뺀다 — 축이 꺼진 run 의 `STATUS` 는 이 두 필드가
+    # 생기기 전과 같은 key 를 싣는다.
+    used_cheats: list[UsedCheat] | None = None
+    active_behaviors: list[ActiveBehavior] | None = None
+
+    @model_serializer(mode="wrap")
+    def _drop_unset_function_fields(self, handler):
+        data = handler(self)
+        for key in ("used_cheats", "active_behaviors"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
 
 
 class IssueSeverity(StrEnum):
@@ -1488,6 +1514,11 @@ class ErrorPayload(BaseModel):
     code: str
     retryable: bool = False
     detail: dict | None = None
+    # run 이 예외로 멈췄을 때만 채운다. 클래스 이름과 `module:function:line` 뿐이고
+    # 예외 메시지와 파일 경로는 싣지 않는다(`app/qa/failure_site.py`).
+    # wire 이름은 camelCase 다 — `outbound_envelope` 가 alias 로 내보낸다.
+    exception_type: str | None = Field(default=None, serialization_alias="exceptionType")
+    frames: list[str] | None = None
 
 
 def outbound_envelope(
@@ -1509,5 +1540,5 @@ def outbound_envelope(
         "correlationId": correlation_id,
         "sequence": sequence,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "payload": payload.model_dump(),
+        "payload": payload.model_dump(by_alias=True),
     }

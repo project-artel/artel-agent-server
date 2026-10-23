@@ -438,11 +438,12 @@ class ScenarioChange(BaseModel):
 
 
 class AgentReply(BaseModel):
-    """한 턴의 답을 사람이 읽는 두 칸으로 (ARTEL-927).
+    """한 턴의 답을 사람이 읽는 세 칸으로 (ARTEL-927, 질문 칸은 ARTEL-1116).
 
     한 덩어리 글이던 답에서는 무엇을 했는지와 왜 그랬는지가 섞여, 사용자가 반박하거나
-    결정할 자리가 보이지 않았다. 세 번째 칸인 질문은 [ScenarioAgentResult.questions] 다 —
-    답할 수 있어야 하는 것이라 선택지까지 따로 실린다.
+    결정할 자리가 보이지 않았다. 세 번째 칸인 질문([asks])은 예전에 답과 따로 질문
+    메시지로 나갔다 — 화면이 그것을 모달로 받았다. 이제 대화를 기억하므로(ARTEL-942)
+    답 맨 아래에 함께 싣고, 사용자는 평범한 대화로 답한다.
     """
 
     # 코드가 센 한 줄. 몇 건을 생성·수정·삭제했는지(ARTEL-936) — 무엇이 바뀌었는지는 [changes].
@@ -451,6 +452,9 @@ class AgentReply(BaseModel):
     detail: str = ""
     # 바뀐 시나리오 목록(ARTEL-936). [result] 는 이것을 센 한 줄이다.
     changes: list[ScenarioChange] = Field(default_factory=list)
+    # 사용자가 정할 것(ARTEL-1116). 비어 있으면 물을 것이 없는 턴이다. 선택지는 사용자의
+    # 말로 쓰여 있어, 화면은 누르면 입력 칸에 그 말을 채운다 — 답은 다음 대화로 온다.
+    asks: list[ScenarioQuestion] = Field(default_factory=list)
 
 
 class Ref(BaseModel):
@@ -481,12 +485,7 @@ class ScenarioAgentResult(BaseModel):
     # The answer split for the screen (ARTEL-927). None for a plain reply — a greeting,
     # an off-topic decline, a failure — which stays `message` alone.
     reply: AgentReply | None = None
-    # What the user can decide (ARTEL-487, ARTEL-927). Empty on an ordinary turn.
-    #
-    # Several are allowed: each carries its own id, so the screen shows them as a batch
-    # and an answer comes back naming the one it belongs to.
-    questions: list[ScenarioQuestion] = Field(default_factory=list)
-    # What every `[[tc:N]]`/`[[ts:N]]` marker in `reply` and `questions` points at
+    # What every `[[tc:N]]`/`[[ts:N]]` marker in `reply` (its asks included) points at
     # (ARTEL-931). Only markers that resolved are listed; the rest were removed.
     refs: list[Ref] = Field(default_factory=list)
 

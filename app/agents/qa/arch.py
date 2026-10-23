@@ -412,7 +412,20 @@ from app.llm.models import LLMModel, get_model_spec
 # is the longest a run carries. `write_macro`, `edit_macro` and `register_macro` also refuse a
 # `#id`, `-` or empty `selector`, which goes stale between game launches. The tool set is
 # unchanged; the label moves because what the model reads after every macro call moved.
-QA_ARCH_LABEL = "v26-macro-result-fold"
+#
+# v27 because the agent can now call functions the game registered (ARTEL-1054, contract
+# `.plan/general/2026-10-14-game-functions-wire-contract.md` in the workspace). Two axes,
+# `cheats` and `behaviors`, both `off` by default. With `cheats=on`, `run_cheat` joins the end of
+# the tool set and sends `invoke_cheat`; with `behaviors=on`, `start_behavior`, `stop_behavior` and
+# `extend_behavior` join after it, and a behavior keeps running inside the game while the agent
+# thinks. Either axis also puts the session-open catalog into the first message, the
+# `Cheats now / not now` or `Behaviors now / not now` lines and one line per running behavior into
+# the pulse view, and `used_cheats` or `active_behaviors` onto `report_step`'s STATUS. A run with
+# both axes off has the v26 tool set and the v26 view byte for byte; the default fingerprint moves
+# only because `arch.model_dump()` gained four keys (the v4 note above). The label moves anyway,
+# the v8 argument: the structure now has shapes a run must say it was or was not filed under, and
+# orchestration turns the axes on per run from the build's catalog.
+QA_ARCH_LABEL = "v27-game-functions"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
@@ -473,6 +486,10 @@ MAX_LINKS_PER_RUN = 1_000_000
 MAX_UNLINKS_PER_RUN = 1_000_000
 MAX_EXPANDS_PER_RUN = 1_000_000
 MAX_ISSUES_PER_RUN = 1_000_000
+# `run_cheat` 호출과 `start_behavior`·`stop_behavior`·`extend_behavior` 호출 수(ARTEL-1054).
+# 다른 allowance 와 같은 ceiling 이다. 축이 켜졌을 때만 `tool_call_limit` 에 더한다.
+MAX_CHEATS_PER_RUN = 1_000_000
+MAX_BEHAVIOR_CALLS_PER_RUN = 1_000_000
 
 
 class VisionMode(StrEnum):
@@ -680,6 +697,15 @@ class QaArchSpec(BaseModel):
     # `cache` 를 덜 읽고, 높이면 오래된 block 이 오래 남아 `cache` 에서 읽는 양이 는다. 어느 쪽이
     # 싼지는 재 봐야 해서 실험 축으로 둔다. `0` 은 오래된 block 을 매 호출 `fold` 한다.
     fold_threshold_chars: int = Field(default=DEFAULT_FOLD_THRESHOLD_CHARS, ge=0, le=10_000_000)
+    # 게임이 등록한 cheat 와 behavior (ARTEL-1054). orchestration 이 session open 에 catalog 를
+    # 실을 때만 `on` 으로 보낸다. `off` 면 tool 도, 첫 message 의 catalog 도, view 의 줄도,
+    # `STATUS` 의 두 필드도 없다 — v26 의 run 그대로다.
+    cheats: Literal["off", "on"] = "off"
+    behaviors: Literal["off", "on"] = "off"
+    max_cheats_per_run: int = Field(default=MAX_CHEATS_PER_RUN, ge=0, le=1_000_000)
+    max_behavior_calls_per_run: int = Field(
+        default=MAX_BEHAVIOR_CALLS_PER_RUN, ge=0, le=1_000_000
+    )
     # Compaction rewrites what the model reads once a run grows past a fraction of
     # its context, so a run with it and a run without it are two agents even with
     # the same tools. `None` defers to the deployment's own setting, which is what
@@ -754,6 +780,9 @@ class QaArchSpec(BaseModel):
 # The skill that exists only for the macro tools. Named here, beside the axis that
 # decides whether the run has them.
 MACRO_SKILL = "macro"
+# The skills that exist only for the game function tools (ARTEL-1054).
+CHEATS_SKILL = "cheats"
+BEHAVIORS_SKILL = "behaviors"
 
 
 def withheld_skills(arch: "QaArchSpec | ResolvedArch") -> frozenset[str]:
@@ -763,7 +792,14 @@ def withheld_skills(arch: "QaArchSpec | ResolvedArch") -> frozenset[str]:
     section and `load_skill` — and one of them forgetting would leave a line about
     a tool the run does not have.
     """
-    return frozenset() if arch.macros == "on" else frozenset({MACRO_SKILL})
+    withheld: set[str] = set()
+    if arch.macros != "on":
+        withheld.add(MACRO_SKILL)
+    if arch.cheats != "on":
+        withheld.add(CHEATS_SKILL)
+    if arch.behaviors != "on":
+        withheld.add(BEHAVIORS_SKILL)
+    return frozenset(withheld)
 
 
 DEFAULT_ARCH = QaArchSpec()
@@ -799,6 +835,10 @@ class ResolvedArch(BaseModel):
     verdict_evidence: Literal["off", "on"]
     fold_stale_macro_results: bool
     fold_threshold_chars: int
+    cheats: Literal["off", "on"]
+    behaviors: Literal["off", "on"]
+    max_cheats_per_run: int
+    max_behavior_calls_per_run: int
     compaction: bool
     compaction_trigger_fraction: float
     compaction_keep_messages: int
@@ -832,6 +872,10 @@ class ResolvedArch(BaseModel):
             + self.max_links_per_run
             + self.max_unlinks_per_run
             + self.max_expands_per_run
+            # 축이 꺼진 run 의 상한은 그대로 둔다. 쓸 수 없는 tool 의 몫까지 더하면 아무것도
+            # 안 바뀐 run 의 상한이 움직인다.
+            + (self.max_cheats_per_run if self.cheats == "on" else 0)
+            + (self.max_behavior_calls_per_run if self.behaviors == "on" else 0)
         )
         return base + self.tool_calls_per_step * max(steps, 1)
 

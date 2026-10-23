@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.llm.credentials import LlmKey
 from app.qa.envelope import QaChatTurn
+from app.qa.game_functions import CaseFunctions, GameFunctionEntry
 from app.qa.run_config import RunConfig
 
 
@@ -19,6 +20,9 @@ class QaCaseRef(BaseModel):
     precondition: str | None = None
     test_step: str | None = None
     expected: str = ""
+    # 이 TC 에서 쓸 수 있는 cheat 와 behavior (ARTEL-1054). 없으면 run 이 받은 것 전부다.
+    # run 의 목록을 좁히기만 한다(`app/qa/game_functions.py` 의 `allowed_names`).
+    functions: CaseFunctions | None = None
 
 
 class QaStep(BaseModel):
@@ -108,3 +112,8 @@ class QaSessionRecord(BaseModel):
     # 여기 있는 동안은 세션 TTL 만큼 Redis 에 있고, 세션이 닫히면 기록과 함께 지워진다.
     # `repr` 에서 빼서 기록을 찍는 로그에 key 가 남지 않게 한다.
     llm_key: LlmKey | None = Field(default=None, repr=False)
+    # session open 의 `context.cheats` / `context.behaviors` (ARTEL-1054). orchestration 이 이미
+    # run 의 허용 목록으로 걸러서 보낸다. 런 중에는 바뀌지 않는다 — SDK 가 런 중에 등록한 function
+    # 은 `pulse` 에는 보여도 여기에 없어 tool 이 거절한다.
+    cheats: list[GameFunctionEntry] = Field(default_factory=list)
+    behaviors: list[GameFunctionEntry] = Field(default_factory=list)

@@ -26,11 +26,14 @@ from app.agents.qa.macro.reference import GRAMMAR, NUMBER_EQUALITY
 from app.prompts import load_prompt, resolve_version, roles_in
 from app.qa.pulse import PulseMemory
 from app.qa.scene_context import SceneCapability, SceneContext
-from app.qa.schemas import QaScenario
+from app.qa.schemas import QaScenario, QaStep
 
 PROMPT_AGENT = "qa_planner"
 RULES_ROLE = "rules"
 EVALUATOR_ROLE = "evaluator"
+# FREE 시나리오의 씬 계획과 씬 판정(ARTEL-1149). v3 부터 있다.
+SCENE_RULES_ROLE = "scene_rules"
+SCENE_EVALUATOR_ROLE = "scene_evaluator"
 
 MACRO_GRAMMAR_PLACEHOLDER = "macro_grammar"
 MACRO_GRAMMAR = f"{GRAMMAR}\n\n{NUMBER_EQUALITY}"
@@ -66,11 +69,20 @@ def screen(pulse: PulseMemory) -> str:
     return pulse.render(since=0, advance=False) or "(the game has sent no reading yet)"
 
 
+def step_text(item: QaStep) -> str:
+    """What the step asks a player to do. A FREE step has no `action`; its test case's step is it."""
+    if item.action.strip():
+        return item.action.strip()
+    if item.case and item.case.test_step:
+        return item.case.test_step.strip()
+    return "(no action)"
+
+
 def this_step(scenario: QaScenario, step: int) -> str:
     """The step as JSON: what to do, and for a test case's last step the result to verify."""
     item = scenario.steps[step - 1]
     following = scenario.steps[step].case_id if step < len(scenario.steps) else None
-    shown: dict = {"step": step, "do": item.action.strip() or "(no action)"}
+    shown: dict = {"step": step, "do": step_text(item)}
     if item.hint:
         shown["try"] = item.hint.strip()
     if item.input:
@@ -81,6 +93,34 @@ def this_step(scenario: QaScenario, step: int) -> str:
         if following != item.case_id:
             shown["verify"] = item.case.expected if item.case else ""
     return json.dumps(shown, ensure_ascii=False, indent=2)
+
+
+def case_view(scenario: QaScenario, step: int) -> dict:
+    """One FREE case as the scene planner and the scene evaluator read it."""
+    item = scenario.steps[step - 1]
+    case = item.case
+    shown: dict = {"case_id": item.case_id}
+    if case and case.scene:
+        shown["scene"] = case.scene
+    if case and case.precondition:
+        shown["precondition"] = case.precondition
+    shown["do"] = step_text(item)
+    shown["verify"] = case.expected if case else ""
+    return shown
+
+
+def candidate_list(scenario: QaScenario, steps: list[int]) -> str:
+    """The candidate cases of a scene plan, as JSON."""
+    return json.dumps([case_view(scenario, step) for step in steps], ensure_ascii=False, indent=2)
+
+
+def travel_step(step: int, scene: str) -> str:
+    """A FREE scenario's move to another scene, written as an ordinary step for the rules prompt."""
+    return json.dumps(
+        {"step": step, "do": f"Go to the scene `{scene}`.", "verify": f"The game shows the scene `{scene}`."},
+        ensure_ascii=False,
+        indent=2,
+    )
 
 
 def game_map(context: SceneContext | None) -> str | None:

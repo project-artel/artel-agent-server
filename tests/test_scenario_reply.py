@@ -50,7 +50,7 @@ def test_authoring_reply_splits_result_from_detail(monkeypatch) -> None:
     # 대화 기록용 글은 두 칸을 다 담는다.
     assert out.reply.result in out.message and out.reply.detail in out.message
     assert "- 상점 열기" in out.message  # 대화 기록에도 무엇이 바뀌었는지 남는다
-    assert out.questions == []
+    assert out.reply.asks == []
 
 
 def test_authoring_reply_counts_several_scenarios(monkeypatch) -> None:
@@ -82,16 +82,17 @@ def test_model_questions_become_answerable_questions(monkeypatch) -> None:
     out, channel, _ = _author(monkeypatch, plan, [wf._Writer(steps=[_case_step()])])
 
     assert len(channel.submitted) == 1  # 물으면서도 할 수 있는 것은 저장한다
-    assert [q.text for q in out.questions] == ["구매 실패도 넣을까요?", "상점 닫기도 볼까요?"]
-    first = out.questions[0]
+    assert [q.text for q in out.reply.asks] == ["구매 실패도 넣을까요?", "상점 닫기도 볼까요?"]
+    first = out.reply.asks[0]
     assert first.why == "골드가 모자랄 때 막히는지 따로 봐야 해요."
     assert [o.label for o in first.options] == ["구매 실패도 넣어 줘", "지금처럼 둬"]
     # 답이 어느 질문의 것인지 이으려면 번호가 서로 달라야 한다.
-    ids = [q.id for q in out.questions] + [o.id for q in out.questions for o in q.options]
-    assert all(ids) and len(set(q.id for q in out.questions)) == 2
+    ids = [q.id for q in out.reply.asks] + [o.id for q in out.reply.asks for o in q.options]
+    assert all(ids) and len(set(q.id for q in out.reply.asks)) == 2
     assert len({o.id for o in first.options}) == 2
-    # 대화 기록에도 물은 것이 남는다 — 다음 턴이 "그거"를 풀 수 있어야 한다.
-    assert "구매 실패도 넣을까요?" in out.message
+    # 대화 기록에도 물은 것이 남는다 — 다음 턴이 "그거"를 풀 수 있어야 하고, 같은 것을
+    # 몇 번 물었는지 셀 수 있어야 한다(ARTEL-1116: 두 번까지만 묻는다).
+    assert "질문: 구매 실패도 넣을까요?" in out.message
 
 
 def test_a_question_only_turn_says_nothing_was_saved(monkeypatch) -> None:
@@ -102,7 +103,7 @@ def test_a_question_only_turn_says_nothing_was_saved(monkeypatch) -> None:
 
     assert channel.submitted == [] and not calls["c"]
     assert out.reply is not None and "저장하지 않았" in out.reply.result
-    assert [q.text for q in out.questions] == ["엔딩 전이 보스 포함인가요?"]
+    assert [q.text for q in out.reply.asks] == ["엔딩 전이 보스 포함인가요?"]
     assert "엔딩 전이 보스 포함인가요?" in out.message
 
 
@@ -113,8 +114,8 @@ def test_an_unplaced_case_becomes_a_question_with_choices(monkeypatch) -> None:
     writers = [wf._Writer(steps=[]), wf._Writer(steps=[])]  # 보수까지 빈손
     out, _, _ = _author(monkeypatch, plan, writers)
 
-    assert len(out.questions) == 1
-    asked = out.questions[0]
+    assert len(out.reply.asks) == 1
+    asked = out.reply.asks[0]
     assert "[[tc:1]]" in asked.text  # 맨 번호가 아니라 표식 — 화면이 이름 칩으로 그린다
     assert "1" not in asked.text.replace("[[tc:1]]", "")
     assert len(asked.options) == 2
@@ -132,8 +133,8 @@ def test_a_dropped_scenario_becomes_a_question(monkeypatch) -> None:
     out, _, _ = _author(monkeypatch, plan, writers, channel)
 
     assert "저장한 시나리오가 없" in out.reply.result
-    assert any("**여정**" in q.text for q in out.questions)
-    assert all("검수" not in q.text for q in out.questions)
+    assert any("**여정**" in q.text for q in out.reply.asks)
+    assert all("검수" not in q.text for q in out.reply.asks)
 
 
 # --- 수정 ------------------------------------------------------------------------
@@ -174,10 +175,36 @@ def test_an_unclear_target_asks_with_the_titles_as_choices(monkeypatch) -> None:
 
     assert channel.submitted == []
     assert out.reply is not None and "그대로" in out.reply.result
-    assert len(out.questions) == 1
-    labels = [o.label for o in out.questions[0].options]
+    assert len(out.reply.asks) == 1
+    labels = [o.label for o in out.reply.asks[0].options]
     assert any("상점 여정" in label for label in labels)
     assert any("전투 여정" in label for label in labels)
+
+
+def test_a_bold_scenario_title_becomes_a_ts_link(monkeypatch) -> None:
+    """모델이 제목을 굵게만 쓰면 화면에 누를 곳이 없다 — 이 런의 제목과 같으면 TS 표식으로 바꾼다."""
+    import app.agents.scenario.workflow as wf
+
+    plans = [wf.ModifyPlan(detail="**상점 여정**에는 체력 확인이 없어요. **없는 제목**도 있어요.")]
+    out, _ = _modify(monkeypatch, plans, current=[_current_scenario(7, "상점 여정")])
+
+    assert "[[ts:7]]" in out.reply.detail
+    assert "**없는 제목**" in out.reply.detail
+    assert any(ref.kind == "ts" and ref.id == 7 for ref in out.refs)
+
+
+def test_a_deliberate_hold_does_not_ask_which_scenario(monkeypatch) -> None:
+    """두 번 물었는데 답이 없으면 모델은 고치지 않고 설명만 낸다(ARTEL-1116). 그것을 "대상을 못
+    가렸다" 로 받아 "어느 시나리오를 고칠까요?" 를 다시 물으면 안 된다."""
+    import app.agents.scenario.workflow as wf
+
+    plans = [wf.ModifyPlan(detail="말씀하신 조건을 알려 주시면 그때 고칠게요.")]
+    out, channel = _modify(monkeypatch, plans)
+
+    assert channel.submitted == []
+    assert out.reply is not None and out.reply.asks == []
+    assert "고치지 않았어요" in out.reply.result
+    assert out.reply.detail == "말씀하신 조건을 알려 주시면 그때 고칠게요."
 
 
 def test_a_modify_question_is_relayed_as_a_question(monkeypatch) -> None:
@@ -189,13 +216,14 @@ def test_a_modify_question_is_relayed_as_a_question(monkeypatch) -> None:
     out, channel = _modify(monkeypatch, plans)
 
     assert channel.submitted == []
-    assert [q.text for q in out.questions] == ["따로 시나리오로 만들까요?"]
+    assert [q.text for q in out.reply.asks] == ["따로 시나리오로 만들까요?"]
 
 
 # --- 결과 프레임 ----------------------------------------------------------------
 
 
-def test_the_result_frame_carries_reply_and_questions() -> None:
+def test_the_result_frame_carries_questions_inside_the_reply() -> None:
+    """질문은 답의 세 번째 칸이다(ARTEL-1116) — 따로 된 `questions` 키는 더 없다."""
     from app.agents.scenario.schemas import (
         AgentReply, QuestionOption, ScenarioAgentResult, ScenarioQuestion,
     )
@@ -203,17 +231,17 @@ def test_the_result_frame_carries_reply_and_questions() -> None:
 
     result = ScenarioAgentResult(
         message="저장했어요\n이유",
-        reply=AgentReply(result="저장했어요", detail="이유"),
-        questions=[ScenarioQuestion(
+        reply=AgentReply(result="저장했어요", detail="이유", asks=[ScenarioQuestion(
             id="agent:1", text="넣을까요?",
             options=[QuestionOption(id="o1", label="넣어 줘")],
-        )],
+        )]),
     )
     event = _result_event(result)
 
-    assert event["reply"] == {"result": "저장했어요", "detail": "이유", "changes": []}
-    assert event["questions"][0]["id"] == "agent:1"
-    assert event["questions"][0]["options"][0]["label"] == "넣어 줘"
+    assert "questions" not in event
+    assert event["reply"]["result"] == "저장했어요" and event["reply"]["changes"] == []
+    assert event["reply"]["asks"][0]["id"] == "agent:1"
+    assert event["reply"]["asks"][0]["options"][0]["label"] == "넣어 줘"
 
 
 def test_a_plain_reply_leaves_both_keys_out() -> None:
@@ -252,7 +280,7 @@ def test_workflow_lines_use_the_words_on_screen(monkeypatch) -> None:
 
     def collect(out) -> None:
         said.append(out.message)
-        said.extend(o.label for q in out.questions for o in q.options)
+        said.extend(o.label for q in out.reply.asks for o in q.options)
 
     plan = wf.GroupingPlan(groups=[wf.Group(title="상점 열기", case_ids=[1])])
     collect(_author(monkeypatch, plan, [wf._Writer(steps=[_case_step()])])[0])
@@ -341,7 +369,7 @@ def test_the_unplaced_question_points_with_a_marker(monkeypatch) -> None:
     plan = wf.GroupingPlan(groups=[wf.Group(title="여정", case_ids=[1])])
     out, _, _ = _author(monkeypatch, plan, [wf._Writer(steps=[]), wf._Writer(steps=[])])
 
-    asked = out.questions[0]
+    asked = out.reply.asks[0]
     assert "[[tc:1]]" in asked.text
     assert ("tc", 1) in {(r.kind, r.id) for r in out.refs}
 
@@ -356,7 +384,7 @@ def test_options_never_carry_a_marker(monkeypatch) -> None:
     )
     out, _, _ = _author(monkeypatch, plan, [wf._Writer(steps=[_case_step()])])
 
-    labels = [o.label for o in out.questions[0].options]
+    labels = [o.label for o in out.reply.asks[0].options]
     assert labels[0] == "상점을 연다 따로 만들어 줘"
     assert all("[[" not in label for label in labels)
 

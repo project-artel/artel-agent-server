@@ -78,7 +78,7 @@ def combine(parts: list[tuple[str, "ScenarioAgentResult"]]) -> "ScenarioAgentRes
         messages.append(f"{index}. {part.message}")
         if part.reply is not None:
             changes += part.reply.changes
-        questions += part.questions
+            questions += part.reply.asks
         scenarios += part.scenarios
         for ref in part.refs:
             refs[(ref.kind, ref.id)] = ref
@@ -90,7 +90,6 @@ def combine(parts: list[tuple[str, "ScenarioAgentResult"]]) -> "ScenarioAgentRes
         message="\n\n".join(messages),
         scenarios=scenarios,
         reviewed=ReviewedCases(**{"in": sorted(set(included)), "out": sorted(set(excluded) - set(included))}) if reviewed_any else None,
-        reply=AgentReply(result="\n".join(results), detail="\n\n".join(details), changes=changes),
-        questions=questions,
+        reply=AgentReply(result="\n".join(results), detail="\n\n".join(details), changes=changes, asks=questions),
         refs=list(refs.values()),
     )

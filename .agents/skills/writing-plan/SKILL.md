@@ -48,3 +48,10 @@ After creating the plan file, respond with:
 - **Created file path** (clickable if possible)
 - **3–5 bullet summary** of the plan goal
 - **Open questions** (if any context is missing)
+
+## Project Writing Style
+
+Before writing the result, follow [writing-style.md](../../docs/writing-style.md).
+Use its natural Korean prose and concrete-title rules while preserving required
+templates, paths, metadata, and machine-readable verdicts. Pass the same rules
+to any reviewer subagents invoked by this skill.
