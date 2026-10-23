@@ -131,6 +131,21 @@ def test_a_stored_run_config_arch_replays_as_it_was_stored() -> None:
     assert shown["arch"]["vision"] is True
 
 
+def test_a_null_or_unknown_arch_value_is_refused_with_a_readable_message() -> None:
+    """이 422 의 `detail[].loc/msg` 는 orchestration 을 거쳐 사용자에게 간다 (ARTEL-1236)."""
+    response = client.post("/internal/qa-sessions", json=open_request(arch=None))
+    assert response.status_code == 422
+    [error] = response.json()["detail"]
+    assert error["loc"] == ["body", "arch"]
+    assert "leave the field out for the default structure" in error["msg"]
+
+    response = client.post("/internal/qa-sessions", json=open_request(arch={"vision": "sometimes"}))
+    assert response.status_code == 422
+    [error] = response.json()["detail"]
+    assert error["loc"] == ["body", "arch", "vision"]
+    assert "vision must be 'auto', 'on' or 'off'" in error["msg"]
+
+
 def test_an_out_of_range_knob_is_refused() -> None:
     response = client.post(
         "/internal/qa-sessions",

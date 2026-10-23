@@ -728,6 +728,13 @@ class QaArchSpec(BaseModel):
             return VisionMode.on
         if value is False:
             return VisionMode.off
+        # 이 422 는 orchestration 을 거쳐 `agent_rejected_request` 의 `message` 로 사용자에게 간다.
+        # pydantic 의 기본 문장은 boolean 을 받는다는 것을 말하지 못하므로 여기서 쓴다.
+        if value not in {mode.value for mode in VisionMode} and not isinstance(value, VisionMode):
+            raise ValueError(
+                f"vision must be 'auto', 'on' or 'off' (true and false from a stored "
+                f"run_config are read as 'on' and 'off'), not {value!r}"
+            )
         return value
 
     @model_validator(mode="after")
