@@ -8,6 +8,16 @@ from app.qa.game_functions import CaseFunctions, GameFunctionEntry
 from app.qa.run_config import RunConfig
 
 
+class CaseReview(BaseModel):
+    """사람이 이 TC 의 판정을 정한 기록 한 건 (ARTEL-1257). orchestration 이 최근 몇 건만 넘긴다."""
+
+    ai_passed: bool
+    human_passed: bool
+    note: str | None = None
+    game_build_version: str | None = None
+    decided_at: str | None = None
+
+
 class QaCaseRef(BaseModel):
     """실행 계약에서 스텝에 동봉되는 TC 리졸브(재설계 2026-08-07).
 
@@ -23,6 +33,8 @@ class QaCaseRef(BaseModel):
     # 이 TC 에서 쓸 수 있는 cheat 와 behavior (ARTEL-1054). 없으면 run 이 받은 것 전부다.
     # run 의 목록을 좁히기만 한다(`app/qa/game_functions.py` 의 `allowed_names`).
     functions: CaseFunctions | None = None
+    # 사람이 이 TC 의 판정을 정한 최근 기록 (ARTEL-1257). 없으면 계획 글이 종전과 같다.
+    reviews: list[CaseReview] | None = None
 
 
 class QaStep(BaseModel):
