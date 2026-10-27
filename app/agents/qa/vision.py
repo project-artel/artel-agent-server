@@ -442,7 +442,7 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
             self._last_scene = scene
 
         # `failure` — 실패 판정이 새로 적힌 turn 의 화면. 몇 turn 뒤에 내린다.
-        failures = sum(1 for result in getattr(state, "step_results", []) if not result.passed)
+        failures = sum(1 for result in getattr(state, "case_attempt_results", []) if result.verdict == "FAILED")
         if failures > self._last_failures:
             if current is not None:
                 self._held["failure"] = current

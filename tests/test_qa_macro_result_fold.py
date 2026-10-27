@@ -152,3 +152,31 @@ def test_the_knob_turns_the_fold_kind_on() -> None:
 
     assert FoldKind.macro_result not in fold_kinds_for(off)
     assert FoldKind.macro_result in fold_kinds_for(on)
+
+
+def test_tc_report_folds_the_macro_result_from_that_attempt():
+    messages = [
+        AIMessage(content="", tool_calls=[{"name": "start_test_case", "args": {"case_id": 42}, "id": "start"}]),
+        ToolMessage(content="started", tool_call_id="start"),
+        call("run_macro", "macro", 1),
+        ToolMessage(content=STOPPED_TEXT, tool_call_id="macro", name="run_macro"),
+        AIMessage(content="", tool_calls=[{"name": "report_test_case", "args": {"case_id": 42, "verdict": "FAILED"}, "id": "report"}]),
+        ToolMessage(content="recorded", tool_call_id="report"),
+    ]
+    folded = fold_every_stale_block(messages, [FoldKind.macro_result])
+    assert folded[3].content.startswith("[macro result folded")
+
+
+def test_prior_tc_report_does_not_fold_a_new_attempts_macro_result():
+    messages = [
+        AIMessage(content="", tool_calls=[{"name": "start_test_case", "args": {"case_id": 42}, "id": "start1"}]),
+        ToolMessage(content="started", tool_call_id="start1"),
+        AIMessage(content="", tool_calls=[{"name": "report_test_case", "args": {"case_id": 42, "verdict": "PASSED"}, "id": "report1"}]),
+        ToolMessage(content="recorded", tool_call_id="report1"),
+        AIMessage(content="", tool_calls=[{"name": "start_test_case", "args": {"case_id": 42}, "id": "start2"}]),
+        ToolMessage(content="started", tool_call_id="start2"),
+        call("run_macro", "macro2", 1),
+        ToolMessage(content=STOPPED_TEXT, tool_call_id="macro2", name="run_macro"),
+    ]
+    folded = fold_every_stale_block(messages, [FoldKind.macro_result])
+    assert folded[-1].content == STOPPED_TEXT

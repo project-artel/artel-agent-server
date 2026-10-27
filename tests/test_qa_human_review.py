@@ -26,9 +26,9 @@ def _scenario(mode: str, reviews: list[dict] | None) -> QaScenario:
 
 
 def _items(text: str) -> list[dict]:
-    start = text.index("[\n")
-    end = text.index("\n]", start) + 2
-    return json.loads(text[start:end])
+    start = text.index('{\n')
+    document, _ = json.JSONDecoder().raw_decode(text[start:])
+    return document['test_cases']
 
 
 def test_ordered_plan_carries_the_review_on_the_verification_step() -> None:
@@ -59,3 +59,19 @@ def test_the_switch_leaves_the_plan_as_if_there_were_no_reviews(monkeypatch) -> 
     monkeypatch.setattr(get_settings(), "qa_human_review", False)
     for mode in ("ORDERED", "FREE"):
         assert _plan(_scenario(mode, [REVIEW])) == _plan(_scenario(mode, None))
+
+
+def test_review_keeps_inconclusive_outcome_and_its_original_case_version():
+    snapshot = '{"id":7,"expected":"이전 기대 결과"}'
+    text = _plan(_scenario("FREE", [{
+        "ai_passed": None,
+        "human_passed": False,
+        "note": "실제 실패를 확인함",
+        "case_version_changed": True,
+        "case_snapshot": snapshot,
+    }]))
+    review = _items(text)[0]["human_review"][0]
+    assert review["ai_said"] == "inconclusive"
+    assert review["person_decided"] == "failed"
+    assert review["case_version_changed"] is True
+    assert review["reviewed_case_snapshot"] == snapshot

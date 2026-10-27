@@ -257,7 +257,7 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     # Waiting is the other way a run ends with nothing to show. v2 closed that
     # off in the prompt ("do not wait forever on silence"); v3 dropped the
     # sentence, so the tool has to say the run pays for it.
-    assert "run's clock" in tools["wait_for_operator"].description
+    assert "시간 제한은 없고" in tools["ask_user"].description
 
     # Cross-tool rules have no single owner, so no tool description can carry them.
     assert "VERBATIM" in v3
@@ -325,7 +325,7 @@ def test_the_default_qa_version_is_v21() -> None:
     other file is v24's with only the version line moved, so a run with the axis off reads
     what it read under v24.
     """
-    assert resolve_version("qa_run") == "v25"
+    assert resolve_version("qa_run") == "v26"
 
 
 def test_v25_is_v24_plus_the_verdict_checks_description() -> None:

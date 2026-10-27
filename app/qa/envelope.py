@@ -1416,6 +1416,7 @@ class MacroSearchResultPayload(_MacroSearchPart):
 
 
 class StatusPayload(BaseModel):
+    attempt_id: str | None = None
     status: StepStatus
     # Always present: null for per-step frames, PASSED|FAILED only on the
     # terminal run frame — so Orchestration can read it uniformly.
@@ -1463,7 +1464,7 @@ class StatusPayload(BaseModel):
     @model_serializer(mode="wrap")
     def _drop_unset_function_fields(self, handler):
         data = handler(self)
-        for key in ("used_cheats", "active_behaviors"):
+        for key in ("used_cheats", "active_behaviors", "attempt_id"):
             if data.get(key) is None:
                 data.pop(key, None)
         return data
@@ -1498,11 +1499,8 @@ class IssuePayload(BaseModel):
 
     title: str
     severity: IssueSeverity
-    # Required, unlike the `step` on every other payload here: the agent is always
-    # working on some step when it notices a defect, even when that step passes,
-    # and an issue nobody can place on the timeline is a bug report without a
-    # location.
-    step: int
+    # TC와 무관한 결함은 참고 step 없이도 보고할 수 있다.
+    step: int | None = None
     expected: str
     actual: str
     # Oldest first. What someone else has to do to see this again.
