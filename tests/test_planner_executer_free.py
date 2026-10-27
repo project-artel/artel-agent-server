@@ -171,7 +171,8 @@ def test_each_scene_is_planned_and_judged_once_for_all_its_cases() -> None:
     asked = Raw(_plan([8]), _plan([7], actions=""))
     judge, seen = _judge(_verdicts_of((8, True)), _verdicts_of((7, True)))
 
-    state, failure = _run_free(fake, _free(MAP_CASE, MENU_CASE), asked, judge, FakeJev())
+    # `analysis="off"` keeps the judge count to the two scene judgements; on, the run review asks once more.
+    state, failure = _run_free(fake, _free(MAP_CASE, MENU_CASE), asked, judge, FakeJev(), analysis="off")
 
     assert failure is None and state.finished
     # The game starts on the menu: the menu's case first; play leaves the game on the map, so the
@@ -221,7 +222,7 @@ def test_a_case_the_planner_keeps_for_later_is_reported_unreached_at_the_limits(
     later = {"8": "Start needs 10 coins and the wallet is empty."}
     judge, seen = _judge()
 
-    _run_free(fake, _free(MENU_CASE), Raw(_plan([], later), _plan([], later)), judge, FakeJev())
+    _run_free(fake, _free(MENU_CASE), Raw(_plan([], later), _plan([], later)), judge, FakeJev(), analysis="off")
 
     (verdict,) = _verdicts(fake)
     assert verdict["status"] == "FAILED"

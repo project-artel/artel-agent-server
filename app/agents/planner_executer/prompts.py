@@ -5,6 +5,8 @@
 | rules          | `rules.md`                                              | planner   |
 | macro grammar  | `app/agents/qa/macro/reference.py`, in `rules`          | planner   |
 | evaluator      | `evaluator.md`                                          | evaluator |
+| failure analysis | `failure_analysis.md` (v7+)                           | evaluator |
+| run review     | `run_review.md` (v7+)                                   | evaluator |
 | game map       | `scene_context`: scenes and what the code lets a player do | planner |
 | developer macros | the project's developer macros that parse, with their build | planner |
 | the step       | the scenario's step, the current screen                 | both      |
@@ -34,6 +36,9 @@ EVALUATOR_ROLE = "evaluator"
 # FREE 시나리오의 씬 계획과 씬 판정(ARTEL-1149). v3 부터 있다.
 SCENE_RULES_ROLE = "scene_rules"
 SCENE_EVALUATOR_ROLE = "scene_evaluator"
+# 실패 분석과 런 리뷰(ARTEL-1267). v7 부터 있다. 둘 다 `app/agents/evaluator/` 가 읽는다.
+FAILURE_ANALYSIS_ROLE = "failure_analysis"
+RUN_REVIEW_ROLE = "run_review"
 
 MACRO_GRAMMAR_PLACEHOLDER = "macro_grammar"
 MACRO_GRAMMAR = f"{GRAMMAR}\n\n{NUMBER_EQUALITY}"

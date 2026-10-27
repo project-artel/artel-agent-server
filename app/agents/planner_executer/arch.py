@@ -51,7 +51,16 @@ from pydantic import BaseModel, ConfigDict, Field
 # static 을 처음으로 싣는다. `recent_picks` 에는 action 앞뒤로 바뀐 읽는 값(`changed`)을, turn 기록에는 보낸 state
 # 전체를 남긴다. 이름표는 docstring 첫 줄이 아니라 첫 문장이다. try 193 에서 Jev 는 static 없이, 고정 0 인 11개
 # object 와 줄바꿈에서 잘린 이름표만 받고 시전할 수 있는 턴에 턴 종료를 7번 골랐다.
-PLANNER_EXECUTER_LABEL = "pe6-decision-state"
+#
+# pe7: 판정을 `app/agents/evaluator/` 로 떼고 실패 분석과 런 리뷰를 더했다(ARTEL-1267). 실패로 판정된 step 마다
+# 모델이 원인 분류(`GAME_DEFECT`·`UNREACHED`·`INCONCLUSIVE`·`AGENT_ERROR`)·원인·재현 절차·인사이트를 쓰고, 그것이
+# step `STATUS` 의 `analysis` 로 나간다. 재현 절차는 play 가 보낸 입력의 번호로만 답하게 해 코드가 문장으로 되돌린다.
+# `GAME_DEFECT` 는 `ISSUE` 로도 나간다 — 이 engine 이 `ISSUE` 를 보내는 첫 자리다. 엔진이 스스로 멈춘 step
+# (`PLANNER-REFUSED`·`JEV-ERROR`·`EVALUATOR-ERROR`)과 FREE 의 UNREACHED 는 모델 없이 코드가 채운다. 정상 종료한
+# run 은 종단 `STATUS` 에 런 리뷰(`overview`·`patterns`·`insights`)를 싣고 같은 overview 를 `LOG` 한 줄로 낸다.
+# 판정 prompt 는 그대로다. 모델이 읽는 새 글 둘(`failure_analysis`·`run_review`, prompt v7)과 knob `analysis`
+# 하나가 늘어 fingerprint 도 움직인다. `analysis="off"` 는 pe6 의 frame 과 같다.
+PLANNER_EXECUTER_LABEL = "pe7-evaluator-analysis"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1
@@ -85,6 +94,9 @@ class PlannerExecuterArchSpec(BaseModel):
     # 부르는 object 를 앞에 두고 6000자에서 뒤를 자른 것, `members` 는 Jev 에게 무엇이 필요한지 물어 거른 것이다
     # (`jev_state.py`).
     jev_state: Literal["raw", "members"] = "raw"
+    # 실패한 step 의 분석과 런 끝의 리뷰(ARTEL-1267). `off` 면 둘 다 하지 않고 `STATUS` 에 `analysis` 를
+    # 싣지 않는다 — pe6 의 frame 그대로다. 실패 하나에 모델 호출 하나, run 하나에 하나가 더 든다.
+    analysis: Literal["off", "on"] = "on"
 
 
 def planner_executer_fingerprint(spec: PlannerExecuterArchSpec, functions: tuple[str, ...]) -> str:

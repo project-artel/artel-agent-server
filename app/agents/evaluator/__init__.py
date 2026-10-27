@@ -7,15 +7,32 @@ reads that play and answers for it:
 * `verdict.py` — did the step (or, for a FREE scenario, each case of a scene) pass. The run's
   model judges from the turns played and the screens before and after; the engine's own claim
   that it reached the goal is evidence, not the answer.
-* `report.py` — sends the verdict the way the tool loop's `report_step` does, so Orchestration
-  records every engine's steps in one shape.
+* `analysis.py` — for a step that failed: which kind of failure it was (`GAME_DEFECT`,
+  `UNREACHED`, `INCONCLUSIVE`, `AGENT_ERROR`), the cause, how to see it again from the inputs
+  the play really sent, and what to look at. A step the engine stopped on its own is filled in
+  by code, without a model call.
+* `review.py` — once every step is judged, what the run says about the scenario as a whole:
+  an overview, the patterns across steps, and what to do first.
+* `report.py` — sends the verdict and the analysis the way the tool loop's `report_step` and
+  `report_issue` do, so Orchestration records every engine's steps in one shape.
 
 The engine keeps what it needs to drive itself — whether `done()` held, when to stop, what to
 retry — and this package owns what leaves the process as a judgement. Only the planner–executer
 engine feeds it today; the tool loop's `report_step` still judges for itself.
 """
 
-from app.agents.evaluator.report import report
+from app.agents.evaluator.analysis import (
+    FailureAnalysis,
+    FailureAnalyzer,
+    FailureCategory,
+    FailureReport,
+    analysis_request,
+    engine_error,
+    sent_inputs,
+    unreached,
+)
+from app.agents.evaluator.report import expected_text, report
+from app.agents.evaluator.review import RunReview, RunReviewer, review_request
 from app.agents.evaluator.verdict import (
     ATTEMPTS,
     CASES_PER_JUDGEMENT,
@@ -36,11 +53,23 @@ __all__ = [
     "MAX_TURNS_SHOWN",
     "CaseVerdict",
     "Evaluator",
+    "FailureAnalysis",
+    "FailureAnalyzer",
+    "FailureCategory",
+    "FailureReport",
     "Judge",
+    "RunReview",
+    "RunReviewer",
     "SceneEvaluator",
     "SceneVerdicts",
     "Verdict",
+    "analysis_request",
+    "engine_error",
+    "expected_text",
     "report",
     "request",
+    "review_request",
     "scene_request",
+    "sent_inputs",
+    "unreached",
 ]

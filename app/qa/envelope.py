@@ -93,13 +93,18 @@ class MessageType(StrEnum):
     KNOWLEDGE_UNLINK = "KNOWLEDGE_UNLINK"
     # One defect the run found in the game, filed against this run.
     #
-    # ONE-WAY, like the knowledge writes above: Orchestration's `routeIssue`
-    # answers nothing. Worse, it drops the frame silently when `payload.severity`
-    # is not on its ladder or `payload.title` is blank — the rejection becomes a
-    # row on the operator's timeline, not a reply down this socket. Nothing here
-    # may wait for an answer, and `report_issue` validates severity itself
-    # precisely because a typo would otherwise look like a successful report.
+    # Answered since ARTEL-366: Orchestration's `routeIssue` replies `ISSUE_RESULT` on
+    # success and a correlated `ERROR` on a rejection, the pair the knowledge writes use.
+    # Before that it was one-way, and a blank `payload.title` or a severity off its ladder
+    # dropped the frame in silence — which is why `report_issue` still validates both
+    # itself: a round trip saved on a run that has a clock. Nothing here waits for the
+    # answer; it is received so the frame is not reported back as unsupported.
     ISSUE = "ISSUE"
+    # Orchestration -> Agent. The success reply to `ISSUE` (ARTEL-366), carrying the stored
+    # `issue_id`. Nothing waits on it; it is in this enum so `deliver()` accepts it instead of
+    # answering "unsupported inbound frame", which the far side reads as a protocol fault
+    # (`docs/qa-protocol.md`, 함정 4).
+    ISSUE_RESULT = "ISSUE_RESULT"
     # 이 `scene` 에서 무엇이 `screen` 을 가르는지를 고쳐 쓴다 (ARTEL-657).
     #
     # 철자와 payload 는 orchestration 의 `ScreenSelectorFrames.kt` 와
@@ -1450,11 +1455,17 @@ class StatusPayload(BaseModel):
     # 생기기 전과 같은 key 를 싣는다.
     used_cheats: list[UsedCheat] | None = None
     active_behaviors: list[ActiveBehavior] | None = None
+    # 실패한 step 의 분석(ARTEL-1267): `category`·`cause`·`reproduction`·`actual`·`insight`·
+    # `engine_claimed`, 게임 결함이면 `title`·`severity` 까지. 종단 frame 에서는 런 리뷰
+    # (`overview`·`patterns`·`insights`)다. Evaluator(`app/agents/evaluator/`)가 채우고
+    # orchestration 은 읽지 않고 `qa_log.payload` 에 통째로 저장한다. `None` 이면 key 를
+    # 뺀다 — 분석을 끈 run 과 tool loop 의 `STATUS` 는 이 필드가 생기기 전과 같은 key 를 싣는다.
+    analysis: dict | None = None
 
     @model_serializer(mode="wrap")
     def _drop_unset_function_fields(self, handler):
         data = handler(self)
-        for key in ("used_cheats", "active_behaviors"):
+        for key in ("used_cheats", "active_behaviors", "analysis"):
             if data.get(key) is None:
                 data.pop(key, None)
         return data
@@ -1498,6 +1509,20 @@ class IssuePayload(BaseModel):
     actual: str
     # Oldest first. What someone else has to do to see this again.
     reproduction: list[str] = Field(default_factory=list)
+    # Evaluator 의 실패 분석이 보낸 `ISSUE` 만 채운다(ARTEL-1267): 분류(`GAME_DEFECT`), 원인,
+    # 해결 인사이트. orchestration 은 검사하지 않고 `issue.detail` 에 저장한다. `None` 이면 key 를
+    # 빼서 tool loop 의 `report_issue` 가 보내는 frame 은 그대로다.
+    category: str | None = None
+    cause: str | None = None
+    insight: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _drop_unset_analysis_fields(self, handler):
+        data = handler(self)
+        for key in ("category", "cause", "insight"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
 
 
 class ErrorPayload(BaseModel):

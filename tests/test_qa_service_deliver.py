@@ -171,6 +171,24 @@ def test_an_inbound_error_is_accepted_even_when_it_answers_nothing() -> None:
     asyncio.run(run())
 
 
+def test_an_issue_result_is_accepted_and_waits_for_nothing() -> None:
+    """`ISSUE_RESULT` is Orchestration's reply to an `ISSUE` (ARTEL-366). Nothing here waits on
+    it; it is accepted so the far side is not told its reply was an unsupported frame."""
+
+    async def run() -> None:
+        service, session_id, task = await _running_service()
+        try:
+            handled = service.deliver(
+                session_id,
+                {"type": "ISSUE_RESULT", "correlationId": "m1", "payload": {"type": "ISSUE", "issue_id": "42"}},
+            )
+            assert handled is True
+        finally:
+            task.cancel()
+
+    asyncio.run(run())
+
+
 def test_an_unknown_type_is_still_rejected() -> None:
     async def run() -> None:
         service, session_id, task = await _running_service()
