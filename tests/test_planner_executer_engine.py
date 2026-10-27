@@ -130,7 +130,9 @@ def test_v4_adds_only_the_failure_analysis_and_run_review_prompts() -> None:
     assert analysis.startswith("You analyse ONE failed test step of a game after it was played.")
     for category in ("GAME_DEFECT", "UNREACHED", "INCONCLUSIVE", "AGENT_ERROR"):
         assert f"`{category}`" in analysis
-    assert "Only numbers from the list you were given" in analysis
+    # 재현 절차는 번호에 묶인 문장이고 화면 글자를 그대로 쓴다. 언어는 런마다 채운다.
+    assert "exactly as the input line quotes it" in analysis and "{language_directive}" in analysis
+    assert load_prompt("qa_planner", "failure_analysis", "v4").placeholders == ("language_directive",)
     review = load_prompt("qa_planner", "run_review", "v4").body
     assert review.startswith("You review ONE QA run of a game after every step was judged.")
     assert '"patterns"' in review and '"insights"' in review

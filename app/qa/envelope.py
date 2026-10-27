@@ -1455,11 +1455,13 @@ class StatusPayload(BaseModel):
     # 생기기 전과 같은 key 를 싣는다.
     used_cheats: list[UsedCheat] | None = None
     active_behaviors: list[ActiveBehavior] | None = None
-    # 실패한 step 의 분석(ARTEL-1267): `category`·`cause`·`reproduction`·`actual`·`insight`·
-    # `engine_claimed`, 게임 결함이면 `title`·`severity` 까지. 종단 frame 에서는 런 리뷰
-    # (`overview`·`patterns`·`insights`)다. Evaluator(`app/agents/evaluator/`)가 채우고
-    # orchestration 은 읽지 않고 `qa_log.payload` 에 통째로 저장한다. `None` 이면 key 를
-    # 뺀다 — 분석을 끈 run 과 tool loop 의 `STATUS` 는 이 필드가 생기기 전과 같은 key 를 싣는다.
+    # 실패한 step 의 분석(ARTEL-1267): `category`·`cause`·`reproduction`(한글 문장)·
+    # `reproduction_inputs`(그 근거)·`actual`·`insight`·`engine_claimed`, 게임 결함이면 이슈 초안용
+    # `title`·`severity` 까지. 종단 frame 에서는 런 리뷰(`overview`·`patterns`·`insights`)다.
+    # Evaluator(`app/agents/evaluator/`)가 채우고 orchestration 은 읽지 않고 `qa_log.payload` 에
+    # 통째로 저장한다. 이슈는 agent 가 만들지 않는다 — 사람이 이 판정을 승인할 때 orchestration 이
+    # 이 내용으로 만든다. `None` 이면 key 를 뺀다 — 분석을 끈 run 과 tool loop 의 `STATUS` 는 이
+    # 필드가 생기기 전과 같은 key 를 싣는다.
     analysis: dict | None = None
 
     @model_serializer(mode="wrap")
@@ -1509,20 +1511,6 @@ class IssuePayload(BaseModel):
     actual: str
     # Oldest first. What someone else has to do to see this again.
     reproduction: list[str] = Field(default_factory=list)
-    # Evaluator 의 실패 분석이 보낸 `ISSUE` 만 채운다(ARTEL-1267): 분류(`GAME_DEFECT`), 원인,
-    # 해결 인사이트. orchestration 은 검사하지 않고 `issue.detail` 에 저장한다. `None` 이면 key 를
-    # 빼서 tool loop 의 `report_issue` 가 보내는 frame 은 그대로다.
-    category: str | None = None
-    cause: str | None = None
-    insight: str | None = None
-
-    @model_serializer(mode="wrap")
-    def _drop_unset_analysis_fields(self, handler):
-        data = handler(self)
-        for key in ("category", "cause", "insight"):
-            if data.get(key) is None:
-                data.pop(key, None)
-        return data
 
 
 class ErrorPayload(BaseModel):

@@ -32,8 +32,9 @@ from pydantic import BaseModel, ConfigDict, Field
 #
 # pe3: 판정을 `app/agents/evaluator/` 로 떼고 실패 분석과 런 리뷰를 더했다(ARTEL-1267). 실패로 판정된 step 마다
 # 모델이 원인 분류(`GAME_DEFECT`·`UNREACHED`·`INCONCLUSIVE`·`AGENT_ERROR`)·원인·재현 절차·인사이트를 쓰고, 그것이
-# step `STATUS` 의 `analysis` 로 나간다. 재현 절차는 play 가 보낸 입력의 번호로만 답하게 해 코드가 문장으로 되돌린다.
-# `GAME_DEFECT` 는 `ISSUE` 로도 나간다 — 이 engine 이 `ISSUE` 를 보내는 첫 자리다. 엔진이 스스로 멈춘 step
+# step `STATUS` 의 `analysis` 로 나간다. 재현 절차는 모델이 런의 언어로 쓰되 입력 번호에 묶이고, 코드가 보낸 입력마다
+# 사람이 본 값(씬·화면 글자·키)을 소스로 주어 문장이 그 글자를 담는지 검사한다. `ISSUE` 는 보내지 않는다 — 이슈로
+# 옮길지는 사람이 판정을 승인하며 정한다. 엔진이 스스로 멈춘 step
 # (`PLANNER-REFUSED`·`JEV-ERROR`·`EVALUATOR-ERROR`)과 FREE 의 UNREACHED 는 모델 없이 코드가 채운다. 정상 종료한
 # run 은 종단 `STATUS` 에 런 리뷰(`overview`·`patterns`·`insights`)를 싣고 같은 overview 를 `LOG` 한 줄로 낸다.
 # 판정 prompt 는 그대로다. 모델이 읽는 새 글 둘(`failure_analysis`·`run_review`, prompt v4)과 knob `analysis`

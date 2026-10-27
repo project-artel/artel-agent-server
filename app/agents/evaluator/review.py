@@ -18,7 +18,8 @@ from pydantic import BaseModel, Field
 
 from app.agents.evaluator.analysis import FailureReport
 from app.agents.evaluator.verdict import ATTEMPTS, Judge, read_json
-from app.agents.planner_executer.prompts import RUN_REVIEW_ROLE, prompt_text, step_text
+from app.agents.planner_executer.prompts import LANGUAGE_PLACEHOLDER, RUN_REVIEW_ROLE, prompt_text, step_text
+from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.agents.qa.tools import QaRunState
 from app.llm.chat_model import structured
 from app.qa.channel import QaCancelled
@@ -54,7 +55,11 @@ class RunReviewer:
         """The review, or `None` when two answers could not be read. A run without a review is
         still a run; the terminal `STATUS` then carries no `analysis` and nothing else moves."""
         if self._system is None:
-            self._system = prompt_text(RUN_REVIEW_ROLE, self._config.prompt_version)
+            self._system = prompt_text(
+                RUN_REVIEW_ROLE,
+                self._config.prompt_version,
+                **{LANGUAGE_PLACEHOLDER: LANGUAGE_DIRECTIVES[self._config.language]},
+            )
         user = review_request(scenario, state, reports)
         problem = ""
         for _ in range(ATTEMPTS):

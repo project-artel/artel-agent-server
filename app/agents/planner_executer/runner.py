@@ -32,7 +32,6 @@ from app.agents.evaluator import (
     RunReviewer,
     SceneEvaluator,
     engine_error,
-    expected_text,
     send_verdict,
     unreached as unreached_report,
 )
@@ -173,9 +172,7 @@ class PlannerExecuterRunner:
         """One step's verdict and, for a failed step, its analysis — kept for the run review too."""
         if analysis is not None:
             self._reports[step] = analysis
-        await send_verdict(
-            channel, state, step, passed, message, analysis=analysis, expected=expected_text(scenario, step)
-        )
+        await send_verdict(channel, state, step, passed, message, analysis=analysis)
 
     async def _analyse(
         self, scenario: QaScenario, step: int, play: StepPlay, message: str

@@ -55,8 +55,11 @@ flowchart LR
   재현 절차에 들어갈 수 없음
 - 엔진이 스스로 멈춘 step(`PLANNER-REFUSED` · `JEV-ERROR` · `EVALUATOR-ERROR`)과 FREE 의 UNREACHED 는 모델을
   부르지 않고 코드가 `AGENT_ERROR` · `UNREACHED` 로 채움
-- 나가는 자리는 있는 frame 둘 — step `STATUS` 의 `analysis`, `GAME_DEFECT` 만 `ISSUE`. 새 `MessageType` 은
-  orchestration 이 frame 째 버리므로 만들지 않음. knob 은 `arch.planner.analysis`, `off` 면 pe6 의 frame 그대로
+- 재현 절차는 모델이 런의 언어로 쓰되, 코드가 보낸 입력마다 사람이 본 값(씬·대상의 화면 글자·키)을 소스로 주고
+  문장이 그 글자를 담는지·코드 표기가 없는지 검사함. `reproduction_inputs` 가 그 소스로 함께 실림
+- 나가는 자리는 step `STATUS` 의 `analysis` 하나. `ISSUE` 는 보내지 않음 — 이슈로 옮길지는 사람이 판정을
+  승인하며 정함. 새 `MessageType` 은 orchestration 이 frame 째 버리므로 만들지 않음. knob 은
+  `arch.planner.analysis`, `off` 면 pe2 의 frame 그대로
 
 ### `screen_verdict` 가 QA agent 가 아닌 이유
 

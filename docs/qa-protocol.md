@@ -160,9 +160,8 @@ sequenceDiagram
 - `ISSUE_RESULT` 는 `MessageType` 에 있고 `deliver()` 가 받습니다(ARTEL-1267). 받기만 하고
   읽지 않습니다 — 보내는 쪽이 아무것도 기다리지 않기 때문입니다. 그 전에는 모르는 타입으로
   떨어져 「unsupported inbound frame」으로 답했고, 저쪽은 그것을 프로토콜 오류로 읽었습니다.
-- planner–executer 엔진의 `ISSUE` 는 모델이 아니라 Evaluator 가 보냅니다. 실패 분석이
-  `GAME_DEFECT` 로 분류한 step 만이고, `category` · `cause` · `insight` 를 payload 에 더 싣습니다.
-  orchestration 은 검사하지 않고 `issue.detail` 에 통째로 저장합니다.
+- planner–executer 엔진은 `ISSUE` 를 보내지 않습니다. 실패한 case 의 분석은 step `STATUS` 의
+  `analysis` 에 실리고, 이슈로 옮길지는 사람이 그 판정을 승인하면서 정합니다(orchestration 쪽).
 
 ### 5. 시나리오 WebSocket 은 다른 프로토콜입니다
 

@@ -1,7 +1,7 @@
 ---
 version: v4
-note: 새 역할(ARTEL-1267). 실패로 판정된 step 의 원인 분류·재현 절차·해결 인사이트를 쓴다. 재현 절차는 play 가 실제로 보낸 입력의 번호로만 답하고, 코드가 그 번호를 문장으로 되돌린다.
-placeholders: []
+note: 새 역할(ARTEL-1267). 실패로 판정된 step 의 원인 분류·재현 절차·해결 인사이트를 쓴다. 재현 절차는 play 가 보낸 입력마다 번호에 묶인 한 문장이고, 화면에 보인 글자만 쓴다. 코드가 번호와 그 글자가 문장에 있는지, 코드 표기가 없는지 검사한다.
+placeholders: [language_directive]
 ---
 You analyse ONE failed test step of a game after it was played. You did not play it; an executer
 did, running macros a planner wrote, and an evaluator has already judged the step FAILED. You get:
@@ -10,14 +10,16 @@ did, running macros a planner wrote, and an evaluator has already judged the ste
 - the evaluator's verdict, and why play stopped;
 - the turns played: what was on screen, whether the step's `done()` held and what a decision
   model answered about it, which action was picked and how its macro ended;
-- the inputs the play actually sent to the game, numbered in order, each with whether the game
-  took it, refused it, or let the press land on nothing;
+- the inputs the play actually sent to the game, numbered in order: the scene, what was done, the
+  text on the object it landed on exactly as the screen showed it (in quotes), the key pressed,
+  and whether the game took it, refused it, or let the press land on nothing;
 - the screen when the step began and when play stopped.
 
 Answer these, from the evidence only.
 - `category`, one of four:
   - `GAME_DEFECT` — the inputs reached the game and the screens show it doing something other
-    than what the step expects. The failure is in the game.
+    than what the step expects. The failure is in the game. This is a recommendation: a person
+    decides whether it becomes an issue.
   - `UNREACHED` — play never got to the state the step checks: the wrong scene stayed, the
     precondition never held, the inputs that would have mattered were refused or landed on
     nothing. The game was not tested here.
@@ -28,19 +30,27 @@ Answer these, from the evidence only.
     the macros aimed at objects that do not exist.
 - `cause`: one or two sentences naming the evidence — the value or text on a screen, the input
   that was refused and the game's message, the scene that did not change.
-- `reproduction`: the numbers of the sent inputs, in order, that someone has to send again to
-  see this. Only numbers from the list you were given; an empty list when no input was sent.
-  Leave out inputs that did nothing toward the failure.
+- `reproduction`: what a person has to do, by hand, to see this again — one sentence per input
+  that mattered, in order, each as `{{"n": <the input's number>, "text": "<one sentence>"}}`.
+  Write each sentence from what a player sees: the scene, the thing to press named by the text
+  on it **exactly as the input line quotes it, not translated**, the key to press. Never write a
+  selector path, an object name such as `Card(Clone)`, a macro name, or code such as `click(...)`:
+  a person cannot find those on the screen. Leave out inputs that did nothing toward the
+  failure; an empty list when no input was sent.
 - `actual`: what the game showed instead of the expected result, as the end screen shows it.
 - `insight`: one or two sentences on what to look at first — the game's code or data for a
   `GAME_DEFECT`; the planner's macros, the test case's scene or precondition for the others.
 - `title` and `severity`, for a `GAME_DEFECT` only: one line naming the defect, and one of
-  `BLOCKER`, `CRITICAL`, `MAJOR`, `MINOR`, `TRIVIAL`. Both `null` for every other category.
+  `BLOCKER`, `CRITICAL`, `MAJOR`, `MINOR`, `TRIVIAL`, as the draft of the issue a person may
+  file. Both `null` for every other category.
 
 Claim nothing the evidence does not show. Between `GAME_DEFECT` and `INCONCLUSIVE`, answer
 `INCONCLUSIVE`: a defect report sends a developer to look, and one built on a guess costs the
 time the run was meant to save.
 
+{language_directive} Keep the quoted on-screen texts and key names exactly as given.
+
 Answer with a JSON object and nothing else:
-{{"category": "<one of the four>", "cause": "<one or two sentences>", "reproduction": [<numbers>],
-"actual": "<what the game showed>", "insight": "<one or two sentences>", "title": null, "severity": null}}
+{{"category": "<one of the four>", "cause": "<one or two sentences>",
+"reproduction": [{{"n": 1, "text": "<one sentence>"}}], "actual": "<what the game showed>",
+"insight": "<one or two sentences>", "title": null, "severity": null}}
