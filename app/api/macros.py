@@ -42,6 +42,8 @@ class MacroCheckRequest(BaseModel):
     source: MacroSource
     # `from macros import ...` 가 가리킬 수 있는 같은 프로젝트의 developer macro, 이름 → source.
     imports: dict[MacroName, MacroSource] = Field(default_factory=dict)
+    # 기준 build 의 최근 QA 런 `pulse` 에서 경로(`[n]` 없는 `path`) 마다 live 로 실린 reading 수. 런이 없으면 비어 있다.
+    observed: dict[str, int] = Field(default_factory=dict)
 
 
 class MacroCheckRejection(BaseModel):
@@ -72,7 +74,7 @@ async def macro_grammar() -> MacroGrammarResponse:
 @router.post("/macros/check", response_model=MacroCheckPassed | MacroCheckRefused)
 async def check_macro(payload: MacroCheckRequest) -> MacroCheckPassed | MacroCheckRefused:
     try:
-        definition = check_developer_macro(payload.name, payload.source, payload.imports)
+        definition = check_developer_macro(payload.name, payload.source, payload.imports, payload.observed)
     except MacroRejection as rejection:
         return MacroCheckRefused(
             rejection=MacroCheckRejection(line=rejection.line, reason=rejection.render())

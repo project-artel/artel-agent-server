@@ -2,7 +2,8 @@
 
 from fastapi.testclient import TestClient
 
-from app.agents.qa.macro.reference import GRAMMAR, NUMBER_EQUALITY
+from app.agents.qa.macro.grammar import TOOLS
+from app.developer_macro_grammar import tool_signature
 from app.main import app
 
 client = TestClient(app)
@@ -30,15 +31,51 @@ def _check(name: str, source: str, imports: dict[str, str] | None = None) -> dic
     return response.json()
 
 
-def test_grammar_is_the_qa_grammar_with_developer_rules() -> None:
+def test_grammar_is_written_for_the_developer_with_developer_rules() -> None:
     response = client.get("/internal/macros/grammar")
 
     assert response.status_code == 200
     body = response.json()
-    assert body["grammar"] == GRAMMAR + "\n\n" + NUMBER_EQUALITY
+    grammar = body["grammar"]
+    # 개발자에게 없는 QA agent 도구는 부르지 않는다.
+    for qa_only in (
+        "register_macro",
+        "edit_macro",
+        "write_macro",
+        "run_macro",
+        "resume_macro",
+        "search_macros",
+    ):
+        assert qa_only not in grammar
+    # action 마다 인자 이름·순서·기본값을 적는다.
+    for spec in TOOLS:
+        assert f"`{tool_signature(spec)}`" in grammar
+    assert "drag(from_target: object, to_target: object, button: int = 0)" in grammar
+    # 개발자가 게임 코드를 보고 먼저 묻는 것들.
+    for must_say in (
+        "KeyCode",
+        "LeftShift",
+        "OnMouseDown",
+        "Input.anyKeyDown",
+        "DontDestroyOnLoad",
+        "Sibling indices are optional",
+        "TextMeshPro",
+        "never `find(...)` inline",
+        # 실측(try 180): 글자 자식을 누르면 닿지 않고, 효과 확인이 없으면 통과로 끝난다.
+        "Aim at the object that receives input",
+        "`reached` is null",
+        "with a `wait_until` or `require` on the effect",
+    ):
+        # 글이 80자에서 줄을 바꾸므로 공백을 하나로 접어 찾는다.
+        assert must_say in " ".join(grammar.split())
+    # 예시가 그 두 습관을 따르고, 검사도 통과한다.
+    example = grammar.split("```python\n")[1].split("```")[0]
+    assert "find(label=" not in example
+    assert "wait_until(" in example
+    assert _check("place_spell_card", example)["ok"] is True
     assert body["rules"] and all(isinstance(rule, str) for rule in body["rules"])
     joined = "\n".join(body["rules"])
-    for must_say in ("-> None", "docstring", "from macros import", "#id"):
+    for must_say in ("-> None", "docstring", "from macros import", "#id", "KeyCode"):
         assert must_say in joined
 
 
@@ -191,3 +228,58 @@ def test_an_oversized_name_is_a_malformed_body() -> None:
     )
 
     assert response.status_code == 422
+
+
+def _with_key(statement: str) -> str:
+    return f'''def tap() -> None:
+    """키를 누른다."""
+    {statement}
+'''
+
+
+def test_a_key_code_that_is_not_a_unity_keycode_is_refused_with_a_suggestion() -> None:
+    body = _check("tap", _with_key('hold_key("shift")\n    release_key("LeftShift")'))
+
+    assert body["ok"] is False
+    assert body["rejection"]["line"] == 3
+    assert "KeyCode" in body["rejection"]["reason"]
+    assert 'Write "LeftShift"' in body["rejection"]["reason"]
+
+
+def test_a_key_code_is_read_without_case_and_also_by_keyword() -> None:
+    for statement in (
+        'press_key("space", 0.1)',
+        'press_key(key_code="Return", duration_seconds=0.1)',
+        'press_key("Alpha1", 0.1)',
+    ):
+        assert _check("tap", _with_key(statement))["ok"] is True, statement
+
+    body = _check("tap", _with_key('press_key(key_code="enter", duration_seconds=0.1)'))
+    assert body["ok"] is False
+    assert 'Write "Return"' in body["rejection"]["reason"]
+
+
+def test_a_key_code_passed_as_a_parameter_is_not_checked() -> None:
+    source = '''def tap(key: string) -> None:
+    """받은 키를 누른다."""
+    press_key(key, 0.1)
+'''
+    assert _check("tap", source)["ok"] is True
+
+
+def test_the_check_refuses_a_selector_recent_runs_almost_never_saw_live() -> None:
+    """orchestration 이 그 build 의 최근 QA 런 `pulse` 에서 센 경로를 `observed` 로 싣는다."""
+    source = '''def look() -> None:
+    """Looks at the tutorial line."""
+    if exists(selector("Tutorial/ChatWindow/ChatText")):
+        press_key("Space", 0.1)
+'''
+    response = client.post(
+        "/internal/macros/check",
+        json={"name": "look", "source": source, "observed": {"Tutorial/ChatWindow/Panel/ChatText": 300}},
+    )
+
+    body = response.json()
+    assert body["ok"] is False
+    assert body["rejection"]["line"] == 3
+    assert "`Tutorial/ChatWindow/Panel/ChatText` (300)" in body["rejection"]["reason"]

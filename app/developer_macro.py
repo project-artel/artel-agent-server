@@ -15,15 +15,16 @@ from collections.abc import Mapping
 from app.agents.qa.macro.errors import MacroRejection
 from app.agents.qa.macro.model import MacroDefinition
 from app.agents.qa.macro.parser import imported_names, macro_definition_from_source
-from app.agents.qa.macro.reference import GRAMMAR, NUMBER_EQUALITY
 from app.agents.qa.macro.selector_check import reject_unstable_selectors
+from app.developer_macro_grammar import DEVELOPER_GRAMMAR
+from app.developer_macro_keys import reject_unknown_key_codes
+from app.developer_macro_paths import reject_rarely_shown_selectors
 
 # orchestration `developer_macro.docstring` 의 상한. 검사를 통과한 macro 가 저장할 때
 # 길이로 거절되면 안 되므로 같은 값을 여기서 먼저 건다.
 MAX_DOCSTRING_LENGTH = 2_000
 
-# `reference.GRAMMAR` 는 QA agent 에게 쓴 글이라 `register_macro`·`search_macros` 를
-# 이름으로 부른다. developer macro 를 쓰는 사람에게 다르게 적용되는 것만 여기 덧붙인다.
+# 문법 글(`DEVELOPER_GRAMMAR`) 뒤에 붙는 검사 규칙 요약. MCP 서버가 "developer macro 규칙" 으로 싣는다.
 DEVELOPER_MACRO_RULES = (
     "The entry `def` is named exactly like the macro and declared `-> None`.",
     "The entry `def` opens with a docstring saying what the macro does and when it is "
@@ -33,29 +34,38 @@ DEVELOPER_MACRO_RULES = (
     "related macros together in one call; their order inside it does not matter.",
     'A `selector("...")` must not be a `#id`, `-` or an empty string: a `#id` changes '
     "between game launches, and the other two name nothing.",
-    "Publishing checks the source statically — parsing, the rules above, and imports. It "
-    "does not run the macro in the game, so passing does not mean it works there; a QA "
-    "run finds that out.",
+    "A `key_code` written as a string must be a Unity `KeyCode` name (`LeftShift`, not "
+    "`shift`).",
+    "A `selector(\"...\")` that recent QA runs on the build almost never saw live, while another "
+    "path with the same name under the same root showed up far more, is refused with that path: "
+    "aim at the object the game actually shows, which is not always where a prefab puts it.",
+    "Publishing checks the source statically — parsing, the rules above, imports, and each "
+    "action's argument count, order and type. Apart from the rule above it does not check that "
+    "a selector or a label exists in the build, and it does not run the macro in the game, so "
+    "passing does not mean it works there; a QA run finds that out.",
 )
 
 
 def developer_macro_grammar() -> str:
-    return f"{GRAMMAR}\n\n{NUMBER_EQUALITY}"
+    return DEVELOPER_GRAMMAR
 
 
 def check_developer_macro(
-    name: str, source: str, imports: Mapping[str, str]
+    name: str, source: str, imports: Mapping[str, str], observed: Mapping[str, int] | None = None
 ) -> MacroDefinition:
     """통과하면 정의를, 못 통과하면 `MacroRejection` 을 낸다. 저장하지 않는다.
 
     검사 순서는 tool loop 의 `register_macro` 와 같다 — 파싱, 불안정한 `selector`, entry
-    docstring. docstring 길이 상한(`MAX_DOCSTRING_LENGTH`)만 여기에 더 있다.
+    docstring. docstring 길이 상한(`MAX_DOCSTRING_LENGTH`)과 `KeyCode` 이름 검사만 여기에 더 있다.
 
     가져온 macro 에는 `selector` 와 docstring 검사를 하지 않는다. 이미 publish 된 것이고,
     tool loop 도 저장된 macro 를 읽을 때는 그 두 검사를 끈다.
     """
     definition = _ImportResolver(imports).definition(name, source, ())
     reject_unstable_selectors(source)
+    # `observed` 는 그 build 의 최근 QA 런 `pulse` 에서 경로마다 live 로 실린 reading 수다(`developer_macro_paths`).
+    reject_rarely_shown_selectors(source, observed)
+    reject_unknown_key_codes(source)
     if definition.entry.docstring is None:
         raise MacroRejection(
             f"the entry `def {name}` has no docstring. Add one as the first statement of "
@@ -105,7 +115,8 @@ class _ImportResolver:
             if imported_source is None:
                 raise MacroRejection(
                     f"`{imported}` is imported but this project has no developer macro "
-                    "by that name. Publish it first, or remove it from the import.",
+                    "by that name. Publish it first — sending both in the same "
+                    "`publish_macros` call is enough — or remove it from the import.",
                     line,
                 )
             try:
