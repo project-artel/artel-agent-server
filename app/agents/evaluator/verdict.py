@@ -7,7 +7,7 @@ ended — and the screen when the step began and when play stopped. It answers
 structured-output method per route. An answer that cannot be read is asked for once more; a
 second one fails the step with `EVALUATOR-ERROR`.
 
-Sending the verdict is `report.py`'s job, so a caller can judge without reporting — a probe
+Sending the verdict is `send.py`'s job, so a caller can judge without sending — a probe
 script replaying a saved play does exactly that.
 """
 

@@ -20,7 +20,7 @@ from app.qa.envelope import IssuePayload, MessageType, StatusPayload, StepStatus
 from app.qa.schemas import QaScenario, QaStepResult
 
 
-async def report(
+async def send_verdict(
     channel: QaRunChannel,
     state: QaRunState,
     step: int,
@@ -29,7 +29,7 @@ async def report(
     analysis: FailureReport | None = None,
     expected: str = "",
 ) -> None:
-    """Record and send one step's verdict, with its analysis when the step failed and was analysed.
+    """Send one step's verdict as frames, with its analysis when the step failed and was analysed.
 
     `expected` is the result the step was to verify; it fills the `ISSUE` a `GAME_DEFECT`
     sends, which Orchestration stores whole beside the title.

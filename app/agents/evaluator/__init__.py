@@ -13,8 +13,9 @@ reads that play and answers for it:
   by code, without a model call.
 * `review.py` — once every step is judged, what the run says about the scenario as a whole:
   an overview, the patterns across steps, and what to do first.
-* `report.py` — sends the verdict and the analysis the way the tool loop's `report_step` and
-  `report_issue` do, so Orchestration records every engine's steps in one shape.
+* `send.py` — `send_verdict` puts the verdict and the analysis on the wire as the frames
+  Orchestration already records (`STATUS`, and `ISSUE` for a game defect). It builds frames and
+  sends them; it decides nothing.
 
 The engine keeps what it needs to drive itself — whether `done()` held, when to stop, what to
 retry — and this package owns what leaves the process as a judgement. Only the planner–executer
@@ -31,7 +32,7 @@ from app.agents.evaluator.analysis import (
     sent_inputs,
     unreached,
 )
-from app.agents.evaluator.report import expected_text, report
+from app.agents.evaluator.send import expected_text, send_verdict
 from app.agents.evaluator.review import RunReview, RunReviewer, review_request
 from app.agents.evaluator.verdict import (
     ATTEMPTS,
@@ -66,7 +67,7 @@ __all__ = [
     "analysis_request",
     "engine_error",
     "expected_text",
-    "report",
+    "send_verdict",
     "request",
     "review_request",
     "scene_request",
