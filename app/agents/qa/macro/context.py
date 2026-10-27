@@ -32,6 +32,7 @@ from app.agents.qa.macro.model import (
     MacroNameTarget,
     MacroSelectorTarget,
 )
+from app.qa.pulse import named_values
 
 # object 목록을 따로 적지 않은 `decide`·`ask` 에서 live object 전부가 들어가는 key.
 DEFAULT_OBJECTS_KEY = "objects"
@@ -100,8 +101,11 @@ def _objects_under(
         record = memory.held[key]
         if not record.live:
             continue
-        path = (record.selector or record.path or "").strip("/")
-        if path == root or path.startswith(root + "/"):
+        # 번호 있는 `selector` 와 번호 없는 `path` 어느 쪽으로 적어도 맞춘다(`binding._under` 와 같은 이유).
+        addresses = {
+            address.strip("/") for address in (record.selector, record.path) if address
+        }
+        if any(address == root or address.startswith(root + "/") for address in addresses):
             below.append(render_object(memories, FoundObject(key=key, record=record)))
     return below
 
@@ -129,7 +133,8 @@ def render_object(memories: MacroMemories, found: FoundObject) -> dict[str, Any]
         short = (member.on or "").split(".")[-1]
         # 같은 type 의 component 가 둘이면 짧은 이름이 겹친다. 먼저 들어온 것을 남긴다 —
         # `binding._member_names` 의 짧은 이름 규칙과 같다.
-        members.setdefault(f"{short}.{member.member}", clip_value(member.value))
+        for name, value in named_values(f"{short}.{member.member}", member.value, member.count):
+            members.setdefault(name, clip_value(value))
     rendered: dict[str, Any] = {"path": record.selector or record.path or found.key}
     if record.text is not None:
         rendered["text"] = clip_value(record.text)

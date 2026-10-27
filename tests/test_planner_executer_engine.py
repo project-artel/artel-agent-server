@@ -59,7 +59,7 @@ def test_the_planner_executer_run_is_filed_under_its_own_label_and_digest() -> N
 
     assert config.arch.engine == "planner_executer"
     assert config.arch.planner == PlannerExecuterArchSpec()
-    assert config.agent_arch == PLANNER_EXECUTER_LABEL == "pe2-free"
+    assert config.agent_arch == PLANNER_EXECUTER_LABEL == "pe6-decision-state"
     assert config.agent_fingerprint != agent.agent_fingerprint
     assert config.decision_model == resolve_decision_model()
     assert config.citation_reporting is False and config.compaction_model is None
@@ -80,19 +80,19 @@ def test_a_relabelled_planner_executer_run_keeps_its_digest() -> None:
 def test_the_planner_prompt_is_recorded_with_the_macro_grammar_it_reads() -> None:
     config = resolve_run_config(arch=PLANNER_EXECUTER)
 
-    assert config.prompt_version == "v4"
+    assert config.prompt_version == "v6"
     assert set(config.prompt_hashes) == {"rules", "evaluator", "scene_rules", "scene_evaluator", "macro_grammar"}
     locked = read_lock()["prompts"]
     for role in ("rules", "evaluator", "scene_rules", "scene_evaluator"):
-        assert locked[f"qa_planner/v4/{role}"] == config.prompt_hashes[role]
+        assert locked[f"qa_planner/v6/{role}"] == config.prompt_hashes[role]
     assert config.prompt_hashes["macro_grammar"] == hashlib.sha256(MACRO_GRAMMAR.encode()).hexdigest()
 
 
 def test_the_planner_defaults_to_the_newest_prompt_and_v1_can_still_be_pinned() -> None:
     """`qa_planner` has no `*_PROMPT_VERSION` setting, so the newest version is the default. The
     tool loop's `qa_run` default is not moved by it."""
-    assert available_versions("qa_planner") == ("v1", "v2", "v3", "v4")
-    assert resolve_version("qa_planner") == "v4"
+    assert available_versions("qa_planner") == ("v1", "v2", "v3", "v4", "v5", "v6")
+    assert resolve_version("qa_planner") == "v6"
     assert resolve_run_config().prompt_version == resolve_version("qa_run")
 
     pinned = resolve_run_config(arch=PLANNER_EXECUTER, prompt_version="v1")
@@ -130,6 +130,25 @@ def test_v4_adds_only_the_rule_to_clear_what_blocks_input_first() -> None:
         assert v4.replace(added, "") == v3
     for role in ("evaluator", "scene_evaluator"):
         assert load_prompt("qa_planner", role, "v4").body == load_prompt("qa_planner", role, "v3").body
+
+
+def test_v5_tells_the_planner_how_the_decision_model_reads_its_actions() -> None:
+    # 로컬 try 184: `end_turn` docstring 의 "GameClearScene" 에 끌려 공격 없이 턴 종료만 골랐다.
+    for role in ("rules", "scene_rules"):
+        v5 = load_prompt("qa_planner", role, "v5").body
+        assert "reads only the FIRST LINE" in v5
+        assert "def can_<action>() -> bool" in v5
+        assert "# VERB OBJECT" in v5
+    for role in ("evaluator", "scene_evaluator"):
+        assert load_prompt("qa_planner", role, "v5").body == load_prompt("qa_planner", role, "v4").body
+
+
+def test_v6_adds_the_features_the_decision_model_reads() -> None:
+    for role in ("rules", "scene_rules"):
+        v6 = load_prompt("qa_planner", role, "v6").body
+        assert "def feature_<name>() -> bool" in v6 and "feature_" not in load_prompt("qa_planner", role, "v5").body
+    for role in ("evaluator", "scene_evaluator"):
+        assert load_prompt("qa_planner", role, "v6").body == load_prompt("qa_planner", role, "v5").body
 
 
 def test_the_service_builds_the_runner_the_engine_names() -> None:

@@ -43,6 +43,9 @@ SCREEN_UNCHANGED = "SCREEN_UNCHANGED"
 # macro 가 도는 동안 operator 가 말을 걸었다. 게임의 잘못도 macro 의 잘못도 아니라
 # 둘 중 어느 코드로도 낼 수 없다. step 을 실패로 적지 않는다.
 OPERATOR_INTERRUPTED = "OPERATOR_INTERRUPTED"
+# 누름이 겨눈 것에 닿기 전에 처리기 없는 화면 위 판에서 끝났다 — 대사창 뒤의 입력 차단 판 같은 것. macro 가 도는
+# 사이 게임이 무언가를 띄운 것이라 macro 의 잘못이 아니다. 뒤의 statement 는 보내지 않는다(로컬 try 187).
+INPUT_BLOCKED = "INPUT_BLOCKED"
 # 반복이 상한에 닿았다 — `while` 의 조건이 50 회째에도 참이었거나, `for` 가 돌 것이
 # 50 개를 넘었거나, macro 가 실행한 statement 가 1000 개를 넘었다. `REQUIRE_FAILED` 와
 # 가른다. 그쪽은 저자가 적은 조건이 거짓이었다는 말이고, 이쪽은 저자가 기다린 변화가

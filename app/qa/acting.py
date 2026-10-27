@@ -68,3 +68,5 @@ class ActionOutcome:
     # 이 batch 가 도는 동안 operator 가 한 말. `text` 끝에도 같은 말이 붙어 있다 —
     # 여기 따로 드는 것은 runner 가 문장을 안 읽고 "말이 왔다" 를 알기 위해서다.
     operator_messages: tuple[str, ...] = ()
+    # 누름을 처리기 없이 삼킨 화면 위 그래픽의 경로(SDK 의 `blockedBy`). 비어 있으면 가려진 누름이 없다.
+    blocked_by: tuple[str, ...] = ()

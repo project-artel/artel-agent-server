@@ -120,11 +120,16 @@ def travel_goal(scene: str) -> str:
     "Go to the scene X." 한 줄이면 Jev 는 X 로 바로 가는 action 만 목표에 맞는다고 본다. 로컬 FREE 런에서
     Map_scene 에서 GameClearScene 으로 가는 이동이 대사 넘기기·전투 입장 action 을 두고도 세 턴 모두
     `none_fits` 로 끝났다(try 168·169). 중간 씬을 거치는 것과 앞을 막는 것을 치우는 것도 진행이라고 적는다.
+
+    끝내야 떠나는 씬(전투)에서는 그것을 끝내는 action 이 진행이라고도 적는다. "한 씬 가까워지면 진행" 만 있을 때
+    try 193 의 GameClearScene 이동에서 Jev 는 매번 성공하는 턴 종료를 시전 없이 7번 골랐다.
     """
     return (
         f"Go to the scene `{scene}`. It may take several scenes on the way: an action that brings the game "
         f"one scene closer to `{scene}`, or that clears what blocks input on the way (a dialogue waiting for "
-        "a key, a tutorial, a confirmation), is progress toward it."
+        "a key, a tutorial, a confirmation), is progress toward it. A scene that is left by finishing what it "
+        "asks for — a battle by winning it, a puzzle by solving it — is crossed by the actions that finish it; "
+        "an action that only passes the time there is not progress."
     )
 
 

@@ -82,6 +82,24 @@ MAX_NAMED_OFF = 12
 # 늘 뿐이지만, 게임 상태 값을 숨기면 verdict 가 틀린다.
 COSMETIC_BELOW = 0.3
 
+# SDK 는 목록·배열 member 를 원소 없이 개수만 싣는다(`{"member": "myCards", "count": 6}`, `value` 없음).
+# 그 개수는 `<이름>.Count` 로 읽는다 — 게임 코드가 쓰는 글자가 그것이라 개발자도 planner 도 그렇게 적는다.
+# 이것이 없을 때 개수는 memory 에 들어와 있으면서 어디에도 안 나갔다: 화면에는 `myCards = None` 이 그려지고,
+# Jev 는 `null` 을 받고, `member(..., "CardManager.myCards.Count")` 는 거절됐다.
+COUNT_SUFFIX = ".Count"
+# 배열은 C# 에서 `.Length` 로 센다. 읽기에서만 받는다 — 화면에는 한 이름(`.Count`)만 그린다.
+LENGTH_SUFFIX = ".Length"
+
+
+def named_values(name: str, value: Any, count: int | None) -> list[tuple[str, Any]]:
+    """member·static 하나가 내보내는 `(이름, 값)`. 개수만 실린 것은 `<이름>.Count` 하나다."""
+    if count is None:
+        return [(name, value)]
+    if value is None:
+        return [(name + COUNT_SUFFIX, count)]
+    return [(name, value), (name + COUNT_SUFFIX, count)]
+
+
 # `LiveState` 가 member key 앞에 붙이는 `among` 접두사. ordinal 0 은 없고 그 외에는 `2#` 꼴이다.
 _AMONG_PREFIX = re.compile(r"^\d+#")
 
@@ -124,6 +142,8 @@ class PulseMember(BaseModel):
     # it the second overwrites the first.
     among: int | None = None
     value: Any = None
+    # 목록·배열이면 SDK 가 원소 대신 싣는 개수(`COUNT_SUFFIX`).
+    count: int | None = None
     # False when the reading read it because it could, rather than because the
     # evidence named it. The distinction is the whole point of carrying it: a
     # condition written against a named member means more than one that happens
@@ -153,6 +173,8 @@ class PulseStatic(BaseModel):
     member: str | None = None
     type: str | None = None
     value: Any = None
+    # 목록·배열이면 SDK 가 원소 대신 싣는 개수(`COUNT_SUFFIX`).
+    count: int | None = None
 
     @property
     def key(self) -> str:
@@ -856,7 +878,8 @@ class PulseMemory(BaseModel):
                 # 마지막으로 본 뒤 바뀐 것만 표시한다. 전부 그리면서 표시까지 없으면 읽는 쪽이
                 # 무엇이 소식인지 스스로 찾아야 하고, 그것이 창이 하라고 있는 일이다.
                 news = "  (changed)" if self.static_at.get(key, 0) > news_since else ""
-                lines.append(f"  {name} = {entry.value!r}{news}{self._moved(key)}")
+                for shown, value in named_values(name, entry.value, entry.count):
+                    lines.append(f"  {shown} = {value!r}{news}{self._moved(key)}")
         if hidden_statics:
             names = ", ".join(self._static_name(self.statics[key]) for key in hidden_statics)
             lines.append(
@@ -938,7 +961,8 @@ class PulseMemory(BaseModel):
                 # 창 밖에서 변한 값은 표를 단다. 창의 뜻이 "이 행위가 만든 것" 이므로, 옛
                 # 값을 표 없이 섞으면 읽는 쪽이 그것을 방금 일어난 일로 읽는다.
                 earlier = "  (changed earlier)" if member_key in owed else ""
-                lines.append(f"  {name} = {member.value!r}{asked}{news}{earlier}{moved}")
+                for shown, value in named_values(name, member.value, member.count):
+                    lines.append(f"  {shown} = {value!r}{asked}{news}{earlier}{moved}")
                 if advance:
                     obj.shown[member_key] = self.clock()
 
@@ -983,8 +1007,9 @@ class PulseMemory(BaseModel):
             )
 
         lines = [
-            f"static {self._static_name(entry)} = {entry.value!r}  (judged cosmetic)"
+            f"static {shown} = {value!r}  (judged cosmetic)"
             for entry in statics
+            for shown, value in named_values(self._static_name(entry), entry.value, entry.count)
         ]
         for key, obj in hits[:MAX_INSPECTED]:
             where = obj.selector or obj.path or key
@@ -1004,7 +1029,8 @@ class PulseMemory(BaseModel):
                 name = f"{(member.on or '').split('.')[-1]}.{member.member}"
                 asked = "" if member.asked is not False else " (unasked)"
                 judged = "  (judged cosmetic)" if self.is_cosmetic(member.type_key) else ""
-                lines.append(f"  {name} = {member.value!r}{asked}{judged}")
+                for shown, value in named_values(name, member.value, member.count):
+                    lines.append(f"  {shown} = {value!r}{asked}{judged}")
         if len(hits) > MAX_INSPECTED:
             # 잘랐다는 것을 말한다. 조용히 자르면 독자가 이것을 전부로 읽는다.
             lines.append(f"({len(hits) - MAX_INSPECTED} more objects match; name one more exactly)")

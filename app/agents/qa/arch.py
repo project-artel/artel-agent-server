@@ -425,7 +425,13 @@ from app.llm.models import LLMModel, get_model_spec
 # only because `arch.model_dump()` gained four keys (the v4 note above). The label moves anyway,
 # the v8 argument: the structure now has shapes a run must say it was or was not filed under, and
 # orchestration turns the axes on per run from the build's catalog.
-QA_ARCH_LABEL = "v27-game-functions"
+#
+# v28 because the pulse view now shows a collection's count. The SDK sends a list or array member
+# as its count alone (`{"member": "myCards", "count": 6}`, no `value`), and the view printed it as
+# `CardManager.myCards = None`; `PulseMemory.render` and `inspect_object` now print
+# `CardManager.myCards.Count = 6`, the name `member(...)` and `static(...)` read it by. Replaying
+# local try 192 found 827 such counts reaching no reader.
+QA_ARCH_LABEL = "v28-collection-counts"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

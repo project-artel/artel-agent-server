@@ -13,7 +13,8 @@ UNSTABLE_SELECTOR_REASON = (
     "a `#id` changes between game launches, and `-` or an empty string names nothing, so a "
     "stored macro that aims with one fails on the next run. Aim with "
     "`find(label=..., name=...)` or a hierarchy path such as "
-    'selector("Root[0]/Canvas[1]/Button[2]").'
+    'selector("Canvas/StartButton"); sibling indices such as '
+    '"Canvas[1]/StartButton[2]" are optional.'
 )
 
 

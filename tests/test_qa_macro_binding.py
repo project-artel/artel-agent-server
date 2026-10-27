@@ -203,6 +203,21 @@ def test_under_narrows_by_prefix_with_or_without_the_scene_name() -> None:
         assert found.record.selector == "Root[0]/Hand[2]/Card(Clone)[3]"
 
 
+def test_under_also_takes_the_path_without_indices() -> None:
+    """`selector("Root/Hand")` 가 `path` 로 맞으므로 `under=` 도 번호 없는 `path` 를 받는다."""
+    held = memories(
+        {**card("Root[0]/Hand[2]/Card(Clone)[3]", text="shoot"), "path": "Root/Hand/Card(Clone)"},
+        {**card("Root[0]/Deck[5]/Card(Clone)[6]", text="shoot"), "path": "Root/Deck/Card(Clone)"},
+    )
+
+    found = resolve_find(held, MacroScope(), find(label="shoot", under="Root/Hand"))
+
+    assert found.record.selector == "Root[0]/Hand[2]/Card(Clone)[3]"
+    # 번호 없는 prefix 도 마디 경계에서 끊는다.
+    with pytest.raises(MacroFailure):
+        resolve_find(held, MacroScope(), find(label="shoot", under="Root/Ha"))
+
+
 def test_under_stops_at_a_segment_boundary() -> None:
     """글자 prefix 로만 보면 범위 제한이 조용히 없는 것이 된다.
 
@@ -338,6 +353,24 @@ def test_static_reads_a_latching_flag_by_the_name_the_view_prints() -> None:
     with pytest.raises(MacroFailure) as failed:
         read(held, MacroScope(), reader("static", key="Nothing.Here"))
     assert failed.value.code == ACTION_REJECTED
+
+
+def test_a_collection_the_sdk_sends_as_a_count_reads_as_count_and_length() -> None:
+    """SDK 는 목록을 원소 없이 `count` 로만 싣는다. 그 개수를 읽을 이름이 없으면 손패 수를 묻는 macro 가 거절된다."""
+    held = memories(
+        card(
+            "CardManager[0]",
+            members=[{"on": "Battle.CardManager", "member": "myCards", "count": 6}],
+        ),
+        statics=[{"declaring": "Battle.Deck", "member": "Pile", "count": 30}],
+    )
+    scope = MacroScope()
+    target = MacroSelectorTarget(selector="CardManager[0]")
+
+    assert read(held, scope, reader("member", target, "CardManager.myCards.Count")) == 6
+    assert read(held, scope, reader("member", target, "CardManager.myCards.Length")) == 6
+    assert read(held, scope, reader("member", target, "myCards.Count")) == 6
+    assert read(held, scope, reader("static", key="Deck.Pile.Count")) == 30
 
 
 def test_observable_says_why_it_answers_nothing_on_a_default_build() -> None:

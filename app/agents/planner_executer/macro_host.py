@@ -53,7 +53,7 @@ class ChannelMacroHost:
     operator_messages: list[str] = field(default_factory=list)
 
     async def run(self, actions: list[JsonRpcAction], summary: str, step: int) -> ActionOutcome:
-        record: dict[str, Any] = {"summary": summary, "ok": False, "error": None, "reached": None}
+        record: dict[str, Any] = {"summary": summary, "ok": False, "error": None, "reached": None, "blocked": None}
         self.sent.append(record)
         result, looked = await self.channel.act_and_look(actions, summary, step)
         self._drain_operator()
@@ -74,6 +74,9 @@ class ChannelMacroHost:
         record["reached"] = next(
             (value["reached"] or "nothing" for value in returned if _is_press(value)), None
         )
+        record["blocked"] = next(
+            (value["blockedBy"] for value in returned if _is_press(value) and value.get("blockedBy")), None
+        )
         if looked:
             screen = ScreenChange.moved
         elif self.channel.scene.pulse.seen:
@@ -84,6 +87,9 @@ class ChannelMacroHost:
             text=f"{summary}: " + (f"FAILED — {record['error']}" if failures else "ok"),
             screen=screen,
             landings=tuple(_press_landing(value) for value in returned if _is_press(value)),
+            blocked_by=tuple(
+                value["blockedBy"] for value in returned if _is_press(value) and value.get("blockedBy")
+            ),
         )
 
     def memories(self) -> MacroMemories:

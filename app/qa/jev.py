@@ -49,6 +49,9 @@ class JevRequest(BaseModel):
 
 class JevChoiceAnswer(BaseModel):
     choice: str
+    # 선택지마다의 확률과 그 선택의 확신. Jev 가 함께 돌려준다(JEV-Star 의 `answer.confidence`).
+    probabilities: dict[str, float] | None = None
+    confidence: float | None = None
 
 
 class JevNoulAnswer(BaseModel):
@@ -69,6 +72,14 @@ class JevNoulResponse(BaseModel):
     usage: JevUsage | None = None
 
 
+class JevChoice(BaseModel):
+    """`choose_scored` 의 답: 고른 것, 선택지마다의 확률, 그 선택의 확신."""
+
+    choice: str
+    probabilities: dict[str, float] = Field(default_factory=dict)
+    confidence: float | None = None
+
+
 class JevClient:
     def __init__(self, post: Callable[[dict], Awaitable[dict]] | None = None) -> None:
         self._post_call = post or self._post
@@ -77,6 +88,11 @@ class JevClient:
     async def choose(
         self, instructions: str, options: dict[str, str], state: dict[str, Any]
     ) -> str:
+        return (await self.choose_scored(instructions, options, state)).choice
+
+    async def choose_scored(
+        self, instructions: str, options: dict[str, str], state: dict[str, Any]
+    ) -> JevChoice:
         request = JevRequest(
             state=state,
             questions={
@@ -92,13 +108,17 @@ class JevClient:
         response = await self._send(request)
         try:
             answer = JevChoiceResponse.model_validate(response)
-            choice = answer.answers["answer"].choice
+            picked = answer.answers["answer"]
         except (ValidationError, KeyError) as error:
             raise JevError("Jev choice response is missing a valid answers.answer.choice.") from error
-        if choice not in options:
-            raise JevError(f"Jev chose an unknown option: {choice!r}.")
+        if picked.choice not in options:
+            raise JevError(f"Jev chose an unknown option: {picked.choice!r}.")
         self._log_cost(answer.usage)
-        return choice
+        return JevChoice(
+            choice=picked.choice,
+            probabilities={key: value for key, value in (picked.probabilities or {}).items() if key in options},
+            confidence=picked.confidence,
+        )
 
     async def probability(
         self, instructions: str, state: dict[str, Any], true_means: str, false_means: str
@@ -120,6 +140,26 @@ class JevClient:
             raise JevError("Jev noul response is missing a valid probability in [0, 1].") from error
         self._log_cost(answer.usage)
         return probability
+
+    async def probabilities(
+        self, instructions: dict[str, str], state: dict[str, Any], true_means: str, false_means: str
+    ) -> dict[str, float]:
+        """같은 `state` 와 기준으로 여러 noul 질문을 한 요청에 묻는다. key 는 `instructions` 의 key 다."""
+        request = JevRequest(
+            state=state,
+            questions={
+                key: JevNoulQuestion(instructions=text, criteria={"true": true_means, "false": false_means})
+                for key, text in instructions.items()
+            },
+        )
+        response = await self._send(request)
+        try:
+            answer = JevNoulResponse.model_validate(response)
+            probabilities = {key: answer.answers[key].noul for key in instructions}
+        except (ValidationError, KeyError) as error:
+            raise JevError("Jev noul response is missing a valid probability for every question.") from error
+        self._log_cost(answer.usage)
+        return probabilities
 
     async def aclose(self) -> None:
         if self._http is not None:

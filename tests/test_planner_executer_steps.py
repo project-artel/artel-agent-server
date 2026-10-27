@@ -16,6 +16,7 @@ from app.agents.planner_executer.evaluator import Evaluator, request
 from app.agents.planner_executer.executer import Executer, StepPlay
 from app.agents.planner_executer.macros import RegisteredMacros, parse_step
 from app.agents.planner_executer.planner import Planner
+from app.agents.qa.macro.errors import MacroRejection
 from app.agents.planner_executer.runner import PlannerExecuterRunner
 from app.agents.qa.arch import QaArchSpec
 from app.qa.jev import JevClient
@@ -237,15 +238,18 @@ def test_jev_picks_an_action_and_confirms_the_goal_before_play_stops() -> None:
     assert play.stopped == "done"
     (pick,) = jev.asked("choice")
     question = pick["questions"]["answer"]
-    assert question["instructions"] == (
-        "Which of these should the player do now to progress this step? The step: Press Start."
-    )
+    assert question["instructions"] == f"{executer_module.PICK_QUESTION} The step: Press Start."
+    # Jev 는 docstring 의 첫 줄만 읽는다. 기다림은 마지막이라고 적힌 선택지다.
     assert question["criteria"] == {
         "press_start": {"what": "Press Start on the title screen. The right move while the menu shows Start."},
         "look_around": {"what": "Wait for the screen to settle. The right move while nothing can be pressed yet."},
-        "none_fits": {"what": "None of the other options fits the current state."},
+        "none_fits": {"what": executer_module.WAIT_DESCRIPTION},
     }
-    assert pick["state"] == {"scene": "Menu", "objects": [{"path": "Root/Start", "text": "Start", "members": {}}]}
+    assert pick["state"] == {
+        "scene": "Menu",
+        "objects": [{"path": "Root/Start", "text": "Start", "members": {}}],
+        "recent_picks": [],
+    }
     (goal,) = jev.asked("noul")
     assert goal["questions"]["answer"]["instructions"] == "Has this step's goal been reached? The step: Press Start."
     assert goal["state"]["scene"] == "Map"
@@ -325,7 +329,9 @@ def test_play_stops_when_every_action_failed_without_sending() -> None:
         fake, FakeJev(picks=("press_start", "look_around", "press_start", "look_around")), max_failures_in_a_row=10
     )
 
-    assert play.stopped == "every action kept failing or ran out of picks here: look_around, press_start"
+    assert play.stopped == (
+        "every action kept failing, left the screen as it was, or ran out of picks here: look_around, press_start"
+    )
     assert play.turns[-1]["dropped"] == ["look_around", "press_start"]
 
 
@@ -342,7 +348,96 @@ def test_an_action_that_sends_and_keeps_failing_is_dropped_after_three() -> None
     picks = [(turn["picked"], turn["outcome"]) for turn in play.turns[:6]]
     assert picks.count(("press_start", "failed")) == 3
     assert play.turns[0]["sent"]  # 보낸 실패다
-    assert play.turns[6]["dropped"] == ["press_start"]
+    # 입력 없이 통과하는 `look_around` 도 세 번이면 빠진다(try 191).
+    assert play.turns[6]["dropped"] == ["look_around", "press_start"]
+
+
+def test_a_click_whose_aim_the_game_refused_counts_as_sending_nothing() -> None:
+    """SDK 는 조준이 거절되면 누름을 돌리지 않는다. 그런 실패는 두 번이면 뺀다(로컬 try 176 의 skip_tutorial)."""
+    fake = FakeGame("Menu", {"Root/Start": {"text": "Start"}})
+    fake.refuse.add(("move_mouse", "Root/Start"))
+
+    play = _play(fake, FakeJev(picks=("press_start", "press_start", "look_around")), max_turns_per_step=3, max_failures_in_a_row=5)
+
+    assert [turn["outcome"] for turn in play.turns[:2]] == ["failed", "failed"]
+    assert play.turns[0]["sent"]  # 묶음은 보냈다. 게임이 받지 않았다
+    assert play.turns[2]["dropped"] == ["press_start"]
+
+
+NUDGE = '''def nudge() -> None:
+    """Press the right arrow to move on the map."""
+    press_key("RightArrow")
+
+
+def look_around() -> None:
+    """Wait for the screen to settle."""
+    wait_until(scene() == "Menu", 1, "Not on the menu.")
+
+
+def done() -> bool:
+    return scene() == "Map"
+'''
+
+
+def test_an_action_that_passes_but_leaves_the_screen_as_it_was_is_dropped_after_three() -> None:
+    """키를 보내고 통과했는데 화면이 그대로인 action 은 같은 씬에서 세 번 연달아면 뺀다(로컬 try 172 의 move_on_map)."""
+    fake = FakeGame("Menu", {"Root/Start": {"text": "Start"}})  # 방향키에 반응하는 것이 없다
+
+    play = _play(fake, FakeJev(picks=("nudge",)), source=NUDGE, max_turns_per_step=5)
+
+    assert [(turn["picked"], turn["outcome"], turn.get("unchanged")) for turn in play.turns[:3]] == [
+        ("nudge", "passed", True)
+    ] * 3
+    assert play.turns[3]["dropped"] == ["nudge"]
+    assert play.turns[3]["options"] == ["look_around"]
+
+
+def test_an_action_that_changes_the_screen_is_not_counted_as_unchanged() -> None:
+    fake = FakeGame("Menu", {"Root/Count": {"text": "0"}})
+
+    def count(game: FakeGame) -> None:
+        game.objects["Root/Count"]["text"] = str(int(game.objects["Root/Count"]["text"]) + 1)
+
+    fake.reactions[("key_click", "RightArrow")] = count
+
+    play = _play(fake, FakeJev(picks=("nudge",)), source=NUDGE, max_turns_per_step=5)
+
+    assert [turn.get("unchanged") for turn in play.turns] == [None] * 5
+    assert "dropped" not in play.turns[-1]
+
+
+PRESS_LABEL = '''def press_label() -> None:
+    """Press the Start label."""
+    label: object = selector("Root/Start/Label")
+    click(label)
+
+
+def look_around() -> None:
+    """Wait for the screen to settle."""
+    wait_until(scene() == "Menu", 1, "Not on the menu.")
+
+
+def done() -> bool:
+    return scene() == "Map"
+'''
+
+
+def test_an_action_whose_presses_reach_nothing_is_dropped_after_three_even_while_the_screen_moves() -> None:
+    """전투처럼 화면이 늘 움직여도, 누름이 매번 빈 자리에 떨어진 action 은 뺀다(로컬 try 180 의 카드 글자 drag)."""
+    fake = FakeGame("Menu", {"Root/Start": {"text": "Start"}, "Root/Start/Label": {"text": "Start"}, "Root/Clock": {"text": "0"}})
+    fake.unreachable.add("Root/Start/Label")
+
+    def tick(game: FakeGame) -> None:
+        game.objects["Root/Clock"]["text"] = str(int(game.objects["Root/Clock"]["text"]) + 1)
+
+    fake.reactions[("press", "Root/Start/Label")] = tick
+
+    play = _play(fake, FakeJev(picks=("press_label",)), source=PRESS_LABEL, max_turns_per_step=5)
+
+    assert [(turn["outcome"], turn.get("missed"), turn.get("unchanged")) for turn in play.turns[:3]] == [
+        ("passed", True, None)
+    ] * 3
+    assert play.turns[3]["dropped"] == ["press_label"]
 
 
 def test_an_action_picked_too_often_in_one_play_is_dropped(monkeypatch) -> None:
@@ -533,3 +628,183 @@ def test_turn_records_go_out_as_logs_with_the_jev_answers() -> None:
     assert first["picked"] == "press_start" and first["options"] == ["press_start", "look_around"]
     assert second["done"] is True and second["goal_ask"] == 0.9
     json.dumps(first)
+
+
+FEASIBLE = '''def press_start() -> None:
+    """Press Start on the title screen."""
+    start: object = find(name="Start")
+    click(start)
+    wait_until(scene() == "Map", 1, "Start did not open the map.")
+
+
+def look_around() -> None:
+    """Wait for the screen to settle."""
+    wait_until(scene() == "Menu", 1, "Not on the menu.")
+
+
+def can_look_around() -> bool:
+    return scene() == "Loading"
+
+
+def done() -> bool:
+    return scene() == "Map"
+'''
+
+
+def test_an_action_whose_can_predicate_is_false_is_not_offered() -> None:
+    """`can_<action>` 이 거짓이면 그 턴의 선택지에서 뺀다. Jev 는 할 수 없게 된 것을 스스로 빼지 못했다(try 184 재현)."""
+    fake = _menu()
+    jev = FakeJev()
+
+    play = _play(fake, jev, source=FEASIBLE)
+
+    assert play.stopped == "done"
+    criteria = jev.asked("choice")[0]["questions"]["answer"]["criteria"]
+    assert set(criteria) == {"press_start", "none_fits"}
+    assert play.turns[0]["infeasible"] == ["look_around"]
+
+
+def test_a_can_predicate_for_an_action_that_does_not_exist_is_refused() -> None:
+    source = FEASIBLE.replace("def can_look_around", "def can_jump")
+    fake = _menu()
+
+    async def go():
+        fake.push_reading()
+        await parse_step(source, RegisteredMacros(fake.channel))
+
+    with pytest.raises(MacroRejection, match="there is no action `jump`"):
+        asyncio.run(go())
+
+
+def test_when_nothing_can_be_done_the_turn_waits_without_asking_jev() -> None:
+    source = FEASIBLE.replace('def done() -> bool:', 'def can_press_start() -> bool:\n    return scene() == "Loading"\n\n\ndef done() -> bool:')
+    fake = _menu()
+    jev = FakeJev()
+
+    play = _play(fake, jev, source=source)
+
+    assert jev.asked("choice") == []
+    assert play.turns[0]["picked"] == "none_fits"
+    assert play.stopped.startswith("no action fit")
+
+
+def test_the_scores_jev_gives_each_option_are_kept_on_the_turn() -> None:
+    class Scored(FakeJev):
+        async def __call__(self, body: dict) -> dict:
+            answer = await super().__call__(body)
+            if body["questions"]["answer"]["type"] == "choice":
+                answer["answers"]["answer"].update(
+                    probabilities={"press_start": 0.81, "look_around": 0.12, "none_fits": 0.07}, confidence=0.69
+                )
+            return answer
+
+    play = _play(_menu(), Scored())
+
+    assert play.turns[0]["scores"] == {"press_start": 0.81, "look_around": 0.12, "none_fits": 0.07}
+    assert play.turns[0]["confidence"] == 0.69
+
+
+FEATURES = FEASIBLE.replace('def done() -> bool:', '''def feature_on_menu() -> bool:
+    return scene() == "Menu"
+
+
+def feature_start_shown() -> bool:
+    start: object = selector("Root/Start")
+    return exists(start)
+
+
+def done() -> bool:''')
+
+
+def test_when_the_plan_writes_features_jev_reads_them_before_the_object_list() -> None:
+    """특징값은 화면 오브젝트 목록 앞에 보탠다(JEV-Star 의 구조화된 관측, try 185 재현). 대신하던 때는 planner 가
+    빠뜨린 값이 어디에도 없었다(try 193)."""
+    fake = _menu()
+    jev = FakeJev()
+
+    play = _play(fake, jev, source=FEATURES)
+
+    state = jev.asked("choice")[0]["state"]
+    assert state == {
+        "scene": "Menu",
+        "features": {"on_menu": True, "start_shown": True},
+        "objects": [{"members": {}, "path": "Root/Start", "text": "Start"}],
+        "recent_picks": [],
+    }
+    assert play.turns[0]["features"] == {"on_menu": True, "start_shown": True}
+
+
+def test_a_feature_that_takes_parameters_is_refused() -> None:
+    source = FEATURES.replace("def feature_on_menu() -> bool:", "def feature_on_menu(name: string) -> bool:")
+    fake = _menu()
+
+    async def go():
+        fake.push_reading()
+        await parse_step(source, RegisteredMacros(fake.channel))
+
+    with pytest.raises(MacroRejection, match="must take no parameters"):
+        asyncio.run(go())
+
+
+TWO_CLICKS = '''def press_start_twice() -> None:
+    """PRESS START — presses Start, then presses it again."""
+    start: object = find(name="Start")
+    click(start)
+    click(start)
+    wait_until(scene() == "Map", 1, "Start did not open the map.")
+
+
+def look_around() -> None:
+    """WAIT — waits for the screen to settle."""
+    wait_until(scene() == "Menu", 1, "Not on the menu.")
+
+
+def done() -> bool:
+    return scene() == "Map"
+'''
+
+
+def test_a_press_a_covering_panel_swallows_stops_the_action_and_is_not_counted_as_a_failure() -> None:
+    """누름이 화면을 덮은 판에서 끝나면 그 자리에서 멈춘다. 실패로 세지 않고 무엇이 막았는지 최근 선택에 남긴다(try 187)."""
+    fake = FakeGame("Menu", {"Root/Start": {"text": "Start"}})
+    fake.cover = "Tutorial/InputBlocker"
+    jev = FakeJev(picks=("press_start_twice", "press_start_twice"))
+
+    memory = executer_module.FailureMemory()
+    play = _play(fake, jev, source=TWO_CLICKS, max_turns_per_step=2, failure_memory=memory)
+
+    first = play.turns[0]
+    assert first["outcome"] == "blocked"
+    assert first["reason"].startswith("INPUT_BLOCKED")
+    # 두 번째 click 은 보내지 않았다.
+    assert [method for method, _ in fake.actions].count("mouse_down") == 2
+    assert memory.failed == {} and memory.sendless == {}
+    second_state = jev.asked("choice")[1]["state"]
+    assert second_state["recent_picks"] == [
+        {
+            "action": "PRESS START — presses Start, then presses it again.",
+            "outcome": "blocked by Tutorial/InputBlocker",
+            "changed": "nothing the actions read",
+        }
+    ]
+
+
+NOTHING_TO_DO = '''def close_dialogue() -> None:
+    """CLOSE DIALOGUE — presses Space while a dialogue is open."""
+    if exists(selector("Root/Dialogue")):
+        press_key("Space")
+
+
+def done() -> bool:
+    return scene() == "Map"
+'''
+
+
+def test_an_action_that_passes_without_sending_anything_is_dropped_after_three() -> None:
+    """입력 없이 통과하는 action 도 반복으로 센다. 대사가 없을 때의 대사 넘기기가 30번 돌았다(try 191)."""
+    fake = FakeGame("Menu", {"Root/Start": {"text": "Start"}})
+
+    play = _play(fake, FakeJev(picks=("close_dialogue",)), source=NOTHING_TO_DO, max_turns_per_step=5)
+
+    assert [(turn["outcome"], turn.get("no_input")) for turn in play.turns[:3]] == [("passed", True)] * 3
+    assert play.stopped.startswith("every action kept failing")

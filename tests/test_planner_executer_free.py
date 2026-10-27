@@ -420,3 +420,27 @@ def test_a_move_that_does_not_arrive_is_logged_and_its_cases_end_scene_unreached
     assert verdict["message"].startswith(
         "UNREACHED (도달 못함) SCENE_UNREACHED: play could not reach the case's scene, so it was not played"
     )
+
+
+def test_a_move_out_of_a_planned_scene_shows_the_planner_that_scene_plans_actions() -> None:
+    """씬 계획은 case 글을 읽고 그 씬의 조작을 쓴다. 이동 계획은 그것을 몰라 전투 조작을 짐작했다(로컬 try 177)."""
+    fake = _resettable_menu()
+    asked = Raw(_plan([], {"8": "Later."}), MOVE, _plan([7], actions=""))
+    judge, _ = _judge(_verdicts_of((7, True)))
+
+    _run_free(fake, _free(MENU_CASE, MAP_CASE), asked, judge, FakeJev(), free_max_resets=0)
+
+    travel_request = asked.calls[1][1]
+    assert "Actions the plan for the scene on screen (`Menu`) wrote earlier in this run." in travel_request
+    assert "def press_start() -> None:" in travel_request
+
+
+def test_the_engine_reports_each_phase_once_when_it_changes() -> None:
+    """계획·실행·판정이 바뀔 때만 `phase` 를 실은 LOG 를 보낸다. SDK 하단 줄의 "생각 중…" 이 이것을 읽는다."""
+    fake = _resettable_menu()
+    judge, _ = _judge(_verdicts_of((8, True)))
+
+    _run_free(fake, _free(MENU_CASE), Raw(_plan([8])), judge, FakeJev(), free_max_resets=0)
+
+    phases = [f["payload"]["phase"] for f in fake.frames("LOG") if "phase" in f["payload"]]
+    assert phases == ["PLANNING", "EXECUTING", "EVALUATING"]

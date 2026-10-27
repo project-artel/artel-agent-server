@@ -8,6 +8,8 @@ The two engines share no structure, so a knob added to one must not move the oth
 import hashlib
 import json
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 # Bumped by hand when the engine's shape changes in a way the fingerprint does not see — what the
@@ -28,7 +30,28 @@ from pydantic import BaseModel, ConfigDict, Field
 # 돌고, 판정은 다섯 개씩 묶어 묻는다(`scene_evaluator`). 후보가 한 계획보다 많은 씬은 남은 후보로 다시 계획한다. 다음 씬으로는 planner 가 이동 step 을 쓴다. 미룬 case 는 라운드가
 # 끝나면 `reset_game` 뒤 다시 돌고, 상한(`free_max_resets`, `free_case_attempts`) 뒤 남은 case 는 UNREACHED 로
 # 실패 보고한다. ORDERED 시나리오의 루프는 그대로지만 knob 이 늘어 fingerprint 가 바뀐다.
-PLANNER_EXECUTER_LABEL = "pe2-free"
+#
+# pe3: executer 가 Jev 에게 묻는 모양을 JEV-Star 처럼 바꿨다. 선택지는 지금 할 수 있는 action 만이고(planner 가 쓴
+# `can_<action>()` 이 거짓인 것은 뺀다), 각 선택지는 docstring 전문이 아니라 첫 줄(developer macro 는 줄 끝 주석)이다.
+# 질문에 판단 순서(입력 막힘 → 진전 → 기다림)를 적고, state 에 최근 선택과 결과(`recent_picks`)를 싣는다. Jev 가
+# 돌려준 선택지별 확률과 confidence 는 turn 기록에 남긴다. 로컬 try 184 에서 Jev 는 `end_turn` docstring 의
+# "GameClearScene" 에 끌려 공격 없이 턴 종료만 11번 골랐고, 재현에서 이 모양으로 바꾸자 시전·턴 종료를 제때 골랐다.
+#
+# pe4: planner 가 판단용 특징값 `feature_<name>()` 을 쓰면, executer 가 턴마다 계산해 화면 오브젝트 목록 대신 Jev 에게
+# 보낸다(scene, features, recent_picks). 로컬 try 185 에서 pe3 의 거른 오브젝트 6개만 받은 Jev 가 손패가 2장에서
+# 22장까지 쌓이는 동안 시전을 0.01~0.10 으로 매겼다. 손패 수 같은 값을 준 재현에서는 시전을 33/33 골랐다.
+#
+# pe5: Jev 와 planner 가 읽는 값의 전처리를 고쳤다. SDK 가 목록·배열을 개수만 싣는 member(`count`)가 화면에는
+# `None` 으로, Jev 에게는 `null` 로 갔고 `member(..., "X.Count")` 는 거절됐다. 이제 `<이름>.Count` 로 그리고 읽는다.
+# 거르지 않는 state(`raw`)와 목표 확인(`goal_ask`)은 경로 알파벳순 대신 계획이 부르는 object 를 앞에 두고 자른다.
+# try 192 를 다시 쌓은 감사에서 개수 827건이 어디에도 나가지 않았고, raw state 는 live object 의 72% 를 잘랐다.
+#
+# pe6: Jev state 를 만드는 규칙을 하나로 세웠다(`jev_state.assemble`). 선택지 action 과 판단 macro 가 읽는 object·
+# member·static(`Reads`, developer macro 몸통까지)을 반드시 싣고, feature 는 object 목록을 대신하지 않고 보태며,
+# static 을 처음으로 싣는다. `recent_picks` 에는 action 앞뒤로 바뀐 읽는 값(`changed`)을, turn 기록에는 보낸 state
+# 전체를 남긴다. 이름표는 docstring 첫 줄이 아니라 첫 문장이다. try 193 에서 Jev 는 static 없이, 고정 0 인 11개
+# object 와 줄바꿈에서 잘린 이름표만 받고 시전할 수 있는 턴에 턴 종료를 7번 골랐다.
+PLANNER_EXECUTER_LABEL = "pe6-decision-state"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1
@@ -58,6 +81,10 @@ class PlannerExecuterArchSpec(BaseModel):
     free_case_attempts: int = Field(default=2, ge=1, le=10)
     # FREE 시나리오: 씬 계획 한 번에 planner 에게 주는 후보 case 의 최대 수.
     free_batch_size: int = Field(default=20, ge=1, le=100)
+    # executer 가 action 을 고를 때 Jev 에게 보내는 state. `raw` 는 화면의 live object 를 거르지 않고 담되 계획이
+    # 부르는 object 를 앞에 두고 6000자에서 뒤를 자른 것, `members` 는 Jev 에게 무엇이 필요한지 물어 거른 것이다
+    # (`jev_state.py`).
+    jev_state: Literal["raw", "members"] = "raw"
 
 
 def planner_executer_fingerprint(spec: PlannerExecuterArchSpec, functions: tuple[str, ...]) -> str:

@@ -1,10 +1,12 @@
 """macro 정의 하나를 batch 여러 개로 쪼개 `run` 을 반복 호출한다.
 
 `require()` 는 화면을 다시 읽어야 하므로 batch 하나로 한 번에 보낼 수 없다. 그리고
-**같은 batch 안의 action 은 실패한 action 에서 멈추지 않고 끝까지 간다**
-(`ArtelManager.ExecuteActionRequest` 의 `foreach`). 그래서 action statement 하나를
+batch 의 실패는 batch 가 끝난 뒤에야 알 수 있다. 그래서 action statement 하나를
 batch 하나에 대응시켜야 "이 statement 는 안 나갔다" 는 말이 참이 된다 — 한 batch 에
-둘을 담으면 뒤엣것을 보낸 뒤에야 실패를 알게 되어 `pending` 이 거짓말이 된다.
+둘을 담으면 뒤엣것의 결과까지 받은 뒤에야 앞엣것의 실패를 알게 되어 `pending` 이 거짓말이 된다.
+SDK 는 batch 안에서 action 하나가 실패하면 그 뒤 action 을 `Skipped: …` 로 돌리지 않는다
+(`ArtelManager.ExecuteActionRequest`). 그 batch 가 누른 버튼·키를 떼는 것만 돈다. 그 전의 SDK 는
+끝까지 돌려, 조준이 실패한 `click` 의 누름이 바뀐 화면에 떨어졌다(로컬 try 172).
 
 `require` 가 실패했을 때 이미 게임에 나간 action 은 되돌릴 수 없으므로, 어디까지 갔는지를
 정확히 보고한다. 그것이 `applied`·`pending`·`skipped` 세 목록이다.
@@ -72,6 +74,7 @@ from app.agents.qa.macro.binding import (
 from app.agents.qa.macro.context import build_context_state
 from app.agents.qa.macro.errors import (
     ACTION_REJECTED,
+    INPUT_BLOCKED,
     JEV_FAILED,
     OPERATOR_INTERRUPTED,
     REQUIRE_FAILED,
@@ -445,6 +448,22 @@ class _Frame:
 
 
 # --- 실행 ---------------------------------------------------------------------
+
+
+def evaluate_value(host: MacroHost, definition: MacroDefinition, name: str) -> Any:
+    """parameter 없는 `-> bool`·`-> int`·`-> float` `def` 하나를 지금의 memory 에 대고 평가한다.
+
+    planner–executer 엔진의 executer 가 매 턴 planner 가 쓴 `feature_*` 를 읽는 자리다. 몸통 규칙은
+    predicate·숫자 `def` 와 같다. 실패는 `MacroFailure` 로 올라간다.
+    """
+    function = definition.function(name)
+    if function is None or (function.returns != "bool" and function.returns not in NUMBER_RETURNS):
+        raise ValueError(f"`{name}` is not a `-> bool`, `-> int` or `-> float` def in {definition.name!r}.")
+    if function.parameters:
+        raise ValueError(f"`{name}` takes parameters.")
+    observed: dict[str, Any] = {}
+    runner = _Runner(host, definition, step=0)
+    return runner._returned(function, MacroScope({}), definition, observed)
 
 
 def evaluate_number(
@@ -1257,6 +1276,15 @@ class _Runner:
                 "mouse, so the virtual pointer went nowhere. Nothing after this was "
                 "sent. This is the machine, not the game and not the macro — take your "
                 "hand off the mouse and call the macro again.",
+            )
+        if outcome.blocked_by:
+            # 화면 위를 덮은 판이 누름을 삼켰다. 화면이 움직였어도 멈춘다 — 그 판이 뜬 것이 바로 움직임이다.
+            # 그대로 가면 뒤의 누름이 같은 판에 떨어지거나, 판이 닫힌 뒤의 다른 화면에 떨어진다.
+            return MacroFailure(
+                INPUT_BLOCKED,
+                f"`{statement.source}` was blocked: the press landed on `{outcome.blocked_by[0]}`, which covers "
+                "the screen and handles no input, before it reached its target. Nothing after this was sent. "
+                "Clear what is on screen (a dialogue, a prompt, an overlay) and call the macro again.",
             )
         if (
             outcome.landings

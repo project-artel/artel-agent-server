@@ -168,6 +168,8 @@ class Planner:
         self._system = prompt_text(RULES_ROLE, config.prompt_version)
         # FREE 시나리오에서만 읽는다. v3 전 버전에는 없는 파일이라 처음 쓸 때 읽는다.
         self._scene_system: str | None = None
+        # 씬 이름 → 그 씬에서 마지막으로 받아들여진 씬 계획의 source. 이동 계획에 함께 보여 준다.
+        self._scene_sources: dict[str, str] = {}
         self._ask = ask or self._ask_model
         self._model = None
 
@@ -177,10 +179,23 @@ class Planner:
 
     async def write_travel(self, scenario: QaScenario, step: int, scene: str) -> Written:
         """A FREE scenario's move to `scene`, written as an ordinary step (`done()` is that scene).
-        `step` is the case the move is for; it labels the notes."""
-        return await self._write(
-            scenario, step, travel_step(step, scene), f"Travel to `{scene}` (for step {step})", "travel"
-        )
+        `step` is the case the move is for; it labels the notes.
+
+        지금 씬에서 받아들여진 씬 계획이 있으면 그 source 를 함께 보여 준다. 씬 계획은 그 씬 case 들의 글을 읽고
+        쓰므로 조작을 안다 — "조합창을 연다", "Shoot 을 Zone1 에 끈다". 이동 계획은 "`X` 로 가라" 한 줄만 받아,
+        전투를 이겨야 닿는 `GameClearScene` 으로 가면서 조합창을 여는 action 없이 clone 번호를 박은 drag 를 썼다
+        (로컬 try 177). 그 계획의 Jev 는 맞는 action 이 없어 `end_turn` 만 18번 골라 졌다.
+        """
+        here = self._channel.scene.pulse.scene
+        shown = travel_step(step, scene)
+        if here and here in self._scene_sources:
+            shown += (
+                f"\n\nActions the plan for the scene on screen (`{here}`) wrote earlier in this run. They were "
+                "accepted and played here, so they know this scene's controls; reuse what fits. Its `done_*` "
+                "functions were that plan's case goals, not yours:\n```python\n"
+                f"{clip(self._scene_sources[here], MAX_SOURCE_CHARS)}\n```"
+            )
+        return await self._write(scenario, step, shown, f"Travel to `{scene}` (for step {step})", "travel")
 
     async def plan_scene(self, scenario: QaScenario, steps: list[int]) -> ScenePlan:
         """The plan for the scene on screen: which of the candidate cases (`steps`) to verify now and
@@ -227,6 +242,8 @@ class Planner:
                 feedback = refusal_feedback(refusals, "answer")
                 continue
             plan = ScenePlan([by_case[case_id] for case_id in verify], {by_case[c]: r for c, r in later.items()}, macros)
+            if scene != "?" and macros is not None and macros.actions:
+                self._scene_sources[scene] = source
             await note_decision(
                 self._channel,
                 "scene_plan",

@@ -243,8 +243,8 @@ def test_the_planner_sees_each_developer_macro_with_its_build() -> None:
     assert "select the ones this step needs in the ```developer block" in user
     assert "from macros import" not in user
     # 기본 planner prompt 는 v4 이고, 목록과 같은 말을 하는 reuse-first 규칙을 담는다.
-    assert _config().prompt_version == "v4"
-    assert system == prompt_text(RULES_ROLE, "v4")
+    assert _config().prompt_version == "v6"
+    assert system == prompt_text(RULES_ROLE, "v6")
     assert "- Reuse first. Before you write an action, read the developer macros the request lists." in system
     assert (
         "- `tap_start()` — written against build 1.2.0 (beta)\n"
@@ -284,7 +284,8 @@ def test_a_developer_macro_with_parameters_runs_with_the_arguments_the_planner_b
 
     assert failure is None and state.step_results[0].passed
     description = jev.asked("choice")[0]["questions"]["answer"]["criteria"]["developer:press"]["what"]
-    assert description == 'Press `target` and wait for the map.\n\nCalled in this step as `press(find(name="Start"))`.'
+    # Jev 에게는 docstring 첫 줄만 간다. 바인딩한 호출은 planner 가 읽는 설명에만 남는다.
+    assert description == "Press `target` and wait for the map."
     assert fake.actions[0][0] == "move_mouse" and fake.actions[0][1][0] == "Root/Start"
     assert fake.scene == "Map"
 
@@ -460,3 +461,15 @@ def test_the_run_goes_on_when_orchestration_fails(monkeypatch) -> None:
 
     assert [options["developer"].usable for options in seen] == [{}, {}]
 
+
+
+def test_a_comment_on_a_developer_line_is_what_jev_reads_about_it() -> None:
+    fake = _menu()
+    jev = FakeJev(picks=("developer:press",))
+    answer = _answer(ONLY_DONE, 'press(find(name="Start"))  # PRESS START — opens the map')
+
+    state, failure = _run(fake, Answered(answer), (_macro("press", PRESS),), jev)
+
+    assert failure is None and state.step_results[0].passed
+    criteria = jev.asked("choice")[0]["questions"]["answer"]["criteria"]
+    assert criteria["developer:press"]["what"] == "PRESS START — opens the map"

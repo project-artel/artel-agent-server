@@ -285,3 +285,11 @@ def test_under_is_clipped_from_the_end_like_find_all() -> None:
     assert clipped > 0
     assert len(state["hand"]) == 200 - clipped
     assert len(json.dumps(state, ensure_ascii=False)) <= MAX_DECIDE_STATE_CHARS
+
+
+def test_a_collection_sent_as_a_count_reaches_jev_as_its_count() -> None:
+    held = memories(thing("Hand[0]", members=[{"on": "Battle.CardManager", "member": "myCards", "count": 6}]))
+
+    state, _clipped = build_context_state(held, MacroScope(), ())
+
+    assert state["objects"][0]["members"] == {"CardManager.myCards.Count": 6}

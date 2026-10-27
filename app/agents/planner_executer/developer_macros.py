@@ -23,7 +23,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
 
-from app.agents.planner_executer.macros import DeveloperAction, DeveloperMacros
+from app.agents.planner_executer.macros import DeveloperAction, DeveloperMacros, first_sentence
 from app.agents.qa.macro.errors import MacroRejection
 from app.agents.qa.macro.model import MacroDefinition
 from app.agents.qa.macro.selector_check import reject_unstable_selectors
@@ -168,7 +168,8 @@ async def bind_developer_calls(
     planner 의 rewrite 로 돌아간다.
     """
     actions: dict[str, DeveloperAction] = {}
-    for call in calls:
+    for line in calls:
+        call, label = split_comment(line)
         name, statements, bound = _bound_call(call, loaded)
         entry = f"{BOUND_PREFIX}{name}"
         source = f"from macros import {name}\n\n\ndef {entry}() -> None:\n" + "".join(
@@ -189,8 +190,22 @@ async def bind_developer_calls(
         description = loaded.usable[name].definition.entry.docstring or ""
         if bound:
             description += f"\n\nCalled in this step as `{call}`."
-        actions[key] = DeveloperAction(definition, description)
+        actions[key] = DeveloperAction(definition, description, label or first_sentence(description))
     return actions
+
+
+def split_comment(line: str) -> tuple[str, str]:
+    """`(호출, 줄 끝 주석)`. 따옴표 안의 `#` 은 주석이 아니다. 주석은 planner 가 그 action 에 붙인 이름이다."""
+    quote = None
+    for index, char in enumerate(line):
+        if quote:
+            if char == quote:
+                quote = None
+        elif char in ("'", '"'):
+            quote = char
+        elif char == "#":
+            return line[:index].strip(), line[index + 1 :].strip()
+    return line.strip(), ""
 
 
 def _bound_call(call: str, loaded: LoadedDeveloperMacros) -> tuple[str, list[str], bool]:

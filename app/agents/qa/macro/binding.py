@@ -70,7 +70,7 @@ from app.agents.qa.macro.model import (
 # `PulseMemory.held` 가 드는 기록 그 자체다. 밑줄로 시작하지만 `held` 를 읽는 쪽은
 # 반드시 이 타입을 다루게 되고, 여기서 비슷한 모양을 하나 더 만들면 같은 사실이 어긋날
 # 자리가 둘이 된다.
-from app.qa.pulse import PulseMemory, _HeldObject
+from app.qa.pulse import LENGTH_SUFFIX, PulseMemory, _HeldObject, named_values
 from app.qa.scene import SceneMemory
 
 # `unread` 가 실려 온 값. SDK 의 `Number` 가 NaN 과 Infinity 를 이렇게 바꿔 보낸다.
@@ -206,12 +206,16 @@ def _segments(record: _HeldObject) -> set[str]:
     return names
 
 
-def _under(key: str, scene: str, under: str) -> bool:
+def _under(key: str, scene: str, under: str, path: str | None = None) -> bool:
     """`under=` 가 그 기록을 범위에 넣는가. memory 의 key 에 prefix 로 맞춘다.
 
     key 는 씬 이름 뒤에 `selector`(없으면 `path`)를 붙인 전체 경로다. 그런데 agent 가
     화면에서 읽는 주소에는 씬 이름이 안 붙어 있으므로, 씬을 안 적은 prefix 도 받는다 —
     안 받으면 `under="Root[0]/Hand[2]"` 가 언제나 아무것도 안 맞춘다.
+
+    번호 없는 `path` 에도 맞춘다. `selector("Canvas/Hand")` 는 `_by_selector` 가 `path` 로
+    받아 주는데 `under="Canvas/Hand"` 만 번호를 요구하면, 에디터 계층을 보고 쓰는 개발자의
+    macro 가 같은 주소를 한쪽에서만 맞춘다.
 
     **마디 경계에서 끊는다.** 글자 prefix 로만 보면 `under="Root[0]/Hand"` 가
     `Root[0]/HandSlot[3]/...` 까지 끌고 오고, 더 나쁘게는 씬 이름의 앞글자가 그 씬의
@@ -219,9 +223,10 @@ def _under(key: str, scene: str, under: str) -> bool:
     그러면 걸린 것이 하나뿐일 때 범위 제한이 조용히 없는 것이 되고, macro 는 범위를
     좁힌 것처럼 읽힌다.
     """
+    candidates = (key, _without_scene(key, scene), *((path,) if path else ()))
     return any(
         candidate == under or candidate.startswith(f"{under.rstrip('/')}/")
-        for candidate in (key, _without_scene(key, scene))
+        for candidate in candidates
     )
 
 
@@ -249,7 +254,7 @@ def _matches(
     hits: list[FoundObject] = []
     scene = memory.scene or ""
     for key, record in _live(memory):
-        if under is not None and not _under(key, scene, under):
+        if under is not None and not _under(key, scene, under, record.path):
             continue
         if label is not None and record.text != label:
             continue
@@ -398,9 +403,17 @@ def _static_names(memory: PulseMemory) -> dict[str, Any]:
     """
     named: dict[str, Any] = {}
     for key, entry in memory.statics.items():
-        named[key] = entry.value
         short = (entry.declaring or "").split(".")[-1]
-        named[f"{short}.{entry.member}"] = entry.value
+        for name in (key, f"{short}.{entry.member}"):
+            named.update(_counted(name, entry.value, entry.count))
+    return named
+
+
+def _counted(name: str, value: Any, count: int | None) -> dict[str, Any]:
+    """`name` 과, 개수가 실렸으면 `name.Count`·`name.Length`. 화면이 그리는 이름(`pulse.named_values`)에 배열의 이름을 더한다."""
+    named = dict(named_values(name, value, count))
+    if count is not None:
+        named[name + LENGTH_SUFFIX] = count
     return named
 
 
@@ -408,14 +421,16 @@ def _member_names(record: _HeldObject) -> dict[str, Any]:
     """`member(<target>, "Type.member")` 가 맞출 이름 → 값. statics 와 같은 규칙이다."""
     named: dict[str, Any] = {}
     for key, member in record.members.items():
-        named[key] = member.value
         short = (member.on or "").split(".")[-1]
-        named[f"{short}.{member.member}"] = member.value
+        # 내부 키와 `Type.member` 는 덮어쓴다(예전과 같다). 짧은 이름이 겹치는 일은 `on` 이 다를 때뿐이다.
+        for name in (key, f"{short}.{member.member}"):
+            named.update(_counted(name, member.value, member.count))
         if member.member:
             # 한 객체에 같은 이름의 멤버가 둘인 경우는 `on` 이 다를 때뿐이다. 그때는
             # 짧은 이름이 겹치므로 먼저 들어온 것이 남고, 긴 이름이 가릴 수 있는 길로
             # 남는다.
-            named.setdefault(member.member, member.value)
+            for name, value in _counted(member.member, member.value, member.count).items():
+                named.setdefault(name, value)
     return named
 
 

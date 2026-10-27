@@ -26,6 +26,10 @@ class FakeGame:
         # to a press aimed at that selector.
         self.reactions: dict[tuple[str, Any], Callable[["FakeGame"], None]] = {}
         self.refuse: set[tuple[str, Any]] = set()
+        # 누르면 아무 데도 닿지 않는 selector(`reached` 가 null). 글자처럼 입력을 받지 않는 객체다.
+        self.unreachable: set[str] = set()
+        # 화면을 덮어 누름을 삼키는 판의 경로. 있으면 모든 누름이 거기서 끝난다(SDK 의 `blockedBy`).
+        self.cover: str | None = None
         self._aim: Any = None
         # macro 이름 → 이 build 에 등록된 글. `MACRO_READ` 가 읽는다.
         self.macros: dict[str, str] = {}
@@ -65,31 +69,50 @@ class FakeGame:
     def _answer(self, frame: dict) -> None:
         results = []
         moved = False
+        # SDK 처럼 실패한 action 뒤의 나머지는 돌리지 않는다. 이 묶음이 누른 버튼을 떼는 것만 돈다.
+        failed = None
+        pressed: set = set()
         for action in frame["payload"]["actions"]:
             method, params = action["method"], action["params"]
             first = params[0] if params else None
+            if failed is not None and not (method == "mouse_up" and first in pressed):
+                results.append({"id": action["id"], "success": False, "error": f"Skipped: {failed}"})
+                continue
             self.actions.append((method, params))
             if (method, first) in self.refuse:
                 results.append(
                     {"id": action["id"], "success": False, "error": f"Nothing at selector: {first}"}
                 )
+                failed = f"action {action['id']} ({method}) failed"
                 continue
             if method == "move_mouse" and isinstance(first, str) and first not in self.objects:
                 results.append({"id": action["id"], "success": False, "error": f"no object {first}"})
+                failed = f"action {action['id']} ({method}) failed"
                 continue
+            if method == "mouse_down":
+                pressed.add(first)
             if method == "move_mouse":
                 self._aim = first
             if method == "mouse_down":
+                if self.cover is not None:
+                    # 덮은 판이 누름을 삼킨다. 겨눈 것은 아무 반응도 하지 않는다.
+                    results.append({
+                        "id": action["id"],
+                        "success": True,
+                        "returnValue": {"reached": self.cover, "pointerHeldByPerson": False, "blockedBy": self.cover},
+                    })
+                    continue
                 aim = self._aim if isinstance(self._aim, str) else "point"
                 reaction = self.reactions.get(("press", aim)) or self.reactions.get((method, first))
                 if reaction is not None:
                     reaction(self)
                     moved = True
+                reached = None if self._aim in self.unreachable else str(self._aim)
                 results.append(
                     {
                         "id": action["id"],
                         "success": True,
-                        "returnValue": {"reached": str(self._aim), "pointerHeldByPerson": False},
+                        "returnValue": {"reached": reached, "pointerHeldByPerson": False},
                     }
                 )
                 continue

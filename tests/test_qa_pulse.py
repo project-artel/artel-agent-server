@@ -1520,3 +1520,19 @@ def test_물으면_이미_말한_글자도_답한다():
     memory.render(since=0, advance=True)
 
     assert "says '이미 말한 대사'" in memory.inspect("Dialogue")
+
+
+def test_a_collection_sent_as_a_count_is_drawn_as_its_count():
+    """SDK 는 목록을 원소 없이 `count` 로만 싣는다. 예전 화면은 그것을 `myCards = None` 으로 그렸다."""
+    memory = fold(reading(
+        active=[obj(members=[
+            {"on": "Battle.CardManager", "member": "myCards", "count": 6, "asked": True},
+        ])],
+        statics=[{"declaring": "Battle.Deck", "member": "Pile", "count": 30}],
+    ))
+
+    view = memory.render(since=0, advance=False)
+    assert "CardManager.myCards.Count = 6" in view
+    assert "myCards = None" not in view
+    assert "Deck.Pile.Count = 30" in view
+    assert "CardManager.myCards.Count = 6" in memory.inspect("continue")
