@@ -51,3 +51,11 @@ def test_a_plan_without_reviews_is_unchanged() -> None:
         assert "human_review" not in plain
         assert HUMAN_REVIEW_RULE not in plain
         assert plain == _plan(_scenario(mode, []))
+
+
+def test_the_switch_leaves_the_plan_as_if_there_were_no_reviews(monkeypatch) -> None:
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "qa_human_review", False)
+    for mode in ("ORDERED", "FREE"):
+        assert _plan(_scenario(mode, [REVIEW])) == _plan(_scenario(mode, None))

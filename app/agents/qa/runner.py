@@ -29,6 +29,7 @@ from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.tools.game_function_tools import focus
 from app.agents.qa.tools.tool_context import ToolContext
 from app.agents.qa.vision import QaCaptureVisionMiddleware
+from app.config import get_settings
 from app.llm.chat_model import build_chat_model
 from app.llm.models import get_model_spec
 from app.prompts import load_prompt, load_skill, skill_descriptions, skill_names
@@ -252,7 +253,7 @@ HUMAN_REVIEW_RULE = (
 
 def _human_review(case: QaCaseRef | None) -> list[dict] | None:
     """TC 하나의 사람 판정 기록을 계획 항목 모양으로. 없으면 None."""
-    if case is None or not case.reviews:
+    if case is None or not case.reviews or not get_settings().qa_human_review:
         return None
     return [
         {
@@ -677,6 +678,13 @@ class QaRunner:
         first_message = (
             _plan(scenario) + _macro_discovery(arch, channel) + _game_functions(arch, channel)
         )
+        # 사람 판정 기록이 첫 메시지에 실제로 실렸는지 남긴다(ARTEL-1257 영향 실측).
+        reviewed = [step.case.id for step in scenario.steps if step.case is not None and step.case.reviews]
+        if reviewed:
+            logger.info(
+                "[qa] human_review cases=%s attached=%s in_message=%s",
+                reviewed, get_settings().qa_human_review, "human_review" in first_message,
+            )
         total_steps = len(scenario.steps)
         tools = build_tools(channel, state, arch, prompt.version)
         # view 의 function 줄을 1번 step 의 TC 기준으로 둔다. 다음부터는 tool 이 옮긴다.
