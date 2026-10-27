@@ -67,10 +67,10 @@ __all__ = [
     "analysis_request",
     "engine_error",
     "expected_text",
-    "send_verdict",
     "request",
     "review_request",
     "scene_request",
+    "send_verdict",
     "sent_inputs",
     "unreached",
 ]

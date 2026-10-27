@@ -48,7 +48,7 @@ flowchart LR
   play 한 모델이 자기 결과를 채점하면 성공 쪽으로 기울고, 두 엔진을 같은 자로 재려면 심판이 하나여야 함
 - 지금은 planner–executer 엔진만 여기로 보냄. tool loop 의 `report_step` 은 아직 스스로 판정함
 - 넷으로 나뉨 — `verdict.py`(step·씬 판정), `analysis.py`(실패한 step 의 분류·원인·재현·인사이트),
-  `review.py`(런 하나의 개요·패턴·먼저 할 일), `report.py`(`STATUS`·`ISSUE` 전송)
+  `review.py`(런 하나의 개요·패턴·먼저 할 일), `send.py`(`send_verdict`: `STATUS`·`ISSUE` 로 내보내기)
 - 실패 분석은 `qa_log` 가 아니라 프로세스 안의 `StepPlay` 를 읽음. 로그는 `MAX_TURN_LOG_BYTES` 로 잘린 사본이라
   그것으로 진단하면 ARTEL-824 와 같은 오진이 남
 - 재현 절차는 play 가 실제로 보낸 입력의 번호로만 답하게 하고 코드가 문장으로 되돌림. 보낸 적 없는 조작은

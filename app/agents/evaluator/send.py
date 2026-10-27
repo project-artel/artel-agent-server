@@ -1,4 +1,7 @@
-"""Sends what the Evaluator decided, in the shapes Orchestration already records.
+"""Puts what the Evaluator decided on the wire, in the shapes Orchestration already records.
+
+Nothing here judges or analyses. `send_verdict` takes a verdict and, for a failed step, its
+`FailureReport`, builds the frames and emits them through the run's channel.
 
 The verdict goes out the way the tool loop's `report_step` sends it — a per-step `STATUS` with
 no `result`, the case id and whether the step is its case's verification step — so Orchestration

@@ -33,7 +33,7 @@ from app.agents.evaluator import (
     SceneEvaluator,
     engine_error,
     expected_text,
-    report,
+    send_verdict,
     unreached as unreached_report,
 )
 from app.agents.planner_executer.decisions import MAX_REFUSAL_CHARS, clip, note_decision
@@ -128,12 +128,12 @@ class PlannerExecuterRunner:
                         f"PLANNER-REFUSED: the step's macros were still refused after "
                         f"{self._spec.max_rewrites} rewrites: {written.refusal}"
                     )
-                    await self._report(channel, state, scenario, step, False, message, self._engine_error(message))
+                    await self._send_verdict(channel, state, scenario, step, False, message, self._engine_error(message))
                     continue
                 play = await executer.play(step, step_text(scenario.steps[step - 1]), written.macros)
                 passed, message = await judge.judge(scenario, step, play)
                 analysis = None if passed else await self._analyse(scenario, step, play, message)
-                await self._report(channel, state, scenario, step, passed, message, analysis)
+                await self._send_verdict(channel, state, scenario, step, passed, message, analysis)
         state.finished = True
         passed = all(result.passed for result in state.step_results)
         review = None
@@ -160,7 +160,7 @@ class PlannerExecuterRunner:
             ),
         )
 
-    async def _report(
+    async def _send_verdict(
         self,
         channel: QaRunChannel,
         state: QaRunState,
@@ -173,7 +173,7 @@ class PlannerExecuterRunner:
         """One step's verdict and, for a failed step, its analysis — kept for the run review too."""
         if analysis is not None:
             self._reports[step] = analysis
-        await report(
+        await send_verdict(
             channel, state, step, passed, message, analysis=analysis, expected=expected_text(scenario, step)
         )
 
@@ -213,7 +213,7 @@ class PlannerExecuterRunner:
         resets = 0
 
         async def settle(step: int, passed: bool, message: str, analysis: FailureReport | None = None) -> None:
-            await self._report(channel, state, scenario, step, passed, message, analysis)
+            await self._send_verdict(channel, state, scenario, step, passed, message, analysis)
             del pending[step]
 
         rounds = 0
