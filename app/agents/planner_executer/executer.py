@@ -22,6 +22,7 @@ play 를 그 오류로 멈춘다 — 대신 아무거나 고르면 무엇을 잰
 import asyncio
 import json
 import time
+from datetime import UTC, datetime
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -74,6 +75,24 @@ class StepPlay:
     start_screen: str = ""
     end_screen: str = ""
     seconds: float = 0.0
+    # SDK 의 frame 번호(`pulse` 의 마지막 reading 이 말한 것)와 벽시계. play 가 시작할 때와 멈출 때의 값이다.
+    # 영상에서 이 step 의 구간을 자르는 기준이 된다(ARTEL-1267) — 판정은 play 가 끝난 뒤 모델이 답한 시각이라
+    # 게임 frame 이 아니고, 구간은 여기서 끝난다. reading 이 아직 없으면 frame 은 `None` 이다.
+    start_frame: int | None = None
+    end_frame: int | None = None
+    started_at: str = ""
+    ended_at: str = ""
+
+    def played(self) -> dict:
+        """step `STATUS` 의 `played`: 영상 구간을 자를 기준. `docs/evaluator-analysis-frames.md`."""
+        return {
+            "start_frame": self.start_frame,
+            "end_frame": self.end_frame,
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
+            "seconds": self.seconds,
+            "stopped": self.stopped,
+        }
 
     def reached_goal(self) -> bool:
         """Whether play got to the step's goal by its own reading: `done()` held on some turn.
@@ -107,7 +126,12 @@ class Executer:
         """Play step `step` (`action` is its text) with `macros` until it stops."""
         channel, spec, clock = self._channel, self._spec, self._clock
         await self._settle()
-        play = StepPlay("turn limit", start_screen=screen(channel.scene.pulse))
+        play = StepPlay(
+            "turn limit",
+            start_screen=screen(channel.scene.pulse),
+            start_frame=channel.scene.pulse.frame,
+            started_at=_now(),
+        )
         started = clock()
         none_since: float | None = None
         failures = disagreements = 0
@@ -169,6 +193,8 @@ class Executer:
                 play.turns[-1]["jev_error"] = str(error)
                 await self._send(play.turns[-1])
         play.end_screen = screen(channel.scene.pulse)
+        play.end_frame = channel.scene.pulse.frame
+        play.ended_at = _now()
         play.seconds = round(clock() - started, 1)
         return play
 
@@ -256,3 +282,8 @@ def _turn_log(record: dict) -> TurnLogPayload:
     return TurnLogPayload(
         category=LogCategory.OBSERVATION, message=", ".join(parts), step=record.get("step"), turn=body
     )
+
+
+def _now() -> str:
+    """UTC ISO 8601, 초 단위. orchestration 의 envelope `timestamp` 와 같은 눈금이다."""
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")

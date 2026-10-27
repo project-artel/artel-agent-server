@@ -44,7 +44,7 @@
 | `SCREEN_SELECTOR_VERDICT` | 제안 하나에 대한 답. **QA agent 가 아니라 판정 agent 가 보냄** | `SCREEN_SELECTOR_RESULT` |
 | `CAPABILITY_VERDICT` · `CAPABILITY_DISCOVERED` | 이 런이 배운 것을 content map 에 적기 | `CAPABILITY_WRITE_RESULT` |
 | `ISSUE` | 런이 찾은 결함 하나 | `ISSUE_RESULT`, 거절은 correlation 을 문 `ERROR`. 기다리는 쪽은 없음 |
-| `STATUS` | 스텝 판정과 런 종료 판정 | 아니오 |
+| `STATUS` | 스텝 판정과 런 종료 판정. planner–executer 는 `analysis`·`played` 를 더 싣는다 — [`evaluator-analysis-frames.md`](evaluator-analysis-frames.md) | 아니오 |
 | `LOG` | 타임라인 한 줄 | 아니오 |
 | `TOOL` · `TOOL_RESULT` | 모델이 부른 tool 하나와 그것이 돌려준 것 | 아니오 |
 

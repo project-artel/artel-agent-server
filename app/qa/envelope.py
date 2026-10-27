@@ -1463,11 +1463,16 @@ class StatusPayload(BaseModel):
     # 이 내용으로 만든다. `None` 이면 key 를 뺀다 — 분석을 끈 run 과 tool loop 의 `STATUS` 는 이
     # 필드가 생기기 전과 같은 key 를 싣는다.
     analysis: dict | None = None
+    # 이 step 의 play 가 돈 구간(ARTEL-1267): `start_frame`·`end_frame`(SDK frame 번호), `started_at`·
+    # `ended_at`(UTC ISO 8601), `seconds`, `stopped`. 영상에서 step 의 클립을 자르는 기준이다. planner–executer
+    # 가 play 한 step 에만 있고, play 없이 실패한 step(PLANNER-REFUSED, UNREACHED)과 tool loop 에는 없다.
+    # 계약은 `docs/evaluator-analysis-frames.md`.
+    played: dict | None = None
 
     @model_serializer(mode="wrap")
     def _drop_unset_function_fields(self, handler):
         data = handler(self)
-        for key in ("used_cheats", "active_behaviors", "analysis"):
+        for key in ("used_cheats", "active_behaviors", "analysis", "played"):
             if data.get(key) is None:
                 data.pop(key, None)
         return data

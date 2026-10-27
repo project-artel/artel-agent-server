@@ -132,6 +132,11 @@ def test_a_failed_step_is_analysed_and_the_analysis_rides_the_status() -> None:
     assert analysis["engine_claimed"] is True
     # No ISSUE: a person approves a failed case into an issue.
     assert fake.frames("ISSUE") == []
+    # The frames and the clock the play ran between, for the recording to be cut by.
+    played = verdict["played"]
+    assert set(played) == {"start_frame", "end_frame", "started_at", "ended_at", "seconds", "stopped"}
+    assert played["start_frame"] <= played["end_frame"] and played["stopped"] == "done"
+    assert played["started_at"].endswith("Z") and played["ended_at"] >= played["started_at"]
     # The analysis read the verdict, the numbered inputs with their on-screen text, and the directive.
     system, user = seen[1]
     assert system.startswith("You analyse ONE failed test step of a game after it was played.")
@@ -188,6 +193,8 @@ def test_a_refused_step_is_filed_as_an_agent_error_without_a_model_call() -> Non
     assert analysis["category"] == "AGENT_ERROR" and analysis["cause"].startswith("PLANNER-REFUSED")
     assert analysis["reproduction"] == [] and analysis["reproduction_inputs"] == []
     assert analysis["engine_claimed"] is False
+    # Never played, so nothing to cut a clip from.
+    assert "played" not in verdict
     # Only the run review asked the model.
     assert [system[:10] for system, _ in seen] == ["You review"]
 

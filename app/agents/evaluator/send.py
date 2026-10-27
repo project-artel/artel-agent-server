@@ -30,8 +30,13 @@ async def send_verdict(
     passed: bool,
     message: str,
     analysis: FailureReport | None = None,
+    played: dict | None = None,
 ) -> None:
-    """Record and send one step's verdict, with its analysis when the step failed and was analysed."""
+    """Record and send one step's verdict, with its analysis when the step failed and was analysed.
+
+    `played` is `StepPlay.played()` — the frames and the clock the play ran between — for the
+    recording to be cut by. A step that was never played sends none.
+    """
     case_id, is_verification = (
         state.step_meta[step - 1] if 0 <= step - 1 < len(state.step_meta) else (None, False)
     )
@@ -49,5 +54,6 @@ async def send_verdict(
             is_verification=is_verification,
             message=message,
             analysis=analysis.as_payload() if analysis is not None else None,
+            played=played,
         ),
     )

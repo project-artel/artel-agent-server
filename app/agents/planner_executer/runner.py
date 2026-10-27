@@ -132,7 +132,7 @@ class PlannerExecuterRunner:
                 play = await executer.play(step, step_text(scenario.steps[step - 1]), written.macros)
                 passed, message = await judge.judge(scenario, step, play)
                 analysis = None if passed else await self._analyse(scenario, step, play, message)
-                await self._send_verdict(channel, state, scenario, step, passed, message, analysis)
+                await self._send_verdict(channel, state, scenario, step, passed, message, analysis, play)
         state.finished = True
         passed = all(result.passed for result in state.step_results)
         review = None
@@ -168,11 +168,18 @@ class PlannerExecuterRunner:
         passed: bool,
         message: str,
         analysis: FailureReport | None = None,
+        play: StepPlay | None = None,
     ) -> None:
-        """One step's verdict and, for a failed step, its analysis — kept for the run review too."""
+        """One step's verdict and, for a failed step, its analysis — kept for the run review too.
+
+        `play` is the play the verdict is about; its frames go out as `played`. A step that was never
+        played (refused macros, an unreached FREE case) passes none.
+        """
         if analysis is not None:
             self._reports[step] = analysis
-        await send_verdict(channel, state, step, passed, message, analysis=analysis)
+        await send_verdict(
+            channel, state, step, passed, message, analysis=analysis, played=play.played() if play else None
+        )
 
     async def _analyse(
         self, scenario: QaScenario, step: int, play: StepPlay, message: str
@@ -209,8 +216,10 @@ class PlannerExecuterRunner:
         known = {scene.scene_name.strip().casefold() for scene in (context.scenes if context else []) if scene.scene_name}
         resets = 0
 
-        async def settle(step: int, passed: bool, message: str, analysis: FailureReport | None = None) -> None:
-            await self._send_verdict(channel, state, scenario, step, passed, message, analysis)
+        async def settle(
+            step: int, passed: bool, message: str, analysis: FailureReport | None = None, play: StepPlay | None = None
+        ) -> None:
+            await self._send_verdict(channel, state, scenario, step, passed, message, analysis, play)
             del pending[step]
 
         rounds = 0
@@ -328,10 +337,10 @@ class PlannerExecuterRunner:
             case = pending[step]
             if passed or reached(play):
                 analysis = None if passed else await self._analyse(scenario, step, play, message)
-                await settle(step, passed, message, analysis)
+                await settle(step, passed, message, analysis, play)
             elif case.attempts >= self._spec.free_case_attempts:
                 last = unreached(case.attempts, resets, "GOAL_UNREACHED", message)
-                await settle(step, False, last, self._unreached(last, play))
+                await settle(step, False, last, self._unreached(last, play), play)
             else:
                 case.last_reason = message
                 case.cause = "GOAL_UNREACHED"
