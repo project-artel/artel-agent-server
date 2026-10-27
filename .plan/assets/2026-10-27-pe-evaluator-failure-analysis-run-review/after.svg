@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="600" viewBox="0 0 680 600" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#888780" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect width="680" height="600" fill="#ffffff"/>
+
+  <!-- QA engine -->
+  <rect x="40" y="40" width="600" height="130" rx="16" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+  <text x="60" y="66" font-size="14" font-weight="500" fill="#444441">QA 엔진 · app/agents/planner_executer</text>
+
+  <rect x="60" y="90" width="160" height="56" rx="8" fill="#ffffff" stroke="#5F5E5A" stroke-width="0.5"/>
+  <text x="140" y="122" font-size="14" font-weight="500" fill="#444441" text-anchor="middle">planner</text>
+
+  <rect x="260" y="90" width="160" height="56" rx="8" fill="#ffffff" stroke="#5F5E5A" stroke-width="0.5"/>
+  <text x="340" y="122" font-size="14" font-weight="500" fill="#444441" text-anchor="middle">executer</text>
+
+  <rect x="460" y="90" width="160" height="56" rx="8" fill="#ffffff" stroke="#5F5E5A" stroke-width="0.5"/>
+  <text x="540" y="114" font-size="14" font-weight="500" fill="#444441" text-anchor="middle">StepPlay</text>
+  <text x="540" y="132" font-size="12" fill="#5F5E5A" text-anchor="middle">play 기록</text>
+
+  <line x1="220" y1="118" x2="258" y2="118" stroke="#888780" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="420" y1="118" x2="458" y2="118" stroke="#888780" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <path d="M540 146 L540 190 L140 190 L140 256" fill="none" stroke="#888780" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Evaluator -->
+  <rect x="40" y="210" width="600" height="210" rx="16" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+  <text x="60" y="236" font-size="14" font-weight="500" fill="#3C3489">Evaluator · app/agents/evaluator</text>
+
+  <rect x="60" y="260" width="160" height="56" rx="8" fill="#ffffff" stroke="#534AB7" stroke-width="0.5"/>
+  <text x="140" y="284" font-size="14" font-weight="500" fill="#3C3489" text-anchor="middle">verdict</text>
+  <text x="140" y="302" font-size="12" fill="#534AB7" text-anchor="middle">passed · reason</text>
+
+  <rect x="260" y="260" width="160" height="56" rx="8" fill="#ffffff" stroke="#534AB7" stroke-width="0.5"/>
+  <text x="340" y="284" font-size="14" font-weight="500" fill="#3C3489" text-anchor="middle">analysis</text>
+  <text x="340" y="302" font-size="12" fill="#534AB7" text-anchor="middle">실패한 step 만</text>
+
+  <rect x="460" y="260" width="160" height="56" rx="8" fill="#ffffff" stroke="#534AB7" stroke-width="0.5"/>
+  <text x="540" y="292" font-size="14" font-weight="500" fill="#3C3489" text-anchor="middle">send_verdict</text>
+
+  <rect x="260" y="340" width="160" height="56" rx="8" fill="#ffffff" stroke="#534AB7" stroke-width="0.5"/>
+  <text x="340" y="364" font-size="14" font-weight="500" fill="#3C3489" text-anchor="middle">review</text>
+  <text x="340" y="382" font-size="12" fill="#534AB7" text-anchor="middle">런 끝에 한 번</text>
+
+  <line x1="220" y1="288" x2="258" y2="288" stroke="#888780" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="420" y1="288" x2="458" y2="288" stroke="#888780" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <line x1="540" y1="316" x2="540" y2="498" stroke="#888780" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M300 396 L300 440 L140 440 L140 498" fill="none" stroke="#888780" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Orchestration -->
+  <rect x="40" y="460" width="600" height="120" rx="16" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+  <text x="60" y="486" font-size="14" font-weight="500" fill="#085041">orchestration 이 받는 frame · 저장만 함</text>
+
+  <rect x="60" y="500" width="160" height="56" rx="8" fill="#ffffff" stroke="#0F6E56" stroke-width="0.5"/>
+  <text x="140" y="524" font-size="14" font-weight="500" fill="#085041" text-anchor="middle">종단 STATUS</text>
+  <text x="140" y="542" font-size="12" fill="#0F6E56" text-anchor="middle">+ 런 리뷰</text>
+
+  <rect x="460" y="500" width="160" height="56" rx="8" fill="#ffffff" stroke="#0F6E56" stroke-width="0.5"/>
+  <text x="540" y="524" font-size="14" font-weight="500" fill="#085041" text-anchor="middle">step STATUS</text>
+  <text x="540" y="542" font-size="12" fill="#0F6E56" text-anchor="middle">+ analysis · played</text>
+</svg>

@@ -5,6 +5,8 @@
 | rules          | `rules.md`                                              | planner   |
 | macro grammar  | `app/agents/qa/macro/reference.py`, in `rules`          | planner   |
 | evaluator      | `evaluator.md`                                          | evaluator |
+| failure analysis | `failure_analysis.md` (v4+)                           | evaluator |
+| run review     | `run_review.md` (v4+)                                   | evaluator |
 | game map       | `scene_context`: scenes and what the code lets a player do | planner |
 | developer macros | the project's developer macros that parse, with their build | planner |
 | the step       | the scenario's step, the current screen                 | both      |
@@ -34,10 +36,17 @@ EVALUATOR_ROLE = "evaluator"
 # FREE 시나리오의 씬 계획과 씬 판정(ARTEL-1149). v3 부터 있다.
 SCENE_RULES_ROLE = "scene_rules"
 SCENE_EVALUATOR_ROLE = "scene_evaluator"
+# 실패 분석과 런 리뷰(ARTEL-1267). v4 부터 있다. 둘 다 `app/agents/evaluator/` 가 읽는다.
+FAILURE_ANALYSIS_ROLE = "failure_analysis"
+RUN_REVIEW_ROLE = "run_review"
 
 MACRO_GRAMMAR_PLACEHOLDER = "macro_grammar"
 MACRO_GRAMMAR = f"{GRAMMAR}\n\n{NUMBER_EQUALITY}"
 _FILLS = {MACRO_GRAMMAR_PLACEHOLDER: MACRO_GRAMMAR}
+# 런마다 다른 값으로 채우는 자리. `static_pieces` 는 이것을 hash 하지 않는다 — 언어는 `RunConfig.language` 로
+# 따로 기록된다. `prompt_text` 를 부르는 쪽이 값을 넘긴다.
+LANGUAGE_PLACEHOLDER = "language_directive"
+RUN_PLACEHOLDERS = frozenset({LANGUAGE_PLACEHOLDER})
 
 # Lines per scene, and characters per line, of the game map.
 MAX_CAPABILITIES_PER_SCENE = 15
@@ -49,19 +58,21 @@ def static_pieces(version: str | None) -> tuple[str, dict[str, str]]:
     resolved = resolve_version(PROMPT_AGENT, version)
     files = {role: load_prompt(PROMPT_AGENT, role, resolved) for role in roles_in(PROMPT_AGENT, resolved)}
     hashes = {role: prompt.body_sha256 for role, prompt in files.items()}
-    for name in sorted({name for prompt in files.values() for name in prompt.placeholders}):
+    for name in sorted({name for prompt in files.values() for name in prompt.placeholders} - RUN_PLACEHOLDERS):
         hashes[name] = hashlib.sha256(_FILLS[name].encode()).hexdigest()
     return resolved, hashes
 
 
-def prompt_text(role: str, version: str) -> str:
+def prompt_text(role: str, version: str, **run_fills: str) -> str:
     """One prompt file's text, its placeholders filled.
 
     Prompt bodies double their literal braces (`app/prompts/loader.py`); formatting turns them
-    back into one.
+    back into one. `run_fills` carries the run-level values (`RUN_PLACEHOLDERS`); a role whose
+    body names one that the caller did not pass raises `KeyError` rather than printing `{name}`.
     """
     prompt = load_prompt(PROMPT_AGENT, role, version)
-    return prompt.body.format(**{name: _FILLS[name] for name in prompt.placeholders})
+    fills = {**_FILLS, **run_fills}
+    return prompt.body.format(**{name: fills[name] for name in prompt.placeholders})
 
 
 def screen(pulse: PulseMemory) -> str:

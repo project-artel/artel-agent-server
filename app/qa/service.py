@@ -405,6 +405,11 @@ class QaExecutionService:
             elif message_type == MessageType.BEHAVIOR_ENDED:
                 # 무엇도 기다리지 않는다. 다음 tool 결과 끝에 붙는다(ARTEL-1054).
                 channel.on_behavior_ended(raw)
+            elif message_type == MessageType.ISSUE_RESULT:
+                # `ISSUE` 의 성공 회신(ARTEL-366). 기다리는 것이 없으므로 읽지 않고 받기만 한다.
+                # 모르는 타입으로 두면 `False` 로 떨어져 "unsupported inbound frame" 으로 답하고,
+                # 저쪽은 그것을 프로토콜 오류로 읽는다(`docs/qa-protocol.md` 함정 4).
+                pass
             elif message_type == MessageType.ERROR:
                 # Always accepted, answered or not. ERROR is a legitimate frame in
                 # both directions, so answering it with "unsupported inbound frame"

@@ -6,14 +6,15 @@ ride along in `arch`; `arch.engine` says they were not what ran.
 """
 
 from app.agents.planner_executer.arch import planner_executer_fingerprint
-from app.agents.planner_executer.prompts import static_pieces
-from app.agents.qa.arch import ResolvedArch
+from app.agents.planner_executer.prompts import FAILURE_ANALYSIS_ROLE, PROMPT_AGENT, RUN_REVIEW_ROLE, static_pieces
+from app.agents.qa.arch import QaArchError, ResolvedArch
 from app.agents.qa.macro.grammar import TOOL_NAMES
 from app.agents.scenario import OutputLanguage
 from app.config import get_settings
 from app.llm.chat_model import TEMPERATURE
 from app.llm.decision import resolve_decision_model
 from app.llm.models import LLMModel, ReasoningConfig, get_model_spec
+from app.prompts import roles_in
 from app.qa.run_config import RunConfig
 
 
@@ -33,6 +34,15 @@ def resolve_planner_executer_config(
     """
     assert arch.planner is not None, "resolve_arch fills `planner` for this engine"
     version, hashes = static_pieces(prompt_version)
+    # 실패 분석과 런 리뷰는 v4 부터 있는 글을 읽는다. 옛 version 에 `analysis="on"` 을 두면 run 은
+    # 첫 실패에서 `PromptError` 로 죽는다. 조용히 끄면 `analysis="on"` 으로 기록된 run 이 분석 없이
+    # 돌아 다른 구조 아래 쌓인다 — `resolve_arch` 가 `vision='on'` 을 거절하는 것과 같은 이유로 거절한다.
+    roles = roles_in(PROMPT_AGENT, version)
+    if arch.planner.analysis == "on" and not {FAILURE_ANALYSIS_ROLE, RUN_REVIEW_ROLE} <= set(roles):
+        raise QaArchError(
+            f"planner.analysis='on' needs the `{FAILURE_ANALYSIS_ROLE}` and `{RUN_REVIEW_ROLE}` prompts, "
+            f"and qa_planner/{version} has neither. Pin v4 or newer, or send planner.analysis='off'."
+        )
     functions = step_module_functions()
     settings = get_settings()
     return RunConfig(

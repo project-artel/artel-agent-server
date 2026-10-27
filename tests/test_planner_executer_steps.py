@@ -12,7 +12,7 @@ import pytest
 
 from app.agents.planner_executer import executer as executer_module
 from app.agents.planner_executer.arch import PlannerExecuterArchSpec
-from app.agents.planner_executer.evaluator import Evaluator, request
+from app.agents.evaluator import Evaluator, request
 from app.agents.planner_executer.executer import Executer, StepPlay
 from app.agents.planner_executer.macros import RegisteredMacros, parse_step
 from app.agents.planner_executer.planner import Planner
@@ -425,7 +425,9 @@ def test_a_step_whose_macros_stay_refused_fails_without_play() -> None:
     no_goal = MACROS.replace("def done() -> bool:", "def finished() -> bool:")
     judge, seen = _judge()
 
-    _run(fake, Asked(no_goal, no_goal), judge, FakeJev(), max_rewrites=1)
+    # `analysis="off"`: with it on, the run review would ask the judge once at the end. What the
+    # refused step itself does with the judge — nothing — is what this test pins.
+    _run(fake, Asked(no_goal, no_goal), judge, FakeJev(), max_rewrites=1, analysis="off")
 
     (verdict,) = _verdicts(fake)
     assert verdict["status"] == "FAILED"

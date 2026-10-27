@@ -7,6 +7,7 @@ The two engines share no structure, so a knob added to one must not move the oth
 
 import hashlib
 import json
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -28,7 +29,17 @@ from pydantic import BaseModel, ConfigDict, Field
 # 돌고, 판정은 다섯 개씩 묶어 묻는다(`scene_evaluator`). 후보가 한 계획보다 많은 씬은 남은 후보로 다시 계획한다. 다음 씬으로는 planner 가 이동 step 을 쓴다. 미룬 case 는 라운드가
 # 끝나면 `reset_game` 뒤 다시 돌고, 상한(`free_max_resets`, `free_case_attempts`) 뒤 남은 case 는 UNREACHED 로
 # 실패 보고한다. ORDERED 시나리오의 루프는 그대로지만 knob 이 늘어 fingerprint 가 바뀐다.
-PLANNER_EXECUTER_LABEL = "pe2-free"
+#
+# pe3: 판정을 `app/agents/evaluator/` 로 떼고 실패 분석과 런 리뷰를 더했다(ARTEL-1267). 실패로 판정된 step 마다
+# 모델이 원인 분류(`GAME_DEFECT`·`UNREACHED`·`INCONCLUSIVE`·`AGENT_ERROR`)·원인·재현 절차·인사이트를 쓰고, 그것이
+# step `STATUS` 의 `analysis` 로 나간다. 재현 절차는 모델이 런의 언어로 쓰되 입력 번호에 묶이고, 코드가 보낸 입력마다
+# 사람이 본 값(씬·화면 글자·키)을 소스로 주어 문장이 그 글자를 담는지 검사한다. `ISSUE` 는 보내지 않는다 — 이슈로
+# 옮길지는 사람이 판정을 승인하며 정한다. 엔진이 스스로 멈춘 step
+# (`PLANNER-REFUSED`·`JEV-ERROR`·`EVALUATOR-ERROR`)과 FREE 의 UNREACHED 는 모델 없이 코드가 채운다. 정상 종료한
+# run 은 종단 `STATUS` 에 런 리뷰(`overview`·`patterns`·`insights`)를 싣고 같은 overview 를 `LOG` 한 줄로 낸다.
+# 판정 prompt 는 그대로다. 모델이 읽는 새 글 둘(`failure_analysis`·`run_review`, prompt v4)과 knob `analysis`
+# 하나가 늘어 fingerprint 도 움직인다. `analysis="off"` 는 pe2 의 frame 과 같다.
+PLANNER_EXECUTER_LABEL = "pe3-evaluator-analysis"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1
@@ -58,6 +69,9 @@ class PlannerExecuterArchSpec(BaseModel):
     free_case_attempts: int = Field(default=2, ge=1, le=10)
     # FREE 시나리오: 씬 계획 한 번에 planner 에게 주는 후보 case 의 최대 수.
     free_batch_size: int = Field(default=20, ge=1, le=100)
+    # 실패한 step 의 분석과 런 끝의 리뷰(ARTEL-1267). `off` 면 둘 다 하지 않고 `STATUS` 에 `analysis` 를
+    # 싣지 않는다 — pe2 의 frame 그대로다. 실패 하나에 모델 호출 하나, run 하나에 하나가 더 든다.
+    analysis: Literal["off", "on"] = "on"
 
 
 def planner_executer_fingerprint(spec: PlannerExecuterArchSpec, functions: tuple[str, ...]) -> str:

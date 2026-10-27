@@ -43,8 +43,8 @@
 | `SCREEN_SELECTOR_RULE` | 이 scene 에서 무엇이 screen 을 가르는지 고쳐 쓰기 | `SCREEN_SELECTOR_RESULT` |
 | `SCREEN_SELECTOR_VERDICT` | 제안 하나에 대한 답. **QA agent 가 아니라 판정 agent 가 보냄** | `SCREEN_SELECTOR_RESULT` |
 | `CAPABILITY_VERDICT` · `CAPABILITY_DISCOVERED` | 이 런이 배운 것을 content map 에 적기 | `CAPABILITY_WRITE_RESULT` |
-| `ISSUE` | 런이 찾은 결함 하나 | 아래 「`ISSUE` 는 한쪽만 옛 계약을 앎」 |
-| `STATUS` | 스텝 판정과 런 종료 판정 | 아니오 |
+| `ISSUE` | 런이 찾은 결함 하나 | `ISSUE_RESULT`, 거절은 correlation 을 문 `ERROR`. 기다리는 쪽은 없음 |
+| `STATUS` | 스텝 판정과 런 종료 판정. planner–executer 는 `analysis`·`played` 를 더 싣는다 — [`evaluator-analysis-frames.md`](evaluator-analysis-frames.md) | 아니오 |
 | `LOG` | 타임라인 한 줄 | 아니오 |
 | `TOOL` · `TOOL_RESULT` | 모델이 부른 tool 하나와 그것이 돌려준 것 | 아니오 |
 
@@ -147,21 +147,21 @@ sequenceDiagram
   실패시킨다」고 적고 있습니다. **저쪽 코드가 이깁니다** — 지금은 죽이지 않습니다.
   다만 언제나 진짜 try 를 적으라는 그 주석의 결론 자체는 여전히 옳습니다.
 
-### 4. `ISSUE` 는 한쪽만 옛 계약을 압니다
+### 4. `ISSUE` 는 답을 받지만 아무도 기다리지 않습니다
 
 - `IssueSeverity` 사다리는 양쪽이 똑같습니다 —
   `BLOCKER` · `CRITICAL` · `MAJOR` · `MINOR` · `TRIVIAL`.
-- `report_issue` 는 `title` 과 `severity` 를 **스스로** 검사하고, 틀리면 프레임을
-  보내지도 않고 모델에게 다시 부르라고 말합니다.
-- 그 검사가 생긴 이유는 옛 계약입니다 — 예전에는 성공이 침묵이고 거절도 운영자
-  타임라인의 `ERROR` 행뿐이라, severity 오타 하나면 버그 보고가 조용히 사라지고
+- `report_issue` 와 Evaluator 의 실패 분석(`app/agents/evaluator/`)은 `title` 과 `severity` 를
+  **스스로** 검사합니다. 그 검사가 생긴 이유는 옛 계약입니다 — 예전에는 성공이 침묵이고 거절도
+  운영자 타임라인의 `ERROR` 행뿐이라, severity 오타 하나면 버그 보고가 조용히 사라지고
   모델은 보고했다고 믿었습니다.
 - **ARTEL-366 이 그것을 고쳤습니다.** 지금 orchestration 은 성공에 `ISSUE_RESULT` 를,
   거절에 correlation 을 문 `ERROR` 를 돌려줍니다.
-- 그런데 **이 저장소에는 `ISSUE_RESULT` 라는 `MessageType` 이 없습니다.** 그 프레임이
-  오면 `deliver()` 가 모르는 타입으로 떨어뜨려 「unsupported inbound frame」으로 답합니다.
-- 지금은 무해합니다. `report_issue` 가 아무것도 기다리지 않기 때문입니다.
-  `app/qa/envelope.py` 의 `ISSUE` 주석은 **낡았습니다** — 저쪽은 더 이상 한쪽 방향이 아닙니다.
+- `ISSUE_RESULT` 는 `MessageType` 에 있고 `deliver()` 가 받습니다(ARTEL-1267). 받기만 하고
+  읽지 않습니다 — 보내는 쪽이 아무것도 기다리지 않기 때문입니다. 그 전에는 모르는 타입으로
+  떨어져 「unsupported inbound frame」으로 답했고, 저쪽은 그것을 프로토콜 오류로 읽었습니다.
+- planner–executer 엔진은 `ISSUE` 를 보내지 않습니다. 실패한 case 의 분석은 step `STATUS` 의
+  `analysis` 에 실리고, 이슈로 옮길지는 사람이 그 판정을 승인하면서 정합니다(orchestration 쪽).
 
 ### 5. 시나리오 WebSocket 은 다른 프로토콜입니다
 
