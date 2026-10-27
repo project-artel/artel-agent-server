@@ -113,6 +113,6 @@ def test_the_reply_node_has_a_fallback_for_every_reply_only_route() -> None:
 
 def test_route_choices_keep_their_order() -> None:
     assert list(spec.route_criteria()) == [
-        "greeting", "offtopic", "decline", "unsupported", "question", "modify", "authoring",
+        "greeting", "offtopic", "decline", "unsupported", "question", "modify", "authoring", "case",
     ]
     assert {choice for choice in spec.route_criteria()} <= {route.value for route in Route}

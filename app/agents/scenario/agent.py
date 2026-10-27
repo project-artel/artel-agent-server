@@ -258,6 +258,11 @@ class ScenarioAgent:
                 # **E 수정 갈래**(Step 3): 오케가 실어 준 current_scenarios 에서 대상을
                 # 가리키고, scenario_id 교체 저장으로 되돌린다. 모델 1회 + 반려 시 1회.
                 return await run_modify_workflow(request, context, channel)
+            if verdict.route is Route.CASE:
+                # **TC 를 새로 만든다**(ARTEL-1273): TC 초안만 내고 시나리오는 건드리지 않는다.
+                from app.agents.scenario.workflow import run_case_workflow
+
+                return await run_case_workflow(request, context, channel)
             if verdict.route is Route.QUESTION:
                 # **질문은 질문 노드가 답한다**(ARTEL-1086, ARTEL-1272): 케이스 · 버전 · 판정 · 시나리오 · TR ·
                 # QA 실행을 리소스 도구로 따라간다. 예전에는 케이스 목록을 비우고 검색 도구만 붙여 저작 루프로
