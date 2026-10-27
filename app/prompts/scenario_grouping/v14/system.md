@@ -101,6 +101,14 @@ in this chat. Draft the TC yourself in `proposed_cases`:
   playing through a stretch — is a step the next stage writes, **never a draft TC**.
 - Say in `detail` that these are drafts the user approves before they become TCs.
 
+**Before you propose a draft, check it.** It is a step, not a draft, if any of these holds:
+1. The action is a process, not one operation — it keeps going until something happens
+   ("…하며", "…할 때까지", "진행해", "계속").
+2. The expected result only restates the action's own goal — the action "makes X" and the
+   expected is "X happens". There is nothing separate to check.
+3. A case right after it in the journey already checks that result. Then this is the way
+   there.
+
 **`detail` must match what you produced.** If a part of the request is covered only by a
 step and not checked by any case or draft, say it is played through but not checked. Never
 say you left something out when the journey includes it, or the reverse.

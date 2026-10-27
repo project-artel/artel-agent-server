@@ -184,3 +184,10 @@ def test_a_real_id_the_writer_negated_is_restored_not_taken_for_a_draft(monkeypa
     assert [step["case_id"] for step in sent["steps"]] == [1, 2, None]
     assert all("proposed_case" not in step for step in sent["steps"])
     assert out.proposed_cases == []
+
+
+def test_a_scenario_and_a_tc_request_joined_by_juggo_is_looked_at_for_splitting() -> None:
+    from app.agents.scenario.requests import looks_multiple
+
+    assert looks_multiple("엔딩까지 가는 시나리오 하나 짜주고, 상점에서 카드 사는 TC도 만들어줘")
+    assert not looks_multiple("게임 시작부터 첫 전투까지 시나리오 짜줘")
