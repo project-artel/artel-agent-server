@@ -1,4 +1,4 @@
-"""The evaluator: judges a step after play stops, with the run's model.
+"""The verdict: judges a step after play stops, with the run's model.
 
 It reads the step (what to do and the result to verify), why play stopped, the turns played —
 the screen's scene, `done()` and what Jev said about it, the action picked and how its macro
@@ -7,9 +7,8 @@ ended — and the screen when the step began and when play stopped. It answers
 structured-output method per route. An answer that cannot be read is asked for once more; a
 second one fails the step with `EVALUATOR-ERROR`.
 
-The verdict goes out the way the agent's `report_step` sends it — a per-step `STATUS` with no
-`result`, the case id and whether the step is its case's verification step — so Orchestration
-records both engines' steps the same way.
+Sending the verdict is `report.py`'s job, so a caller can judge without reporting — a probe
+script replaying a saved play does exactly that.
 """
 
 import json
@@ -22,12 +21,10 @@ from pydantic import BaseModel
 
 from app.agents.planner_executer.executer import StepPlay
 from app.agents.planner_executer.prompts import EVALUATOR_ROLE, SCENE_EVALUATOR_ROLE, case_view, prompt_text, this_step
-from app.agents.qa.tools import QaRunState
 from app.llm.chat_model import structured
-from app.qa.channel import QaCancelled, QaRunChannel
-from app.qa.envelope import MessageType, StatusPayload, StepStatus
+from app.qa.channel import QaCancelled
 from app.qa.run_config import RunConfig
-from app.qa.schemas import QaScenario, QaStepResult
+from app.qa.schemas import QaScenario
 
 # Tries per step: the first answer, and one more when it cannot be read.
 ATTEMPTS = 2
@@ -217,27 +214,3 @@ def _read(answer: Any) -> Verdict:
     if match is None:
         raise ValueError(f"no JSON object in {str(answer)[:120]!r}")
     return Verdict.model_validate(json.loads(match.group(0)))
-
-
-async def report(
-    channel: QaRunChannel, state: QaRunState, step: int, passed: bool, message: str
-) -> None:
-    """Record and send one step's verdict, in the shape `report_step` sends it."""
-    case_id, is_verification = (
-        state.step_meta[step - 1] if 0 <= step - 1 < len(state.step_meta) else (None, False)
-    )
-    state.step_results.append(
-        QaStepResult(
-            step=step, passed=passed, message=message, case_id=case_id, is_verification=is_verification
-        )
-    )
-    await channel.emit(
-        MessageType.STATUS,
-        StatusPayload(
-            status=StepStatus.COMPLETED if passed else StepStatus.FAILED,
-            step=step,
-            case_id=case_id,
-            is_verification=is_verification,
-            message=message,
-        ),
-    )

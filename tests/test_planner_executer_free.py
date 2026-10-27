@@ -12,7 +12,7 @@ import asyncio
 import pytest
 
 from app.agents.planner_executer import runner as runner_module
-from app.agents.planner_executer.evaluator import CASES_PER_JUDGEMENT, SceneEvaluator
+from app.agents.evaluator import CASES_PER_JUDGEMENT, SceneEvaluator
 from app.agents.planner_executer.executer import StepPlay
 from app.agents.planner_executer.free import FreeCase, candidates, next_scene
 from app.agents.planner_executer.planner import read_plan
