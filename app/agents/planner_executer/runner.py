@@ -24,7 +24,18 @@ recorded as ORDERED, and its FREE scenarios still play this way.
 import asyncio
 from collections.abc import Awaitable, Callable
 
-from app.agents.evaluator import Evaluator, Judge, SceneEvaluator, report
+from app.agents.evaluator import (
+    Evaluator,
+    FailureAnalyzer,
+    FailureReport,
+    Judge,
+    RunReviewer,
+    SceneEvaluator,
+    engine_error,
+    expected_text,
+    report,
+    unreached as unreached_report,
+)
 from app.agents.planner_executer.decisions import MAX_REFUSAL_CHARS, clip, note_decision
 from app.agents.planner_executer.developer_macros import NO_DEVELOPER_MACROS, LoadedDeveloperMacros
 from app.agents.planner_executer.executer import Executer, StepPlay
@@ -101,6 +112,11 @@ class PlannerExecuterRunner:
         )
         executer = Executer(channel, self._spec, jev)
         judge = Evaluator(self._config, self._judge)
+        # 실패 분석과 런 리뷰(ARTEL-1267). `analysis="off"` 면 둘 다 없고 `STATUS` 는 pe2 그대로다.
+        analysing = self._spec.analysis == "on"
+        self._analyzer = FailureAnalyzer(self._config, self._judge) if analysing else None
+        self._reviewer = RunReviewer(self._config, self._judge) if analysing else None
+        self._reports: dict[int, FailureReport] = {}
 
         if scenario.execution_mode == "FREE":
             await self._run_free(channel, scenario, state, planner, executer, SceneEvaluator(self._config, self._judge))
@@ -108,17 +124,31 @@ class PlannerExecuterRunner:
             for step in range(1, len(scenario.steps) + 1):
                 written = await planner.write(scenario, step)
                 if written.macros is None:
-                    await report(
-                        channel, state, step, False,
+                    message = (
                         f"PLANNER-REFUSED: the step's macros were still refused after "
-                        f"{self._spec.max_rewrites} rewrites: {written.refusal}",
+                        f"{self._spec.max_rewrites} rewrites: {written.refusal}"
                     )
+                    await self._report(channel, state, scenario, step, False, message, self._engine_error(message))
                     continue
                 play = await executer.play(step, step_text(scenario.steps[step - 1]), written.macros)
                 passed, message = await judge.judge(scenario, step, play)
-                await report(channel, state, step, passed, message)
+                analysis = None if passed else await self._analyse(scenario, step, play, message)
+                await self._report(channel, state, scenario, step, passed, message, analysis)
         state.finished = True
         passed = all(result.passed for result in state.step_results)
+        review = None
+        if self._reviewer is not None:
+            # 정상 종료에만 한다. 취소·시간 초과로 끊긴 run 은 `service._send_terminal` 이 닫고, 그 run 을
+            # 통째로 읽으면 끊김을 게임 탓으로 읽는다.
+            review = await self._reviewer.review(scenario, state, self._reports)
+            if review is not None:
+                await note_decision(
+                    channel,
+                    "run_review",
+                    review.overview,
+                    patterns=review.patterns,
+                    insights=review.insights,
+                )
         await channel.emit(
             MessageType.STATUS,
             StatusPayload(
@@ -126,8 +156,40 @@ class PlannerExecuterRunner:
                 result=RunResult.PASSED if passed else RunResult.FAILED,
                 message=f"{sum(r.passed for r in state.step_results)}/{state.total_steps} steps passed.",
                 summary=state.build_summary(),
+                analysis=review.model_dump() if review is not None else None,
             ),
         )
+
+    async def _report(
+        self,
+        channel: QaRunChannel,
+        state: QaRunState,
+        scenario: QaScenario,
+        step: int,
+        passed: bool,
+        message: str,
+        analysis: FailureReport | None = None,
+    ) -> None:
+        """One step's verdict and, for a failed step, its analysis — kept for the run review too."""
+        if analysis is not None:
+            self._reports[step] = analysis
+        await report(
+            channel, state, step, passed, message, analysis=analysis, expected=expected_text(scenario, step)
+        )
+
+    async def _analyse(
+        self, scenario: QaScenario, step: int, play: StepPlay, message: str
+    ) -> FailureReport | None:
+        """The failure analysis of a judged step, or `None` when the run does not analyse."""
+        if self._analyzer is None:
+            return None
+        return await self._analyzer.analyze(scenario, step, play, message)
+
+    def _engine_error(self, message: str, play: StepPlay | None = None) -> FailureReport | None:
+        return engine_error(message, play) if self._analyzer is not None else None
+
+    def _unreached(self, message: str, play: StepPlay | None = None) -> FailureReport | None:
+        return unreached_report(message, play) if self._analyzer is not None else None
 
     async def _run_free(
         self,
@@ -150,8 +212,8 @@ class PlannerExecuterRunner:
         known = {scene.scene_name.strip().casefold() for scene in (context.scenes if context else []) if scene.scene_name}
         resets = 0
 
-        async def settle(step: int, passed: bool, message: str) -> None:
-            await report(channel, state, step, passed, message)
+        async def settle(step: int, passed: bool, message: str, analysis: FailureReport | None = None) -> None:
+            await self._report(channel, state, scenario, step, passed, message, analysis)
             del pending[step]
 
         rounds = 0
@@ -202,7 +264,8 @@ class PlannerExecuterRunner:
                     unreached={str(case.step): case.cause for case in left},
                 )
                 for case in left:
-                    await settle(case.step, False, unreached(case.attempts, resets, case.cause, case.last_reason))
+                    message = unreached(case.attempts, resets, case.cause, case.last_reason)
+                    await settle(case.step, False, message, self._unreached(message))
                 return
             await note_decision(
                 channel,
@@ -224,7 +287,7 @@ class PlannerExecuterRunner:
         offered: list[FreeCase],
         pending: dict[int, FreeCase],
         resets: int,
-        settle: Callable[[int, bool, str], Awaitable[None]],
+        settle: Callable[..., Awaitable[None]],
     ) -> list[int]:
         """One plan: the planned cases played in order while the scene stays, then judged.
 
@@ -237,11 +300,11 @@ class PlannerExecuterRunner:
             # offered only because their scene is unknown wait for another scene.
             for case in offered:
                 if same_scene(case.scene, scene):
-                    await settle(
-                        case.step, False,
+                    message = (
                         f"PLANNER-REFUSED: the scene plan was still refused after {self._spec.max_rewrites} "
-                        f"rewrites: {plan.refusal}",
+                        f"rewrites: {plan.refusal}"
                     )
+                    await settle(case.step, False, message, self._engine_error(message))
             return []
         for step, reason in plan.later.items():
             pending[step].last_reason = f"the planner left it for later in {scene or 'an unknown scene'}: {reason}"
@@ -267,9 +330,11 @@ class PlannerExecuterRunner:
             passed, message = verdicts[step]
             case = pending[step]
             if passed or reached(play):
-                await settle(step, passed, message)
+                analysis = None if passed else await self._analyse(scenario, step, play, message)
+                await settle(step, passed, message, analysis)
             elif case.attempts >= self._spec.free_case_attempts:
-                await settle(step, False, unreached(case.attempts, resets, "GOAL_UNREACHED", message))
+                last = unreached(case.attempts, resets, "GOAL_UNREACHED", message)
+                await settle(step, False, last, self._unreached(last, play))
             else:
                 case.last_reason = message
                 case.cause = "GOAL_UNREACHED"
@@ -326,8 +391,8 @@ class PlannerExecuterRunner:
 
 
 def reached(play: StepPlay) -> bool:
-    """Whether play got to the step's goal: `done()` held on some turn."""
-    return play.stopped == "done" or any(turn.get("done") for turn in play.turns)
+    """Whether play got to the step's goal: `done()` held on some turn (`StepPlay.reached_goal`)."""
+    return play.reached_goal()
 
 
 # UNREACHED 보고의 첫 문장. 씬에 못 간 case 와 play 했는데 목표에 못 닿은 case 가 같은 문구였다(ARTEL-1186).

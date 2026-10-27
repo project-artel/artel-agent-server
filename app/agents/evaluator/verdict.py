@@ -20,7 +20,13 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
 
 from app.agents.planner_executer.executer import StepPlay
-from app.agents.planner_executer.prompts import EVALUATOR_ROLE, SCENE_EVALUATOR_ROLE, case_view, prompt_text, this_step
+from app.agents.planner_executer.prompts import (
+    EVALUATOR_ROLE,
+    SCENE_EVALUATOR_ROLE,
+    case_view,
+    prompt_text,
+    this_step,
+)
 from app.llm.chat_model import structured
 from app.qa.channel import QaCancelled
 from app.qa.run_config import RunConfig
@@ -149,7 +155,7 @@ def scene_request(scenario: QaScenario, played: list[tuple[int, StepPlay]], firs
     for step, play in played:
         shown = play.turns[-MAX_TURNS_SHOWN_PER_CASE:]
         skipped = len(play.turns) - len(shown)
-        turns = "\n".join(_turn_line(turn) for turn in shown) or "  (no turn was played)"
+        turns = "\n".join(turn_line(turn) for turn in shown) or "  (no turn was played)"
         parts.append(
             f"Case:\n{json.dumps(case_view(scenario, step), ensure_ascii=False, indent=2)}\n\n"
             f"Why play stopped: {play.stopped}\n\n"
@@ -161,23 +167,28 @@ def scene_request(scenario: QaScenario, played: list[tuple[int, StepPlay]], firs
     return "\n---\n\n".join(parts)
 
 
+def read_json(answer: Any) -> dict:
+    """The JSON object in what the model returned — a dict as it is, a string by its first `{…}`."""
+    if isinstance(answer, dict):
+        return answer
+    match = _JSON.search(str(answer))
+    if match is None:
+        raise ValueError(f"no JSON object in {str(answer)[:120]!r}")
+    return json.loads(match.group(0))
+
+
 def _read_scene(answer: Any) -> SceneVerdicts:
     """`SceneVerdicts` from what the model returned. Raises when it is not one."""
     if isinstance(answer, SceneVerdicts):
         return answer
-    if isinstance(answer, dict):
-        return SceneVerdicts.model_validate(answer)
-    match = _JSON.search(str(answer))
-    if match is None:
-        raise ValueError(f"no JSON object in {str(answer)[:120]!r}")
-    return SceneVerdicts.model_validate(json.loads(match.group(0)))
+    return SceneVerdicts.model_validate(read_json(answer))
 
 
 def request(scenario: QaScenario, step: int, play: StepPlay) -> str:
     """What the evaluator reads about one step."""
     shown = play.turns[-MAX_TURNS_SHOWN:]
     skipped = len(play.turns) - len(shown)
-    turns = "\n".join(_turn_line(turn) for turn in shown) or "  (no turn was played)"
+    turns = "\n".join(turn_line(turn) for turn in shown) or "  (no turn was played)"
     return (
         f"The step:\n{this_step(scenario, step)}\n\n"
         f"Why play stopped: {play.stopped}\n\n"
@@ -189,7 +200,8 @@ def request(scenario: QaScenario, step: int, play: StepPlay) -> str:
     )
 
 
-def _turn_line(turn: dict) -> str:
+def turn_line(turn: dict) -> str:
+    """One turn of a play as the Evaluator's prompts draw it."""
     parts = [f"  turn {turn['turn']} on {turn.get('scene')}: done()={turn.get('done')}"]
     if turn.get("done_error"):
         parts.append(f"(done() could not be read: {turn['done_error']})")
@@ -208,9 +220,4 @@ def _read(answer: Any) -> Verdict:
     """A `Verdict` from what the model returned. Raises when it is not one."""
     if isinstance(answer, Verdict):
         return answer
-    if isinstance(answer, dict):
-        return Verdict.model_validate(answer)
-    match = _JSON.search(str(answer))
-    if match is None:
-        raise ValueError(f"no JSON object in {str(answer)[:120]!r}")
-    return Verdict.model_validate(json.loads(match.group(0)))
+    return Verdict.model_validate(read_json(answer))

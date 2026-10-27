@@ -75,6 +75,14 @@ class StepPlay:
     end_screen: str = ""
     seconds: float = 0.0
 
+    def reached_goal(self) -> bool:
+        """Whether play got to the step's goal by its own reading: `done()` held on some turn.
+
+        The engine's claim, not the verdict. The Evaluator records it beside its own answer so
+        the two can be compared.
+        """
+        return self.stopped == "done" or any(turn.get("done") for turn in self.turns)
+
 
 class JevStopped(Exception):
     """Jev did not answer; the step's play stops with this."""
