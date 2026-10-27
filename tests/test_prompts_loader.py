@@ -553,6 +553,8 @@ def test_every_live_agent_has_a_v1(monkeypatch) -> None:
             "scenario_grouping",
             "scenario_writer",
             "scenario_modify",
+            # TC 만들기 갈래(ARTEL-1273) — TC 초안만 낸다.
+            "scenario_case",
             "game_context",
             "knowledge_query",
             "screen_verdict",
