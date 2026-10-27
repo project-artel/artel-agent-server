@@ -210,7 +210,7 @@ class ScenarioAgent:
         # **여러 요청은 하나씩 제 갈래로**(ARTEL-1086): 요청이 섞인 말은 나눠서 차례로 처리하고 한 답으로 모은다.
         # 이미 갈래가 정해진 재진입(질문의 소형 턴 등)에는 걸지 않는다.
         if (
-            getattr(get_settings(), "scenario_single_request_enabled", False)
+            getattr(get_settings(), "scenario_single_request_enabled", True)
             and self._router is not None
             and request.current_route is None
             and looks_multiple(request.user_input)
@@ -258,23 +258,13 @@ class ScenarioAgent:
                 # **E 수정 갈래**(Step 3): 오케가 실어 준 current_scenarios 에서 대상을
                 # 가리키고, scenario_id 교체 저장으로 되돌린다. 모델 1회 + 반려 시 1회.
                 return await run_modify_workflow(request, context, channel)
-            if verdict.route is Route.QUESTION and get_settings().scenario_resource_tools_enabled:
-                # **범용 질문**(ARTEL-1086, POC): 케이스 · 버전 · 판정 · 시나리오 · TR · QA 실행을 리소스 도구로
-                # 따라가며 답한다. 스위치를 끄면 아래의 예전 소형 턴이다.
+            if verdict.route is Route.QUESTION:
+                # **질문은 질문 노드가 답한다**(ARTEL-1086, ARTEL-1272): 케이스 · 버전 · 판정 · 시나리오 · TR ·
+                # QA 실행을 리소스 도구로 따라간다. 예전에는 케이스 목록을 비우고 검색 도구만 붙여 저작 루프로
+                # 다시 들어갔는데, 진행 표시가 저작 단계로 뜨고 개수 질문에 검색 결과 수로 답했다.
                 from app.agents.scenario.question import run_question_workflow
 
                 return await run_question_workflow(request, context, channel)
-            if verdict.route is Route.QUESTION:
-                # **새 기계가 아니라 설계된 폴백을 탄다**: 전량을 비우면 프롬프트가
-                # 검색 안내(NO_TEST_CASE_LIST_NOTICE)로 갈리고 검색 도구가 켜진다
-                # (ARTEL-319 의 롤백 경로). 케이스 74k·흐름·간선이 전부 빠진 소형 턴이다.
-                slim = request.model_copy(update={
-                    "test_case_list": [],
-                    "flows": [],
-                    "scene_edges": [],
-                    "current_route": Route.QUESTION.value,
-                })
-                return await self.run(slim, context, channel)
             if not get_settings().scenario_loop_enabled:
                 # **구 루프 갈래 끊기**(실험 전용 — 서비스 기본값은 켬). 여기 닿는 것은
                 # MODIFY 와, 워크플로가 꺼진 채의 저작뿐이다. 지금은 그 요청이 얼마나,
