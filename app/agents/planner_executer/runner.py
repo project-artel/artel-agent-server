@@ -31,6 +31,7 @@ from app.agents.planner_executer.evaluator import Evaluator, Judge, SceneEvaluat
 from app.agents.planner_executer.executer import Executer, FailureMemory, StepPlay
 from app.agents.planner_executer.free import FreeCase, candidates, free_cases, next_scene, same_scene
 from app.agents.planner_executer.macros import RegisteredMacros
+from app.agents.planner_executer.phases import PhaseReporter, RunPhase
 from app.agents.planner_executer.planner import Ask, Planner
 from app.agents.planner_executer.prompts import screen, step_text, travel_goal
 from app.agents.qa.runner import _step_plan
@@ -102,11 +103,13 @@ class PlannerExecuterRunner:
         )
         executer = Executer(channel, self._spec, jev)
         judge = Evaluator(self._config, self._judge)
+        self._phase = PhaseReporter(channel)
 
         if scenario.execution_mode == "FREE":
             await self._run_free(channel, scenario, state, planner, executer, SceneEvaluator(self._config, self._judge))
         else:
             for step in range(1, len(scenario.steps) + 1):
+                await self._phase.enter(RunPhase.PLANNING, step)
                 written = await planner.write(scenario, step)
                 if written.macros is None:
                     await evaluator.report(
@@ -115,7 +118,9 @@ class PlannerExecuterRunner:
                         f"{self._spec.max_rewrites} rewrites: {written.refusal}",
                     )
                     continue
+                await self._phase.enter(RunPhase.EXECUTING, step)
                 play = await executer.play(step, step_text(scenario.steps[step - 1]), written.macros)
+                await self._phase.enter(RunPhase.EVALUATING, step)
                 passed, message = await judge.judge(scenario, step, play)
                 await evaluator.report(channel, state, step, passed, message)
         state.finished = True
@@ -212,6 +217,7 @@ class PlannerExecuterRunner:
                 round=rounds,
                 pending=list(pending),
             )
+            await self._phase.enter(RunPhase.EXECUTING)
             await reset_game(channel)
             resets += 1
 
@@ -232,6 +238,7 @@ class PlannerExecuterRunner:
         Returns the planned cases left unplayed because the scene changed before their turn.
         """
         scene = channel.scene.pulse.scene
+        await self._phase.enter(RunPhase.PLANNING, offered[0].step if offered else None)
         plan = await planner.plan_scene(scenario, [case.step for case in offered])
         if plan.macros is None:
             # The plan never parsed. The scene's own cases fail as a refused step does; the cases
@@ -261,12 +268,14 @@ class PlannerExecuterRunner:
                 continue
             pending[step].attempts += 1
             case_id = scenario.steps[step - 1].case_id
+            await self._phase.enter(RunPhase.EXECUTING, step)
             play = await executer.play(
                 step, step_text(scenario.steps[step - 1]), plan.macros.for_case(case_id), failures
             )
             played.append((step, play))
         if not played:
             return unplayed
+        await self._phase.enter(RunPhase.EVALUATING, played[0][0])
         verdicts = await scene_judge.judge(scenario, played, first_screen)
         for step, play in played:
             passed, message = verdicts[step]
@@ -292,9 +301,11 @@ class PlannerExecuterRunner:
         """Move to `target`'s scene. `False`, with why on that scene's cases, when play does not get there."""
         scene = target.scene or ""
         origin = channel.scene.pulse.scene
+        await self._phase.enter(RunPhase.PLANNING, target.step)
         written = await planner.write_travel(scenario, target.step, scene)
         stopped = f"the move was still refused after {self._spec.max_rewrites} rewrites: {written.refusal}"
         if written.macros is not None:
+            await self._phase.enter(RunPhase.EXECUTING, target.step)
             play = await executer.play(target.step, travel_goal(scene), written.macros)
             stopped = play.stopped
         arrived = channel.scene.pulse.scene
