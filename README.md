@@ -15,7 +15,7 @@
 | WebSocket 라우트 | 2 | `/internal/sessions/{id}`, `/internal/qa-sessions/{id}` |
 | QA tool | 37 | `app/agents/qa/tools/` |
 | QA middleware | 5 | `app/agents/qa/runner.py` |
-| QA `MessageType` | 30 | `app/qa/envelope.py` |
+| QA `MessageType` | 40 | `app/qa/envelope.py` |
 | prompt 계열 | 7 | `app/prompts/` (`qa_run` 은 v16, `scenario` 는 v8 까지) |
 
 ## 실행
@@ -195,7 +195,7 @@ docker run --rm -p 8080:8080 -v ${PWD}/.env:/app/.env:ro artel-agent-server:loca
 | 문서 | 무엇 |
 | --- | --- |
 | [`docs/architecture.md`](docs/architecture.md) | agent 여섯이 무엇이고, QA 런이 왜 tool loop 인지 |
-| [`docs/qa-protocol.md`](docs/qa-protocol.md) | `MessageType` 30 개, 어느 tool 이 무엇을 기다리는지, 함정 |
+| [`docs/qa-protocol.md`](docs/qa-protocol.md) | `MessageType` 40 개, 어느 tool 이 무엇을 기다리는지, 함정 |
 | [`docs/adr/`](docs/adr/README.md) | 이 저장소의 모양을 정한 결정 여섯 개 |
 | [`docs/api-documentation.md`](docs/api-documentation.md) | OpenAPI 계약을 어디서 보고 무엇을 선언해야 하는지 |
 | [`app/specs_v2/README.md`](app/specs_v2/README.md) | 명세 발견기의 evidence graph 와 연결 motif |
