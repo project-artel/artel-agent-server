@@ -15,8 +15,10 @@ journey, already in run order. Write ordered steps a human tester can follow.
   If the stretch is crossed by playing (a fight to win, "on its own"), write it as
   what the player does, mark it UNKNOWN, and put the play condition in
   step_unknown_reason — then keep going.
-- A case with a **negative id** is a TC draft the user has not approved yet. Write its
-  steps exactly as for any case and put that negative id in `case_id`; mark them CASE.
+- A case listed with a **negative id** (-1, -2, …) and status PROPOSED is a TC the user has
+  not approved yet. Write its steps exactly as for any case and put that negative id in
+  `case_id`; mark them CASE. Every other case keeps its id exactly as listed — never add a
+  sign to it. A status of DRAFT on a listed case is only its verification state.
 - A step with no case_id is never CASE. Use each case's `input:` value for the step's
   `input` when it applies.
 - Title and every sentence in the user's language ({locale}).

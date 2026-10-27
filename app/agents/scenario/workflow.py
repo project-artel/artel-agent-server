@@ -557,7 +557,7 @@ def _drafts_table(drafts: list[ProposedCase], ko: bool) -> str:
     return "\n".join([head, *rows])
 
 
-def _detach_drafts(scenario: ScenarioPlan, ko: bool) -> ScenarioPlan:
+def _detach_drafts(scenario: ScenarioPlan, ko: bool, refs: set[int] | None = None, known: set[int] | None = None) -> ScenarioPlan:
     """TC 초안을 가리키는 스텝을 저장 계약에 맞춘다(ARTEL-1273).
 
     초안은 아직 TC 가 아니라 `case_id` 에 음수를 둘 수 없다 — 오케가 없는 번호로 막는다. 번호를 `proposed_case`
@@ -565,16 +565,25 @@ def _detach_drafts(scenario: ScenarioPlan, ko: bool) -> ScenarioPlan:
     """
     if not any(step.case_id is not None and step.case_id < 0 for step in scenario.steps):
         return scenario
+    refs = refs or set()
+    known = known or set()
     reason = "승인 전 TC 초안을 확인하는 스텝이에요" if ko else "Checks a TC draft that is not approved yet"
-    steps = [
-        step.model_copy(update={
-            "proposed_case": step.case_id, "case_id": None,
-            "step_source": "UNKNOWN", "step_unknown_reason": reason,
-        })
-        if step.case_id is not None and step.case_id < 0 else step
-        for step in scenario.steps
-    ]
-    return scenario.model_copy(update={"steps": steps})
+
+    def fixed(step: AuthoredStep) -> AuthoredStep:
+        if step.case_id is None or step.case_id >= 0:
+            return step
+        if step.case_id in refs:
+            return step.model_copy(update={
+                "proposed_case": step.case_id, "case_id": None,
+                "step_source": "UNKNOWN", "step_unknown_reason": reason,
+            })
+        # **초안이 아닌 음수는 모델이 진짜 id 에 부호를 붙인 것이다.** 실측(294건, 긴 여정): 모든 TC 의 검증 상태가
+        # DRAFT 라 "초안" 과 헷갈려 21스텝 전부가 -id 로 나왔고, 그대로 초안으로 떼어져 TC 연결이 다 사라졌다.
+        if -step.case_id in known:
+            return step.model_copy(update={"case_id": -step.case_id})
+        return step.model_copy(update={"case_id": None})
+
+    return scenario.model_copy(update={"steps": [fixed(step) for step in scenario.steps]})
 
 
 def _existing_scenarios(request: ScenarioAgentRequest) -> str:
@@ -622,7 +631,7 @@ def _as_case(draft: ProposedCase) -> TestCaseListItem:
         step=draft.action or "(no action — observe)",
         precondition=draft.precondition or None,
         expected_value=draft.expected,
-        verification_status="DRAFT TC, not approved yet",
+        verification_status="PROPOSED (not a TC yet)",
     )
 
 
@@ -925,11 +934,13 @@ async def run_authoring_workflow(
     changes: list[ScenarioChange] = []
     dropped: list[str] = []
     accepted_plans: list[ScenarioPlan] = []
+    draft_refs = {draft.ref for draft in plan.proposed_cases if draft.ref < 0}
+    real_ids = {case.id for case in request.test_case_list}
     for group, scenario in zip(groups, written):
         if scenario is None:
             dropped.append(group.title)
             continue
-        scenario = _detach_drafts(scenario, ko)
+        scenario = _detach_drafts(scenario, ko, draft_refs, real_ids)
         answer = await channel.submit_scenario(scenario.model_dump(by_alias=True))
         if answer is not None and not answer.accepted and answer.detail:
             # 반려 라우팅: 그 묶음 worker 만 이유를 들고 한 번 다시 쓴다. B 복귀는 없다 —
@@ -937,7 +948,7 @@ async def run_authoring_workflow(
             # FREE 묶음은 다시 써도 같은 스텝이 나오므로 재시도 없이 버린다.
             retried = None if scenario.is_free() else await write(group, feedback=answer.detail)
             if retried is not None:
-                scenario = _detach_drafts(retried, ko)
+                scenario = _detach_drafts(retried, ko, draft_refs, real_ids)
                 answer = await channel.submit_scenario(scenario.model_dump(by_alias=True))
             else:
                 answer = None

@@ -163,3 +163,24 @@ def test_a_turn_that_writes_nothing_says_why_in_the_models_words(monkeypatch) ->
 
     assert out.reply.result == "앞으로 의도된 막힘 확인도 넣을게요."
     assert "TC를 찾지 못해서" not in out.message
+
+
+def test_a_real_id_the_writer_negated_is_restored_not_taken_for_a_draft(monkeypatch) -> None:
+    _fake_calls(monkeypatch, {
+        wf.GroupingPlan: wf.GroupingPlan(groups=[wf.Group(title="상점 여정", case_ids=[1, 2])]),
+        wf._Writer: wf._Writer(steps=[
+            AuthoredStep(action="상점을 연다", case_id=-1, step_source="CASE"),
+            AuthoredStep(action="물건을 본다", case_id=-2, step_source="CASE"),
+            AuthoredStep(action="없는 번호", case_id=-99, step_source="CASE"),
+        ]),
+    })
+    channel = _FakeChannel()
+
+    out = asyncio.run(wf.run_authoring_workflow(
+        _request(user_input="상점 짜줘", test_case_list=_cases()), _CTX, channel,
+    ))
+
+    (sent,) = channel.submitted
+    assert [step["case_id"] for step in sent["steps"]] == [1, 2, None]
+    assert all("proposed_case" not in step for step in sent["steps"])
+    assert out.proposed_cases == []
