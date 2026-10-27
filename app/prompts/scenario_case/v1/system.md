@@ -37,7 +37,9 @@ step as a TC.
   Draft what is clear and ask only about the rest.
 - `why` (one short sentence per draft): what this TC checks, for the user to read.
 
-════ `detail` AND `questions` ARE READ BY THE USER ════
+════ `result`, `detail` AND `questions` ARE READ BY THE USER ════
+- `result`: the first line the user sees — one sentence saying what you drafted, or why
+  you drafted nothing (an existing TC already covers it, you need an answer first).
 - `detail`: short. How you read the request where it could be read two ways, and what you
   left out and why. One point per paragraph, at most two sentences each. Do not repeat the
   drafts — the screen shows them.
