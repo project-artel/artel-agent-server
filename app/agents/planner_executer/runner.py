@@ -24,10 +24,9 @@ recorded as ORDERED, and its FREE scenarios still play this way.
 import asyncio
 from collections.abc import Awaitable, Callable
 
-from app.agents.planner_executer import evaluator
+from app.agents.evaluator import Evaluator, Judge, SceneEvaluator, report
 from app.agents.planner_executer.decisions import MAX_REFUSAL_CHARS, clip, note_decision
 from app.agents.planner_executer.developer_macros import NO_DEVELOPER_MACROS, LoadedDeveloperMacros
-from app.agents.planner_executer.evaluator import Evaluator, Judge, SceneEvaluator
 from app.agents.planner_executer.executer import Executer, FailureMemory, StepPlay
 from app.agents.planner_executer.free import FreeCase, candidates, free_cases, next_scene, same_scene
 from app.agents.planner_executer.macros import RegisteredMacros
@@ -112,7 +111,7 @@ class PlannerExecuterRunner:
                 await self._phase.enter(RunPhase.PLANNING, step)
                 written = await planner.write(scenario, step)
                 if written.macros is None:
-                    await evaluator.report(
+                    await report(
                         channel, state, step, False,
                         f"PLANNER-REFUSED: the step's macros were still refused after "
                         f"{self._spec.max_rewrites} rewrites: {written.refusal}",
@@ -122,7 +121,7 @@ class PlannerExecuterRunner:
                 play = await executer.play(step, step_text(scenario.steps[step - 1]), written.macros)
                 await self._phase.enter(RunPhase.EVALUATING, step)
                 passed, message = await judge.judge(scenario, step, play)
-                await evaluator.report(channel, state, step, passed, message)
+                await report(channel, state, step, passed, message)
         state.finished = True
         passed = all(result.passed for result in state.step_results)
         await channel.emit(
@@ -157,7 +156,7 @@ class PlannerExecuterRunner:
         resets = 0
 
         async def settle(step: int, passed: bool, message: str) -> None:
-            await evaluator.report(channel, state, step, passed, message)
+            await report(channel, state, step, passed, message)
             del pending[step]
 
         rounds = 0

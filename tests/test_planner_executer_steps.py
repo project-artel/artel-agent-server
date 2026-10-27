@@ -12,7 +12,7 @@ import pytest
 
 from app.agents.planner_executer import executer as executer_module
 from app.agents.planner_executer.arch import PlannerExecuterArchSpec
-from app.agents.planner_executer.evaluator import Evaluator, request
+from app.agents.evaluator import Evaluator, request
 from app.agents.planner_executer.executer import Executer, StepPlay
 from app.agents.planner_executer.macros import RegisteredMacros, parse_step
 from app.agents.planner_executer.planner import Planner
