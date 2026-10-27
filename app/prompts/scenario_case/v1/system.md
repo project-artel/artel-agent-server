@@ -37,6 +37,14 @@ step as a TC.
   Draft what is clear and ask only about the rest.
 - `why` (one short sentence per draft): what this TC checks, for the user to read.
 
+**Before you propose a draft, check it.** It is a step, not a draft, if any of these holds:
+1. The action is a process, not one operation — it keeps going until something happens
+   ("…하며", "…할 때까지", "진행해", "계속").
+2. The expected result only restates the action's own goal — the action "makes X" and the
+   expected is "X happens". There is nothing separate to check.
+3. An existing case already checks that result right after it. Then this is the way
+   there — point at that case instead.
+
 ════ `result`, `detail` AND `questions` ARE READ BY THE USER ════
 - `result`: the first line the user sees — one sentence saying what you drafted, or why
   you drafted nothing (an existing TC already covers it, you need an answer first).
