@@ -116,3 +116,50 @@ def test_the_case_route_goes_to_the_case_node(monkeypatch) -> None:
     out = asyncio.run(agent.run(_request(user_input="상점 TC 만들어줘"), _CTX, _FakeChannel()))
 
     assert out.message == "초안"
+
+
+def test_the_first_line_is_the_models_when_everything_was_saved(monkeypatch) -> None:
+    _fake_calls(monkeypatch, {
+        wf.GroupingPlan: wf.GroupingPlan(result="상점 흐름을 시나리오 하나로 짰어요.", groups=[wf.Group(title="상점 여정", case_ids=[1])]),
+        wf._Writer: wf._Writer(steps=[AuthoredStep(action="상점을 연다", case_id=1, step_source="CASE")]),
+    })
+
+    out = asyncio.run(wf.run_authoring_workflow(
+        _request(user_input="상점 짜줘", test_case_list=_cases()), _CTX, _FakeChannel(),
+    ))
+
+    assert out.reply.result == "상점 흐름을 시나리오 하나로 짰어요."
+
+
+def test_the_first_line_is_counted_when_a_scenario_was_rejected(monkeypatch) -> None:
+    from app.sessions.channel import ScenarioAccepted
+
+    _fake_calls(monkeypatch, {
+        wf.GroupingPlan: wf.GroupingPlan(result="두 흐름을 짰어요.", groups=[
+            wf.Group(title="상점 여정", case_ids=[1]), wf.Group(title="창고 여정", case_ids=[2]),
+        ]),
+        wf._Writer: wf._Writer(steps=[AuthoredStep(action="연다", case_id=1, step_source="CASE")]),
+    })
+    channel = _FakeChannel(answers=[
+        ScenarioAccepted(accepted=True, written=1, steps=1),
+        ScenarioAccepted(accepted=False, written=0, steps=0),
+    ])
+
+    out = asyncio.run(wf.run_authoring_workflow(
+        _request(user_input="둘 다 짜줘", test_case_list=_cases()), _CTX, channel,
+    ))
+
+    assert out.reply.result == "총 1건의 시나리오를 생성했습니다."
+
+
+def test_a_turn_that_writes_nothing_says_why_in_the_models_words(monkeypatch) -> None:
+    _fake_calls(monkeypatch, {
+        wf.GroupingPlan: wf.GroupingPlan(result="앞으로 의도된 막힘 확인도 넣을게요.", detail="설정으로 이해했어요."),
+    })
+
+    out = asyncio.run(wf.run_authoring_workflow(
+        _request(user_input="앞으로는 막힘 확인도 넣어줘", test_case_list=_cases()), _CTX, _FakeChannel(),
+    ))
+
+    assert out.reply.result == "앞으로 의도된 막힘 확인도 넣을게요."
+    assert "TC를 찾지 못해서" not in out.message

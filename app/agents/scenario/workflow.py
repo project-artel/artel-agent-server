@@ -158,9 +158,19 @@ _QUESTIONS_DESCRIPTION = (
 )
 
 
+_RESULT_DESCRIPTION = (
+    "The first line the user reads, one sentence in their language: what this answer does —"
+    " the scenario(s) you are writing and their scope, or why you are writing none. No ids,"
+    " no step counts. In Korean, 해요체."
+)
+
+
 class GroupingPlan(BaseModel):
     """B 의 출력 — 묶기·순서·범위 해석까지. 문장은 C 의 일이다."""
 
+    # 답의 첫 줄(ARTEL-1273). 전에는 코드가 저장한 것을 세어 썼는데, 0건일 때 이유를 몰라 "TC 를 못 찾아서" 로
+    # 단정했다(설정만 말한 턴에서도). 이제 모델이 쓰고, 저장이 계획과 다르면 코드가 센 줄로 바꾼다.
+    result: str = Field(default="", description=_RESULT_DESCRIPTION)
     groups: list[Group] = Field(default_factory=list)
     # 답의 설명 칸에 그대로 실린다(ARTEL-927). 코드가 쓰는 결과 칸은 사실(몇 개를 몇
     # 스텝으로 저장)만 말할 수 있고, "왜 그렇게 나눴는지"는 판단한 쪽만 답할 수 있다.
@@ -185,6 +195,7 @@ class GroupingPlan(BaseModel):
 class CasePlan(BaseModel):
     """TC 만들기 갈래의 출력(ARTEL-1273) — TC 초안만. 시나리오는 건드리지 않는다."""
 
+    result: str = Field(default="", description=_RESULT_DESCRIPTION)
     cases: list[ProposedCase] = Field(default_factory=list)
     detail: str = Field(default="", description=_DETAIL_DESCRIPTION)
     questions: list[Ask] = Field(default_factory=list, description=_QUESTIONS_DESCRIPTION)
@@ -780,15 +791,19 @@ async def run_authoring_workflow(
     if plan.questions and not groups:
         return _answer(
             request,
-            "먼저 확인할 게 있어서 아직 저장하지 않았어요."
-            if ko else "Nothing saved yet — I need to check something first.",
+            plan.result.strip() or (
+                "먼저 확인할 게 있어서 아직 저장하지 않았어요."
+                if ko else "Nothing saved yet — I need to check something first."
+            ),
             plan.detail, _questions(plan.questions),
         )
     if not groups:
         return _answer(
             request,
-            "요청에 맞는 TC를 찾지 못해서 아무것도 저장하지 않았어요."
-            if ko else "No test case matched the request, so nothing was saved.",
+            plan.result.strip() or (
+                "이번에는 시나리오를 만들지 않았어요."
+                if ko else "No scenario was written this time."
+            ),
             plan.detail,
         )
 
@@ -960,7 +975,8 @@ async def run_authoring_workflow(
     # ARTEL-936), **설명은 판단한 모델이**(`plan.detail`), **질문은 고를 수 있게.** 코드가 아는
     # 미반영분(저장 못 한 시나리오, 자리를 못 찾은 TC)도 설명에 사과문으로 섞지 않고 질문으로
     # 낸다 — 사용자가 정할 일이기 때문이다. 어느 칸에도 번호는 없다.
-    result = _summary(changes, ko)
+    # 계획대로 다 저장됐으면 모델의 첫 줄을 쓴다. 하나라도 빠졌으면 모델의 말이 사실과 달라지므로 코드가 센 줄이다.
+    result = plan.result.strip() if plan.result.strip() and not dropped else _summary(changes, ko)
 
     asks = list(plan.questions)
     if dropped:
@@ -1266,7 +1282,9 @@ async def run_case_workflow(
         f"초안 {len(drafts)}개" + "".join(f"\n  · {d.scene} | {d.action} → {d.expected}" for d in drafts),
     )
     ko = request.locale.value == "ko"
-    if drafts:
+    if plan.result.strip():
+        result = plan.result.strip()
+    elif drafts:
         result = (
             f"TC 초안 {len(drafts)}개를 만들었어요." if ko else f"Drafted {len(drafts)} test case(s)."
         )
