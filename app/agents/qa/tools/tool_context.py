@@ -17,6 +17,8 @@ from dataclasses import dataclass
 
 from app.agents.qa.arch import ResolvedArch, ScreenCaptureMode
 from app.agents.qa.tools.state import QaRunState
+from app.config import get_settings
+from app.qa.performance import PerformanceReader
 from app.qa.acting import ActionOutcome, PressLanding, ScreenChange
 from app.qa.channel import QaRunChannel, with_operator_messages
 from app.qa.envelope import ActionResultItem, JsonRpcAction
@@ -75,9 +77,22 @@ class ToolContext:
         errors_line = channel.game_errors.summary_line()
         if errors_line is not None:
             body = f"{body}\n\n{errors_line}" if body else errors_line
+        # 지난 10초 hitch 수 한 줄 (ARTEL-1223). 0 이거나 아직 못 읽었으면 줄이 없다. 값은 `act` 와
+        # `observe_scene` 이 간격을 두고 새로 읽어 둔 것이다 — 이 함수는 동기라 여기서 묻지 않는다.
+        performance_line = self.performance().summary_line()
+        if performance_line is not None:
+            body = f"{body}\n\n{performance_line}" if body else performance_line
 
         # 오퍼레이터의 말이 맨 뒤다. 지금부터 적용되는 지시라 화면보다 나중에 읽혀야 한다.
         return with_operator_messages(body, messages)
+
+    def performance(self) -> PerformanceReader:
+        """이 런의 `PerformanceReader`. 처음 부를 때 만든다."""
+        if self.state.performance is None:
+            self.state.performance = PerformanceReader(
+                self.channel.qa_try_id, get_settings().orchestration_base_url
+            )
+        return self.state.performance
 
     def _first_entry_line(self) -> str | None:
         """scene 의 view 가 이 런에서 처음 그려졌으면, 전체 screen capture 를 한 장 찍으라는 줄.
@@ -158,6 +173,7 @@ class ToolContext:
         # 여기서 나온다 — 모델은 method 이름만 말하고 인자는 이 기록이 낸다(ARTEL-644).
         state.remember_dispatch(actions)
         result, looked = await channel.act_and_look(actions, summary, step)
+        await self.performance().refresh_summary()
         messages = channel.drain_operator_messages()
         # 같은 말이 둘로 간다. `messages` 는 `_answer` 가 문장 끝에 붙이는 데 쓰고,
         # `said` 는 부르는 쪽이 문장을 안 읽고도 "말이 왔다" 를 알게 하는 데 쓴다.
