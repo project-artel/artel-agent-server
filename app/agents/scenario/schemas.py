@@ -65,6 +65,10 @@ class CaseGuard(BaseModel):
     # "drop by and come back" — measured (run 203), authoring entered the battle screen
     # and never wrote the step that wins it. The map knew winning was required.
     moves: list["ValueMove"] = Field(default_factory=list)
+    # Why this requirement is not confirmed, or None. Read from plain-language cases,
+    # some of these are wrong and some only go by another name; dropping them lost the
+    # right ones too, so they come marked and the case text decides.
+    unconfirmed: str | None = None
 
 
 class ValueMove(BaseModel):
