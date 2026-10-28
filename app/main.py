@@ -11,7 +11,6 @@ from fastapi.responses import JSONResponse
 from app.agents import GameContextAgent, KnowledgeQueryAgent, StepPhrasingAgent
 from app.agents.project_agent import ProjectAgent
 from app.api.embeddings import router as embeddings_router
-from app.api.demonstrations import router as demonstrations_router
 from app.api.extract import router as extract_router
 from app.api.knowledge_queries import router as knowledge_queries_router
 from app.api.llm_cache import router as llm_cache_router
@@ -24,7 +23,6 @@ from app.api.specs_v2 import router as specs_v2_router
 from app.api.step_phrasing import router as step_phrasing_router
 from app.config import get_settings
 from app.documents import ExtractionService
-from app.demonstrations.agent import DemonstrationExtractionAgent
 from app.llm import build_embedding_client
 from app.llm.catalog import ModelCatalogUnavailableError
 from app.llm.usage import get_usage_buffer
@@ -32,6 +30,7 @@ from app.logging_config import configure_logging
 from app.observability import configure_langsmith
 from app.prompts import validate_prompts
 from app.qa.service import QaExecutionService
+from app.qa.retired_context import purge_demonstration_context
 from app.qa.store import InMemoryQaSessionStore, QaSessionStore, RedisQaSessionStore
 from app.sessions.redis_store import RedisSessionStore
 from app.sessions.service import SessionService
@@ -64,6 +63,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             encoding="utf-8",
             decode_responses=True,
         )
+        await purge_demonstration_context(redis)
         store = RedisSessionStore(redis, settings.session_ttl_seconds)
         # QA execution sessions share the Redis client (distinct `qa:` namespace).
         qa_store = RedisQaSessionStore(redis, settings.session_ttl_seconds)
@@ -96,7 +96,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.knowledge_query_batch_limit = settings.knowledge_query_batch_limit
     app.state.step_phrasing_agent = StepPhrasingAgent()
     app.state.project_agent = ProjectAgent()
-    app.state.demonstration_extraction_agent = DemonstrationExtractionAgent()
 
     # LLM spend collection. No-op without ORCHESTRATION_BASE_URL; stop() sends
     # the partial batch, without which every deploy loses one.
@@ -150,7 +149,6 @@ def create_app() -> FastAPI:
     app.include_router(project_agent_router, prefix=INTERNAL_PREFIX)
     app.include_router(llm_cache_router, prefix=INTERNAL_PREFIX)
     app.include_router(macros_router, prefix=INTERNAL_PREFIX)
-    app.include_router(demonstrations_router, prefix=INTERNAL_PREFIX)
     app.add_exception_handler(ModelCatalogUnavailableError, _model_catalog_unavailable)
     app.add_exception_handler(RequestValidationError, _validation_error_without_api_keys)
     return app

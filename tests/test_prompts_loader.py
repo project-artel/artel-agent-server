@@ -558,7 +558,6 @@ def test_every_live_agent_has_a_v1(monkeypatch) -> None:
             "screen_verdict",
             "screen_name",
             "step_phrasing",
-            "demonstration",
             # 프로젝트 workspace 를 조작하는 project agent (ARTEL-1126).
             "project_agent",
             # Jev 질문을 범용 LLM 이 답할 때 쓰는 프롬프트(`app/llm/decision.py`).

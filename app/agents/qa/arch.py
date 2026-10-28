@@ -485,7 +485,8 @@ from app.llm.models import LLMModel, get_model_spec
 # v34: step 판정을 TC 시작·결과 보고로 바꾸고 시도별 영상 구간을 남긴다.
 # tool 실행을 직렬화하여 사용자 질문 대기 중 다른 조작을 막고, 대기는 실행 제한 시간에서 뺀다.
 # 통합 arch는 예외·성능·시각 점검·시연 절차와 TC 시도별 판정·사용자 대기를 함께 제공한다.
-QA_ARCH_LABEL = "v34-case-evaluation-diagnostics-procedures"
+# v35는 사람이 수행한 시연 절차를 QA context에서 제거한다. TC 명세·현재 관찰·사람 판정 피드백은 유지한다.
+QA_ARCH_LABEL = "v35-case-evaluation-no-demonstrations"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

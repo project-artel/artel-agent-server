@@ -31,7 +31,8 @@ from pydantic import BaseModel, ConfigDict, Field
 # pe3: planner와 evaluator의 모든 요청에 실행 언어를 전달하고 언어 지시문의 hash를 기록한다.
 # pe4는 `planner`와 `evaluator`가 TC의 승인된 시연 절차와 현재 `evidence` 사용 규칙을
 # 함께 읽는다. 실행 한도와 macro 도구는 유지하므로 `fingerprint`는 바뀌지 않는다.
-PLANNER_EXECUTER_LABEL = "pe4-language-demonstration-procedures"
+# pe5는 planner와 evaluator의 시연 절차 참고를 제거한다. 실행 언어와 기존 macro 도구는 유지한다.
+PLANNER_EXECUTER_LABEL = "pe5-language-no-demonstrations"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1

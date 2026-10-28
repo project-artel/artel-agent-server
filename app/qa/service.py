@@ -19,7 +19,6 @@ from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage
 from app.llm.credentials import LlmKey, bind_llm_key
 from app.llm.models import LLMModel, ReasoningConfig
 from app.llm.usage import set_usage_scope
-from app.prompts import load_prompt
 from app.qa.channel import QaRunChannel
 from app.qa.game_functions import GameFunctionCatalog, GameFunctionEntry
 from app.qa.envelope import (
@@ -150,17 +149,6 @@ class QaExecutionService:
             arch=arch,
             execution_mode=execution_mode,
         )
-        if any(
-            step.case and step.case.verification_procedure
-            for item in scenarios for step in item.scenario.steps
-        ):
-            directive = load_prompt("demonstration", "qa_context", "v1")
-            run_config = run_config.model_copy(update={
-                "prompt_hashes": {
-                    **run_config.prompt_hashes,
-                    "demonstration/v1/qa_context": directive.body_sha256,
-                },
-            })
         session_id = uuid.uuid4().hex
         record = QaSessionRecord(
             qa_run_id=qa_run_id,

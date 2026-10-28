@@ -1,4 +1,4 @@
-"""통합한 TC 보고·사람 피드백·시연·진단 도구가 함께 전달되는 계약."""
+"""통합한 TC 보고·사람 피드백·진단 도구가 함께 전달되는 계약."""
 
 import json
 
@@ -8,20 +8,19 @@ from app.agents.qa.runner import _plan
 from app.agents.qa.arch import QaArchSpec, resolve_arch, structure_of
 from app.prompts import load_prompt, resolve_version
 from app.qa.schemas import QaCaseRef, QaScenario, QaStep
-from test_demonstrations import approved
 
 
 @pytest.mark.parametrize("mode", ["ORDERED", "FREE"])
-def test_tc_plan_keeps_demonstration_and_human_feedback_together(mode):
-    case = QaCaseRef(id=42, expected="아이템 추가", verification_procedure=approved(),
+def test_tc_plan_keeps_human_feedback_without_demonstration(mode):
+    case = QaCaseRef(id=42, expected="아이템 추가", verification_procedure={"procedure": {"steps": ["STALE_DEMONSTRATION_ONLY"]}},
         reviews=[{"ai_passed": False, "human_passed": True, "note": "지급 지연을 기다려야 함"}])
     scenario = QaScenario(execution_mode=mode, steps=[QaStep(action="구매", case_id=42, case=case)])
     text = _plan(scenario)
     payload = json.loads(text[text.index('{'):text.rindex('}') + 1])
     row = payload["test_cases"][0]
-    assert row["verification_procedure"]["revision"] == 2
+    assert "verification_procedure" not in row
+    assert "STALE_DEMONSTRATION_ONLY" not in text
     assert row["human_review"][0]["note"] == "지급 지연을 기다려야 함"
-    assert "this run's observations only" in text
     assert "start_test_case" in text and "report_test_case" in text
     assert "report_step(" not in text
 

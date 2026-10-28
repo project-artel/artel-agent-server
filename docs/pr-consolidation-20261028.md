@@ -19,8 +19,8 @@
 ## 충돌 해결
 
 - #181의 `DEFAULT_MODEL` 환경변수 선택을 최신 원격 DB model catalog에 연결했다. 정적 Enum/catalog는 복구하지 않았으며, 요청의 `EnabledLLMModel`, reasoning, provider key와 기능별 effective model 설정을 유지했다. 기본 model이 catalog 밖이거나 꺼져 있으면 실제 선택 시 설정 이름을 포함해 거절한다. 원격 catalog를 읽기 전인 Settings 생성에서는 검증하지 않는다.
-- #257의 planner 출력 언어와 #268의 승인된 시연 절차를 함께 유지한다. planner label은 `pe4-language-demonstration-procedures`다.
-- #262~#266의 기대값 대조·예외·성능 조회·첫 scene capture·macro 도중 표시한 text 점검과 #275의 TC 시작·시도별 판정·사람 피드백·사용자 질문 대기를 함께 유지한다. `QaCaseRef`와 첫 QA context에 `verification_procedure`와 `reviews`가 모두 들어간다.
+- #257의 planner 출력 언어는 유지한다. 시연 기능 제거 후 planner label은 `pe5-language-no-demonstrations`다. #268의 추출 endpoint와 승인 절차 참고는 제거했다.
+- #262~#266의 기대값 대조·예외·성능 조회·첫 scene capture·macro 도중 표시한 text 점검과 #275의 TC 시작·시도별 판정·사람 피드백·사용자 질문 대기를 함께 유지한다. `QaCaseRef`와 첫 QA context에는 `reviews`를 유지하고 `verification_procedure`는 제거했다.
 - #262의 `report_step`/`performed` 규약은 이후 승인된 #275의 TC 단위 보고로 대체한다. 참고 step을 다시 필수 판정으로 만들지 않는다. 기대값과 관측값이 모순된 통과를 거절하는 회귀는 `report_test_case`의 checks 계약으로 옮겼다.
 - 원본 갈래들이 미병합 `v25`·`v26` 번호를 서로 다른 내용으로 사용했다. 공개 `develop`의 `v1`~`v24`는 원문을 유지한다. 실행판 `v25`·`v26`은 #275의 TC 계약 원문, `v27`~`v29`는 #266까지 누적된 진단 갈래 원문으로 고정했다. 서로 다른 미병합 `v25`·`v26`의 양쪽 원문을 [`pr-consolidation-sources/pr-266`](pr-consolidation-sources/pr-266/v25/system.md)과 [`pr-consolidation-sources/pr-275`](pr-consolidation-sources/pr-275/v25/system.md)에 별도로 보존했다. source SHA와 파일별 원본 byte SHA256은 [`pr-consolidation-prompt-sources.json`](pr-consolidation-prompt-sources.json)에 있다.
 - 과거 prompt를 동일 조건으로 재현할 때는 manifest가 가리키는 source commit의 tool schema·arch도 함께 사용해야 한다. 번호가 겹친 진단 갈래의 `v25`·`v26`은 archive와 source branch에서 찾을 수 있다. 현재 기본 실행은 새 TC tool 계약과 `v30`이다.
@@ -797,3 +797,5 @@ Jira: ARTEL-1270
 
 
 </details>
+
+시연 제거 최종 검증: 전체 pytest 2,959개, focused 120개 및 분리 Redis 7의 CAS·TTL·QA 정보 보존 검사가 통과했다. 운영 데이터 정리와 실제 게임 QA는 실행하지 않았다.

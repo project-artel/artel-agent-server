@@ -241,12 +241,6 @@ def _step_plan(scenario: QaScenario) -> list[tuple[int | None, bool]]:
     return plan
 
 
-def _procedure_directive(scenario: QaScenario) -> str:
-    if not any(step.case and step.case.verification_procedure for step in scenario.steps):
-        return ""
-    return load_prompt("demonstration", "qa_context", "v1").body + "\n\n"
-
-
 # 사람 판정 기록을 읽는 법 (ARTEL-1257). 기록이 있는 계획에만 붙는다 — 없는 run 의 첫 메시지는 종전 그대로다.
 HUMAN_REVIEW_RULE = (
     "- `human_review` lists earlier verdicts of the same test case that a person reviewed and "
@@ -292,8 +286,6 @@ def _plan(scenario: QaScenario) -> str:
                 "expected": case.expected if case else ""}
             if (reviews := _human_review(case)) is not None:
                 item["human_review"] = reviews
-            if case and case.verification_procedure:
-                item["verification_procedure"] = case.verification_procedure.model_dump(mode="json")
             cases[step.case_id] = item
     return (
         f"Scenario: {scenario.title} — {scenario.description}\n\n"
@@ -304,7 +296,6 @@ def _plan(scenario: QaScenario) -> str:
         "Use INCONCLUSIVE when you cannot establish the actual outcome. Ask the user with ask_user if you do not know how to proceed. "
         "TC failures create issues automatically. report_issue is only for defects unrelated to a TC.\n"
         + (HUMAN_REVIEW_RULE if any("human_review" in case for case in cases.values()) else "")
-        + _procedure_directive(scenario)
         + json.dumps({"test_cases": list(cases.values()), "reference_steps": references}, ensure_ascii=False, indent=2)
         + "\nObserve the screen and begin."
     )
