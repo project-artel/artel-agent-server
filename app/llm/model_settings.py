@@ -2,7 +2,9 @@
 
 ``GET {ORCHESTRATION_BASE_URL}/internal/settings/models`` 는
 ``{"scenarioAuthoringModel": ..., "decisionModel": ...}`` 를 돌려주고 두 값 모두 null 일 수
-있다. 이 server 가 읽는 것은 ``decisionModel`` 이다. 시나리오 저작 model 은 orchestration 이
+있다. orchestration #367~#371 부터는 ``effective`` 도 실린다 — 위 둘은 저장된 값이고,
+``effective`` 는 기본값까지 채운 쓸 값이다. ``effective`` 가 있으면 그것을 읽고, 없는 옛
+orchestration 이면 위 두 값을 읽는다. 이 server 가 읽는 것은 ``decisionModel`` 이다. 시나리오 저작 model 은 orchestration 이
 세션을 열 때 정해서 보내 주므로 여기서는 읽기만 하고 쓰지 않는다.
 
 cache 와 실패 처리는 `app/llm/api_key.py` 의 `LlmApiKeyProvider` 와 같다.
@@ -29,13 +31,24 @@ logger = logging.getLogger(__name__)
 MODEL_SETTINGS_PATH = "/internal/settings/models"
 
 
-class _ModelSettingsBody(BaseModel):
-    """The body of `GET /internal/settings/models`."""
-
+class _FeatureModelValues(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, extra="ignore", frozen=True)
 
     scenario_authoring_model: str | None = None
     decision_model: str | None = None
+
+
+class _ModelSettingsBody(_FeatureModelValues):
+    """The body of `GET /internal/settings/models`.
+
+    The top-level pair is what an administrator stored and may be null; `effective` is what to
+    use. A body without `effective` comes from an orchestration older than #367.
+    """
+
+    effective: _FeatureModelValues | None = None
+
+    def in_use(self) -> _FeatureModelValues:
+        return self.effective if self.effective is not None else self
 
 
 @dataclass(frozen=True)
@@ -123,9 +136,10 @@ class ModelSettingsProvider:
             logger.warning("[model-settings] orchestration answered an unreadable body")
             return None
 
+        values = body.in_use()
         return FeatureModels(
-            scenario_authoring=_clean(body.scenario_authoring_model),
-            decision=_clean(body.decision_model),
+            scenario_authoring=_clean(values.scenario_authoring_model),
+            decision=_clean(values.decision_model),
         )
 
 
