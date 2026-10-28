@@ -482,7 +482,7 @@ def test_a_refused_tool_does_not_run() -> None:
         result = await tools["report_step"].ainvoke(
             {
                 "step": 1,
-                "passed": True,
+                "performed": True, "passed": True,
                 "message": "saw it",
                 "thought": "판정한다",
                 "learned": "",
@@ -556,7 +556,7 @@ def test_an_omitted_learned_does_not_buy_a_way_past_verify() -> None:
         state.phase_cycle.phase = RunPhase.verify
 
         await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "saw it", "thought": "판정한다"}
+            {"step": 1, "performed": True, "passed": True, "message": "saw it", "thought": "판정한다"}
         )
 
         assert state.step_results == []

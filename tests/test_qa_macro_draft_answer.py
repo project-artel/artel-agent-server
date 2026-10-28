@@ -64,7 +64,7 @@ async def send_actions(tools, step: int = 1) -> None:
 
 async def report(tools, passed: bool, step: int = 1) -> str:
     return await tools["report_step"].ainvoke(
-        {"step": step, "passed": passed, "message": "m", "thought": "t", "learned": ""}
+        {"step": step, "performed": True, "passed": passed, "message": "m", "thought": "t", "learned": ""}
     )
 
 
@@ -301,7 +301,7 @@ def test_a_run_without_a_phase_gate_still_gets_the_draft_and_no_phase() -> None:
             await send_actions(tools)
             if phase_cycle is PhaseCycleMode.off:
                 await tools["report_step"].ainvoke(
-                    {"step": 1, "passed": True, "message": "m", "thought": "t"}
+                    {"step": 1, "performed": True, "passed": True, "message": "m", "thought": "t"}
                 )
             else:
                 await report(tools, passed=True)

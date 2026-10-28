@@ -142,7 +142,7 @@ def scripted_run(
                 "tool_calls": [
                     {
                         "name": "report_step",
-                        "args": {"step": 1, "passed": True, "message": "화면 확인함", "thought": "판정"},
+                        "args": {"step": 1, "performed": True, "passed": True, "message": "화면 확인함", "thought": "판정"},
                         "id": "report",
                     }
                 ]
