@@ -233,6 +233,24 @@ def unreached(message: str, play: StepPlay | None = None) -> FailureReport:
     )
 
 
+def unobservable(missing: list[dict[str, Any]], message: str, play: StepPlay | None = None) -> FailureReport:
+    """A case whose `observe` names the SDK could not resolve: the verdict read a screen that was
+    never going to show the value, so the failure says nothing about the game either way."""
+    named = ", ".join(f"`{item.get('name')}` ({item.get('reason')})" for item in missing)
+    return FailureReport(
+        category=FailureCategory.INCONCLUSIVE,
+        cause=_clip(f"UNOBSERVABLE: the SDK could not find {named}; the verdict was: {message}"),
+        reproduction=(),
+        inputs=tuple(sent_inputs(play)) if play is not None else (),
+        insight=(
+            "Fix the case's observe name so it names a field, property or static of a game type "
+            "(`Type::member`), or mark the member in the game so the SDK can reach it, then run "
+            "the case again. Nothing here says the game is wrong."
+        ),
+        engine_claimed=engine_claimed(play),
+    )
+
+
 class FailureAnalyzer:
     """Asks the run's model why a judged step failed, from the same evidence the verdict read."""
 

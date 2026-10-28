@@ -29,6 +29,8 @@ class FakeGame:
         self._aim: Any = None
         # macro 이름 → 이 build 에 등록된 글. `MACRO_READ` 가 읽는다.
         self.macros: dict[str, str] = {}
+        # method → params 를 받아 `returnValue` 를 돌려주는 답. `watch` 처럼 값을 돌려주는 action 용.
+        self.answers: dict[str, Callable[[list], Any]] = {}
         # 움직이지 않은 action 뒤에 `pulse` 를 기다리는 시간. 진짜 값(1.5초)이면 화면을 바꾸지 않는
         # action 마다 그만큼 기다린다.
         self.channel = QaRunChannel(
@@ -68,6 +70,8 @@ class FakeGame:
         for action in frame["payload"]["actions"]:
             method, params = action["method"], action["params"]
             first = params[0] if params else None
+            # `watch` 처럼 목록을 첫 param 으로 보내는 action 도 `refuse`·`reactions` 의 key 가 되게 한다.
+            first = tuple(first) if isinstance(first, list) else first
             self.actions.append((method, params))
             if (method, first) in self.refuse:
                 results.append(
@@ -97,6 +101,9 @@ class FakeGame:
             if reaction is not None:
                 reaction(self)
                 moved = True
+            if method in self.answers:
+                results.append({"id": action["id"], "success": True, "returnValue": self.answers[method](params)})
+                continue
             results.append({"id": action["id"], "success": True})
         self.frame += 5
         self.channel.on_action_result(

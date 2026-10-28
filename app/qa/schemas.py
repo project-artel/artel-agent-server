@@ -23,6 +23,10 @@ class QaCaseRef(BaseModel):
     # 이 TC 에서 쓸 수 있는 cheat 와 behavior (ARTEL-1054). 없으면 run 이 받은 것 전부다.
     # run 의 목록을 좁히기만 한다(`app/qa/game_functions.py` 의 `allowed_names`).
     functions: CaseFunctions | None = None
+    # 이 TC 가 묻는 값의 이름(ARTEL-1279). SDK 의 `watch` 가 푸는 `Type::member` 문법이고, 런이
+    # 시작할 때 시나리오의 이름을 모아 한 번 보낸다. orchestration 은 `test_case.metadata.observe`
+    # 를 그대로 싣고 해석하지 않는다. 없으면 분석이 구운 watch list 만으로 읽는다.
+    observe: list[str] | None = None
 
 
 class QaStep(BaseModel):

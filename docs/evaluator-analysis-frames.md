@@ -111,7 +111,7 @@
 | `INCONCLUSIVE` | 화면이 결과를 어느 쪽으로도 보여 주지 못했다 | 아니오 |
 | `AGENT_ERROR` | 엔진이 스스로 멈췼다(`PLANNER-REFUSED` · `JEV-ERROR` · `EVALUATOR-ERROR`), 또는 분석 답을 두 번 읽지 못했다(`ANALYSIS-ERROR`) | 아니오 |
 
-- `UNREACHED` 와 엔진이 멈춘 `AGENT_ERROR` 는 모델을 부르지 않고 코드가 채운다. `reproduction` 은 비고
+- `UNREACHED`, 엔진이 멈춘 `AGENT_ERROR`, 그리고 case 의 `observe` 이름을 SDK 가 못 푼 `INCONCLUSIVE`(`cause` 가 `UNOBSERVABLE:` 로 시작, ARTEL-1279)는 모델을 부르지 않고 코드가 채운다. `reproduction` 은 비고
   `reproduction_inputs` 에는 보낸 입력이 전부 실린다
 - 미승인(오탐·미탐) 로그를 남길 때 `engine_claimed`(엔진 주장) · 판정(`status`) · 사람의 결정 셋이 confusion matrix 의
   세 축이다
