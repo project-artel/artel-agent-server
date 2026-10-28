@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="670" viewBox="0 0 680 670" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#888780" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrow-accent" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#B4541E" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect width="680" height="670" fill="#ffffff"/>
+
+  <!-- QA engine -->
+  <rect x="40" y="40" width="600" height="200" rx="16" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+  <text x="60" y="66" font-size="14" font-weight="500" fill="#444441">QA 엔진 · app/agents/planner_executer</text>
+
+  <rect x="60" y="90" width="160" height="56" rx="8" fill="#ffffff" stroke="#5F5E5A" stroke-width="0.5"/>
+  <text x="140" y="114" font-size="14" font-weight="500" fill="#444441" text-anchor="middle">planner</text>
+  <text x="140" y="132" font-size="12" fill="#5F5E5A" text-anchor="middle">step 하나를 source 로</text>
+
+  <rect x="260" y="90" width="160" height="56" rx="8" fill="#ffffff" stroke="#5F5E5A" stroke-width="0.5"/>
+  <text x="340" y="114" font-size="14" font-weight="500" fill="#444441" text-anchor="middle">executer</text>
+  <text x="340" y="132" font-size="12" fill="#5F5E5A" text-anchor="middle">Jev 가 action 을 고른다</text>
+
+  <rect x="460" y="90" width="160" height="56" rx="8" fill="#ffffff" stroke="#5F5E5A" stroke-width="0.5"/>
+  <text x="540" y="114" font-size="14" font-weight="500" fill="#444441" text-anchor="middle">StepPlay</text>
+  <text x="540" y="132" font-size="12" fill="#5F5E5A" text-anchor="middle">play 기록 · turn.repair</text>
+
+  <line x1="220" y1="118" x2="258" y2="118" stroke="#888780" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="420" y1="118" x2="458" y2="118" stroke="#888780" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- editor (new) -->
+  <rect x="260" y="168" width="160" height="56" rx="8" fill="#FFF4EC" stroke="#B4541E" stroke-width="1"/>
+  <text x="340" y="192" font-size="14" font-weight="500" fill="#7A3512" text-anchor="middle">editor</text>
+  <text x="340" y="210" font-size="12" fill="#B4541E" text-anchor="middle">app/agents/editor · macro_repair</text>
+
+  <line x1="300" y1="146" x2="300" y2="166" stroke="#B4541E" stroke-width="1.5" marker-end="url(#arrow-accent)"/>
+  <text x="292" y="153" font-size="11" fill="#7A3512" text-anchor="end">같은 action 이 repair_after 번</text>
+  <text x="292" y="166" font-size="11" fill="#7A3512" text-anchor="end">실패·입력 0 → turn 기록·flags·developer 본문</text>
+
+  <line x1="380" y1="166" x2="380" y2="148" stroke="#B4541E" stroke-width="1.5" marker-end="url(#arrow-accent)"/>
+  <text x="388" y="153" font-size="11" fill="#7A3512">source 전체 재작성 → parse_step</text>
+  <text x="388" y="166" font-size="11" fill="#7A3512">macros 교체 · max_repairs_per_step</text>
+
+  <rect x="60" y="168" width="160" height="56" rx="8" fill="#ffffff" stroke="#B4541E" stroke-width="0.5"/>
+  <text x="140" y="192" font-size="14" font-weight="500" fill="#7A3512" text-anchor="middle">LOG macro_fix</text>
+  <text x="140" y="210" font-size="12" fill="#B4541E" text-anchor="middle">evidence · source 전후</text>
+  <line x1="258" y1="196" x2="222" y2="196" stroke="#B4541E" stroke-width="1.5" marker-end="url(#arrow-accent)"/>
+
+  <path d="M540 146 L540 250 L140 250 L140 326" fill="none" stroke="#888780" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M60 196 L50 196 L50 598 L58 598" fill="none" stroke="#B4541E" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrow-accent)"/>
+
+  <!-- Evaluator -->
+  <rect x="40" y="280" width="600" height="210" rx="16" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+  <text x="60" y="306" font-size="14" font-weight="500" fill="#3C3489">Evaluator · app/agents/evaluator</text>
+
+  <rect x="60" y="330" width="160" height="56" rx="8" fill="#ffffff" stroke="#534AB7" stroke-width="0.5"/>
+  <text x="140" y="354" font-size="14" font-weight="500" fill="#3C3489" text-anchor="middle">verdict</text>
+  <text x="140" y="372" font-size="12" fill="#534AB7" text-anchor="middle">turn 줄에 고침 표시</text>
+
+  <rect x="260" y="330" width="160" height="56" rx="8" fill="#ffffff" stroke="#534AB7" stroke-width="0.5"/>
+  <text x="340" y="354" font-size="14" font-weight="500" fill="#3C3489" text-anchor="middle">analysis</text>
+  <text x="340" y="372" font-size="12" fill="#534AB7" text-anchor="middle">실패한 step 만</text>
+
+  <rect x="460" y="330" width="160" height="56" rx="8" fill="#ffffff" stroke="#534AB7" stroke-width="0.5"/>
+  <text x="540" y="362" font-size="14" font-weight="500" fill="#3C3489" text-anchor="middle">send_verdict</text>
+
+  <rect x="260" y="410" width="160" height="56" rx="8" fill="#ffffff" stroke="#534AB7" stroke-width="0.5"/>
+  <text x="340" y="434" font-size="14" font-weight="500" fill="#3C3489" text-anchor="middle">review</text>
+  <text x="340" y="452" font-size="12" fill="#534AB7" text-anchor="middle">런 끝에 한 번</text>
+
+  <line x1="220" y1="358" x2="258" y2="358" stroke="#888780" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="420" y1="358" x2="458" y2="358" stroke="#888780" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <line x1="540" y1="386" x2="540" y2="568" stroke="#888780" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <path d="M300 466 L300 510 L140 510 L140 568" fill="none" stroke="#888780" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Orchestration -->
+  <rect x="40" y="530" width="600" height="120" rx="16" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+  <text x="60" y="556" font-size="14" font-weight="500" fill="#085041">orchestration 이 받는 frame · 저장만 함</text>
+
+  <rect x="60" y="570" width="160" height="56" rx="8" fill="#ffffff" stroke="#0F6E56" stroke-width="0.5"/>
+  <text x="140" y="594" font-size="14" font-weight="500" fill="#085041" text-anchor="middle">종단 STATUS</text>
+  <text x="140" y="612" font-size="12" fill="#0F6E56" text-anchor="middle">+ 런 리뷰</text>
+
+  <rect x="260" y="570" width="160" height="56" rx="8" fill="#ffffff" stroke="#B4541E" stroke-width="0.5"/>
+  <text x="340" y="594" font-size="14" font-weight="500" fill="#7A3512" text-anchor="middle">LOG kind: macro_fix</text>
+  <text x="340" y="612" font-size="12" fill="#B4541E" text-anchor="middle">macro_fix_refused · turn.repair</text>
+
+  <rect x="460" y="570" width="160" height="56" rx="8" fill="#ffffff" stroke="#0F6E56" stroke-width="0.5"/>
+  <text x="540" y="594" font-size="14" font-weight="500" fill="#085041" text-anchor="middle">step STATUS</text>
+  <text x="540" y="612" font-size="12" fill="#0F6E56" text-anchor="middle">+ analysis · played</text>
+</svg>
