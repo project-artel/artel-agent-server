@@ -450,7 +450,16 @@ from app.llm.models import LLMModel, get_model_spec
 # alarms in 169 of 170 L1 runs. `get_errors` is in `ANY_PHASE`, since it is called after ACT and
 # before VERIFY. One tool joined the default set, so `arch_fingerprint` moves; the line in every
 # answer does not, which is the fourth item AGENTS.md names.
-QA_ARCH_LABEL = "v29-unseen-errors"
+#
+# v30 because what the model reads around a screen capture moved (ARTEL-1221). The answer of
+# `capture_screen` now ends with a checklist — empty areas, elements with no art, overlap,
+# clipping, a developer console — to go over after the question the capture was taken for, and
+# the first view of each scene in an `on_demand` run with vision is followed by one line asking
+# for a whole-screen capture there. On 2026-10-22 a title screen with no background was found in
+# 0 of 3 runs (no run captured at step 1), and cards drawn without their art in 0 of 3, although
+# all three captured the hand. Nothing hashed moves: the tool set, the schemas and the middleware
+# list are unchanged, so the label is the only record of this change.
+QA_ARCH_LABEL = "v30-capture-checklist"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

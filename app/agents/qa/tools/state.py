@@ -205,6 +205,9 @@ class QaRunState:
         # `performed=false` 인데 `passed=true` 라서 한 번 돌려보낸 step (ARTEL-1220). 같은 step 의
         # 두 번째 보고는 그대로 기록한다 — 기대값이 "거부된다" 인 step 에서는 그 조합이 맞다.
         self.unperformed_pass_refused: set[int] = set()
+        # 이 런에서 view 가 한 번이라도 그려진 scene (ARTEL-1221). 처음 그려지는 tool 결과에 전체
+        # screen capture 를 한 장 찍으라는 줄이 붙는다.
+        self.scenes_entered: set[str] = set()
         # 이 런의 phase 상태 기계, 또는 `None`. `build_tools` 가 `arch.phase_cycle` 을 보고
         # 채운다 — `off` 와 `in_verdict` 에서는 끝까지 `None` 이다.
         self.phase_cycle = None
