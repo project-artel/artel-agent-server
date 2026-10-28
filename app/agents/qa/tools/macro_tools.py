@@ -61,6 +61,7 @@ from app.agents.qa.macro.runner import (
     MacroPlace,
     MacroPulseWait,
     MacroRunResult,
+    ReadMemberAnswer,
     run_macro as execute_macro,
 )
 from app.agents.qa.tools.action_tools import parse_target
@@ -181,6 +182,11 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
                 )
             except JevError as error:
                 raise MacroJevUnavailable(str(error)) from error
+
+        async def read_member(self, name: str) -> ReadMemberAnswer | None:
+            # `pulse` 에 없는 이름을 `static()`·`member()` 가 읽을 때 runner 가 한 번 묻는다(ARTEL-1285).
+            # `ctx.act` 가 아니다 — 입력이 아니라 읽기라 화면을 기다릴 것도 timeline 에 남길 것도 없다.
+            return ReadMemberAnswer.from_result(await channel.read_member(name), name)
 
     def _jev() -> JevClient:
         """런 하나에 client 하나. 연결을 다시 쓰고, 런이 끝날 때 `QaRunner` 가 닫는다."""

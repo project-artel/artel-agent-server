@@ -469,6 +469,28 @@ class PulseMemory(BaseModel):
     # tool 이 지금 step 을 옮길 때 고친다(`app/agents/qa/tools/game_function_tools.py` 의 `focus`).
     allowed_cheats: list[str] | None = None
     allowed_behaviors: list[str] | None = None
+    # `PULSE.events` 를 도착한 순서대로, 오래된 것이 앞(ARTEL-1285). `MAX_EVENTS_KEPT` 를 넘으면
+    # 앞에서 버린다. `whole` reading 에도 비우지 않는다 — scene 이 바뀐 것 자체가 `scene.load`
+    # event 로 여기 적히고, 그 앞의 일은 그 scene 으로 온 까닭이다.
+    events: list[RecordedEvent] = Field(default_factory=list)
+    # macro runner 가 `read_member` 로 게임에 물어 받은 값(ARTEL-1285). key 는 `Declaring::Member`.
+    # `statics` 와 따로 두는 이유: `pulse` 가 감시하는 값이 아니라 다음 reading 이 갱신하지 않으므로,
+    # `statics:` 절에 그리면 안 움직이는 값이 사실처럼 남는다. macro 의 `static()`·`member()` 만 읽는다.
+    read_members: dict[str, PulseStatic] = Field(default_factory=dict)
+    # `read_member` 가 못 읽은 이름과 SDK 가 말한 이유. reader 의 거절 문장이 이것을 덧붙인다.
+    unreadable_members: dict[str, str] = Field(default_factory=dict)
+
+    def learn_member(self, declaring: str, member: str, value: Any) -> None:
+        """`read_member` 가 돌려준 값 하나를 `static()`·`member()` 가 찾는 자리에 둔다."""
+        entry = PulseStatic(declaring=declaring, member=member, value=value)
+        self.read_members[entry.key] = entry
+        self.unreadable_members.pop(entry.key, None)
+
+    def refuse_member(self, declaring: str, member: str, reason: str) -> None:
+        """`read_member` 가 그 이름을 못 읽었다. 거절 이유를 reader 가 쓸 수 있게 남긴다."""
+        key = f"{declaring}::{member}"
+        self.unreadable_members[key] = reason
+        self.read_members.pop(key, None)
 
     def apply_functions(self, update: PulseFunctions) -> None:
         """`PULSE.functions` 를 합친다. `whole` 이면 쥔 것을 통째로 바꾼다."""

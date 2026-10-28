@@ -29,6 +29,7 @@
 """
 
 import operator as python_operator
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -404,6 +405,81 @@ def _static_names(memory: PulseMemory) -> dict[str, Any]:
     return named
 
 
+def _read_member_names(memory: PulseMemory) -> dict[str, Any]:
+    """macro runner 가 `read_member` 로 게임에 물어 받은 값(ARTEL-1285). 이름 규칙은 statics 와 같다.
+
+    `pulse` 가 감시하는 값 뒤에 선다 — `_static`·`_member` 가 감시 값에서 못 찾았을 때만 여기를
+    본다. 감시 값은 다음 reading 이 갱신하고 이것은 물었던 순간의 값이라, 둘이 있으면 감시 값이 맞다.
+    """
+    named: dict[str, Any] = {}
+    for key, entry in memory.read_members.items():
+        named[key] = entry.value
+        short = (entry.declaring or "").split(".")[-1]
+        named[f"{short}.{entry.member}"] = entry.value
+    return named
+
+
+def sdk_member_name(dotted: str) -> str | None:
+    """`static("Game.Score")` 의 이름을 SDK 의 `read_member` 가 받는 `Game::Score` 로.
+
+    마지막 마디가 member 이고 그 앞 전부가 type 이다 — `Battle.Turns.TurnBattleSystem.turn` 은
+    `Battle.Turns.TurnBattleSystem::turn`. 마디가 하나뿐이면 type 을 모르는 것이라 `None` 이고,
+    그때는 묻지 않는다.
+    """
+    if "::" in dotted:
+        declaring, member = dotted.split("::", 1)
+    elif "." in dotted:
+        declaring, member = dotted.rsplit(".", 1)
+    else:
+        return None
+    if not declaring or not member:
+        return None
+    return f"{declaring}::{member}"
+
+
+def _unreadable_reason(memory: PulseMemory, name: str) -> str:
+    """`read_member` 가 이 이름을 못 읽었다고 했으면 그 이유를 거절 문장에 붙일 꼴로. 아니면 빈 문자열.
+
+    runner 가 거절을 macro 에 적힌 이름의 SDK 꼴(`sdk_member_name`)로 남기므로 그 key 하나만 본다.
+    """
+    sdk_name = sdk_member_name(name)
+    reason = memory.unreadable_members.get(sdk_name) if sdk_name else None
+    if reason is None:
+        return ""
+    return f" The game was asked to read it directly (`read_member`) and could not: {reason}"
+
+
+def unknown_member_names(
+    memories: MacroMemories, scope: MacroScope, calls: Iterable[MacroReaderCall]
+) -> list[str]:
+    """`static`·`member` reader 가 지금의 `pulse` 에서 못 찾을 이름. 적힌 순서대로, 하나씩.
+
+    runner 가 statement 를 돌리기 전에 이것을 게임에 `read_member` 로 묻는다(ARTEL-1285). `pulse`
+    가 감시하는 값만 "있다" 로 센다 — 전에 `read_member` 로 받은 값은 그때의 값이라 다시 묻는다.
+    `member` 는 target 을 풀지 않고 살아 있는 객체 어디에든 그 이름이 있으면 있다고 본다. target
+    을 여기서 풀면 `SELECTOR_NOT_FOUND` 가 reader 의 자리가 아닌 곳에서 난다.
+    """
+    pulse = memories.pulse
+    statics = _static_names(pulse)
+    on_objects: set[str] = set()
+    for _key, record in _live(pulse):
+        on_objects.update(_member_names(record))
+    unknown: list[str] = []
+    for call in calls:
+        if call.reader not in ("static", "member") or call.key is None:
+            continue
+        try:
+            name = scope.text(call.key)
+        except MacroFailure:
+            # 아직 bind 되지 않은 이름이 key 다. 그 statement 가 돌 때 reader 가 제 자리에서 거절한다.
+            continue
+        known = statics if call.reader == "static" else on_objects
+        if name in known or name in unknown:
+            continue
+        unknown.append(name)
+    return unknown
+
+
 def _member_names(record: _HeldObject) -> dict[str, Any]:
     """`member(<target>, "Type.member")` 가 맞출 이름 → 값. statics 와 같은 규칙이다."""
     named: dict[str, Any] = {}
@@ -445,7 +521,7 @@ def read(memories: MacroMemories, scope: MacroScope, call: MacroReaderCall) -> A
     if reader == "text":
         return found.record.text
     if reader == "member":
-        return _member(found, scope, call)
+        return _member(memories, found, scope, call)
     raise MacroFailure(  # pragma: no cover - parser 가 여덟 밖의 이름을 거절한다
         ACTION_REJECTED, f"`{reader}` is not a reader a macro can call."
     )
@@ -471,14 +547,20 @@ def _observable(
 def _static(memories: MacroMemories, scope: MacroScope, call: MacroReaderCall) -> Any:
     name = scope.text(call.key)
     named = _static_names(memories.pulse)
-    if name not in named:
-        raise MacroFailure(
-            ACTION_REJECTED,
-            f"static({name!r}) is not a static this run has been sent. The statics "
-            "block of the scene view lists the names this takes.",
-            {"asked": name, "available": sorted(named)},
-        )
-    return named[name]
+    if name in named:
+        return named[name]
+    # `pulse` 가 감시하지 않는 값은 runner 가 이 statement 앞에서 `read_member` 로 물어 두었다
+    # (ARTEL-1285). 받은 것이 있으면 그것이고, 없으면 종전과 같은 거절에 SDK 의 이유를 붙인다.
+    asked = _read_member_names(memories.pulse)
+    if name in asked:
+        return asked[name]
+    raise MacroFailure(
+        ACTION_REJECTED,
+        f"static({name!r}) is not a static this run has been sent. The statics "
+        "block of the scene view lists the names this takes."
+        + _unreadable_reason(memories.pulse, name),
+        {"asked": name, "available": sorted(named)},
+    )
 
 
 def _at_start(memories: MacroMemories, scope: MacroScope, call: MacroReaderCall) -> Any:
@@ -550,17 +632,27 @@ def _record_at_start(
     return None
 
 
-def _member(found: FoundObject, scope: MacroScope, call: MacroReaderCall) -> Any:
+def _member(
+    memories: MacroMemories,
+    found: FoundObject,
+    scope: MacroScope,
+    call: MacroReaderCall,
+) -> Any:
     name = scope.text(call.key)
     named = _member_names(found.record)
-    if name not in named:
-        raise MacroFailure(
-            ACTION_REJECTED,
-            f"member({name!r}) is not a value the game reads on {found.key}. Nothing "
-            "was sent to the game.",
-            {"asked": name, "object": found.key, "available": sorted(named)},
-        )
-    return named[name]
+    if name in named:
+        return named[name]
+    # `_static` 과 같은 보강(ARTEL-1285). `read_member` 는 instance 를 가리지 않고 답하므로 runner 는
+    # 값이 하나인 member 만 적어 둔다 — 그 하나는 어느 객체를 겨눴든 같은 값이다.
+    asked = _read_member_names(memories.pulse)
+    if name in asked:
+        return asked[name]
+    raise MacroFailure(
+        ACTION_REJECTED,
+        f"member({name!r}) is not a value the game reads on {found.key}. Nothing "
+        "was sent to the game." + _unreadable_reason(memories.pulse, name),
+        {"asked": name, "object": found.key, "available": sorted(named)},
+    )
 
 
 # --- 도착한 값의 모양 -----------------------------------------------------------
