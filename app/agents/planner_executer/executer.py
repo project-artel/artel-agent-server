@@ -9,8 +9,12 @@ Each turn:
 3. ask Jev which action to run now: the actions' docstrings are the options, with `none_fits`;
 4. `none_fits` — wait for the next reading, and stop once nothing has fit for
    `no_action_grace_seconds`. Otherwise run the action with the macro runner; `max_failures_in_a_row`
-   failed actions stop play;
-5. record the turn and send it as a `LOG`.
+   failed actions stop play, and so do `max_idle_turns_in_a_row` actions that ran without sending the
+   game an input (ARTEL-1288);
+5. before those stops, when one action has failed or sent nothing `repair_after` times in a row and
+   the play has a `repair` (the editor, `app/agents/editor/`), call it with that action's turn records
+   and go on with the macros it returns — up to `max_repairs_per_step` times a step;
+6. record the turn and send it as a `LOG`.
 
 Jev 에 묻는 두 질문은 macro 의 `ask`·`decide` 와 같은 모양이다: state 는 keyword 없는 `ask`·`decide`
 가 보내는 것(`build_context_state`: scene 과 화면의 live object 전부)이고, 선택지 끝에는
@@ -23,11 +27,11 @@ import asyncio
 import json
 import time
 from datetime import UTC, datetime
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from app.agents.planner_executer.arch import PlannerExecuterArchSpec
 from app.agents.planner_executer.macro_host import ASK_FALSE_MEANS, ASK_TRUE_MEANS, ChannelMacroHost
@@ -41,6 +45,10 @@ from app.agents.qa.macro.runner import run_macro
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory, LogPayload, MessageType
 from app.qa.jev import JevClient, JevError
+
+# What the executer calls to have a stuck action's macros rewritten: `(macros, action, its turn
+# records)` → the rewrite, or `None` when it was refused to the end (`app.agents.editor.Repair`).
+Repair = Callable[[StepMacros, str, list[dict]], Awaitable[StepMacros | None]]
 
 GOAL_QUESTION = "Has this step's goal been reached?"
 PICK_QUESTION = "Which of these should the player do now to progress this step?"
@@ -64,6 +72,22 @@ class TurnLogPayload(LogPayload):
 
     kind: str = "turn"
     turn: dict[str, Any] = Field(default_factory=dict)
+
+
+class ActionFlag(BaseModel):
+    """macro가 남긴 위치·메시지·관측값을 turn과 editor에 그대로 전달한다."""
+
+    place: str
+    message: str
+    observed: dict[str, Any] = Field(default_factory=dict)
+
+
+@dataclass
+class ActionRun:
+    outcome: str
+    reason: str | None
+    sent: list[dict]
+    flags: list[ActionFlag] = field(default_factory=list)
 
 
 @dataclass
@@ -122,8 +146,14 @@ class Executer:
         self._jev = jev
         self._clock = clock
 
-    async def play(self, step: int, action: str, macros: StepMacros) -> StepPlay:
-        """Play step `step` (`action` is its text) with `macros` until it stops."""
+    async def play(
+        self, step: int, action: str, macros: StepMacros, repair: Repair | None = None
+    ) -> StepPlay:
+        """Play step `step` (`action` is its text) with `macros` until it stops.
+
+        `repair` is the editor for this step, or `None` when the play has none (a FREE case's play:
+        its macros are a scene plan shared by several cases, which the editor does not rewrite).
+        """
         channel, spec, clock = self._channel, self._spec, self._clock
         await self._settle()
         play = StepPlay(
@@ -134,7 +164,9 @@ class Executer:
         )
         started = clock()
         none_since: float | None = None
-        failures = disagreements = 0
+        failures = disagreements = idle_turns = repairs = 0
+        # The action the last turns ran, and how many times in a row it failed or sent nothing.
+        stuck: tuple[str | None, int] = (None, 0)
         try:
             for turn in range(spec.max_turns_per_step):
                 await self._settle()
@@ -176,12 +208,38 @@ class Executer:
                     await channel.wait_for_reading(min(remaining, IDLE_LOOK_SECONDS))
                     continue
                 none_since = None
-                outcome, reason, sent = await self._run(macros.actions[picked], step)
-                record.update(outcome=outcome, reason=reason, sent=sent)
-                await self._send(record)
+                action_run = await self._run(macros.actions[picked], step)
+                outcome, reason, sent = action_run.outcome, action_run.reason, action_run.sent
+                record.update(
+                    outcome=outcome, reason=reason, sent=sent,
+                    flags=[flagged.model_dump(mode="json") for flagged in action_run.flags],
+                )
                 failures = failures + 1 if outcome == "failed" else 0
+                idle = outcome == "passed" and not sent
+                idle_turns = idle_turns + 1 if idle else 0
+                stuck = (picked, stuck[1] + 1 if stuck[0] == picked else 1) if outcome == "failed" or idle else (None, 0)
+                if stuck[1] >= spec.repair_after and repair is not None and repairs < spec.max_repairs_per_step:
+                    # 멈춤 규칙보다 먼저다: 그 action 의 turn 기록을 들고 editor 를 부르고, 답이 오면 그것으로 잇는다.
+                    repairs += 1
+                    evidence = [turn for turn in play.turns if turn.get("picked") == picked][-stuck[1] :]
+                    fixed = await repair(macros, picked, evidence)
+                    record["repair"] = {"action": picked, "attempt": repairs, "replaced": fixed is not None}
+                    await self._send(record)
+                    if fixed is not None:
+                        macros = fixed
+                        failures = idle_turns = 0
+                        stuck = (None, 0)
+                        continue
+                else:
+                    await self._send(record)
                 if failures >= spec.max_failures_in_a_row:
                     play.stopped = f"{failures} actions failed in a row (last: {picked}: {reason})"
+                    break
+                if idle_turns >= spec.max_idle_turns_in_a_row:
+                    play.stopped = (
+                        f"no progress: {idle_turns} actions in a row ran without sending the game an input "
+                        f"(last: {picked})"
+                    )
                     break
                 if not sent:
                     # 보낸 것이 없으면 화면도 그대로다. 다음 reading 을 기다려 같은 화면에 바로 다시
@@ -232,25 +290,29 @@ class Executer:
         except JevError as error:
             raise JevStopped(str(error)) from error
 
-    async def _run(self, definition: MacroDefinition, step: int) -> tuple[str, str | None, list[dict]]:
-        """Run one action. `(outcome, reason, batches sent)`; outcome is passed, paused or failed."""
+    async def _run(self, definition: MacroDefinition, step: int) -> ActionRun:
+        """실패나 pause 전까지 기록된 flags도 실행 결과와 함께 보존한다."""
         host = ChannelMacroHost(self._channel, self._jev, step)
         try:
             result = await run_macro(host, definition, {}, step)
         except QaCancelled:
             raise
         except Exception as error:  # noqa: BLE001 - noted against the action, play goes on
-            return "failed", f"{type(error).__name__}: {str(error)[:200]}", host.sent
+            return ActionRun("failed", f"{type(error).__name__}: {str(error)[:200]}", host.sent)
+        flags = [
+            ActionFlag(place=str(flagged.place), message=flagged.message, observed=flagged.observed)
+            for flagged in result.flags
+        ]
         if result.failure is not None:
             reason = f"{result.failure.code} at {result.stopped_at}: {result.failure.reason}"
-            return "failed", reason[:MAX_REASON_CHARS], host.sent
+            return ActionRun("failed", reason[:MAX_REASON_CHARS], host.sent, flags)
         refused = [sent["error"] for sent in host.sent if not sent["ok"] and sent["error"]]
         if refused:
-            return "failed", ("the game refused an input: " + "; ".join(refused))[:MAX_REASON_CHARS], host.sent
+            return ActionRun("failed", ("the game refused an input: " + "; ".join(refused))[:MAX_REASON_CHARS], host.sent, flags)
         if host.paused is not None:
             outcome = "failed" if host.paused.startswith("`decide`") else "paused"
-            return outcome, host.paused[:MAX_REASON_CHARS], host.sent
-        return "passed", None, host.sent
+            return ActionRun(outcome, host.paused[:MAX_REASON_CHARS], host.sent, flags)
+        return ActionRun("passed", None, host.sent, flags)
 
     def _scene(self) -> str | None:
         return self._channel.scene.pulse.scene
@@ -276,6 +338,8 @@ def _turn_log(record: dict) -> TurnLogPayload:
         parts.append(f"picked {record['picked']}")
     if "outcome" in record:
         parts.append(record["outcome"] + (f": {record['reason']}" if record.get("reason") else ""))
+    if "repair" in record:
+        parts.append("macros " + ("rewritten" if record["repair"]["replaced"] else "rewrite refused"))
     body = json.loads(json.dumps(record, default=str))
     if len(json.dumps(body, ensure_ascii=False).encode()) > MAX_TURN_LOG_BYTES:
         body = {key: record.get(key) for key in ("step", "turn", "done", "picked", "outcome")}

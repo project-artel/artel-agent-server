@@ -94,7 +94,9 @@ def _resettable_menu() -> FakeGame:
 
 
 def _run_free(fake: FakeGame, scenario: QaScenario, asked: Raw, judge, jev: FakeJev, **knobs):
-    config = _config(no_action_grace_seconds=0.2, **knobs)
+    # editor 를 끈다: 이 테스트들은 FREE 의 흐름을 고정하고, `Raw` 는 planner 의 답만 들고 있다. 이동 step 에서
+    # action 이 연달아 실패하면 editor 가 모델을 한 번 더 불러 그 답을 소비한다(ARTEL-1288).
+    config = _config(no_action_grace_seconds=0.2, **{"editor": "off", **knobs})
 
     async def go():
         fake.push_reading()

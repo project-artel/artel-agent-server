@@ -6,7 +6,13 @@ ride along in `arch`; `arch.engine` says they were not what ran.
 """
 
 from app.agents.planner_executer.arch import planner_executer_fingerprint
-from app.agents.planner_executer.prompts import FAILURE_ANALYSIS_ROLE, PROMPT_AGENT, RUN_REVIEW_ROLE, static_pieces
+from app.agents.planner_executer.prompts import (
+    FAILURE_ANALYSIS_ROLE,
+    MACRO_REPAIR_ROLE,
+    PROMPT_AGENT,
+    RUN_REVIEW_ROLE,
+    static_pieces,
+)
 from app.agents.qa.arch import QaArchError, ResolvedArch
 from app.agents.qa.macro.grammar import TOOL_NAMES
 from app.agents.scenario import OutputLanguage
@@ -42,6 +48,11 @@ def resolve_planner_executer_config(
         raise QaArchError(
             f"planner.analysis='on' needs the `{FAILURE_ANALYSIS_ROLE}` and `{RUN_REVIEW_ROLE}` prompts, "
             f"and qa_planner/{version} has neither. Pin v4 or newer, or send planner.analysis='off'."
+        )
+    if arch.planner.editor == "on" and MACRO_REPAIR_ROLE not in roles:
+        raise QaArchError(
+            f"planner.editor='on' needs the `{MACRO_REPAIR_ROLE}` prompt, and qa_planner/{version} has none. "
+            "Pin v5 or newer, or send planner.editor='off'."
         )
     functions = step_module_functions()
     settings = get_settings()
