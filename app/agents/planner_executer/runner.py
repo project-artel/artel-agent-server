@@ -24,6 +24,7 @@ recorded as ORDERED, and its FREE scenarios still play this way.
 import asyncio
 from collections.abc import Awaitable, Callable
 
+from app.agents.editor import MacroEditor
 from app.agents.evaluator import (
     Evaluator,
     FailureAnalyzer,
@@ -108,10 +109,13 @@ class PlannerExecuterRunner:
     ) -> None:
         if not channel.scene.pulse.seen:
             await channel.wait_for_reading(FIRST_READING_SECONDS)
-        planner = Planner(
-            self._config, channel, self._spec, RegisteredMacros(channel), ask=self._ask, developer=self._developer
-        )
+        registered = RegisteredMacros(channel)
+        planner = Planner(self._config, channel, self._spec, registered, ask=self._ask, developer=self._developer)
         executer = Executer(channel, self._spec, jev)
+        # 런 중 macro 수정(ARTEL-1288). `editor="off"` 면 executer 는 멈춤 규칙만 더한 채 pe4 처럼 돈다.
+        self._editor = MacroEditor(self._config, channel, self._spec, registered, ask=self._ask) if (
+            self._spec.editor == "on"
+        ) else None
         judge = Evaluator(self._config, self._judge)
         # 실패 분석과 런 리뷰(ARTEL-1267). `analysis="off"` 면 둘 다 없고 `STATUS` 는 pe2 그대로다.
         analysing = self._spec.analysis == "on"
@@ -134,7 +138,9 @@ class PlannerExecuterRunner:
                     )
                     await self._send_verdict(channel, state, scenario, step, False, message, self._engine_error(message))
                     continue
-                play = await executer.play(step, step_text(scenario.steps[step - 1]), written.macros)
+                play = await executer.play(
+                    step, step_text(scenario.steps[step - 1]), written.macros, self._repair(scenario, step)
+                )
                 passed, message = await judge.judge(scenario, step, play)
                 analysis = None if passed else await self._analyse(scenario, step, play, message)
                 await self._send_verdict(channel, state, scenario, step, passed, message, analysis, play)
@@ -185,6 +191,10 @@ class PlannerExecuterRunner:
         await send_verdict(
             channel, state, step, passed, message, analysis=analysis, played=play.played() if play else None
         )
+
+    def _repair(self, scenario: QaScenario, step: int):
+        """The editor for one step's play, or `None` when the run does not edit."""
+        return self._editor.for_step(scenario, step) if self._editor is not None else None
 
     async def _analyse(
         self, scenario: QaScenario, step: int, play: StepPlay, message: str
@@ -370,7 +380,9 @@ class PlannerExecuterRunner:
         written = await planner.write_travel(scenario, target.step, scene)
         stopped = f"the move was still refused after {self._spec.max_rewrites} rewrites: {written.refusal}"
         if written.macros is not None:
-            play = await executer.play(target.step, f"Go to the scene `{scene}`.", written.macros)
+            play = await executer.play(
+                target.step, f"Go to the scene `{scene}`.", written.macros, self._repair(scenario, target.step)
+            )
             stopped = play.stopped
         arrived = channel.scene.pulse.scene
         waiting = [case.step for case in pending.values() if same_scene(case.scene, scene)]

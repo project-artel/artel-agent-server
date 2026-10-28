@@ -280,6 +280,110 @@ def test_actions_failing_in_a_row_stop_play() -> None:
     assert play.stopped.startswith("2 actions failed in a row (last: press_start: WAIT_TIMEOUT")
 
 
+# `press_start` 가 이 화면에 없는 가지만 들어 있다: 돌지만 게임에 아무것도 보내지 않는다.
+STUCK = MACROS.replace(
+    '''    start: object = find(name="Start")
+    click(start)
+    wait_until(scene() == "Map", 1, "Start did not open the map.")
+''',
+    '''    if scene() == "Battle":
+        start: object = find(name="Start")
+        click(start)
+''',
+)
+
+
+class Repairs:
+    """The executer's `repair`: answers with the parsed sources in turn and records what it was asked."""
+
+    def __init__(self, fake: FakeGame, *sources: str | None) -> None:
+        self.fake = fake
+        self.sources = list(sources)
+        self.calls: list[tuple[list[str], str, list[dict]]] = []
+
+    async def __call__(self, macros, action: str, turns: list[dict]):
+        self.calls.append((list(macros.actions), action, turns))
+        source = self.sources.pop(0)
+        return None if source is None else await parse_step(source, RegisteredMacros(self.fake.channel))
+
+
+def _play_with(fake: FakeGame, jev: FakeJev, repair, source: str, **knobs) -> StepPlay:
+    spec = PlannerExecuterArchSpec(**{"no_action_grace_seconds": 0.2, **knobs})
+
+    async def go() -> StepPlay:
+        fake.push_reading()
+        macros = await parse_step(source, RegisteredMacros(fake.channel))
+        return await Executer(fake.channel, spec, JevClient(post=jev)).play(1, "Press Start.", macros, repair)
+
+    return asyncio.run(go())
+
+
+def test_an_action_that_keeps_sending_nothing_calls_the_editor_and_play_goes_on_with_the_rewrite() -> None:
+    fake = _menu()
+    repair = Repairs(fake, MACROS)
+
+    play = _play_with(fake, FakeJev(), repair, STUCK, repair_after=2)
+
+    assert play.stopped == "done"
+    idle, fixed, pressed, reached = play.turns
+    assert idle["outcome"] == "passed" and idle["sent"] == [] and "repair" not in idle
+    assert fixed["repair"] == {"action": "press_start", "attempt": 1, "replaced": True}
+    assert pressed["sent"][0]["summary"] == "click(start)" and reached["done"] is True
+    # editor 에는 그 action 의 turn 기록만, 연달아 걸린 만큼 간다.
+    ((actions, action, turns),) = repair.calls
+    assert actions == ["press_start", "look_around"] and action == "press_start"
+    assert [turn["turn"] for turn in turns] == [0, 1]
+    assert [log["turn"] for log in _turn_logs(fake) if "repair" in log] == [1]
+
+
+def test_a_failing_action_is_repaired_before_the_failure_stop() -> None:
+    fake = FakeGame("Menu", {"Root/Start": {"text": "Start"}})  # 눌러도 아무 일이 없다
+    patient = MACROS.replace(
+        'wait_until(scene() == "Map", 1, "Start did not open the map.")', 'wait_until(scene() == "Menu", 1, "Not on the menu.")'
+    )
+    repair = Repairs(fake, patient)
+
+    play = _play_with(fake, FakeJev(), repair, MACROS, repair_after=2, max_failures_in_a_row=2, max_turns_per_step=4)
+
+    assert [turn["outcome"] for turn in play.turns] == ["failed", "failed", "passed", "passed"]
+    assert play.turns[1]["repair"]["replaced"] is True and play.stopped == "turn limit"
+    assert play.turns[1]["reason"].startswith("WAIT_TIMEOUT at press_start step 3 of 3: ")
+    assert repair.calls[0][2][1]["reason"] == play.turns[1]["reason"]
+
+
+def test_a_refused_rewrite_counts_and_the_failure_stop_applies() -> None:
+    fake = FakeGame("Menu", {"Root/Start": {"text": "Start"}})
+    repair = Repairs(fake, None)
+
+    play = _play_with(fake, FakeJev(), repair, MACROS, repair_after=2, max_failures_in_a_row=2)
+
+    assert play.turns[1]["repair"] == {"action": "press_start", "attempt": 1, "replaced": False}
+    assert play.stopped.startswith("2 actions failed in a row (last: press_start: WAIT_TIMEOUT")
+    assert len(repair.calls) == 1
+
+
+def test_repairs_are_capped_per_step_and_idle_turns_then_stop_play() -> None:
+    fake = _menu()
+    repair = Repairs(fake, STUCK, STUCK)
+
+    play = _play_with(
+        fake, FakeJev(), repair, STUCK, repair_after=2, max_repairs_per_step=1, max_idle_turns_in_a_row=4
+    )
+
+    assert len(repair.calls) == 1 and play.turns[1]["repair"]["attempt"] == 1
+    # 고친 뒤 idle 수는 0 부터 다시 센다: turn 2–5 가 네 번이다.
+    assert len(play.turns) == 6 and all(turn["sent"] == [] for turn in play.turns)
+    assert play.stopped == "no progress: 4 actions in a row ran without sending the game an input (last: press_start)"
+    assert fake.actions == []
+
+
+def test_without_a_repair_idle_turns_stop_play() -> None:
+    play = _play_with(_menu(), FakeJev(), None, STUCK, max_idle_turns_in_a_row=3)
+
+    assert len(play.turns) == 3
+    assert play.stopped.startswith("no progress: 3 actions in a row")
+
+
 def test_play_stops_at_the_turn_cap() -> None:
     play = _play(_menu(), FakeJev(picks=("look_around",)), max_turns_per_step=2)
 

@@ -59,7 +59,7 @@ def test_the_planner_executer_run_is_filed_under_its_own_label_and_digest() -> N
 
     assert config.arch.engine == "planner_executer"
     assert config.arch.planner == PlannerExecuterArchSpec()
-    assert config.agent_arch == PLANNER_EXECUTER_LABEL == "pe4-pulse-events"
+    assert config.agent_arch == PLANNER_EXECUTER_LABEL == "pe5-macro-repair"
     assert config.agent_fingerprint != agent.agent_fingerprint
     assert config.decision_model == resolve_decision_model()
     assert config.citation_reporting is False and config.compaction_model is None
@@ -80,25 +80,26 @@ def test_a_relabelled_planner_executer_run_keeps_its_digest() -> None:
 def test_the_planner_prompt_is_recorded_with_the_macro_grammar_it_reads() -> None:
     config = resolve_run_config(arch=PLANNER_EXECUTER)
 
-    assert config.prompt_version == "v4"
-    assert set(config.prompt_hashes) == {
-        "rules", "evaluator", "scene_rules", "scene_evaluator", "failure_analysis", "run_review", "macro_grammar"
-    }
+    assert config.prompt_version == "v5"
+    roles = ("rules", "evaluator", "scene_rules", "scene_evaluator", "failure_analysis", "run_review", "macro_repair")
+    assert set(config.prompt_hashes) == {*roles, "macro_grammar"}
     locked = read_lock()["prompts"]
-    for role in ("rules", "evaluator", "scene_rules", "scene_evaluator", "failure_analysis", "run_review"):
-        assert locked[f"qa_planner/v4/{role}"] == config.prompt_hashes[role]
+    for role in roles:
+        assert locked[f"qa_planner/v5/{role}"] == config.prompt_hashes[role]
     assert config.prompt_hashes["macro_grammar"] == hashlib.sha256(MACRO_GRAMMAR.encode()).hexdigest()
 
 
 def test_the_planner_defaults_to_the_newest_prompt_and_v1_can_still_be_pinned() -> None:
     """`qa_planner` has no `*_PROMPT_VERSION` setting, so the newest version is the default. The
     tool loop's `qa_run` default is not moved by it."""
-    assert available_versions("qa_planner") == ("v1", "v2", "v3", "v4")
-    assert resolve_version("qa_planner") == "v4"
+    assert available_versions("qa_planner") == ("v1", "v2", "v3", "v4", "v5")
+    assert resolve_version("qa_planner") == "v5"
     assert resolve_run_config().prompt_version == resolve_version("qa_run")
 
-    # v1 has no `failure_analysis`, so a pinned run has to turn the analysis off to be built.
-    without_analysis = QaArchSpec(engine="planner_executer", planner=PlannerExecuterArchSpec(analysis="off"))
+    # v1 has neither `failure_analysis` nor `macro_repair`, so a pinned run turns both off to be built.
+    without_analysis = QaArchSpec(
+        engine="planner_executer", planner=PlannerExecuterArchSpec(analysis="off", editor="off")
+    )
     pinned = resolve_run_config(arch=without_analysis, prompt_version="v1")
 
     assert pinned.prompt_version == "v1"
@@ -136,6 +137,25 @@ def test_v4_adds_only_the_failure_analysis_and_run_review_prompts() -> None:
     review = load_prompt("qa_planner", "run_review", "v4").body
     assert review.startswith("You review ONE QA run of a game after every step was judged.")
     assert '"patterns"' in review and '"insights"' in review
+
+
+def test_v5_adds_only_the_macro_repair_prompt() -> None:
+    # planner·evaluator 가 읽는 글은 그대로다(ARTEL-1288): 통과 수가 움직이면 editor 가 움직인 것이다.
+    for role in ("rules", "scene_rules", "evaluator", "scene_evaluator", "failure_analysis", "run_review"):
+        assert load_prompt("qa_planner", role, "v5").body == load_prompt("qa_planner", role, "v4").body
+    repair = load_prompt("qa_planner", "macro_repair", "v5")
+    assert repair.body.startswith("You fix the macros of ONE test step of a game while it is being played.")
+    assert "Never weaken `done()`" in repair.body and "{macro_grammar}" in repair.body
+    assert repair.placeholders == ("macro_grammar",)
+
+
+def test_editor_on_is_refused_on_a_prompt_version_without_its_prompt() -> None:
+    editing = QaArchSpec(engine="planner_executer", planner=PlannerExecuterArchSpec(editor="on"))
+    with pytest.raises(QaArchError, match="planner.editor='on' needs the `macro_repair` prompt"):
+        resolve_run_config(arch=editing, prompt_version="v4")
+    # v4 still builds with the editor off; its analysis prompts are there.
+    quiet = QaArchSpec(engine="planner_executer", planner=PlannerExecuterArchSpec(editor="off"))
+    assert resolve_run_config(arch=quiet, prompt_version="v4").prompt_version == "v4"
 
 
 def test_analysis_on_is_refused_on_a_prompt_version_without_its_prompts() -> None:

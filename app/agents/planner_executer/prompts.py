@@ -7,6 +7,7 @@
 | evaluator      | `evaluator.md`                                          | evaluator |
 | failure analysis | `failure_analysis.md` (v4+)                           | evaluator |
 | run review     | `run_review.md` (v4+)                                   | evaluator |
+| macro repair   | `macro_repair.md` (v5+), macro grammar in it            | editor    |
 | game map       | `scene_context`: scenes and what the code lets a player do | planner |
 | developer macros | the project's developer macros that parse, with their build | planner |
 | the step       | the scenario's step, the current screen                 | both      |
@@ -39,6 +40,8 @@ SCENE_EVALUATOR_ROLE = "scene_evaluator"
 # 실패 분석과 런 리뷰(ARTEL-1267). v4 부터 있다. 둘 다 `app/agents/evaluator/` 가 읽는다.
 FAILURE_ANALYSIS_ROLE = "failure_analysis"
 RUN_REVIEW_ROLE = "run_review"
+# 런 중 macro 수정(ARTEL-1288). v5 부터 있다. `app/agents/editor/` 가 읽는다.
+MACRO_REPAIR_ROLE = "macro_repair"
 
 MACRO_GRAMMAR_PLACEHOLDER = "macro_grammar"
 MACRO_GRAMMAR = f"{GRAMMAR}\n\n{NUMBER_EQUALITY}"

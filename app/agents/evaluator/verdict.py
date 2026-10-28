@@ -211,6 +211,12 @@ def turn_line(turn: dict) -> str:
         parts.append(f"Jev picked {turn['picked']}")
     if "outcome" in turn:
         parts.append(f"→ {turn['outcome']}" + (f": {turn['reason']}" if turn.get("reason") else ""))
+    if turn.get("repair"):
+        parts.append(
+            f"the editor rewrote the macros around {turn['repair']['action']}"
+            if turn["repair"].get("replaced")
+            else f"the editor's rewrite around {turn['repair']['action']} was refused"
+        )
     if turn.get("jev_error"):
         parts.append(f"Jev did not answer: {turn['jev_error']}")
     return "; ".join(parts)

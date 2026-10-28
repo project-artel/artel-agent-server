@@ -48,7 +48,19 @@ from pydantic import BaseModel, ConfigDict, Field
 # 는 움직이지 않고, 모델이 읽는 글이 바뀌어 label 만 움직인다. 같은 변경의 `read_member` 보강(`static()`·
 # `member()` 가 `pulse` 에 없는 이름을 게임에 한 번 묻는다)은 macro 가 읽을 수 있는 값을 늘리지만 모델이 읽는
 # 글은 아니라 bump 의 이유가 아니다.
-PLANNER_EXECUTER_LABEL = "pe4-pulse-events"
+#
+# pe5: 런 중에 macro 를 고친다(ARTEL-1288). 한 action 이 `repair_after` 번 연달아 실패하거나, 돌았는데 게임에 입력을
+# 하나도 보내지 않으면, executer 가 step 을 끝내지 않고 editor(`app/agents/editor/`, prompt `macro_repair`)를 불러 그
+# step 의 source 를 다시 쓰게 하고 그 답으로 play 를 잇는다. stage 런 148 은 Jev 가 같은 action 을 37 번 골랐는데 그
+# action 이 입력을 한 번도 안 보내 480 초 budget 을 다 썼다 — 발행 전에 macro 를 검증하는 것은 효과를 미리 알 수 없어
+# 불가능하고(게임이 답해야 안다), 그 자리에 planner 를 다시 부르면 "step 을 쓰는 역할" 과 "고치는 역할" 이 한 prompt 에
+# 섞인다. 그래서 역할을 따로 둔다. 고침은 step 마다 `max_repairs_per_step` 번까지고, 다 쓰면 pe4 의 멈춤 규칙이 그대로
+# 적용된다. 입력 없이 도는 turn 이 `max_idle_turns_in_a_row` 번 이어지면 play 를 멈추는 규칙도 새로 든다 — 전에는 turn
+# 상한이나 budget 까지 돌았다. knob 넷(`editor`·`repair_after`·`max_repairs_per_step`·`max_idle_turns_in_a_row`)과
+# 모델이 읽는 새 글 하나(prompt v5 의 `macro_repair`)가 늘어 fingerprint 와 label 이 함께 움직인다. `editor="off"` 는
+# 고치지 않고 멈춤 규칙만 더한 frame 이다. FREE 시나리오의 case play 는 씬 계획 하나를 case 여럿이 나누어 쓰므로 아직
+# 고치지 않는다.
+PLANNER_EXECUTER_LABEL = "pe5-macro-repair"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1
@@ -81,6 +93,15 @@ class PlannerExecuterArchSpec(BaseModel):
     # 실패한 step 의 분석과 런 끝의 리뷰(ARTEL-1267). `off` 면 둘 다 하지 않고 `STATUS` 에 `analysis` 를
     # 싣지 않는다 — pe2 의 frame 그대로다. 실패 하나에 모델 호출 하나, run 하나에 하나가 더 든다.
     analysis: Literal["off", "on"] = "on"
+    # 런 중 macro 수정(ARTEL-1288). `off` 면 editor 를 부르지 않는다.
+    editor: Literal["off", "on"] = "on"
+    # 한 action 이 이만큼 연달아 실패하거나 입력 없이 끝나면 editor 를 부른다. `max_failures_in_a_row` 와 같은 수면
+    # 실패 셋째에 멈춤보다 고침이 먼저다.
+    repair_after: int = Field(default=3, ge=1, le=50)
+    # step 하나에서 editor 를 부르는 횟수. 거절로 끝난 호출도 센다.
+    max_repairs_per_step: int = Field(default=2, ge=0, le=10)
+    # action 이 돌았는데 게임에 입력을 하나도 보내지 않은 turn 이 이만큼 이어지면 play 를 멈춘다. 어느 action 이든 센다.
+    max_idle_turns_in_a_row: int = Field(default=10, ge=1, le=1_000)
 
 
 def planner_executer_fingerprint(spec: PlannerExecuterArchSpec, functions: tuple[str, ...]) -> str:
