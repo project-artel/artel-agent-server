@@ -284,6 +284,8 @@ class ReadMemberValue(BaseModel):
     value: Any = None
     count: int | None = None
     unread: str | None = None
+    # 이 값을 쥔 component 의 scene path. static 이나 heap holder 면 없다(ARTEL-1289).
+    path: str | None = None
 
     @property
     def read(self) -> bool:
@@ -448,36 +450,45 @@ class MacroRunResult:
 def _apply_read_member(
     pulse: PulseMemory, sdk_name: str, answer: ReadMemberAnswer
 ) -> None:
-    """`read_member` 의 답 하나를 `PulseMemory` 에 적는다. 값 하나면 배우고, 그 밖은 이유를 남긴다.
+    """`read_member` 의 답 하나를 `PulseMemory` 에 적는다.
 
     macro 에 적힌 이름(`Game.Score` → `Game::Score`)으로 적는다. SDK 가 `resolved.declaring` 에 더 긴
     이름을 돌려줘도 reader 가 맞추는 글자는 macro 의 것이라, 그 글자로 적어야 다음 평가가 찾는다.
 
-    instance 가 여럿인데 값이 다르면 배우지 않는다. `member()` 는 target 하나를 겨누는데 어느 instance
-    의 값인지 이 답은 말하지 않으므로, 하나를 고르면 그 조건이 다른 객체의 값으로 판정될 수 있다.
+    holder 마다 `path` 가 온 값은 그 path 아래에 적어 그 객체를 겨눈 `member()` 만 읽는다(ARTEL-1289).
+    못 읽은 holder 는 그 path 의 거절로 남긴다. holder 를 가리지 않는 값(`static()` 과 path 없는 `member()`
+    가 읽는 것)은 읽힌 값 전부가 같을 때만 적는다 — 하나를 고르면 그 조건이 다른 객체의 값으로 판정될 수
+    있다. 컬렉션은 `count` 가 값이다: SDK 는 컬렉션의 내용물을 보내지 않고 개수만 보낸다.
     """
     declaring, member = sdk_name.split("::", 1)
     refused = next((one for one in answer.unresolvable if one.reason or one.name), None)
     if refused is not None:
         pulse.refuse_member(declaring, member, refused.reason or "no reason given")
         return
+    for one in answer.values:
+        if not one.path:
+            continue
+        if one.read:
+            pulse.learn_member(declaring, member, one.value, path=one.path)
+        elif one.count is not None:
+            pulse.learn_member(declaring, member, None, count=one.count, path=one.path)
+        elif one.unread:
+            pulse.refuse_member(declaring, member, one.unread, path=one.path)
     read = [one.value for one in answer.values if one.read]
-    if read and all(one == read[0] for one in read):
+    counted = [one.count for one in answer.values if not one.read and one.count is not None]
+    unread = next((one.unread for one in answer.values if one.unread), None)
+    if unread is None and read and not counted and all(one == read[0] for one in read):
         pulse.learn_member(declaring, member, read[0])
         return
-    if read:
-        reason = f"{len(read)} instances hold this member with different values"
+    if unread is None and counted and not read and all(one == counted[0] for one in counted):
+        pulse.learn_member(declaring, member, None, count=counted[0])
+        return
+    if unread is not None and (read or counted):
+        reason = f"{len(answer.values)} instances hold this member and one could not be read: {unread}"
+    elif read or counted:
+        reason = f"{len(read) + len(counted)} instances hold this member with different values"
     else:
-        unread = next((one.unread for one in answer.values if one.unread), None)
-        counted = next(
-            (one.count for one in answer.values if one.count is not None), None
-        )
-        if unread:
-            reason = unread
-        elif counted is not None:
-            reason = f"the game counted {counted} instances and read no value"
-        else:
-            reason = "the game returned no value"
+        reason = unread or "the game returned no value"
     pulse.refuse_member(declaring, member, reason)
 
 
@@ -881,7 +892,7 @@ class _Runner:
             return
         memories = self.memories()
         for name in unknown_member_names(memories, frame.scope, calls):
-            sdk_name = sdk_member_name(name)
+            sdk_name = sdk_member_name(name, memories.pulse)
             if sdk_name is None or sdk_name in self.read_members_asked:
                 continue
             self.read_members_asked.add(sdk_name)
@@ -1093,6 +1104,8 @@ class _Runner:
                     statement, observed, waited_here, readings, evaluations, cap
                 )
             readings += arrived.pulses
+            # 새 reading 이 왔으면 `read_member` 로 받아 둔 값도 낡았을 수 있다. 조건을 다시 읽기 전에 비운다.
+            self.read_members_asked.clear()
             if condition_is_true():
                 self.result.waits.append(
                     f"{place}: `{statement.source}` was true after {waited_here:.1f}s "
@@ -1456,6 +1469,10 @@ class _Runner:
         # 글자가 아니게 되고, 자기가 쓴 줄을 못 알아보는 것이 제일 비싼 혼선이다.
         outcome = await self.host.run(actions, statement.source, self.step)
         self.result.outcomes.append(outcome.text)
+        # 게임에 입력이 나갔으면 전에 물어 받은 값은 그 입력 전의 값이다. 다음 statement 가 다시 묻게
+        # 비운다(ARTEL-1289) — 전에는 macro 하나가 도는 동안 한 번만 물어, 입력 뒤의 `require` 가 옛
+        # 값으로 판정됐다.
+        self.read_members_asked.clear()
 
         # **돌아온 값을 본다.** 종전에는 여기서 무조건 `True` 였고, 그래서 클릭이 허공에
         # 떨어져도 사람이 마우스를 쥐어도 macro 가 끝까지 갔다 — 저자가 `require` 로 미리

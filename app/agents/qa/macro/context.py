@@ -22,6 +22,7 @@ from app.agents.qa.macro.binding import (
     resolve_target,
 )
 from app.agents.qa.macro.grammar import MAX_CONTEXT_VALUE_CHARS, MAX_DECIDE_STATE_CHARS
+from app.qa.pulse import UnreadValue
 from app.agents.qa.macro.model import (
     MacroContextArgument,
     MacroContextFindAll,
@@ -123,18 +124,29 @@ def render_object(memories: MacroMemories, found: FoundObject) -> dict[str, Any]
     """
     record = found.record
     members: dict[str, Any] = {}
-    for member in record.members.values():
-        if memories.pulse.is_cosmetic(member.type_key):
-            continue
-        short = (member.on or "").split(".")[-1]
-        # 같은 type 의 component 가 둘이면 짧은 이름이 겹친다. 먼저 들어온 것을 남긴다 —
-        # `binding._member_names` 의 짧은 이름 규칙과 같다.
-        members.setdefault(f"{short}.{member.member}", clip_value(member.value))
+    shown = [m for m in record.members.values() if not memories.pulse.is_cosmetic(m.type_key)]
+    short_names = [f"{(m.on or '').split('.')[-1]}.{m.member}" for m in shown]
+    for member, short in zip(shown, short_names):
+        # 같은 type 의 component 가 둘이면 짧은 이름이 겹친다. 그때는 둘 다 `#among` 을 붙여 적는다 —
+        # `binding._member_names` 가 붙이지 않은 이름을 모호로 거절하는 것과 같은 규칙이고, Jev 와
+        # macro 가 같은 값을 읽게 한다(ARTEL-1289). 전에는 Jev 가 첫 값, macro 가 마지막 값이었다.
+        name = f"{short}#{member.among or 0}" if short_names.count(short) > 1 else short
+        members[name] = clip_value(_observed_text(member.observed))
     rendered: dict[str, Any] = {"path": record.selector or record.path or found.key}
     if record.text is not None:
         rendered["text"] = clip_value(record.text)
     rendered["members"] = {name: members[name] for name in sorted(members)}
+    # adapter 조각은 그대로 싣는다. Jev 가 `interactable`·`playing` 같은 상태를 읽는 자리다.
+    for fragment_name, fragment in record.fragments().items():
+        rendered[fragment_name] = clip_value(fragment)
     return rendered
+
+
+def _observed_text(value: Any) -> Any:
+    """`UnreadValue` 는 JSON 으로 못 나가므로 글자로. 그 밖은 그대로."""
+    if isinstance(value, UnreadValue):
+        return f"(unread: {value.reason})"
+    return value
 
 
 def clip_value(value: Any) -> Any:
