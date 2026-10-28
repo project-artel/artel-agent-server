@@ -2,7 +2,7 @@ import asyncio
 import contextlib
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.agents.qa.arch import DEFAULT_ARCH, QaArchSpec, resolve_arch
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage
@@ -98,6 +98,23 @@ class OpenQaSessionRequest(BaseModel):
     # 런을 시작한 사용자가 등록한 key. 사용자 key 로 도는 런에만 실려 온다. 없으면 공용 key 다.
     # 세션 기록에만 두고 `run_config`·로그·응답에는 넣지 않는다(`app/llm/credentials.py`).
     llm_key: LlmKey | None = None
+
+    @field_validator("arch", mode="before")
+    @classmethod
+    def arch_is_an_object(cls, value: object) -> object:
+        """`arch: null` 을 필드 이름과 고칠 길이 든 문장으로 거절한다 (ARTEL-1236).
+
+        빼면 지금 구조이고 `null` 은 받지 않는다. 받아 주면 "구조를 모른다" 와 "기본 구조" 가 한
+        값이 된다. pydantic 의 기본 문장 ("Input should be a valid dictionary or instance of
+        QaArchSpec") 은 orchestration 의 `agent_rejected_request` 를 거쳐 사용자에게 그대로 가는데,
+        무엇을 보내야 하는지 말하지 않는다.
+        """
+        if value is None:
+            raise ValueError(
+                "arch must be an object such as {\"vision\": \"on\"}; leave the field out for "
+                "the default structure, null is not accepted"
+            )
+        return value
 
     @model_validator(mode="after")
     def validate_against_model(self) -> "OpenQaSessionRequest":
