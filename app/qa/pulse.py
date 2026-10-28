@@ -75,6 +75,16 @@ MAX_SCREEN_TEXT = 30
 # 꺼지는데, 그때 필요한 것은 명단이 아니라 "많이 꺼졌다" 는 사실이다.
 MAX_NAMED_OFF = 12
 
+# `PULSE.events` 를 몇 개까지 쥐나(ARTEL-1285). 한 reading 이 싣는 것은 직전 reading 뒤에 일어난
+# 것만이라, 쥐지 않으면 view 가 그 reading 한 번 동안만 그것을 말할 수 있다. 오래된 것부터 버린다.
+MAX_EVENTS_KEPT = 40
+# `what happened` 절이 한 번에 적는 event 줄의 상한. 전투 한 턴에 `anim.*` 이 수십 개 오는데, 읽는
+# 쪽에 필요한 것은 어떤 종류가 몇 번인지이고 같은 종류는 SDK 가 이미 `count` 로 접어 보낸다.
+MAX_EVENTS_SHOWN = 15
+# 지난번 그린 뒤 새 event 가 없을 때 대신 적는 마지막 event 수. 비워 두면 "아무 일도 없었다" 와
+# "이 SDK 는 event 를 안 보낸다" 가 구분되지 않는다.
+MAX_EVENTS_EARLIER = 5
+
 # 게임 상태일 확률이 이 값보다 낮다고 판정된 member type 은 view 에서 숨긴다.
 #
 # 0.5 가 아닌 이유: ARTEL-944 가 같은 입력을 네 번 물었을 때 판정 모델의 확률이 최대 0.100
@@ -220,6 +230,49 @@ class PulseComponent(BaseModel):
     m: list[PulseMember] = Field(default_factory=list)
 
 
+class PulseEvent(BaseModel):
+    """게임이 직전 reading 뒤에 한 호출 하나(`PULSE.events`, schema 3, ARTEL-1285).
+
+    `kind` 는 `audio.play`·`anim.trigger`·`scene.load`·`prefs.set`·`spawn` 같은 SDK 의 이름이고,
+    `target` 은 그 호출을 받은 객체의 scene path(`scene.load`·`prefs.*` 같은 static 호출은 `None`),
+    `detail` 은 clip·trigger·parameter·scene·prefab·key 이름, `value` 는 인자가 있을 때 그 값이다.
+    같은 kind+target+detail+value 는 SDK 가 `count` 로 접어 보내고 `frame` 은 그중 첫 번째다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    kind: str
+    target: str | None = None
+    detail: str | None = None
+    value: str | int | float | bool | None = None
+    frame: int | None = None
+    count: int = 1
+
+    def line(self) -> str:
+        """view 의 한 줄. `audio.play Pixel 10 on BackgroundMusic (x3)` 꼴."""
+        text = self.kind
+        if self.detail:
+            text += f" {self.detail}"
+        if self.value is not None:
+            text += f"={self.value!r}"
+        if self.target:
+            # scene path 의 마지막 마디만. 객체 블록의 머리줄이 selector 를 쓰므로 그 이름으로
+            # 찾아지면 되고, 경로 전체는 한 줄을 화면 너비만큼 늘린다.
+            text += f" on {self.target.rsplit('/', 1)[-1]}"
+        if self.count > 1:
+            text += f" (x{self.count})"
+        return text
+
+
+class RecordedEvent(BaseModel):
+    """`PulseMemory` 가 쥔 event 하나와 그것이 실려 온 `reading` 번호. 창을 가르는 자다."""
+
+    model_config = ConfigDict(extra="allow")
+
+    reading: int
+    event: PulseEvent
+
+
 class PulseReading(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -253,6 +306,8 @@ class PulseReading(BaseModel):
     # 지금 도는 behavior 전부. 하나라도 도는 동안 매 `PULSE` 에 실리고, 다 끝나면 `[]` 이다.
     # 없으면(`None`) 아무것도 안 돌았거나 이 기능이 없는 SDK 다.
     behaviors: list[RunningBehavior] | None = None
+    # 직전 reading 뒤에 게임이 한 호출(ARTEL-1285, schema 3). 없으면 schema 2 이하의 SDK 다.
+    events: list[PulseEvent] = Field(default_factory=list)
 
 
 class ReadingLog(BaseModel):
@@ -586,6 +641,13 @@ class PulseMemory(BaseModel):
             self.statics[entry.key] = entry
             self.static_at[entry.key] = now
 
+        # event 는 이 reading 의 번호를 달고 뒤에 붙는다. 같은 번호가 창을 가르는 자(`clock`)라
+        # `render` 가 "지난번 그린 뒤" 를 값과 같은 자로 잰다.
+        for event in reading.events:
+            self.events.append(RecordedEvent(reading=now, event=event))
+        if len(self.events) > MAX_EVENTS_KEPT:
+            del self.events[: len(self.events) - MAX_EVENTS_KEPT]
+
         # Which list an object arrives in is what says whether it is on. It is
         # not a field on the object, so it cannot disagree with itself.
         for live, arrived in ((True, reading.active), (False, reading.deactive)):
@@ -743,6 +805,12 @@ class PulseMemory(BaseModel):
                 for entry in window:
                     lines.append(f"  {entry.reading} ({self._log_line(entry)})")
             lines.append("")
+
+        # 게임이 한 호출(`PULSE.events`, ARTEL-1285). 로그 바로 다음이다 — 로그가 "무엇이 움직였나"
+        # 이고 이것이 "게임이 무엇을 했나" 라 둘이 같은 창을 보며 한 사실의 두 면을 말한다.
+        # `<<scene context>>` 블록보다 앞이기도 하다. `MAX_LOGGED_CHARS` 가 tool 결과의 꼬리를
+        # 자르므로(ARTEL-824) 뒤에 두면 잘릴 때 이것이 먼저 없어진다.
+        lines.extend(self._event_lines(since))
 
         # 사라진 것을 말한다. 창을 타므로 한 번 말하고 만다.
         #
@@ -1184,6 +1252,32 @@ class PulseMemory(BaseModel):
         if pointers:
             parts.append("pointer: " + ", ".join(str(p) for p in pointers))
         return "can do — " + " · ".join(parts) if parts else ""
+
+    def _event_lines(self, since: int) -> list[str]:
+        """`what happened` 절. event 가 하나도 없으면 빈 목록이라 schema 2 의 view 와 같다.
+
+        창은 값과 같다 — `since` 보다 뒤의 reading 에 실려 온 것만. 창에 든 것이 없으면 마지막
+        `MAX_EVENTS_EARLIER` 개를 "earlier" 로 적는다. 창이 비었다고 절을 빼면 "게임이 아무 호출도
+        안 했다" 와 "이 SDK 는 event 를 안 보낸다" 가 같은 침묵이 된다.
+
+        `MAX_EVENTS_SHOWN` 을 넘으면 **최신**을 남기고 앞을 센다. 읽는 쪽이 찾는 것은 행위 직후에
+        게임이 무엇을 했나이고, 그것이 창의 끝이다.
+        """
+        if not self.events:
+            return []
+        fresh = [one for one in self.events if one.reading > since]
+        if fresh:
+            head = "what happened since the last reading:"
+        else:
+            fresh = self.events[-MAX_EVENTS_EARLIER:]
+            head = f"what happened earlier (nothing new since the last reading, last {len(fresh)}):"
+        dropped = max(len(fresh) - MAX_EVENTS_SHOWN, 0)
+        lines = [head]
+        if dropped:
+            lines.append(f"  (+{dropped} earlier events not listed)")
+        lines.extend(f"  {one.event.line()}" for one in fresh[dropped:])
+        lines.append("")
+        return lines
 
     @staticmethod
     def _static_name(entry: "PulseStatic") -> str:

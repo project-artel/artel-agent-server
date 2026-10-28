@@ -39,7 +39,16 @@ from pydantic import BaseModel, ConfigDict, Field
 # run 은 종단 `STATUS` 에 런 리뷰(`overview`·`patterns`·`insights`)를 싣고 같은 overview 를 `LOG` 한 줄로 낸다.
 # 판정 prompt 는 그대로다. 모델이 읽는 새 글 둘(`failure_analysis`·`run_review`, prompt v4)과 knob `analysis`
 # 하나가 늘어 fingerprint 도 움직인다. `analysis="off"` 는 pe2 의 frame 과 같다.
-PLANNER_EXECUTER_LABEL = "pe3-evaluator-analysis"
+#
+# pe4: planner 와 evaluator 가 읽는 화면(`prompts.screen`, 곧 `PulseMemory.render`)에 게임이 한 호출이 실린다
+# (ARTEL-1285). schema 3 의 `PULSE.events` — `audio.play`·`anim.trigger`·`scene.load`·`spawn`·`prefs.set` 같은
+# 호출을 대상·이름·인자·횟수와 함께 — 가 `what happened since the last reading:` 절로 그려진다. 소리가 났는지,
+# 애니메이션이 돌았는지는 member 값으로는 안 보이던 것이라 planner 의 `done` 과 evaluator 의 판정이 읽는 근거가
+# 늘었다. schema 2 의 reading 은 그 절이 없어 pe3 과 같은 화면이다. knob 과 macro tool 은 그대로라 fingerprint
+# 는 움직이지 않고, 모델이 읽는 글이 바뀌어 label 만 움직인다. 같은 변경의 `read_member` 보강(`static()`·
+# `member()` 가 `pulse` 에 없는 이름을 게임에 한 번 묻는다)은 macro 가 읽을 수 있는 값을 늘리지만 모델이 읽는
+# 글은 아니라 bump 의 이유가 아니다.
+PLANNER_EXECUTER_LABEL = "pe4-pulse-events"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1
