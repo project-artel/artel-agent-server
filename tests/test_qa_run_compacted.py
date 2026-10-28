@@ -9,6 +9,7 @@ to the graph wrongly leaves the run no better off than none at all.
 """
 
 import asyncio
+from tests.qa_attempts import configure_attempts
 from typing import Any
 
 import pytest
@@ -127,8 +128,8 @@ def verdict(call_id: str, step: int) -> dict:
     return {
         "tool_calls": [
             {
-                "name": "report_step",
-                "args": {"step": step, "performed": True, "passed": True, "message": f"{step}번 확인함", "thought": "판정"},
+                "name": "report_test_case",
+                "args": {"case_id": step, "verdict": "PASSED", "message": f"{step}번 확인함", "thought": "판정"},
                 "id": call_id,
             }
         ]
@@ -142,8 +143,10 @@ def compacted_run(monkeypatch: pytest.MonkeyPatch) -> tuple[ScriptedModel, QaRun
             look("1"),
             look("2"),
             look("3"),
+            {"tool_calls": [{"name": "start_test_case", "args": {"case_id": 1, "thought": "시작"}, "id": "start1"}]},
             verdict("4", 1),
             {"tool_calls": [{"name": "compact_context", "args": {"reason": "길어졌다"}, "id": "5"}]},
+            {"tool_calls": [{"name": "start_test_case", "args": {"case_id": 2, "thought": "시작"}, "id": "start2"}]},
             verdict("6", 2),
             {
                 "tool_calls": [
@@ -181,6 +184,7 @@ def compacted_run(monkeypatch: pytest.MonkeyPatch) -> tuple[ScriptedModel, QaRun
 
     channel, sent = make_channel()
     state = QaRunState(total_steps=2)
+    configure_attempts(channel, state)
     asyncio.run(QaRunner(config).run(channel, scenario(), state))
     assert summarizer.calls == 1
     return model, state, sent
@@ -194,7 +198,7 @@ def test_a_run_that_compacts_still_reaches_its_verdicts(monkeypatch: pytest.Monk
 
     assert state.compactions == 1
     assert state.finished
-    assert [(r.step, r.passed) for r in state.step_results] == [(1, True), (2, True)]
+    assert [(r.case_id, r.verdict) for r in state.case_attempt_results] == [(1, "PASSED"), (2, "PASSED")]
 
 
 def test_the_turn_after_a_compaction_reads_the_summary_and_the_ledger(
@@ -205,15 +209,15 @@ def test_the_turn_after_a_compaction_reads_the_summary_and_the_ledger(
     model, _state, _sent = compacted_run(monkeypatch)
 
     # Turn 6 is the first model call made after `compact_context` was answered.
-    after = model.received[5]
+    after = model.received[6]
     texts = [str(message.content) for message in after]
 
     assert any(SUMMARY_TEXT in text for text in texts)
     # The ledger's own opening sentence, not the marker alone — the system
     # prompt names the marker too, when it teaches the agent to read the block.
     ledger = next(text for text in texts if text.startswith("CONTEXT COMPACTED."))
-    assert "step 1: PASS — 1번 확인함" in ledger
-    assert "Continue with step 2" in ledger
+    assert "TC 1, attempt" in ledger and "PASSED — 1번 확인함" in ledger
+    assert "Choose what to verify next" in ledger
     # The conversation really was cut: the opening instructions are gone.
     assert not any("Begin. Observe the screen first." in text for text in texts)
 
@@ -267,6 +271,7 @@ def test_compaction_off_leaves_both_the_middleware_and_the_tool_out(
     )
     channel, _sent = make_channel()
     state = QaRunState(total_steps=2)
+    configure_attempts(channel, state)
     asyncio.run(QaRunner(config).run(channel, scenario(), state))
 
     # The structure records itself as compaction-free, so the run is comparable

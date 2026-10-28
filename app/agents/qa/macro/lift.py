@@ -350,11 +350,11 @@ def offer(draft: Draft) -> str:
     )
     return (
         f"\n\nMacro draft ready — `{draft.name}` replays the {draft.actions} actions you "
-        "sent for this step, with every id and coordinate turned into a selector or a "
+        "sent for this TC attempt, with every id and coordinate turned into a selector or a "
         "`find`:\n\n```python\n"
         f"{draft.source}```\n"
-        "This step passed, this scenario runs again on later builds, and the next run "
-        "reaches this step and is shown the macros registered on this build. Without "
+        "This TC attempt passed, this scenario runs again on later builds, and the next run "
+        "checks this TC and is shown the macros registered on this build. Without "
         f"`{draft.name}`, the next run sends these actions by hand again: "
         f"{draft.actions} tool calls.{loop} An unregistered draft is dropped when the run "
         "ends.\n"

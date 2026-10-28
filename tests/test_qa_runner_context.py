@@ -10,6 +10,7 @@ to fix.
 """
 
 import asyncio
+from tests.qa_attempts import configure_attempts
 from typing import Any
 
 import pytest
@@ -141,8 +142,8 @@ def scripted_run(
             {
                 "tool_calls": [
                     {
-                        "name": "report_step",
-                        "args": {"step": 1, "performed": True, "passed": True, "message": "화면 확인함", "thought": "판정"},
+                        "name": "report_test_case",
+                        "args": {"case_id": 1, "verdict": "PASSED", "message": "화면 확인함", "thought": "판정"},
                         "id": "report",
                     }
                 ]
@@ -166,12 +167,15 @@ def scripted_run(
 
     channel, sent = make_channel()
     state = QaRunState(total_steps=1)
+    configure_attempts(channel, state)
+    asyncio.run(channel.evaluation.start(1))
     # phase gate 를 끈다. 이 파일이 보는 것은 model 이 무엇을 읽느냐이지 phase 가 아니다.
     runner = QaRunner(resolve_run_config(arch=QaArchSpec(phase_cycle=PhaseCycleMode.off)))
 
     asyncio.run(runner.run(channel, scenario(), state))
 
     assert state.finished
+    assert len(state.case_attempt_results) == 1
     assert len(model.received) >= observations + 2
     return model, channel, sent
 

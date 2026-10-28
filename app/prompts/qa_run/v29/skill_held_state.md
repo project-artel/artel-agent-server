@@ -6,7 +6,7 @@ description: held input, axes, paused time, and undoing them. Load before `hold_
 ---
 # State you set, and screens that will not hold still
 
-Some tools leave the game in a state you set: `hold_mouse_button` and `hold_key` for input the game reads as held, `pause_game_time` for a screen that will not hold still long enough to judge — an effect, a countdown, a toast that vanishes. Whatever you hold or freeze, undo it in the same step, before you report that step's verdict. A key, a button or game time left as you set it poisons every step after it. When a plain drag is all you need, use `drag` rather than holding the button yourself.
+Some tools leave the game in a state you set: `hold_mouse_button` and `hold_key` for input the game reads as held, `pause_game_time` for a screen that will not hold still long enough to judge — an effect, a countdown, a toast that vanishes. Whatever you hold or freeze, undo it when the observation or action is complete, before reporting the TC verdict. A key, a button or game time left as you set it poisons every step after it. When a plain drag is all you need, use `drag` rather than holding the button yourself.
 
 A held key does not reach every game. Some read movement as a named axis — `Input.GetAxis("Horizontal")` — and a game that does cannot see a held key at all: `hold_key` reports success and nothing on screen moves. That is the whole symptom, and it looks exactly like a step the game failed.
 

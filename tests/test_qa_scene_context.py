@@ -15,6 +15,7 @@ Three things are pinned here, and they fail in different ways:
 """
 
 import asyncio
+from tests.qa_attempts import configure_attempts
 from typing import Any
 
 import httpx
@@ -569,8 +570,8 @@ def drive(
             {
                 "tool_calls": [
                     {
-                        "name": "report_step",
-                        "args": {"step": 1, "performed": True, "passed": True, "message": "봤다", "thought": "판정"},
+                        "name": "report_test_case",
+                        "args": {"case_id": 1, "verdict": "PASSED", "message": "봤다", "thought": "판정"},
                         "id": "report",
                     }
                 ]
@@ -600,6 +601,8 @@ def drive(
     model.before_turn = lambda call: channel.push_scene(scenes[min(call - 1, len(scenes) - 1)])
     model.before_turn(1)
     state = QaRunState(total_steps=1)
+    configure_attempts(channel, state)
+    asyncio.run(channel.evaluation.start(1))
 
     asyncio.run(
         QaRunner(resolve_run_config(arch=QaArchSpec(phase_cycle=PhaseCycleMode.off)))
@@ -607,6 +610,7 @@ def drive(
     )
 
     assert state.finished
+    assert len(state.case_attempt_results) == 1
     return model, channel
 
 

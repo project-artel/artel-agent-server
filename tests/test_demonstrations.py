@@ -190,7 +190,8 @@ def test_qa_attaches_procedure_and_current_evidence_rules(mode):
     assert "this run's observations only" in rendered
     assert "Historical images, facts and observedOutcome cannot prove" in rendered
     assert "procedure id/revision" in rendered
-    assert ("report_case" if mode == "FREE" else "report_step") in rendered
+    assert "start_test_case" in rendered and "report_test_case" in rendered
+    assert "report_step(" not in rendered
 
 
 @pytest.mark.parametrize("mode", ["ORDERED", "FREE"])

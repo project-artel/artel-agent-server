@@ -5,6 +5,7 @@
 """
 
 import asyncio
+from tests.qa_attempts import configure_attempts, start_case, report_case
 
 import pytest
 
@@ -294,18 +295,18 @@ def make(macros: str):
         QaArchSpec(vision=VisionMode.on, phase_cycle=PhaseCycleMode.off, macros=macros),
         "openai/gpt-6-luna",
     )
+    configure_attempts(channel, state)
     tools = {one.name: one for one in build_tools(channel, state, arch)}
     return state, tools
 
 
 def run_step(tools) -> str:
     async def scenario():
+        await start_case(tools)
         for _ in range(3):
             await tools["press_key"].ainvoke({"step": 1, "thought": "t", "key_code": "Space", "duration_seconds": 0.1})
         await tools["click"].ainvoke({"step": 1, "thought": "t", "target": "#41"})
-        return await tools["report_step"].ainvoke(
-            {"step": 1, "performed": True, "passed": True, "message": "dialogue advanced", "thought": "t"}
-        )
+        return await report_case(tools)
 
     return asyncio.run(scenario())
 
@@ -329,7 +330,7 @@ def test_the_offer_makes_registering_the_default_and_names_what_declining_costs(
     assert "edit_macro" in answers[1] and "`replay_step_3`" in answers[1]
     assert "decline_macro_draft" in answers[2] and "`replay_step_3`" in answers[2]
     assert "what" in answers[2] and "`reason`" in answers[2]
-    assert "This step passed" in text and "later builds" in text
+    assert "This TC attempt passed" in text and "later builds" in text
     assert "sends these actions by hand again: 13 tool calls" in text
     assert "dropped when the run ends" in text
     assert "skip_memory_update" not in text and "UPDATE_MEMORY" not in text

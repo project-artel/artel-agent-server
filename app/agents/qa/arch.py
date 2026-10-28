@@ -482,7 +482,10 @@ from app.llm.models import LLMModel, get_model_spec
 # v33은 TC에 승인된 시연 절차가 있을 때 첫 실행 `context`에 revision과 검증 기준을
 # 추가한다. 과거 시연 결과와 이번 실행의 `evidence`를 구분하도록 명시한다.
 # `tool`과 `middleware`는 같으므로 `fingerprint`는 유지하지만 모델이 읽는 내용은 달라진다.
-QA_ARCH_LABEL = "v33-performance-demonstration-procedures"
+# v34: step 판정을 TC 시작·결과 보고로 바꾸고 시도별 영상 구간을 남긴다.
+# tool 실행을 직렬화하여 사용자 질문 대기 중 다른 조작을 막고, 대기는 실행 제한 시간에서 뺀다.
+# 통합 arch는 예외·성능·시각 점검·시연 절차와 TC 시도별 판정·사용자 대기를 함께 제공한다.
+QA_ARCH_LABEL = "v34-case-evaluation-diagnostics-procedures"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
@@ -737,6 +740,15 @@ class QaArchSpec(BaseModel):
     # 기본값이 `True` 인 이유는 `pulse_relevance` 와 같다. 기본 run 의 view 가 그대로라
     # `QA_ARCH_LABEL` 이 안 움직인다.
     report_step_view: bool = True
+    # 판정마다 기대 항목별 근거(`checks`)를 받고 판독 기록과 대조한다(ARTEL-1133). 켜면
+    # `report_step` · `report_case` 가 `checks` 인자를 하나 더 받고, 판정과 항목이 서로 반대면
+    # 돌려보내며, 근거마다 기록과 맞는지를 `STATUS` 에 싣는다(`app/qa/verdict_evidence.py`).
+    #
+    # 기본값이 `off` 인 이유는 `pulse_relevance` 와 같다. 끄면 tool schema 가 그대로라 기본
+    # 런의 모양과 `QA_ARCH_LABEL` 이 안 움직인다. 켠 런과 끈 런을 같은 시나리오로 재 본 뒤에
+    # 기본값을 정한다. `arch_fingerprint` 도 끈 런에서는 이 칸을 넣지 않는다 — 넣으면 이 축이
+    # 생긴 날 모든 기본 런의 digest 가 바뀐다.
+    verdict_evidence: Literal["off", "on"] = "off"
     # 끝까지 간 `run_macro` 결과를 한 줄로 내고, 호출한 step 이 보고된 뒤 오래된 결과를 한 줄로
     # `fold` 한다(ARTEL-1026). 기본값이 `True` 이고 `QA_ARCH_LABEL` 이 `v26-macro-result-fold` 로
     # 올랐다. 끄면 결과 문장과 `fold` 종류가 v25 그대로다.
@@ -903,6 +915,7 @@ class ResolvedArch(BaseModel):
     fold_stale_skills: bool
     pulse_relevance: bool
     report_step_view: bool
+    verdict_evidence: Literal["off", "on"]
     fold_stale_macro_results: bool
     fold_threshold_chars: int
     cheats: Literal["off", "on"]
@@ -1044,7 +1057,10 @@ def arch_fingerprint(
         # with `engine="agent"` has the same loop whatever they hold, and the other engine is
         # hashed by `planner_executer_fingerprint`. Hashed here, the axis would have moved every
         # default run's digest the day it was added, filing one structure under two.
-        "arch": arch.model_dump(mode="json", exclude={"label", "engine", "planner"}),
+        "arch": arch.model_dump(
+            mode="json",
+            exclude={"label", "engine", "planner"} | ({"verdict_evidence"} if arch.verdict_evidence == "off" else set()),
+        ),
         "tools": sorted(
             (tool.name, json.dumps(tool.args, sort_keys=True, default=str))
             for tool in tools

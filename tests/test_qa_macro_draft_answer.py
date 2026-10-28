@@ -9,6 +9,7 @@ phase 는 `register_macro` 나 `decline_macro_draft` 로만 끝난다. `skip_mem
 """
 
 import asyncio
+from tests.qa_attempts import configure_attempts, start_case, report_case
 
 from app.agents.qa.arch import PhaseCycleMode, QaArchSpec, VisionMode, resolve_arch
 from app.agents.qa.tools import QaRunState, build_tools
@@ -50,11 +51,13 @@ def make(macros: str, phase_cycle: PhaseCycleMode = PhaseCycleMode.lite):
         QaArchSpec(vision=VisionMode.on, phase_cycle=phase_cycle, macros=macros),
         "openai/gpt-6-luna",
     )
+    configure_attempts(channel, state)
     tools = {one.name: one for one in build_tools(channel, state, arch)}
     return state, tools
 
 
 async def send_actions(tools, step: int = 1) -> None:
+    await start_case(tools, step)
     for _ in range(3):
         await tools["press_key"].ainvoke(
             {"step": step, "thought": "t", "key_code": "Space", "duration_seconds": 0.1}
@@ -63,9 +66,8 @@ async def send_actions(tools, step: int = 1) -> None:
 
 
 async def report(tools, passed: bool, step: int = 1) -> str:
-    return await tools["report_step"].ainvoke(
-        {"step": step, "performed": True, "passed": passed, "message": "m", "thought": "t", "learned": ""}
-    )
+    await start_case(tools, step)
+    return await report_case(tools, step, passed)
 
 
 async def skip(tools, reason: str, step: int = 1) -> str:
@@ -99,6 +101,7 @@ def test_a_failed_verdict_gets_no_draft_and_a_later_pass_of_the_same_step_does()
 
         # 실패 판정 뒤에 `UPDATE_MEMORY` 를 지나 다시 판정하는 길을 gate 앞에서 흉내 낸다.
         state.phase_cycle.phase = RunPhase.act
+        await send_actions(tools)
         await report(tools, passed=True)
         assert DRAFT in state.macros.drafts
         assert state.offered_drafts == {1: DRAFT}
@@ -300,9 +303,7 @@ def test_a_run_without_a_phase_gate_still_gets_the_draft_and_no_phase() -> None:
             state, tools = make("on", phase_cycle)
             await send_actions(tools)
             if phase_cycle is PhaseCycleMode.off:
-                await tools["report_step"].ainvoke(
-                    {"step": 1, "performed": True, "passed": True, "message": "m", "thought": "t"}
-                )
+                await report_case(tools)
             else:
                 await report(tools, passed=True)
 

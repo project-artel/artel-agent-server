@@ -5,6 +5,8 @@
 
 import asyncio
 
+import pytest
+
 from app.agents.game_context.schemas import GameContextAgentRequest
 from app.agents.knowledge_query.schemas import KnowledgeQueryAgentRequest
 from app.agents.scenario.schemas import ScenarioAgentRequest
@@ -153,3 +155,17 @@ def test_every_request_schema_reads_the_setting(monkeypatch) -> None:
     for schema in schemas:
         field = schema.model_fields["model"]
         assert field.default_factory is resolve_default_model, schema.__name__
+
+
+def test_unknown_deployment_default_is_refused_when_the_remote_catalog_is_used(monkeypatch):
+    _use(monkeypatch, "openai/not-a-model")
+    with pytest.raises(ValueError, match="default_model .*not in the catalog"):
+        resolve_default_model()
+
+
+def test_disabled_deployment_default_cannot_bypass_the_admin_setting(monkeypatch):
+    from conftest import FIXTURE_MODEL_CATALOG
+    disabled = next(model for model, spec in FIXTURE_MODEL_CATALOG.items() if not spec.enabled and model != BEDROCK)
+    _use(monkeypatch, disabled)
+    with pytest.raises(ValueError, match="disabled"):
+        resolve_default_model()

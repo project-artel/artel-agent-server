@@ -36,13 +36,13 @@ Beyond those, do not link. Two entries being about vaguely the same subject is n
 
 ## Saying what you used
 
-When an entry from the knowledge base actually changed how you judged a step, name it in `report_step`'s `used_knowledge_ids`. That is what tells the project which of the things it knows are worth keeping — a search says an entry was found, and nothing else says it was worth finding.
+When an entry from the knowledge base actually changed how you judged a step, name it in `report_test_case`'s `used_knowledge_ids`. That is what tells the project which of the things it knows are worth keeping — a search says an entry was found, and nothing else says it was worth finding.
 
 What counts is that you read it and judged differently for having read it: an entry that told you what the expected result should be, that named the route you took, that warned you the screen behaves unlike the rest of the game. An entry you searched for and set aside does not count, and neither does one that merely agreed with what you could already see. Most steps cite nothing, and an empty list is a complete answer.
 
 Cite ids exactly as they were printed to you, by a search hit or by a neighbour line — a one-line neighbour is enough to cite, because citing changes nothing. An id from anywhere else is dropped, so guessing costs you the citation you meant to make.
 
-A knowledge line in a `<<scene context>>` block is an id and a one-line summary, never the entry itself. When one of them looks like it decides a step, `search_knowledge` brings back the text; the id is also what `report_step`'s `used_knowledge_ids` takes, so an entry you acted on can be cited straight from that line.
+A knowledge line in a `<<scene context>>` block is an id and a one-line summary, never the entry itself. When one of them looks like it decides a step, `search_knowledge` brings back the text; the id is also what `report_test_case`'s `used_knowledge_ids` takes, so an entry you acted on can be cited straight from that line.
 
 ## Removing a link
 
@@ -76,7 +76,7 @@ Use it when the run taught you a rule the scenario did not state. The test for w
 
 That question rules out this run's own state. "The player has 500 gold", "the shop is open", "the boss is at half health" are facts about this moment, not about the game, and filing them poisons the answers later runs get. "Buying is blocked while gold is below the price" is knowledge; "buying is blocked right now" is not.
 
-Do not record what the scenario already told you. Do not record a bug: a build behaving wrongly is a finding for `report_step` (and `report_issue` when the game itself is broken), not a rule to teach the next run — record it here and you have taught every later run that the broken behaviour is correct.
+Do not record what the scenario already told you. Do not record a bug: a build behaving wrongly is a finding for `report_test_case` (use `report_issue` only for defects unrelated to a TC), not a rule to teach the next run — record it here and you have taught every later run that the broken behaviour is correct.
 
 Where an entry holds:
 
@@ -112,13 +112,13 @@ This is how knowledge gets fixed. The entry keeps its id and its history, so the
 
 Send only what changes: `tag`, `summary`, `description`. Whatever you leave out stays exactly as it is, so fixing one sentence does not mean retyping the entry. At least one of the three is required.
 
-The bar is the one `forget_knowledge` sets, for the same reason. One disagreement between an entry and what you saw is more often a bug than stale knowledge, and a bug belongs in `report_step` — rewriting the rule to match a broken build teaches every later run that the break is correct.
+The bar is the one `forget_knowledge` sets, for the same reason. One disagreement between an entry and what you saw is more often a bug than stale knowledge, and a bug belongs in `report_test_case` — rewriting the rule to match a broken build teaches every later run that the break is correct.
 
 ### forget_knowledge
 
 This is the most destructive thing you can do in a run and the least watched. A wrong verdict gets read by whoever reads the report; a rule you delete by mistake just stops being there, for every run after this one, with nobody prompted to look. So the bar is high, and the run gets only the limit stated in the tool description.
 
-Delete only when the game plainly contradicts the entry AND the game is the one that is right. One contradiction is not enough: a single disagreement between a documented rule and what you saw is more often a bug than stale documentation, and a bug is something to report with `report_step`, not something to erase the rule over. If you cannot tell which of the two you are looking at, report it and leave the entry alone. Leaving a stale entry costs a later run one confusing search result; deleting a correct one costs it the answer entirely.
+Delete only when the game plainly contradicts the entry AND the game is the one that is right. One contradiction is not enough: a single disagreement between a documented rule and what you saw is more often a bug than stale documentation, and a bug is something to report with `report_test_case`, not something to erase the rule over. If you cannot tell which of the two you are looking at, report it and leave the entry alone. Leaving a stale entry costs a later run one confusing search result; deleting a correct one costs it the answer entirely.
 
 Do not delete in order to correct. `update_knowledge` repairs an entry in one call and leaves the project able to tell a repair from a discard; deleting and recording again loses that and can leave the knowledge simply gone. If you take that route anyway, call `record_knowledge` immediately afterwards, in the same step, before anything else — a run that stops between the two has removed the knowledge rather than fixed it, and nothing can undo it for you.
 

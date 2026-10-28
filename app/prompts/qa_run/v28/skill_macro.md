@@ -1,6 +1,6 @@
 ---
 version: v28
-note: macro 문법과 수명주기와 예시 둘. tool_write_macro·tool_read_macro·tool_edit_macro·tool_register_macro·tool_run_macro 다섯이 500자 상한 안에 들어가려면 이 글이 설명 밖에 있어야 한다. tests/test_qa_macro_reference.py 가 문법 절을 app/agents/qa/macro/reference.py 가 grammar.py 로 조립한 글과 맞추고, 예시 둘을 parser 에 넣는다. v20 (ARTEL-984): 진입점 def 의 docstring 이 summary 이고 register_macro 가 그것을 요구한다는 The docstring 절을 더했고, 예시 셋이 docstring 으로 시작한다. v21 (ARTEL-988): wait_until statement 와 -> bool predicate 를 문법 절(Waiting, Predicates, Conditions, 상한)에 더했고, clear_the_wave 예시가 predicate 로 or 를 적고 wait_until 로 승리 화면을 기다린다. v22: import, match decide, ask 와 Jev 가 읽는 context 를 문법에 더하고, 네 번째 예시로 앞의 두 예시를 import 해 전투를 한 턴씩 고르는 orchestration macro 를 실었다. v23 (ARTEL-1056): 상한 절의 호출 깊이를 3 에서 9 로 올렸다. v28 (ARTEL-1222): 수명주기 절에 macro 답이 싣는 글자 줄을 읽고 빈 줄, placeholder, 깨진 글자를 report_issue 로 보내라는 문단 하나를 더한다.
+note: macro 문법과 수명주기와 예시 둘. tool_write_macro·tool_read_macro·tool_edit_macro·tool_register_macro·tool_run_macro 다섯이 500자 상한 안에 들어가려면 이 글이 설명 밖에 있어야 한다. tests/test_qa_macro_reference.py 가 문법 절을 app/agents/qa/macro/reference.py 가 grammar.py 로 조립한 글과 맞추고, 예시 둘을 parser 에 넣는다. v20 (ARTEL-984): 진입점 def 의 docstring 이 summary 이고 register_macro 가 그것을 요구한다는 The docstring 절을 더했고, 예시 셋이 docstring 으로 시작한다. v21 (ARTEL-988): wait_until statement 와 -> bool predicate 를 문법 절(Waiting, Predicates, Conditions, 상한)에 더했고, clear_the_wave 예시가 predicate 로 or 를 적고 wait_until 로 승리 화면을 기다린다. v22: import, match decide, ask 와 Jev 가 읽는 context 를 문법에 더하고, 네 번째 예시로 앞의 두 예시를 import 해 전투를 한 턴씩 고르는 orchestration macro 를 실었다. v23 (ARTEL-1056): 상한 절의 호출 깊이를 3 에서 9 로 올렸다.
 placeholders: []
 description: When you repeat a sequence of actions — the same presses for every dialogue line, the same combine-and-attack for every enemy — write it once as a macro and run it instead of repeating it by hand. Load this skill before your first `write_macro`: it holds the grammar and three worked examples.
 ---
@@ -186,8 +186,9 @@ And these, each for its own reason:
 
 - `click_button` is deprecated — it invokes a Button's `onClick` directly, so it sees no occlusion. Write `click` instead
 - `reset_game` is not allowed in a macro — a stored script must not be able to throw the run's progress away. Call the tool yourself when a step needs it
+- `report_test_case` is not part of the macro grammar. The agent judges the TC from its expected result and observed evidence after the macro returns
 - `report_step` is not part of the macro grammar. A verdict needs the scenario, the earlier steps, what the operator said and the knowledge this run read, and a macro holds none of those — use `ask_verdict(<expected>)` to say this step needs judging, and judge it yourself
-- `report_case` is not part of the macro grammar: a test case's verdict is derived from its steps' verdicts, so there is nothing for a macro to report
+- `report_case` is unavailable. Use the agent's `report_test_case` after the macro returns
 - `report_issue` is not part of the macro grammar. File the defect yourself after the macro returns; `flag(<message>)` is how a macro tells you it saw something
 
 **What you hold, you release.** `hold_key` / `release_key`, `hold_mouse_button` / `release_mouse_button`, `pause_game_time` / `resume_game_time` are counted along every path through
@@ -270,14 +271,10 @@ action already sent cannot be taken back, so calling the macro again starts from
 board that is not where it started last time. Anything the macro flagged comes back
 too, and so does any verdict it asked for. A flagged line is for you to read; a
 verdict it asked for is about the step you called it with, and that step still needs
-your own `report_step`. A request inside a loop stands once per pass; they are all
+your own `report_test_case`. A request inside a loop stands once per pass; they are all
 about that one step, so read them together and report it once.
 
-**The answer lists the text the game showed while the macro ran**, one line per text
-it put on screen, oldest first — every dialogue line a macro pressed through, which
-nobody else reads. Read it before you report the step. A blank line, a placeholder
-such as `[MISSING TEXT: STORY_003]`, `TODO` or a raw key name, and garbled characters
-are defects: file each with `report_issue`, even when the macro itself ran to the end.
+**The answer lists the text the game showed while the macro ran**, one line per text it put on screen, oldest first. Read all of it before reporting the TC. A blank line, placeholder such as `[MISSING TEXT: STORY_003]`, `TODO`, raw key name or garbled text is an independent defect to report with `report_issue`, even when the macro completed.
 
 **`resume_macro` answers a macro paused at a `checkpoint`.** The answer to `run_macro`
 says PAUSED, what reached the game so far and what has not been sent yet. Nothing more
@@ -373,7 +370,7 @@ def attack_first_enemy_with(card_label: string, element_label: string) -> None:
     # `ask_verdict` says the step this macro was called for now has something to
     # judge. It takes no step number: the step is the one `run_macro` was called
     # with, so the same macro asks about whichever step calls it. The macro judges
-    # nothing — you still call `report_step` after it returns.
+    # nothing — you still call `report_test_case` after it returns.
     ask_verdict("the enemy loses health equal to the combined card's power")
 
 

@@ -8,6 +8,7 @@ precondition would be the first regression this feature could ship.
 """
 
 import asyncio
+from tests.qa_attempts import configure_attempts, start_case, report_case
 
 from app.agents.qa.knowledge import (
     KNOWLEDGE_RELATIONS,
@@ -665,6 +666,8 @@ def test_citing_something_only_glimpsed_is_allowed() -> None:
     async def run() -> None:
         channel, state, tools, sent = make(total_steps=1)
 
+        configure_attempts(channel, state)
+        await start_case(tools)
         task = answer_search(
             channel, sent, [KnowledgeSearchHit(id="1", neighbors=[neighbour(id="42")])]
         )
@@ -674,19 +677,18 @@ def test_citing_something_only_glimpsed_is_allowed() -> None:
         await task
         assert "42" not in state.knowledge_seen and "42" in state.knowledge_glimpsed
 
-        await tools["report_step"].ainvoke(
+        await tools["report_test_case"].ainvoke(
             {
-                "step": 1,
-                "performed": True, "passed": True,
+                "case_id": 1,
+                "verdict": "PASSED",
                 "message": "이웃 줄이 말한 대로였다",
                 "thought": "그 한 줄이 판정을 바꿨다",
                 "used_knowledge_ids": ["42"],
             }
         )
 
-        payload = frames(sent, MessageType.STATUS)[0]["payload"]
-        assert payload["used_knowledge_ids"] == ["42"]
-        assert payload["rejected_knowledge_id_count"] == 0
+        payload = channel.evaluation.requests[-1][1]
+        assert payload["usedKnowledgeIds"] == ["42"]
 
     asyncio.run(run())
 
