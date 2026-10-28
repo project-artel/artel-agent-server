@@ -33,6 +33,7 @@ from app.agents.evaluator import (
     SceneEvaluator,
     engine_error,
     send_verdict,
+    unobservable,
     unreached as unreached_report,
 )
 from app.agents.planner_executer.decisions import MAX_REFUSAL_CHARS, clip, note_decision
@@ -40,6 +41,7 @@ from app.agents.planner_executer.developer_macros import NO_DEVELOPER_MACROS, Lo
 from app.agents.planner_executer.executer import Executer, StepPlay
 from app.agents.planner_executer.free import FreeCase, candidates, free_cases, next_scene, same_scene
 from app.agents.planner_executer.macros import RegisteredMacros
+from app.agents.planner_executer.observe import watch
 from app.agents.planner_executer.planner import Ask, Planner
 from app.agents.planner_executer.prompts import screen, step_text
 from app.agents.qa.runner import _step_plan
@@ -116,6 +118,9 @@ class PlannerExecuterRunner:
         self._analyzer = FailureAnalyzer(self._config, self._judge) if analysing else None
         self._reviewer = RunReviewer(self._config, self._judge) if analysing else None
         self._reports: dict[int, FailureReport] = {}
+        # 시나리오의 `observe` 이름을 SDK 에 한 번 청한다. 못 푼 이름은 case 별로 쥐고, 그 case 의
+        # 실패는 모델을 부르지 않고 `INCONCLUSIVE` 로 채운다(ARTEL-1279).
+        self._unobservable = await watch(channel, scenario)
 
         if scenario.execution_mode == "FREE":
             await self._run_free(channel, scenario, state, planner, executer, SceneEvaluator(self._config, self._judge))
@@ -187,6 +192,10 @@ class PlannerExecuterRunner:
         """The failure analysis of a judged step, or `None` when the run does not analyse."""
         if self._analyzer is None:
             return None
+        case = scenario.steps[step - 1].case
+        missing = self._unobservable.get(case.id) if case is not None else None
+        if missing:
+            return unobservable(missing, message, play)
         return await self._analyzer.analyze(scenario, step, play, message)
 
     def _engine_error(self, message: str, play: StepPlay | None = None) -> FailureReport | None:

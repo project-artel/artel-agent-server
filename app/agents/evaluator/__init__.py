@@ -33,6 +33,7 @@ from app.agents.evaluator.analysis import (
     engine_error,
     input_line,
     sent_inputs,
+    unobservable,
     unreached,
 )
 from app.agents.evaluator.send import send_verdict
@@ -77,5 +78,6 @@ __all__ = [
     "scene_request",
     "send_verdict",
     "sent_inputs",
+    "unobservable",
     "unreached",
 ]
