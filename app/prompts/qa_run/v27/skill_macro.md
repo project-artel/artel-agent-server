@@ -186,9 +186,8 @@ And these, each for its own reason:
 
 - `click_button` is deprecated — it invokes a Button's `onClick` directly, so it sees no occlusion. Write `click` instead
 - `reset_game` is not allowed in a macro — a stored script must not be able to throw the run's progress away. Call the tool yourself when a step needs it
-- `report_test_case` is not part of the macro grammar. The agent judges the TC from its expected result and observed evidence after the macro returns
 - `report_step` is not part of the macro grammar. A verdict needs the scenario, the earlier steps, what the operator said and the knowledge this run read, and a macro holds none of those — use `ask_verdict(<expected>)` to say this step needs judging, and judge it yourself
-- `report_case` is unavailable. Use the agent's `report_test_case` after the macro returns
+- `report_case` is not part of the macro grammar: a test case's verdict is derived from its steps' verdicts, so there is nothing for a macro to report
 - `report_issue` is not part of the macro grammar. File the defect yourself after the macro returns; `flag(<message>)` is how a macro tells you it saw something
 
 **What you hold, you release.** `hold_key` / `release_key`, `hold_mouse_button` / `release_mouse_button`, `pause_game_time` / `resume_game_time` are counted along every path through
@@ -271,10 +270,8 @@ action already sent cannot be taken back, so calling the macro again starts from
 board that is not where it started last time. Anything the macro flagged comes back
 too, and so does any verdict it asked for. A flagged line is for you to read; a
 verdict it asked for is about the step you called it with, and that step still needs
-your own `report_test_case`. A request inside a loop stands once per pass; they are all
+your own `report_step`. A request inside a loop stands once per pass; they are all
 about that one step, so read them together and report it once.
-
-**The answer lists the text the game showed while the macro ran**, one line per text it put on screen, oldest first. Read all of it before reporting the TC. A blank line, placeholder such as `[MISSING TEXT: STORY_003]`, `TODO`, raw key name or garbled text is an independent defect to report with `report_issue`, even when the macro completed.
 
 **`resume_macro` answers a macro paused at a `checkpoint`.** The answer to `run_macro`
 says PAUSED, what reached the game so far and what has not been sent yet. Nothing more
@@ -370,7 +367,7 @@ def attack_first_enemy_with(card_label: string, element_label: string) -> None:
     # `ask_verdict` says the step this macro was called for now has something to
     # judge. It takes no step number: the step is the one `run_macro` was called
     # with, so the same macro asks about whichever step calls it. The macro judges
-    # nothing — you still call `report_test_case` after it returns.
+    # nothing — you still call `report_step` after it returns.
     ask_verdict("the enemy loses health equal to the combined card's power")
 
 

@@ -22,15 +22,19 @@
 - #257의 planner 출력 언어와 #268의 승인된 시연 절차를 함께 유지한다. planner label은 `pe4-language-demonstration-procedures`다.
 - #262~#266의 기대값 대조·예외·성능 조회·첫 scene capture·macro 도중 표시한 text 점검과 #275의 TC 시작·시도별 판정·사람 피드백·사용자 질문 대기를 함께 유지한다. `QaCaseRef`와 첫 QA context에 `verification_procedure`와 `reviews`가 모두 들어간다.
 - #262의 `report_step`/`performed` 규약은 이후 승인된 #275의 TC 단위 보고로 대체한다. 참고 step을 다시 필수 판정으로 만들지 않는다. 기대값과 관측값이 모순된 통과를 거절하는 회귀는 `report_test_case`의 checks 계약으로 옮겼다.
-- 원본 갈래들이 `v25`·`v26` prompt 번호를 각각 사용했다. 현재 TC 계약을 유지하고 진단 지시문을 합친 `qa_run/v30`을 기본 판본으로 추가했다. QA label은 `v34-case-evaluation-diagnostics-procedures`다. 예외·성능 tool이 합쳐진 tool 목록과 fingerprint를 함께 고정했다.
+- 원본 갈래들이 미병합 `v25`·`v26` 번호를 서로 다른 내용으로 사용했다. 공개 `develop`의 `v1`~`v24`는 원문을 유지한다. 실행판 `v25`·`v26`은 #275의 TC 계약 원문, `v27`~`v29`는 #266까지 누적된 진단 갈래 원문으로 고정했다. 서로 다른 미병합 `v25`·`v26`의 양쪽 원문을 [`pr-consolidation-sources/pr-266`](pr-consolidation-sources/pr-266/v25/system.md)과 [`pr-consolidation-sources/pr-275`](pr-consolidation-sources/pr-275/v25/system.md)에 별도로 보존했다. source SHA와 파일별 원본 byte SHA256은 [`pr-consolidation-prompt-sources.json`](pr-consolidation-prompt-sources.json)에 있다.
+- 과거 prompt를 동일 조건으로 재현할 때는 manifest가 가리키는 source commit의 tool schema·arch도 함께 사용해야 한다. 번호가 겹친 진단 갈래의 `v25`·`v26`은 archive와 source branch에서 찾을 수 있다. 현재 기본 실행은 새 TC tool 계약과 `v30`이다.
+- 새 내용은 기본 판본 `qa_run/v30`에만 합쳤다. TC 계약에 예외·성능·시각·macro text 점검을 더한다. QA label은 `v34-case-evaluation-diagnostics-procedures`다. 예외·성능 tool이 합쳐진 tool 목록과 fingerprint를 함께 고정했다. 과거 판본의 의미와 default TC 계약을 섞지 않는다.
+- 독립 review가 통합 과정의 `v27`~`v29` 덮어쓰기를 발견해 원문으로 복원했다. `tests/test_prompt_source_preservation.py`는 `v1`~`v29` 전체 파일 목록과 SHA256, 미병합 번호 충돌 archive 네 개를 검증한다. 원본 branch와 commit도 그대로 남아 있다.
 
 ## 통합 검증
 
 - 통합 전 첫 전체 실행에서 12개 오래된 prompt/tool 단정이 실패했다. 참고 step 보고가 제거된 TC 계약과 결합된 진단 tool에 맞춰 회귀를 수정했다.
 - 수정 후 집중 검증: `tests/test_qa_arch.py tests/test_qa_tools.py tests/test_qa_verdict_performed.py tests/test_llm_default_model.py tests/test_qa_bundle_contract.py` 127개 통과.
-- 최종 전체 `.venv/bin/python -m pytest -q`: **2,982개 통과**, 201.54초.
+- 통합 초기 전체 `.venv/bin/python -m pytest -q`: **2,982개 통과**, 201.54초.
 - `/home/yunseong/.local/bin/uv build --wheel --out-dir /home/yunseong/dev/artel/.work/agent-pr-bundle-dist-20261028`: wheel build 통과.
-- `python -m compileall -q app`, `git diff --check` 통과.
+- `python -m compileall -q app` 통과. 원문 복원 전 `git diff --check`는 통과했다. 복원한 과거 판본의 기존 EOF 빈 줄 9개는 원본 hash를 보존하기 위해 수정하지 않는다. `git -c core.whitespace=-blank-at-eof diff --check`로 나머지 whitespace 오류가 없음을 확인한다.
+- 과거 prompt 보존 수정 후 영향 회귀 **44개 통과**. 최종 전체 `.venv/bin/python -m pytest -q`는 **2,984개 통과**, 201.67초다. `v1`~`v29` source 원문과 충돌 archive hash 회귀 두 개가 추가됐다.
 - 실제 LLM·유료 QA·Unity 실행은 시작하지 않았다. 원본의 성능 측정과 실제 QA 검증은 아래 원본 PR 기록이며 이번 통합의 정확도 개선 증거로 사용하지 않는다.
 
 ## 다른 작성자의 포함된 선행 PR

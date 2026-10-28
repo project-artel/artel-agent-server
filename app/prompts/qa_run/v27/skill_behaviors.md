@@ -18,7 +18,7 @@ Never use a behavior for a step that verifies the controls themselves. If a step
 
 `start_behavior` answers with the behavior's id. While it runs, the pulse view shows a `Behavior running` line with its seconds, its limit and what it reports. It ends by itself when its time runs out, when its work is done, when its target disappears, or when it fails; the end reaches you appended to a later tool result as `Behavior ended`, with the reason. Do not assume it is still running after that line.
 
-A behavior may run across reference steps and test cases. `start_test_case` stops behaviors the selected TC does not allow, even when you revisit an earlier TC. Stop one yourself with `stop_behavior` when it is no longer needed, and give it more time with `extend_behavior` when it still is.
+A behavior may run across steps and across test cases. `report_step` lists the behaviors still running. When the next test case does not allow one, it is stopped for you before that case's first step. Stop one yourself with `stop_behavior` when the step no longer needs it, and give it more time with `extend_behavior` when it still does.
 
 Use only behaviors on the `Behaviors now` line. One on the `Behaviors not now` line is refused by the game with the reason shown; do not try it. The game runs at most four behaviors at once.
 
