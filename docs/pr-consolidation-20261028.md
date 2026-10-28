@@ -28,13 +28,17 @@
 
 - 통합 전 첫 전체 실행에서 12개 오래된 prompt/tool 단정이 실패했다. 참고 step 보고가 제거된 TC 계약과 결합된 진단 tool에 맞춰 회귀를 수정했다.
 - 수정 후 집중 검증: `tests/test_qa_arch.py tests/test_qa_tools.py tests/test_qa_verdict_performed.py tests/test_llm_default_model.py tests/test_qa_bundle_contract.py` 127개 통과.
-- 최종 전체 `python -m pytest -q`: 진행 중이며 완료 결과를 아래에 갱신한다.
+- 최종 전체 `.venv/bin/python -m pytest -q`: **2,982개 통과**, 201.54초.
+- `/home/yunseong/.local/bin/uv build --wheel --out-dir /home/yunseong/dev/artel/.work/agent-pr-bundle-dist-20261028`: wheel build 통과.
 - `python -m compileall -q app`, `git diff --check` 통과.
 - 실제 LLM·유료 QA·Unity 실행은 시작하지 않았다. 원본의 성능 측정과 실제 QA 검증은 아래 원본 PR 기록이며 이번 통합의 정확도 개선 증거로 사용하지 않는다.
 
 ## 다른 작성자의 포함된 선행 PR
 
-최종 source ancestry 검사 후 포함된 선행 PR을 기록한다. 포함됐다는 것은 source head가 이미 의존하던 commit이 있다는 뜻이며, 해당 PR을 merge하거나 닫았다는 뜻이 아니다.
+원본 11개 source head가 최종 통합 HEAD의 ancestor임을 전수 확인했다. 아래 다른 작성자의 PR도 source가 이미 의존하던 commit으로 포함된다. 해당 PR의 branch·head·상태는 변경하지 않는다.
+
+- [#269 — 판정마다 이유 싣기와 근거 축 verdict_evidence 추가](https://github.com/project-artel/artel-agent-server/pull/269)
+- [#270 — 같은 TC의 사람 확정 기록을 QA 첫 메시지에 추가](https://github.com/project-artel/artel-agent-server/pull/270)
 
 ## 원본 설명과 검증 이력
 
