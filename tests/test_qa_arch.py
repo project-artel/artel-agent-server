@@ -515,7 +515,7 @@ def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v28-verdict-expected-observed"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v29-unseen-errors"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -538,6 +538,7 @@ _PINNED_COMPACTION_KNOBS = {
 _EXPECTED_DEFAULT_TOOL_NAMES = (
     "observe_scene",
     "inspect_object",
+    "get_errors",
     "search_knowledge",
     "record_knowledge",
     "update_knowledge",
@@ -653,7 +654,10 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 # And from `7d56243753d1`, when `report_step` gained `performed` and its arguments were
 # reordered to `message`, `performed`, `passed` (ARTEL-1220) and the label moved to
 # `v28-verdict-expected-observed`. The tool names are unchanged; one tool schema moved.
-_EXPECTED_DEFAULT_FINGERPRINT = "2fd1bb6585a3"
+#
+# And from `2fd1bb6585a3`, when `get_errors` joined the observation tools (ARTEL-1219) and the
+# label moved to `v29-unseen-errors`.
+_EXPECTED_DEFAULT_FINGERPRINT = "30d40310f4fd"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:

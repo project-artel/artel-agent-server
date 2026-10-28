@@ -439,7 +439,18 @@ from app.llm.models import LLMModel, get_model_spec
 # itself is judged that way correctly. The first message's step rules say the same. Two tool
 # schemas moved, so `arch_fingerprint` moves with the label. Checked before picking the number:
 # no branch on origin carries a label above v27.
-QA_ARCH_LABEL = "v28-verdict-expected-observed"
+#
+# v29 because the model now reads how many exceptions the game logged and it has not looked at,
+# and can read them (ARTEL-1219). The SDK puts `errors` on `PULSE` and `ACTION_RESULT`
+# (ARTEL-1218); `QaRunChannel.game_errors` keeps them by `(type, message, stackHead)`. Every tool
+# answer that goes through `ToolContext.answer` ends with `unseen errors: N` while N is above 0,
+# and the new `get_errors` tool lists the unseen items and marks them seen, so an item read once
+# is not counted again however often it repeats. Putting the items themselves into every call was
+# rejected: gyemong logs two of its own exceptions during a scan, and the luna models filed false
+# alarms in 169 of 170 L1 runs. `get_errors` is in `ANY_PHASE`, since it is called after ACT and
+# before VERIFY. One tool joined the default set, so `arch_fingerprint` moves; the line in every
+# answer does not, which is the fourth item AGENTS.md names.
+QA_ARCH_LABEL = "v29-unseen-errors"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
