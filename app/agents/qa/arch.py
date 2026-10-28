@@ -438,7 +438,19 @@ from app.llm.models import LLMModel, get_model_spec
 # because what the model reads after every action moved, which the fingerprint cannot see. The
 # `read_member` fallback for `static()` and `member()` lands in the same change but is not a reason
 # for the bump: it changes what a macro can read, not what the model reads.
-QA_ARCH_LABEL = "v28-pulse-events"
+# v29 because the pulse view now carries what the SDK had been sending and the agent had been dropping
+# (ARTEL-1289). A member that is a collection shows its `count`; a member the game could not read shows
+# `(unread: <reason>)` instead of `None`; a static held by several heap objects shows one line per holder
+# (`State.hp@1`); each object block ends with its adapter fragments — `ui: interactable=True fill=1`,
+# `engine: audio.playing=False`, `uitk: Name(type) 'text'`; the header says `coverage gaps:` when the
+# SDK truncated the reading and `audio playing: N`; `audio.started` and `error` lines join the
+# `what happened` block. A reading that carries none of these renders byte for byte as v28. The tool
+# set and every argument schema are unchanged, so `arch_fingerprint` does not move; the label moves
+# because what the model reads after every action moved. The reader fixes in the same change — one
+# name resolver (`member_aliases`), ambiguous names refused, `read_member` answers kept per holder,
+# the fetched-value cache cleared after an input — change what a macro reads, not what the model
+# reads, and are not the reason for the bump.
+QA_ARCH_LABEL = "v29-pulse-fragments"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

@@ -71,7 +71,15 @@ from app.agents.qa.macro.model import (
 # `PulseMemory.held` 가 드는 기록 그 자체다. 밑줄로 시작하지만 `held` 를 읽는 쪽은
 # 반드시 이 타입을 다루게 되고, 여기서 비슷한 모양을 하나 더 만들면 같은 사실이 어긋날
 # 자리가 둘이 된다.
-from app.qa.pulse import PulseMemory, _HeldObject
+from app.qa.pulse import (
+    AliasTable,
+    AmbiguousValue,
+    PulseMemory,
+    UnreadValue,
+    _HeldObject,
+    flatten_fragment,
+    member_aliases,
+)
 from app.qa.scene import SceneMemory
 
 # `unread` 가 실려 온 값. SDK 의 `Number` 가 NaN 과 Infinity 를 이렇게 바꿔 보낸다.
@@ -387,63 +395,139 @@ def _exists(memories: MacroMemories, scope: MacroScope, target: MacroTarget) -> 
     return True
 
 
+def _absent(memories: MacroMemories, scope: MacroScope, target: MacroTarget) -> bool:
+    """`absent` 는 `exists` 의 부정이되, 잘린 reading 에서는 부재를 확정하지 않는다(ARTEL-1289).
+
+    SDK 가 `gaps`(`holder-limit:8` …)를 달아 보낸 reading 은 상한에 걸려 빠진 객체가 있을 수 있다.
+    그때 "안 보인다" 를 "없다" 로 답하면 상한 때문에 빠진 객체를 없는 것으로 판정한다.
+    """
+    if _exists(memories, scope, target):
+        return False
+    gaps = memories.pulse.gaps
+    if gaps:
+        raise MacroFailure(
+            ACTION_REJECTED,
+            f"absent({describe_target(target)}) cannot be decided: the game's reading was truncated "
+            f"({', '.join(gaps)}), so an object this reading does not show may still exist. Wait for a "
+            "fuller reading or name the object another way.",
+            {"target": describe_target(target), "gaps": list(gaps)},
+        )
+    return True
+
+
+def describe_target(target: MacroTarget) -> str:
+    if isinstance(target, MacroSelectorTarget):
+        return f"selector({target.selector!r})"
+    return target.name
+
+
 # --- 조건의 왼쪽에 오는 호출 여덟 -----------------------------------------------
 
 
 def _static_names(memory: PulseMemory) -> dict[str, Any]:
     """`static("Type.member")` 가 맞출 이름 → 값.
 
-    화면에 그려지는 이름을 그대로 받는다(`PulseMemory.render` 의 statics 절이
-    `declaring` 의 마지막 마디와 `member` 를 점으로 붙여 쓴다). agent 가 읽은 글자와
-    macro 에 적는 글자가 같아야 하므로, memory 의 내부 키도 함께 받는다.
+    화면에 그려지는 이름을 그대로 받는다(`PulseMemory.render` 의 statics 절이 `declaring` 의 마지막
+    마디와 `member` 를 점으로 붙여 쓴다). 이름은 `member_aliases` 하나가 만들고(ARTEL-1289), holder 가
+    여럿인 static 은 `@n` 을 붙인 이름만 하나를 가리킨다 — 붙이지 않은 이름에 다른 값이 둘 오면
+    `AmbiguousValue` 라 reader 가 거절한다.
     """
-    named: dict[str, Any] = {}
+    table = AliasTable()
     for key, entry in memory.statics.items():
-        named[key] = entry.value
-        short = (entry.declaring or "").split(".")[-1]
-        named[f"{short}.{entry.member}"] = entry.value
-    return named
+        table.add(member_aliases(entry.declaring, entry.member, entry.suffix), entry.observed, key)
+    return table.named
 
 
-def _read_member_names(memory: PulseMemory) -> dict[str, Any]:
+def _read_member_names(memory: PulseMemory, path: str | None = None) -> dict[str, Any]:
     """macro runner 가 `read_member` 로 게임에 물어 받은 값(ARTEL-1285). 이름 규칙은 statics 와 같다.
 
     `pulse` 가 감시하는 값 뒤에 선다 — `_static`·`_member` 가 감시 값에서 못 찾았을 때만 여기를
     본다. 감시 값은 다음 reading 이 갱신하고 이것은 물었던 순간의 값이라, 둘이 있으면 감시 값이 맞다.
+    `path` 를 주면 그 holder 의 값(`<path>|…` key)만, 없으면 holder 를 가리지 않는 값만 든다
+    (ARTEL-1289) — 다른 객체의 값으로 조건이 통과하지 않게.
     """
-    named: dict[str, Any] = {}
+    table = AliasTable()
     for key, entry in memory.read_members.items():
-        named[key] = entry.value
-        short = (entry.declaring or "").split(".")[-1]
-        named[f"{short}.{entry.member}"] = entry.value
-    return named
+        if (entry.path or None) != path:
+            continue
+        table.add(member_aliases(entry.declaring, entry.member), entry.observed, key)
+    return table.named
 
 
-def sdk_member_name(dotted: str) -> str | None:
+def _settled(value: Any, asked: str) -> Any:
+    """reader 가 돌려줄 값. 못 읽은 값과 모호한 이름은 값이 아니라 거절이다(ARTEL-1289)."""
+    if isinstance(value, UnreadValue):
+        raise MacroFailure(
+            ACTION_REJECTED,
+            f"{asked} could not be read by the game: {value.reason}. This is not a null value — the game "
+            "has no readable value there right now.",
+            {"asked": asked, "unread": value.reason},
+        )
+    if isinstance(value, AmbiguousValue):
+        raise MacroFailure(
+            ACTION_REJECTED,
+            f"{asked} names {len(value.candidates)} values that differ. Name one of them exactly: "
+            + ", ".join(repr(candidate) for candidate in value.candidates)
+            + ".",
+            {"asked": asked, "candidates": list(value.candidates)},
+        )
+    return value
+
+
+def sdk_member_name(dotted: str, memory: PulseMemory | None = None) -> str | None:
     """`static("Game.Score")` 의 이름을 SDK 의 `read_member` 가 받는 `Game::Score` 로.
 
-    마지막 마디가 member 이고 그 앞 전부가 type 이다 — `Battle.Turns.TurnBattleSystem.turn` 은
-    `Battle.Turns.TurnBattleSystem::turn`. 마디가 하나뿐이면 type 을 모르는 것이라 `None` 이고,
-    그때는 묻지 않는다.
+    `::` 가 적혀 있으면 그대로다 — `Cards.CardManager::myCards.Count` 처럼 member 뒤에 경로가 올 수
+    있어 그것이 정확한 꼴이다. 점만 있으면 `memory` 가 아는 type 이름(멤버의 `on`, static 의
+    `declaring`, 그 짧은 이름)에 맞춰 가장 긴 앞부분을 type 으로 삼는다: `CardManager.myCards.Count`
+    는 `Cards.CardManager::myCards.Count` 다. 아는 type 이 없으면 종전처럼 마지막 마디를 member 로
+    본다 — `Battle.Turns.TurnBattleSystem.turn` 은 `Battle.Turns.TurnBattleSystem::turn`. 마지막 점에서
+    가르는 것만으로는 점 경로 멤버가 `CardManager.myCards::Count` 가 돼 `no such type` 이었다
+    (ARTEL-1289). 마디가 하나뿐이면 type 을 모르는 것이라 `None` 이고, 그때는 묻지 않는다.
     """
     if "::" in dotted:
         declaring, member = dotted.split("::", 1)
-    elif "." in dotted:
-        declaring, member = dotted.rsplit(".", 1)
-    else:
+        return f"{declaring}::{member}" if declaring and member else None
+    if "." not in dotted:
         return None
+    parts = dotted.split(".")
+    if memory is not None:
+        full_types = _known_types(memory)
+        short_types = {full.split(".")[-1]: full for full in sorted(full_types)}
+        for cut in range(len(parts) - 1, 0, -1):
+            candidate = ".".join(parts[:cut])
+            full = candidate if candidate in full_types else short_types.get(candidate)
+            if full is not None:
+                return f"{full}::{'.'.join(parts[cut:])}"
+    declaring, member = dotted.rsplit(".", 1)
     if not declaring or not member:
         return None
     return f"{declaring}::{member}"
 
 
-def _unreadable_reason(memory: PulseMemory, name: str) -> str:
+def _known_types(memory: PulseMemory) -> set[str]:
+    """이 run 의 `pulse` 가 이름을 댄 type 전부: 멤버의 `on`, static·`read_member` 의 `declaring`."""
+    types = {entry.declaring for entry in memory.statics.values() if entry.declaring}
+    types.update(entry.declaring for entry in memory.read_members.values() if entry.declaring)
+    for record in memory.held.values():
+        types.update(member.on for member in record.members.values() if member.on)
+    return types
+
+
+def _unreadable_reason(memory: PulseMemory, name: str, path: str | None = None) -> str:
     """`read_member` 가 이 이름을 못 읽었다고 했으면 그 이유를 거절 문장에 붙일 꼴로. 아니면 빈 문자열.
 
-    runner 가 거절을 macro 에 적힌 이름의 SDK 꼴(`sdk_member_name`)로 남기므로 그 key 하나만 본다.
+    runner 가 거절을 macro 에 적힌 이름의 SDK 꼴(`sdk_member_name`)로 남기므로 그 key 를 본다. `path`
+    가 있으면 그 holder 의 거절(`<path>|…`)을 먼저 본다.
     """
-    sdk_name = sdk_member_name(name)
-    reason = memory.unreadable_members.get(sdk_name) if sdk_name else None
+    sdk_name = sdk_member_name(name, memory)
+    if sdk_name is None:
+        return ""
+    reason = None
+    if path:
+        reason = memory.unreadable_members.get(f"{path}|{sdk_name}")
+    if reason is None:
+        reason = memory.unreadable_members.get(sdk_name)
     if reason is None:
         return ""
     return f" The game was asked to read it directly (`read_member`) and could not: {reason}"
@@ -461,9 +545,7 @@ def unknown_member_names(
     """
     pulse = memories.pulse
     statics = _static_names(pulse)
-    on_objects: set[str] = set()
-    for _key, record in _live(pulse):
-        on_objects.update(_member_names(record))
+    on_objects: set[str] | None = None
     unknown: list[str] = []
     for call in calls:
         if call.reader not in ("static", "member") or call.key is None:
@@ -473,26 +555,56 @@ def unknown_member_names(
         except MacroFailure:
             # 아직 bind 되지 않은 이름이 key 다. 그 statement 가 돌 때 reader 가 제 자리에서 거절한다.
             continue
-        known = statics if call.reader == "static" else on_objects
+        if call.reader == "static":
+            known: set[str] | dict[str, Any] = statics
+        else:
+            # target 이 지금 풀리면 **그 객체**에 있는 이름만 안다고 본다(ARTEL-1289). 다른 객체에 같은
+            # 이름이 있다고 묻지 않으면, 이 객체의 값은 끝까지 안 오고 reader 가 거절한다. 풀리지 않는
+            # target 은 종전대로 살아 있는 객체 어디에든 있으면 있다고 본다 — 여기서 `SELECTOR_NOT_FOUND`
+            # 를 내면 reader 의 자리가 아닌 곳에서 난다.
+            known = _names_on_target(memories, scope, call.target)
+            if known is None:
+                if on_objects is None:
+                    on_objects = set()
+                    for _key, record in _live(pulse):
+                        on_objects.update(_member_names(record))
+                known = on_objects
         if name in known or name in unknown:
             continue
         unknown.append(name)
     return unknown
 
 
+def _names_on_target(
+    memories: MacroMemories, scope: MacroScope, target: MacroTarget | None
+) -> dict[str, Any] | None:
+    """target 의 객체가 지금 쥔 이름 → 값. target 이 없거나 지금 풀리지 않으면 `None`."""
+    if target is None:
+        return None
+    try:
+        found = resolve_target(memories, scope, target)
+    except MacroFailure:
+        return None
+    return _member_names(found.record)
+
+
 def _member_names(record: _HeldObject) -> dict[str, Any]:
-    """`member(<target>, "Type.member")` 가 맞출 이름 → 값. statics 와 같은 규칙이다."""
-    named: dict[str, Any] = {}
+    """`member(<target>, "Type.member")` 가 맞출 이름 → 값. statics 와 같은 규칙이다(`member_aliases`).
+
+    같은 type 의 component 가 둘이면 `#among` 을 붙인 이름만 하나를 가리키고, 붙이지 않은 이름에 다른
+    값이 둘 오면 `AmbiguousValue` 다(ARTEL-1289) — 전에는 짧은 이름이 마지막 값으로 덮였고 Jev 는
+    첫 값을 봐서 둘이 다른 값을 읽었다. adapter 조각(`ui`·`engine`·`uitk`)은 `ui.interactable` 같은
+    점 이름으로 든다.
+    """
+    table = AliasTable()
     for key, member in record.members.items():
-        named[key] = member.value
-        short = (member.on or "").split(".")[-1]
-        named[f"{short}.{member.member}"] = member.value
-        if member.member:
-            # 한 객체에 같은 이름의 멤버가 둘인 경우는 `on` 이 다를 때뿐이다. 그때는
-            # 짧은 이름이 겹치므로 먼저 들어온 것이 남고, 긴 이름이 가릴 수 있는 길로
-            # 남는다.
-            named.setdefault(member.member, member.value)
-    return named
+        # 첫 component 도 `#0` 을 가진다. SDK 는 `among` 을 둘째부터 보내지만, 둘이 있을 때 첫째를 하나로
+        # 가리킬 이름이 있어야 한다.
+        table.add(member_aliases(member.on, member.member, f"#{member.among or 0}"), member.observed, key)
+    for name, fragment in record.fragments().items():
+        for flat_name, value in flatten_fragment(name, fragment).items():
+            table.add((flat_name,), value, flat_name)
+    return table.named
 
 
 def read(memories: MacroMemories, scope: MacroScope, call: MacroReaderCall) -> Any:
@@ -511,7 +623,7 @@ def read(memories: MacroMemories, scope: MacroScope, call: MacroReaderCall) -> A
     if reader == "exists":
         return _exists(memories, scope, call.target)
     if reader == "absent":
-        return not _exists(memories, scope, call.target)
+        return _absent(memories, scope, call.target)
 
     found = resolve_target(memories, scope, call.target)
     if reader == "actionable":
@@ -548,12 +660,12 @@ def _static(memories: MacroMemories, scope: MacroScope, call: MacroReaderCall) -
     name = scope.text(call.key)
     named = _static_names(memories.pulse)
     if name in named:
-        return named[name]
+        return _settled(named[name], f"static({name!r})")
     # `pulse` 가 감시하지 않는 값은 runner 가 이 statement 앞에서 `read_member` 로 물어 두었다
     # (ARTEL-1285). 받은 것이 있으면 그것이고, 없으면 종전과 같은 거절에 SDK 의 이유를 붙인다.
     asked = _read_member_names(memories.pulse)
     if name in asked:
-        return asked[name]
+        return _settled(asked[name], f"static({name!r})")
     raise MacroFailure(
         ACTION_REJECTED,
         f"static({name!r}) is not a static this run has been sent. The statics "
@@ -639,18 +751,21 @@ def _member(
     call: MacroReaderCall,
 ) -> Any:
     name = scope.text(call.key)
+    asked_text = f"member({name!r}) on {found.key}"
     named = _member_names(found.record)
     if name in named:
-        return named[name]
-    # `_static` 과 같은 보강(ARTEL-1285). `read_member` 는 instance 를 가리지 않고 답하므로 runner 는
-    # 값이 하나인 member 만 적어 둔다 — 그 하나는 어느 객체를 겨눴든 같은 값이다.
-    asked = _read_member_names(memories.pulse)
-    if name in asked:
-        return asked[name]
+        return _settled(named[name], asked_text)
+    # `_static` 과 같은 보강(ARTEL-1285). `read_member` 의 답은 holder 마다 `path` 를 달고 오므로 먼저
+    # **이 객체**의 값을 보고(ARTEL-1289), 없으면 holder 를 가리지 않는 값(static 이거나 holder 전부가
+    # 같은 값)을 본다.
+    for path in (found.record.path, None):
+        asked = _read_member_names(memories.pulse, path)
+        if name in asked:
+            return _settled(asked[name], asked_text)
     raise MacroFailure(
         ACTION_REJECTED,
         f"member({name!r}) is not a value the game reads on {found.key}. Nothing "
-        "was sent to the game." + _unreadable_reason(memories.pulse, name),
+        "was sent to the game." + _unreadable_reason(memories.pulse, name, found.record.path),
         {"asked": name, "object": found.key, "available": sorted(named)},
     )
 

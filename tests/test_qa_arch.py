@@ -518,7 +518,9 @@ def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
 #
 # `v28-pulse-events` (ARTEL-1285) moved the label alone: `PulseMemory.render` gained the
 # `what happened since the last reading:` block, which the fingerprint does not hash.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v28-pulse-events"
+# `v29-pulse-fragments` (ARTEL-1289) moved it alone again: the view gained member counts, unread
+# reasons, per-holder statics, adapter fragments, coverage gaps and audio lines.
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v29-pulse-fragments"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,

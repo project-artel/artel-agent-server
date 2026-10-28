@@ -64,7 +64,13 @@ from pydantic import BaseModel, ConfigDict, Field
 # pe5는 planner의 source만 읽어 developer macro를 추측으로 고쳤고, 정상적인 조건 미충족을 알리는
 # flag도 입력 없는 실행으로만 보았다(ARTEL-1288). prompt v5와 knob은 유지하지만 모델이 읽는
 # evidence가 달라져 label을 구분한다. fingerprint가 해시하는 knob과 tool 목록은 그대로다.
-PLANNER_EXECUTER_LABEL = "pe6-editor-evidence"
+#
+# pe7: planner·evaluator·editor 가 읽는 화면(`prompts.screen` = `PulseMemory.render`)이 SDK 가 보내던 것을 전부
+# 싣는다(ARTEL-1289) — 컬렉션의 `count`, 못 읽은 멤버의 `(unread: …)`, holder 별 static, 객체의 `ui`·`engine`·`uitk`
+# 조각, `coverage gaps`·`audio playing`, `audio.started`·`error` event. 같은 변경의 reader 수정(이름 해석기 하나,
+# 모호한 이름 거절, holder 별 `read_member`, 입력 뒤 cache 비움)은 macro 가 읽는 값을 바꾸지 모델이 읽는 글은
+# 아니다. knob 은 그대로라 fingerprint 는 움직이지 않고 label 만 움직인다.
+PLANNER_EXECUTER_LABEL = "pe7-pulse-fragments"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1
