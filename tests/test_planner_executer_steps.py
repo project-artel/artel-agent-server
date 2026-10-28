@@ -549,3 +549,24 @@ def test_turn_records_go_out_as_logs_with_the_jev_answers() -> None:
     assert first["picked"] == "press_start" and first["options"] == ["press_start", "look_around"]
     assert second["done"] is True and second["goal_ask"] == 0.9
     json.dumps(first)
+
+
+@pytest.mark.parametrize(("ending", "outcome"), [
+    ('require(scene() == "Missing", "wrong scene")', "failed"),
+    ('checkpoint("wait for cards")', "paused"),
+])
+def test_flags_survive_failed_and_paused_actions_in_turn_evidence(ending: str, outcome: str) -> None:
+    from app.agents.editor.repair import evidence_lines
+
+    source = (
+        'def press_start() -> None:\n    """Prepare a spell."""\n'
+        '    flag("no compatible cards")\n    ' + ending + '\n\n'
+        'def done() -> bool:\n    return scene() == "Map"\n'
+    )
+    fake = _menu()
+    play = _play(fake, FakeJev(), source, max_turns_per_step=1)
+    turn = play.turns[0]
+    assert turn["outcome"] == outcome
+    assert turn["flags"][0]["message"] == "no compatible cards"
+    assert "no compatible cards" in evidence_lines([turn])[0]
+    assert _turn_logs(fake)[0]["flags"] == turn["flags"]

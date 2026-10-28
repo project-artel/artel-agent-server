@@ -60,7 +60,11 @@ from pydantic import BaseModel, ConfigDict, Field
 # 모델이 읽는 새 글 하나(prompt v5 의 `macro_repair`)가 늘어 fingerprint 와 label 이 함께 움직인다. `editor="off"` 는
 # 고치지 않고 멈춤 규칙만 더한 frame 이다. FREE 시나리오의 case play 는 씬 계획 하나를 case 여럿이 나누어 쓰므로 아직
 # 고치지 않는다.
-PLANNER_EXECUTER_LABEL = "pe5-macro-repair"
+# pe6: editor에 선택된 developer macro의 실제 호출과 import 본문, 실행 flags를 함께 전달한다.
+# pe5는 planner의 source만 읽어 developer macro를 추측으로 고쳤고, 정상적인 조건 미충족을 알리는
+# flag도 입력 없는 실행으로만 보았다(ARTEL-1288). prompt v5와 knob은 유지하지만 모델이 읽는
+# evidence가 달라져 label을 구분한다. fingerprint가 해시하는 knob과 tool 목록은 그대로다.
+PLANNER_EXECUTER_LABEL = "pe6-editor-evidence"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1

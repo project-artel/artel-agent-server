@@ -59,7 +59,7 @@ def test_the_planner_executer_run_is_filed_under_its_own_label_and_digest() -> N
 
     assert config.arch.engine == "planner_executer"
     assert config.arch.planner == PlannerExecuterArchSpec()
-    assert config.agent_arch == PLANNER_EXECUTER_LABEL == "pe5-macro-repair"
+    assert config.agent_arch == PLANNER_EXECUTER_LABEL == "pe6-editor-evidence"
     assert config.agent_fingerprint != agent.agent_fingerprint
     assert config.decision_model == resolve_decision_model()
     assert config.citation_reporting is False and config.compaction_model is None

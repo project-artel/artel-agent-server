@@ -17,6 +17,7 @@ are: they are registered macros the editor cannot change, and when the failing a
 them it is taken out of the step and the editor is told to write a `def` in its place.
 """
 
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
@@ -30,8 +31,13 @@ from app.agents.planner_executer.decisions import (
     clip,
     note_decision,
 )
-from app.agents.planner_executer.developer_macros import DEVELOPER_ACTION_PREFIX
+from app.agents.planner_executer.developer_macros import (
+    DEVELOPER_ACTION_PREFIX,
+    NO_DEVELOPER_MACROS,
+    LoadedDeveloperMacros,
+)
 from app.agents.planner_executer.macros import DeveloperAction, RegisteredMacros, StepMacros, parse_step
+from app.agents.qa.macro.parser import imported_names
 from app.agents.planner_executer.planner import Ask, _text, extract_code
 from app.agents.planner_executer.prompts import MACRO_REPAIR_ROLE, game_map, prompt_text, screen, this_step
 from app.agents.qa.macro.errors import MacroRejection
@@ -70,11 +76,13 @@ class MacroEditor:
         spec: PlannerExecuterArchSpec,
         registered: RegisteredMacros,
         ask: Ask | None = None,
+        developer: LoadedDeveloperMacros = NO_DEVELOPER_MACROS,
     ) -> None:
         self._config = config
         self._channel = channel
         self._spec = spec
         self._registered = registered
+        self._developer = developer
         self._system = prompt_text(MACRO_REPAIR_ROLE, config.prompt_version)
         self._ask = ask or self._ask_model
         self._model = None
@@ -148,11 +156,11 @@ class MacroEditor:
     def _request(
         self, scenario: QaScenario, step: int, macros: StepMacros, action: str, turns: list[dict], feedback: str
     ) -> str:
-        drawn = game_map(self._channel.scene.scene_context)
-        shown = turns[-MAX_EVIDENCE_TURNS:]
-        developer = action.startswith(DEVELOPER_ACTION_PREFIX)
+        drawn_map = game_map(self._channel.scene.scene_context)
+        shown_turns = turns[-MAX_EVIDENCE_TURNS:]
+        is_developer = action.startswith(DEVELOPER_ACTION_PREFIX)
         return (
-            (f"Game map:\n{drawn}\n\n" if drawn else "")
+            (f"Game map:\n{drawn_map}\n\n" if drawn_map else "")
             + f"Scenario: {scenario.title}\n\n"
             + f"The step:\n{this_step(scenario, step)}\n\n"
             + f"The step's macros as they run now:\n```python\n{macros.source.rstrip()}\n```\n\n"
@@ -160,15 +168,43 @@ class MacroEditor:
             + (
                 " — a developer macro selected for the step, not in the source above; it is taken out of the "
                 "step, so write a `def` that does its work."
-                if developer
+                if is_developer
                 else ""
             )
             + f"\nIts docstring: {macros.description(action)!r}\n"
-            + f"How its last {len(shown)} runs went:\n"
-            + "\n".join(evidence_lines(shown))
+            + (self._developer_sources(macros, action) if is_developer else "")
+            + f"How its last {len(shown_turns)} runs went:\n"
+            + "\n".join(evidence_lines(shown_turns))
             + f"\n\nCurrent screen:\n{screen(self._channel.scene.pulse)}\n"
             + (f"\n{feedback}\n" if feedback else "")
         )
+
+    def _developer_sources(self, macros: StepMacros, action: str) -> str:
+        """실제 호출 인자와 developer namespace의 본문을 중복 없이 보여 준다."""
+        name = action.removeprefix(DEVELOPER_ACTION_PREFIX).split("#", 1)[0]
+        if name not in self._developer.usable:
+            return "Developer source is unavailable; do not invent its implementation.\n"
+        sections = [
+            "Developer source for reference only. Its imports refer to other developer macros, "
+            "not the build's registered macros. Write the needed logic in replacement defs; "
+            "do not copy these imports into your answer.\n",
+            f"The selected call with its bound arguments:\n```python\n{macros.actions[action].source.rstrip()}\n```\n",
+        ]
+        pending = [name]
+        seen: set[str] = set()
+        while pending:
+            current = pending.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            loaded = self._developer.usable.get(current)
+            if loaded is None:
+                sections.append(f"Developer macro `{current}`: source unavailable.\n")
+                continue
+            source = loaded.macro.source
+            sections.append(f"Developer macro `{current}`:\n```python\n{source.rstrip()}\n```\n")
+            pending.extend(reversed(imported_names(source)))
+        return "\n".join(sections) + "\n"
 
     async def _ask_model(self, system: str, user: str) -> str:
         if self._model is None:
@@ -189,5 +225,8 @@ def evidence_lines(turns: list[dict]) -> list[str]:
             line += "; sent " + ", ".join(str(batch.get("summary")) for batch in sent)
         else:
             line += "; no input was sent to the game"
+        for flagged in turn.get("flags") or []:
+            details = json.dumps(flagged, ensure_ascii=False, default=str)
+            line += "; flag " + clip(details, MAX_EVIDENCE_REASON_CHARS)
         lines.append(line)
     return lines

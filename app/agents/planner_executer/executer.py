@@ -31,7 +31,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from app.agents.planner_executer.arch import PlannerExecuterArchSpec
 from app.agents.planner_executer.macro_host import ASK_FALSE_MEANS, ASK_TRUE_MEANS, ChannelMacroHost
@@ -72,6 +72,22 @@ class TurnLogPayload(LogPayload):
 
     kind: str = "turn"
     turn: dict[str, Any] = Field(default_factory=dict)
+
+
+class ActionFlag(BaseModel):
+    """macro가 남긴 위치·메시지·관측값을 turn과 editor에 그대로 전달한다."""
+
+    place: str
+    message: str
+    observed: dict[str, Any] = Field(default_factory=dict)
+
+
+@dataclass
+class ActionRun:
+    outcome: str
+    reason: str | None
+    sent: list[dict]
+    flags: list[ActionFlag] = field(default_factory=list)
 
 
 @dataclass
@@ -192,8 +208,12 @@ class Executer:
                     await channel.wait_for_reading(min(remaining, IDLE_LOOK_SECONDS))
                     continue
                 none_since = None
-                outcome, reason, sent = await self._run(macros.actions[picked], step)
-                record.update(outcome=outcome, reason=reason, sent=sent)
+                action_run = await self._run(macros.actions[picked], step)
+                outcome, reason, sent = action_run.outcome, action_run.reason, action_run.sent
+                record.update(
+                    outcome=outcome, reason=reason, sent=sent,
+                    flags=[flagged.model_dump(mode="json") for flagged in action_run.flags],
+                )
                 failures = failures + 1 if outcome == "failed" else 0
                 idle = outcome == "passed" and not sent
                 idle_turns = idle_turns + 1 if idle else 0
@@ -270,25 +290,29 @@ class Executer:
         except JevError as error:
             raise JevStopped(str(error)) from error
 
-    async def _run(self, definition: MacroDefinition, step: int) -> tuple[str, str | None, list[dict]]:
-        """Run one action. `(outcome, reason, batches sent)`; outcome is passed, paused or failed."""
+    async def _run(self, definition: MacroDefinition, step: int) -> ActionRun:
+        """실패나 pause 전까지 기록된 flags도 실행 결과와 함께 보존한다."""
         host = ChannelMacroHost(self._channel, self._jev, step)
         try:
             result = await run_macro(host, definition, {}, step)
         except QaCancelled:
             raise
         except Exception as error:  # noqa: BLE001 - noted against the action, play goes on
-            return "failed", f"{type(error).__name__}: {str(error)[:200]}", host.sent
+            return ActionRun("failed", f"{type(error).__name__}: {str(error)[:200]}", host.sent)
+        flags = [
+            ActionFlag(place=str(flagged.place), message=flagged.message, observed=flagged.observed)
+            for flagged in result.flags
+        ]
         if result.failure is not None:
             reason = f"{result.failure.code} at {result.stopped_at}: {result.failure.reason}"
-            return "failed", reason[:MAX_REASON_CHARS], host.sent
+            return ActionRun("failed", reason[:MAX_REASON_CHARS], host.sent, flags)
         refused = [sent["error"] for sent in host.sent if not sent["ok"] and sent["error"]]
         if refused:
-            return "failed", ("the game refused an input: " + "; ".join(refused))[:MAX_REASON_CHARS], host.sent
+            return ActionRun("failed", ("the game refused an input: " + "; ".join(refused))[:MAX_REASON_CHARS], host.sent, flags)
         if host.paused is not None:
             outcome = "failed" if host.paused.startswith("`decide`") else "paused"
-            return outcome, host.paused[:MAX_REASON_CHARS], host.sent
-        return "passed", None, host.sent
+            return ActionRun(outcome, host.paused[:MAX_REASON_CHARS], host.sent, flags)
+        return ActionRun("passed", None, host.sent, flags)
 
     def _scene(self) -> str | None:
         return self._channel.scene.pulse.scene

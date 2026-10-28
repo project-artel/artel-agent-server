@@ -113,7 +113,9 @@ class PlannerExecuterRunner:
         planner = Planner(self._config, channel, self._spec, registered, ask=self._ask, developer=self._developer)
         executer = Executer(channel, self._spec, jev)
         # 런 중 macro 수정(ARTEL-1288). `editor="off"` 면 executer 는 멈춤 규칙만 더한 채 pe4 처럼 돈다.
-        self._editor = MacroEditor(self._config, channel, self._spec, registered, ask=self._ask) if (
+        self._editor = MacroEditor(
+            self._config, channel, self._spec, registered, ask=self._ask, developer=self._developer
+        ) if (
             self._spec.editor == "on"
         ) else None
         judge = Evaluator(self._config, self._judge)

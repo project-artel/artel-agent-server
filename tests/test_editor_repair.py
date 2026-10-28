@@ -133,3 +133,74 @@ def test_with_the_editor_off_idle_turns_stop_play_without_a_model_call() -> None
 
     assert len(asked.calls) == 1
     assert "Why play stopped: no progress: 3 actions in a row" in seen[0][1]
+
+
+def test_developer_sources_follow_shared_nested_imports_and_keep_bound_arguments() -> None:
+    from app.agents.planner_executer.developer_macros import DeveloperMacro, bind_developer_calls, load_developer_macros
+
+    sources = {
+        "prepare": 'from macros import left, right\n\ndef prepare(count: int) -> None:\n    """Prepare a spell."""\n    left()\n    right()\n',
+        "left": 'from macros import shared\n\ndef left() -> None:\n    shared()\n',
+        "right": 'from macros import shared\n\ndef right() -> None:\n    shared()\n',
+        "shared": 'def shared() -> None:\n    flag("no compatible cards")\n',
+        "unrelated": 'def unrelated() -> None:\n    flag("not selected")\n',
+    }
+    fake = _menu()
+    fake.macros = {"shared": 'def shared() -> None:\n    flag("wrong namespace")\n'}
+    asked = Asked(MACROS)
+
+    async def go():
+        fake.push_reading()
+        developer = await load_developer_macros(tuple(
+            DeveloperMacro(name, source, "1.4.0", None, False) for name, source in sources.items()
+        ))
+        actions = await bind_developer_calls(["prepare(1)", "prepare(2)"], developer)
+        registered = RegisteredMacros(fake.channel)
+        macros = await parse_step('def done() -> bool:\n    return scene() == "Map"\n', registered, actions)
+        config = _config()
+        editor = MacroEditor(config, fake.channel, config.arch.planner, registered, ask=asked, developer=developer)
+        return await editor.repair(_scenario(), 1, macros, "developer:prepare#2", TURNS)
+
+    repaired = asyncio.run(go())
+    assert repaired.macros is not None
+    user = asked.calls[0][1]
+    assert "prepare(2)" in user
+    for name in ("prepare", "left", "right", "shared"):
+        assert user.count(f"Developer macro `{name}`:") == 1
+        assert sources[name].rstrip() in user
+    assert "Developer macro `unrelated`" not in user
+    assert "wrong namespace" not in user
+    assert "do not copy these imports into your answer" in user
+    assert fake.frames("MACRO_READ") == []
+    assert "developer:prepare" in repaired.macros.actions
+    assert "developer:prepare#2" not in repaired.macros.actions
+
+
+def test_flags_reach_editor_from_executer_without_game_input() -> None:
+    flagged_source = 'def press_start() -> None:\n    """Prepare a spell if cards fit."""\n    flag("no compatible cards")\n\ndef done() -> bool:\n    return scene() == "Map"\n'
+    fake = _menu()
+    asked = Asked(flagged_source, MACROS)
+    judge, _ = _judge({"passed": True, "reason": "The map opened."})
+    state, failure = _run(fake, asked, judge, FakeJev(), repair_after=2, analysis="off")
+    assert failure is None and state.step_results[0].passed
+    user = asked.calls[1][1]
+    assert '"message": "no compatible cards"' in user
+    assert '"place": "press_start step 1 of 1"' in user
+    turns = [frame["payload"]["turn"] for frame in fake.frames("LOG") if frame["payload"].get("kind") == "turn"]
+    assert turns[0]["sent"] == []
+    assert turns[0]["flags"][0]["message"] == "no compatible cards"
+
+
+def test_runner_passes_loaded_developer_sources_to_editor() -> None:
+    from app.agents.planner_executer.developer_macros import DeveloperMacro
+    from tests.test_planner_executer_developer_macros import Answered as DeveloperAsked, _answer, _run as run_developer
+
+    source = 'def prepare() -> None:\n    """Prepare if cards fit."""\n    flag("no compatible cards")\n'
+    asked = DeveloperAsked(_answer('def done() -> bool:\n    return scene() == "Map"\n', "prepare"), _answer(MACROS))
+    state, failure = run_developer(
+        _menu(), asked, (DeveloperMacro("prepare", source, "1.4.0", None, False),),
+        jev=FakeJev(picks=("developer:prepare", "press_start")), repair_after=1, analysis="off",
+    )
+    assert failure is None and state.step_results[0].passed
+    assert source.rstrip() in asked.calls[1][1]
+    assert "no compatible cards" in asked.calls[1][1]
