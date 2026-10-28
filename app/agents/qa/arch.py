@@ -425,7 +425,20 @@ from app.llm.models import LLMModel, get_model_spec
 # only because `arch.model_dump()` gained four keys (the v4 note above). The label moves anyway,
 # the v8 argument: the structure now has shapes a run must say it was or was not filed under, and
 # orchestration turns the axes on per run from the build's catalog.
-QA_ARCH_LABEL = "v27-game-functions"
+#
+# v28 because the pulse view now says what the game did (ARTEL-1285). An SDK at `PULSE` schema 3
+# sends `events`, one entry per call the game made since the previous reading — `audio.play`,
+# `anim.trigger`, `scene.load`, `spawn`, `prefs.set` and the rest, with the object it was made on,
+# the clip or parameter name, the argument and how many times it folded. `PulseMemory` keeps the last
+# `MAX_EVENTS_KEPT` of them and `render` draws a `what happened since the last reading:` block right
+# after the readings log, one line per event, windowed the way values are; when nothing new arrived it
+# lists the last few as `earlier`, so a game that sent no events and an SDK that sends none read
+# differently. A schema 2 reading carries no `events` and renders byte for byte as v27. The tool set
+# and every argument schema are unchanged, so `arch_fingerprint` does not move; the label moves
+# because what the model reads after every action moved, which the fingerprint cannot see. The
+# `read_member` fallback for `static()` and `member()` lands in the same change but is not a reason
+# for the bump: it changes what a macro can read, not what the model reads.
+QA_ARCH_LABEL = "v28-pulse-events"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

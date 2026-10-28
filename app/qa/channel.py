@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from app.qa.envelope import (
     ActionPayload,
+    ActionResultItem,
     ActionResultPayload,
     CapabilityWriteResultPayload,
     ChatPayload,
@@ -87,6 +88,11 @@ MAX_OPERATOR_WAIT_SECONDS = 300.0
 # Orchestration embeds the query and then queries pgvector — so this is not as
 # tight as a local call, but it must never be the reason a run misses its deadline.
 KNOWLEDGE_SEARCH_TIMEOUT_SECONDS = 20.0
+
+# macro 의 `static()`·`member()` 가 `pulse` 에 없는 이름을 읽을 때 보내는 `read_member` 한 번의 대기
+# (ARTEL-1285). reflection 으로 값 하나를 읽는 일이라 action 보다 훨씬 빨리 끝나고, macro 가 statement
+# 마다 이것을 기다리므로 `ACTION_TIMEOUT_SECONDS` 를 다 쓰면 한 macro 가 run 의 deadline 을 먹는다.
+READ_MEMBER_TIMEOUT_SECONDS = 5.0
 
 # How long a knowledge write waits for its answer.
 #
@@ -512,6 +518,26 @@ class QaRunChannel:
             return None
         finally:
             self._action_waiters.pop(message_id, None)
+
+    async def read_member(
+        self, name: str, step: int | None = None
+    ) -> ActionResultItem | None:
+        """SDK action `read_member` 로 `Type::member` 하나를 지금 읽는다. `None` 은 답이 없었다는 뜻이다.
+
+        `pulse` 를 거치지 않는다 — `watch` 와 달리 감시 목록에 더하지 않고 지금 값만 한 번 받는다.
+        그래서 돌아온 항목을 그대로 돌려주고, 그것을 어디에 적을지는 부른 쪽(macro runner)이 정한다.
+        action 하나짜리 batch 라 `id` 는 늘 1 이다. `read_member` 를 모르는 SDK 는 `success=False` 로
+        거절하고, 그것도 답이므로 `None` 이 아니다.
+        """
+        result = await self.dispatch_actions(
+            [JsonRpcAction(id=1, method="read_member", params=[name])],
+            message=f"read_member {name}",
+            step=step,
+            timeout=READ_MEMBER_TIMEOUT_SECONDS,
+        )
+        if result is None:
+            return None
+        return next((item for item in result.results if item.id == 1), None)
 
     async def search_knowledge(
         self, query: str, tag: str | None, limit: int, step: int | None = None

@@ -54,6 +54,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, runtime_checkable
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from app.agents.qa.macro.binding import (
     FoundObject,
     LateSelector,
@@ -68,6 +70,8 @@ from app.agents.qa.macro.binding import (
     resolve_find,
     resolve_find_all,
     resolve_target,
+    sdk_member_name,
+    unknown_member_names,
 )
 from app.agents.qa.macro.context import build_context_state
 from app.agents.qa.macro.errors import (
@@ -119,6 +123,9 @@ from app.agents.qa.macro.model import (
     MacroReadValue,
     MacroParameter,
     MacroPredicateCondition,
+    MacroReaderCall,
+    MacroReaderCondition,
+    MacroReaderOperand,
     MacroRequireStatement,
     MacroReturnStatement,
     MacroSelectorValue,
@@ -127,7 +134,7 @@ from app.agents.qa.macro.model import (
     MacroWaitUntilStatement,
 )
 from app.qa.acting import ActionOutcome, PressLanding, ScreenChange
-from app.qa.envelope import JsonRpcAction
+from app.qa.envelope import ActionResultItem, JsonRpcAction
 from app.qa.pulse import PulseMemory
 
 # 화면이 연달아 이만큼 그대로면 멈춘다.
@@ -265,6 +272,87 @@ class StepStartValues(Protocol):
     def pulse_at_step_start(self) -> PulseMemory | None: ...
 
 
+class ReadMemberValue(BaseModel):
+    """`read_member` 가 instance 하나에 대해 낸 것. `value` 가 있거나, `count` 만 있거나, `unread` 다.
+
+    `value` 가 `None` 으로 온 것과 없는 것을 가르려면 `model_fields_set` 을 본다 — 게임이 `null` 을
+    읽은 것도 읽은 값이다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    value: Any = None
+    count: int | None = None
+    unread: str | None = None
+
+    @property
+    def read(self) -> bool:
+        return "value" in self.model_fields_set
+
+
+class ReadMemberResolved(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    name: str | None = None
+    kind: str | None = None
+    holders: int | None = None
+    declaring: str | None = None
+    member: str | None = None
+
+
+class ReadMemberUnresolvable(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    name: str | None = None
+    reason: str | None = None
+
+
+class ReadMemberAnswer(BaseModel):
+    """SDK action `read_member` 의 `returnValue`(ARTEL-1285). `watch` 의 답과 같은 꼴에 `values` 가 붙는다.
+
+    `values` 는 instance 마다 하나이고 `static` 인 member 는 정확히 하나다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    resolved: list[ReadMemberResolved] = Field(default_factory=list)
+    unresolvable: list[ReadMemberUnresolvable] = Field(default_factory=list)
+    values: list[ReadMemberValue] = Field(default_factory=list)
+
+    @classmethod
+    def from_result(
+        cls, item: ActionResultItem | None, name: str
+    ) -> "ReadMemberAnswer | None":
+        """`ACTION_RESULT` 의 항목 하나를 답으로. 답이 없으면 `None`, SDK 가 거절했으면 그 이유를 `unresolvable` 로.
+
+        `read_member` 를 모르는 SDK 는 action 을 거절한다. 그것을 `None` 으로 삼키면 reader 가 종전과
+        같은 문장으로 거절해 agent 가 SDK 쪽 사정을 모른다. 이유를 실어야 다음 손이 어디인지 보인다.
+        """
+        if item is None:
+            return None
+        if not item.success:
+            reason = item.error or "the game refused `read_member` without a reason"
+            return cls(unresolvable=[ReadMemberUnresolvable(name=name, reason=reason)])
+        returned = item.returnValue if isinstance(item.returnValue, dict) else {}
+        return cls.model_validate(returned)
+
+
+@runtime_checkable
+class MemberReader(Protocol):
+    """host 가 **골라서** 더하는 capability 둘째(ARTEL-1285). `static()`·`member()` 의 보강이다.
+
+    `pulse` 가 감시하지 않는 이름을 macro 가 읽으려 하면 runner 가 그 statement 앞에서 이것으로 게임에
+    한 번 묻고, 받은 값을 `PulseMemory.learn_member` 로 넣어 동기 reader 가 찾게 한다. reader 평가는
+    동기이고 host 를 모르므로 묻는 자리는 runner 의 statement 경계다.
+
+    `StepStartValues` 와 같은 이유로 `MacroHost` 에 넣지 않는다 — 가짜 host 로 도는 테스트가 이것을
+    구현할 이유가 없고, 없으면 종전과 같이 reader 가 거절한다. `name` 은 SDK 꼴 `Type::member` 다.
+    `None` 은 게임이 답하지 않은 것이다.
+    """
+
+    async def read_member(self, name: str) -> ReadMemberAnswer | None: ...
+
+
 @dataclass(frozen=True)
 class MacroPlace:
     """`def` 이름과 그 안의 statement 번호. 세 목록과 두 거둠이 전부 이것을 든다.
@@ -357,6 +445,42 @@ class MacroRunResult:
 # --- 번호 ---------------------------------------------------------------------
 
 
+def _apply_read_member(
+    pulse: PulseMemory, sdk_name: str, answer: ReadMemberAnswer
+) -> None:
+    """`read_member` 의 답 하나를 `PulseMemory` 에 적는다. 값 하나면 배우고, 그 밖은 이유를 남긴다.
+
+    macro 에 적힌 이름(`Game.Score` → `Game::Score`)으로 적는다. SDK 가 `resolved.declaring` 에 더 긴
+    이름을 돌려줘도 reader 가 맞추는 글자는 macro 의 것이라, 그 글자로 적어야 다음 평가가 찾는다.
+
+    instance 가 여럿인데 값이 다르면 배우지 않는다. `member()` 는 target 하나를 겨누는데 어느 instance
+    의 값인지 이 답은 말하지 않으므로, 하나를 고르면 그 조건이 다른 객체의 값으로 판정될 수 있다.
+    """
+    declaring, member = sdk_name.split("::", 1)
+    refused = next((one for one in answer.unresolvable if one.reason or one.name), None)
+    if refused is not None:
+        pulse.refuse_member(declaring, member, refused.reason or "no reason given")
+        return
+    read = [one.value for one in answer.values if one.read]
+    if read and all(one == read[0] for one in read):
+        pulse.learn_member(declaring, member, read[0])
+        return
+    if read:
+        reason = f"{len(read)} instances hold this member with different values"
+    else:
+        unread = next((one.unread for one in answer.values if one.unread), None)
+        counted = next(
+            (one.count for one in answer.values if one.count is not None), None
+        )
+        if unread:
+            reason = unread
+        elif counted is not None:
+            reason = f"the game counted {counted} instances and read no value"
+        else:
+            reason = "the game returned no value"
+    pulse.refuse_member(declaring, member, reason)
+
+
 def numbered(statements: tuple[MacroStatement, ...], start: int = 1) -> list[tuple[int, MacroStatement]]:
     """`def` 하나의 statement 를 깊이 우선으로 번호 매긴 평면 목록.
 
@@ -374,6 +498,84 @@ def numbered(statements: tuple[MacroStatement, ...], start: int = 1) -> list[tup
             flat.extend(nested)
             next_number += len(nested)
     return flat
+
+
+def reader_calls_in(
+    statement: MacroStatement, definition: MacroDefinition
+) -> list[MacroReaderCall]:
+    """이 statement 가 돌 때 읽게 되는 reader 호출 전부. predicate·숫자 `def` 안의 것까지.
+
+    runner 가 statement 를 돌리기 전에 `static`·`member` 의 이름을 게임에 물을 수 있게(ARTEL-1285)
+    적힌 순서대로 모은다. 몸통이 있는 statement(`if`·`for`·`while`)는 제 조건만이다 — 몸통의
+    statement 는 저마다 `_statement` 를 지나며 제 것을 모은다.
+    """
+    calls: list[MacroReaderCall] = []
+    visited: set[str] = set()
+
+    def from_operand(operand: MacroOperand) -> None:
+        if isinstance(operand, MacroReaderOperand):
+            calls.append(operand.call)
+        elif isinstance(operand, MacroNumberCallOperand):
+            from_function(operand.callee)
+        elif isinstance(operand, MacroArithmeticOperand):
+            from_operand(operand.left)
+            from_operand(operand.right)
+        elif isinstance(operand, MacroExtremumOperand):
+            for one in operand.operands:
+                from_operand(one)
+
+    def from_condition(condition: MacroCondition) -> None:
+        if isinstance(condition, MacroReaderCondition):
+            calls.append(condition.call)
+        elif isinstance(condition, MacroComparisonCondition):
+            from_operand(condition.left)
+            from_operand(condition.right)
+        elif isinstance(condition, MacroPredicateCondition):
+            from_function(condition.callee)
+
+    def from_function(name: str) -> None:
+        # 같은 `def` 를 두 번 걷지 않는다. parser 가 재귀를 거절하지만 걷는 쪽이 그것에 기대지 않는다.
+        if name in visited:
+            return
+        visited.add(name)
+        function = definition.function(name)
+        if function is None:
+            return
+        from_statements(function.statements)
+
+    def from_statements(statements: tuple[MacroStatement, ...]) -> None:
+        for inner in statements:
+            if isinstance(inner, MacroIfStatement):
+                from_condition(inner.condition)
+                from_statements(inner.body)
+                from_statements(inner.orelse)
+            elif isinstance(inner, MacroReturnStatement):
+                if inner.condition is not None:
+                    from_condition(inner.condition)
+                if inner.expression is not None:
+                    from_operand(inner.expression)
+            else:
+                from_statement(inner)
+
+    def from_statement(one: MacroStatement) -> None:
+        if isinstance(one, MacroAssignStatement):
+            if isinstance(one.value, MacroReadValue):
+                calls.append(one.value.call)
+            elif isinstance(one.value, MacroComputeValue):
+                from_operand(one.value.expression)
+        elif isinstance(
+            one,
+            (
+                MacroRequireStatement,
+                MacroIfStatement,
+                MacroWhileStatement,
+                MacroWaitUntilStatement,
+            ),
+        ):
+            from_condition(one.condition)
+
+    from_statement(statement)
+    return calls
 
 
 def _bodies(statement: MacroStatement) -> tuple[tuple[MacroStatement, ...], ...]:
@@ -514,6 +716,9 @@ class _Runner:
         # 모르는 batch 는 세지도 지우지도 않는다 — 까닭은 `_went_wrong` 에 있다.
         self.still_screens = 0
         self.waited_this_call = 0.0
+        # 이 run 에서 `read_member` 로 물은 이름(SDK 꼴). 한 run 에 이름마다 한 번만 묻는다 — `wait_until`
+        # 과 `while` 은 같은 조건을 `pulse` 마다 다시 읽는데, 그때마다 왕복하면 대기가 질의가 된다.
+        self.read_members_asked: set[str] = set()
 
     # -- 바깥 --
 
@@ -613,6 +818,7 @@ class _Runner:
                     "really ends.",
                     {"executed": MAX_EXECUTED_STATEMENTS},
                 )
+            await self._read_unknown_members(frame, statement)
             if isinstance(statement, MacroForStatement):
                 return await self._for(frame, place, statement)
             if isinstance(statement, MacroWhileStatement):
@@ -658,6 +864,30 @@ class _Runner:
         except MacroFailure as failure:
             self.stop(failure, place)
             return False
+
+    async def _read_unknown_members(
+        self, frame: _Frame, statement: MacroStatement
+    ) -> None:
+        """`static`·`member` 가 `pulse` 에서 못 찾을 이름을 statement 앞에서 게임에 묻는다(ARTEL-1285).
+
+        host 가 `MemberReader` 가 아니면 아무것도 안 한다 — reader 가 종전처럼 거절한다. 받은 값은
+        `PulseMemory.learn_member` 로, 못 읽었다는 답은 `refuse_member` 로 적어 두고, 그 뒤의 동기
+        평가가 그것을 읽는다. 게임이 답하지 않으면(`None`) 적는 것이 없고 reader 의 거절도 종전 그대로다.
+        """
+        if not isinstance(self.host, MemberReader):
+            return
+        calls = reader_calls_in(statement, frame.definition)
+        if not calls:
+            return
+        memories = self.memories()
+        for name in unknown_member_names(memories, frame.scope, calls):
+            sdk_name = sdk_member_name(name)
+            if sdk_name is None or sdk_name in self.read_members_asked:
+                continue
+            self.read_members_asked.add(sdk_name)
+            answer = await self.host.read_member(sdk_name)
+            if answer is not None:
+                _apply_read_member(memories.pulse, sdk_name, answer)
 
     def _assign(
         self,

@@ -11,6 +11,7 @@ asks its host to act, to read, to wait and to ask Jev. This host does what the t
 | `wait_for_pulse` | `QaRunChannel.wait_for_reading`                                                 |
 | `checkpoint`     | does not wait: the macro stops there and the turn ends                          |
 | `decide`/`ask`   | `JevClient` from `app/qa/jev.py`, the client the tool loop's host uses          |
+| `read_member`    | `QaRunChannel.read_member`, the `MemberReader` capability (ARTEL-1285)          |
 
 operator 의 말은 runner 에 넘기지 않는다. 이 engine 에는 답할 사람이 없고, 넘기면 macro 가
 `OPERATOR_INTERRUPTED` 로 멈춘다. 받은 말은 비우고 turn 기록에 남긴다.
@@ -27,6 +28,7 @@ from app.agents.qa.macro.runner import (
     MacroJevUnavailable,
     MacroPulseWait,
     MacroRunResult,
+    ReadMemberAnswer,
 )
 from app.agents.qa.tools.tool_context import _is_press, _press_landing
 from app.qa.acting import ActionOutcome, ScreenChange
@@ -129,6 +131,16 @@ class ChannelMacroHost:
             )
         except JevError as error:
             raise MacroJevUnavailable(str(error)) from error
+
+    async def read_member(self, name: str) -> ReadMemberAnswer | None:
+        """`static()`·`member()` 가 `pulse` 에 없는 이름을 읽을 때 runner 가 한 번 묻는 자리(ARTEL-1285).
+
+        `sent` 에 적지 않는다. 그 목록은 사람이 따라 할 입력이고(Evaluator 의 재현 절차가 거기서
+        글자를 검사한다) 값을 읽는 것은 입력이 아니다.
+        """
+        item = await self.channel.read_member(name, self.step)
+        self._drain_operator()
+        return ReadMemberAnswer.from_result(item, name)
 
     def _drain_operator(self) -> None:
         self.operator_messages.extend(self.channel.drain_operator_messages())
