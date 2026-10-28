@@ -102,6 +102,9 @@ def this_step(scenario: QaScenario, step: int) -> str:
             shown["precondition"] = item.case.precondition
         if following != item.case_id:
             shown["verify"] = item.case.expected if item.case else ""
+    if item.case and item.case.verification_procedure:
+        shown["verification_procedure"] = item.case.verification_procedure.model_dump(mode="json")
+        shown["verification_guidance"] = load_prompt("demonstration", "qa_context", "v1").body
     return json.dumps(shown, ensure_ascii=False, indent=2)
 
 
@@ -116,6 +119,9 @@ def case_view(scenario: QaScenario, step: int) -> dict:
         shown["precondition"] = case.precondition
     shown["do"] = step_text(item)
     shown["verify"] = case.expected if case else ""
+    if case and case.verification_procedure:
+        shown["verification_procedure"] = case.verification_procedure.model_dump(mode="json")
+        shown["verification_guidance"] = load_prompt("demonstration", "qa_context", "v1").body
     return shown
 
 

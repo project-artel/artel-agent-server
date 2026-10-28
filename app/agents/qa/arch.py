@@ -479,7 +479,10 @@ from app.llm.models import LLMModel, get_model_spec
 # count is above 0, re-read at most every 5 s after an action or an `observe_scene`. The same
 # split as `get_errors` (v29): the count rides along, the detail is a tool call, and a problem is
 # a `report_issue`, never a verdict. One tool joined the default set, so the fingerprint moves.
-QA_ARCH_LABEL = "v32-performance"
+# v33은 TC에 승인된 시연 절차가 있을 때 첫 실행 `context`에 revision과 검증 기준을
+# 추가한다. 과거 시연 결과와 이번 실행의 `evidence`를 구분하도록 명시한다.
+# `tool`과 `middleware`는 같으므로 `fingerprint`는 유지하지만 모델이 읽는 내용은 달라진다.
+QA_ARCH_LABEL = "v33-performance-demonstration-procedures"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
