@@ -303,6 +303,12 @@ def render_test_case_list(entries: list[TestCaseListItem]) -> str:
             if guard.raised_in:
                 needs += f"  ← moves in {', '.join(guard.raised_in)}"
             lines.append(needs)
+        if entry.state_before_any:
+            either = " | ".join(
+                "(" + ", ".join(f"{g.variable} {g.operator} {g.value}" for g in branch) + ")"
+                for branch in entry.state_before_any
+            )
+            lines.append(f"    needs one of: {either}")
         if entry.state_after:
             leaves = ", ".join(f"{k} {v}" for k, v in entry.state_after.items())
             lines.append(f"    leaves: {leaves}")

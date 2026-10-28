@@ -141,6 +141,9 @@ class TestCaseListItem(BaseModel):
     # so pydantic discarded them while the prompt went on telling the agent to
     # order by them. Ordering silently fell back to re-reading the sentence.
     state_before: list[CaseGuard] = Field(default_factory=list)
+    # Any one of these is enough. `state_before` keeps only what every branch shares,
+    # so a "one of two ways" requirement arrives there empty and lives here instead.
+    state_before_any: list[list[CaseGuard]] = Field(default_factory=list)
     state_after: dict[str, str] = Field(default_factory=dict)
     # Where this screen leads in one step, and what to press to get there.
     # The map has known this all along; it was never sent.
