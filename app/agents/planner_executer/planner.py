@@ -45,6 +45,7 @@ from app.agents.planner_executer.prompts import (
     travel_step,
 )
 from app.agents.qa.macro.errors import MacroRejection
+from app.agents.scenario import OutputLanguage
 from app.llm.chat_model import build_chat_model
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import LogCategory
@@ -96,7 +97,7 @@ def split_plan_block(answer: str) -> tuple[str, str | None]:
     return answer[: match.start()] + answer[match.end() :], match.group(1)
 
 
-def read_plan(text: str | None, candidates: list[int]) -> tuple[list[int], dict[int, str]]:
+def read_plan(text: str | None, candidates: list[int], language: OutputLanguage = OutputLanguage.en) -> tuple[list[int], dict[int, str]]:
     """`(verify, later)` from the ```plan block, or `MacroRejection` naming what is wrong.
 
     A candidate the plan leaves out is put `later` with that said; an id that is not a candidate,
@@ -129,7 +130,7 @@ def read_plan(text: str | None, candidates: list[int]) -> tuple[list[int], dict[
         raise MacroRejection(f"case {', '.join(map(str, twice))} is listed twice; put each case in one place once.")
     for case_id in candidates:
         if case_id not in verify and case_id not in later:
-            later[case_id] = "the plan did not include it"
+            later[case_id] = "계획에 포함되지 않았습니다" if language == OutputLanguage.ko else "the plan did not include it"
     return verify, later
 
 
@@ -150,11 +151,14 @@ class Planner:
         self._developer = developer
         # 런 동안 바뀌지 않으므로 한 번 그린다.
         self._developer_macros = developer_macro_list(developer.usable.values())
-        self._system = prompt_text(RULES_ROLE, config.prompt_version)
+        self._system = prompt_text(RULES_ROLE, config.prompt_version, config.language)
         # FREE 시나리오에서만 읽는다. v3 전 버전에는 없는 파일이라 처음 쓸 때 읽는다.
         self._scene_system: str | None = None
         self._ask = ask or self._ask_model
         self._model = None
+
+    def _say(self, ko: str, en: str) -> str:
+        return ko if self._config.language == OutputLanguage.ko else en
 
     async def write(self, scenario: QaScenario, step: int) -> Written:
         """Step `step`'s macros; rewritten while the parser refuses them, up to `max_rewrites`."""
@@ -164,23 +168,28 @@ class Planner:
         """A FREE scenario's move to `scene`, written as an ordinary step (`done()` is that scene).
         `step` is the case the move is for; it labels the notes."""
         return await self._write(
-            scenario, step, travel_step(step, scene), f"Travel to `{scene}` (for step {step})", "travel"
+            scenario, step, travel_step(step, scene),
+            self._say(f"`{scene}`으로 이동 (step {step})", f"Travel to `{scene}` (for step {step})"), "travel"
         )
 
     async def plan_scene(self, scenario: QaScenario, steps: list[int]) -> ScenePlan:
         """The plan for the scene on screen: which of the candidate cases (`steps`) to verify now and
         in what order, and their macros. Rewritten while it is refused, up to `max_rewrites`."""
         if self._scene_system is None:
-            self._scene_system = prompt_text(SCENE_RULES_ROLE, self._config.prompt_version)
+            self._scene_system = prompt_text(SCENE_RULES_ROLE, self._config.prompt_version, self._config.language)
         by_case = {scenario.steps[step - 1].case_id: step for step in steps}
         candidates = list(by_case)
         feedback = ""
         plan = ScenePlan([], {}, None, "nothing was written")
         for attempt in range(self._spec.max_rewrites + 1):
             await self._channel.note(
+                self._say(
+                f"Scene {self._channel.scene.pulse.scene or '?'}: planner가 case {len(steps)}개를 계획하고 있습니다"
+                + (" (이전 응답이 거절돼 다시 작성 중)" if attempt else "")
+                + f". Prompt {self._config.prompt_version}.",
                 f"Scene {self._channel.scene.pulse.scene or '?'}: the planner is planning {len(steps)} cases"
                 + (" again (the last answer was refused)" if attempt else "")
-                + f". Prompt {self._config.prompt_version}.",
+                + f". Prompt {self._config.prompt_version}."),
                 LogCategory.THOUGHT,
                 steps[0],
             )
@@ -190,7 +199,7 @@ class Planner:
             source = extract_code(rest) if _FENCE.search(rest) else ""
             scene = self._channel.scene.pulse.scene or "?"
             try:
-                verify, later = read_plan(plan_text, candidates)
+                verify, later = read_plan(plan_text, candidates, self._config.language)
                 developer_actions = await bind_developer_calls(calls, self._developer)
                 macros = await parse_scene(source, self._registered, verify, developer_actions)
             except MacroRejection as rejection:
@@ -198,8 +207,10 @@ class Planner:
                 await note_decision(
                     self._channel,
                     "scene_plan_refused",
-                    f"Scene {scene}: the plan was refused (answer {attempt + 1} of {self._spec.max_rewrites + 1}): "
-                    f"{clip(plan.refusal, MAX_QUOTE_CHARS)}",
+                    self._say(
+                        f"Scene {scene}: 계획이 거절됐습니다 (응답 {attempt + 1}/{self._spec.max_rewrites + 1}): ",
+                        f"Scene {scene}: the plan was refused (answer {attempt + 1} of {self._spec.max_rewrites + 1}): "
+                    ) + f"{clip(plan.refusal, MAX_QUOTE_CHARS)}",
                     steps[0],
                     scene=scene,
                     answer=attempt + 1,
@@ -217,8 +228,11 @@ class Planner:
             await note_decision(
                 self._channel,
                 "scene_plan",
-                f"Scene {scene}: verify {len(plan.verify)} of {len(steps)} cases now (steps {plan.verify}), "
-                f"{len(plan.later)} later, {len(macros.actions)} actions",
+                self._say(
+                    f"Scene {scene}: case {len(steps)}개 중 {len(plan.verify)}개를 검증합니다 (steps {plan.verify}). "
+                    f"{len(plan.later)}개는 연기하며 action {len(macros.actions)}개를 사용합니다.",
+                    f"Scene {scene}: verify {len(plan.verify)} of {len(steps)} cases now (steps {plan.verify}), "
+                    f"{len(plan.later)} later, {len(macros.actions)} actions"),
                 steps[0],
                 scene=scene,
                 offered=steps,
@@ -249,9 +263,13 @@ class Planner:
         written = Written("", None, "nothing was written")
         for attempt in range(self._spec.max_rewrites + 1):
             await self._channel.note(
+                self._say(
+                f"{label}: planner가 macro를 작성하고 있습니다"
+                + (" (이전 응답이 거절돼 다시 작성 중)" if attempt else "")
+                + f". Prompt {self._config.prompt_version}.",
                 f"{label}: the planner is writing macros"
                 + (" again (the last answer was refused)" if attempt else "")
-                + f". Prompt {self._config.prompt_version}.",
+                + f". Prompt {self._config.prompt_version}."),
                 LogCategory.THOUGHT,
                 step,
             )
@@ -266,8 +284,10 @@ class Planner:
                 await note_decision(
                     self._channel,
                     f"{kind}_macros_refused",
-                    f"{label}: the macros were refused (answer {attempt + 1} of {self._spec.max_rewrites + 1}): "
-                    f"{clip(written.refusal, MAX_QUOTE_CHARS)}",
+                    self._say(
+                        f"{label}: macro가 거절됐습니다 (응답 {attempt + 1}/{self._spec.max_rewrites + 1}): ",
+                        f"{label}: the macros were refused (answer {attempt + 1} of {self._spec.max_rewrites + 1}): "
+                    ) + f"{clip(written.refusal, MAX_QUOTE_CHARS)}",
                     step,
                     answer=attempt + 1,
                     refusal=clip(written.refusal, MAX_REFUSAL_CHARS),
@@ -283,7 +303,7 @@ class Planner:
             await note_decision(
                 self._channel,
                 f"{kind}_macros",
-                f"{label}: {len(actions)} actions — {', '.join(actions)}",
+                self._say(f"{label}: action {len(actions)}개를 사용합니다 — ", f"{label}: {len(actions)} actions — ") + ', '.join(actions),
                 step,
                 actions=actions,
                 source=clip(source, MAX_SOURCE_CHARS),

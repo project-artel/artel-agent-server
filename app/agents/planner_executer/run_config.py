@@ -32,7 +32,7 @@ def resolve_planner_executer_config(
     The planner and the evaluator both run on `model`.
     """
     assert arch.planner is not None, "resolve_arch fills `planner` for this engine"
-    version, hashes = static_pieces(prompt_version)
+    version, hashes = static_pieces(prompt_version, language)
     functions = step_module_functions()
     settings = get_settings()
     return RunConfig(
