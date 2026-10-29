@@ -326,8 +326,11 @@ def test_the_default_qa_version_is_v21() -> None:
 
     v26 adds `tool_get_errors.md` and one paragraph to the system prompt on reading
     `unseen errors: N` (ARTEL-1219).
+
+    v27 adds two sentences to the vision directive (ARTEL-1221): a whole-screen capture on
+    the first entry to each scene, and a checklist for reading any capture.
     """
-    assert resolve_version("qa_run") == "v26"
+    assert resolve_version("qa_run") == "v27"
 
 
 # v20 이 고쳐 쓴 v19 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
@@ -1147,3 +1150,18 @@ def test_v26_adds_get_errors_and_one_system_paragraph() -> None:
         "## When the game itself is broken\n\n",
         "## When the game itself is broken\n\n" + paragraph,
     )
+
+
+def test_v27_extends_only_the_vision_directive() -> None:
+    """v27 은 vision 지시문 뒤에 문단 하나만 더한다 (ARTEL-1221)."""
+    assert roles_in("qa_run", "v27") == roles_in("qa_run", "v26")
+    for role in roles_in("qa_run", "v26"):
+        same = load_prompt("qa_run", role, "v27").body == load_prompt("qa_run", role, "v26").body
+        assert same is (role != "vision_directive"), role
+    before = load_prompt("qa_run", "vision_directive", "v26").body
+    after = load_prompt("qa_run", "vision_directive", "v27").body
+    assert after.startswith(before)
+    added = after[len(before):]
+    assert "first time you enter each scene" in added
+    for check in ("empty areas", "no art", "overlap", "clipping", "developer console"):
+        assert check in added, check

@@ -72,6 +72,18 @@ def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
     return [observe_scene, inspect_object, get_errors]
 
 
+# capture 답에 붙는 점검 목록 (ARTEL-1221). 2026-10-22 측정에서 agent 는 capture 를 찍은 목적만
+# 답했다 — 카드 그림이 없는 빌드에서 3런 모두 손패를 capture 하고도 그림이 없다는 말이 없었고,
+# 개발자 콘솔이 손패를 가린 capture 두 장도 지나쳤다. 그림이 도착하기 직전에 읽히는 자리라
+# system prompt 보다 여기에 둔다.
+CAPTURE_CHECKLIST = (
+    "Answer what you captured it for, then look once more for: empty or black areas where "
+    "something should be drawn, elements with no art (a card or button that is only text), "
+    "elements overlapping each other, text or images cut off at an edge, and a developer "
+    "console or error text on screen. File each one you see with `report_issue`."
+)
+
+
 def build_capture_tool(ctx: ToolContext) -> BaseTool:
     """`capture_screen` 하나만 낸다.
 
@@ -154,6 +166,6 @@ def build_capture_tool(ctx: ToolContext) -> BaseTool:
         # `payload.step` null (ARTEL-868).
         await channel.note(f"Captured {what}: {capture.url}", LogCategory.OBSERVATION, step)
 
-        return _answer(f"Captured {what}. The image follows.", messages)
+        return _answer(f"Captured {what}. The image follows. {CAPTURE_CHECKLIST}", messages)
 
     return capture_screen

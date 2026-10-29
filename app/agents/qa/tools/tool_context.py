@@ -15,7 +15,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from app.agents.qa.arch import ResolvedArch
+from app.agents.qa.arch import ResolvedArch, ScreenCaptureMode
 from app.agents.qa.tools.state import QaRunState
 from app.qa.acting import ActionOutcome, PressLanding, ScreenChange
 from app.qa.channel import QaRunChannel, with_operator_messages
@@ -66,6 +66,9 @@ class ToolContext:
             state.watermark = channel.scene.updates
             # 화면이 곧 답인 도구(`observe_scene`)는 앞에 얹을 몸통이 없다.
             body = f"{body}\n\n{view}" if body else view
+            first_entry = self._first_entry_line()
+            if first_entry is not None:
+                body = f"{body}\n\n{first_entry}"
 
         # 안 본 예외의 수 한 줄 (ARTEL-1219). 0 이면 줄이 없다. 화면을 안 붙이는 tool 에도 붙인다 —
         # 예외는 화면과 상관없이 쌓이고, `report_step` 직전에 보는 답이 지식 tool 일 수도 있다.
@@ -75,6 +78,28 @@ class ToolContext:
 
         # 오퍼레이터의 말이 맨 뒤다. 지금부터 적용되는 지시라 화면보다 나중에 읽혀야 한다.
         return with_operator_messages(body, messages)
+
+    def _first_entry_line(self) -> str | None:
+        """scene 의 view 가 이 런에서 처음 그려졌으면, 전체 screen capture 를 한 장 찍으라는 줄.
+
+        2026-10-22 측정에서 타이틀 배경이 안 그려지는 빌드를 3런 중 0런이 찾았다. step 1 에서
+        capture 를 찍은 런이 하나도 없었다(ARTEL-1221). scene 목록은 무엇이 있는지만 말하고 그것이
+        그려졌는지는 말하지 않으므로, 그림을 볼 수 있는 자리는 capture 하나다.
+
+        `capture_screen` 이 있는 `on_demand` 런에만 붙는다. `every_call` 과 `by_role` 은 이미 매
+        호출 그림을 받고, vision 이 꺼진 런은 그 tool 이 없다. scene 마다 한 번이다.
+        """
+        if not self.arch.vision or self.arch.screen_capture is not ScreenCaptureMode.on_demand:
+            return None
+        scene_memory = self.channel.scene
+        scene = (scene_memory.scene or scene_memory.pulse.scene or "").strip()
+        if not scene or scene in self.state.scenes_entered:
+            return None
+        self.state.scenes_entered.add(scene)
+        return (
+            f"First view of scene `{scene}` this run: call `capture_screen` once for the whole "
+            "screen and check the picture, even if the step does not ask how it looks."
+        )
 
     async def run(self, actions: list[JsonRpcAction], summary: str, step: int) -> str:
         """Every acting tool goes through here: act, then look at what it did.
