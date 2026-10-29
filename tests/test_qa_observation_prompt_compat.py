@@ -6,10 +6,12 @@ from app.prompts import load_tool_description, roles_in
 from tests.test_qa_game_errors import make
 
 
-@pytest.mark.parametrize("version", ["v24", "v31"])
+@pytest.mark.parametrize("version", ["v24", "v31", "v32", "v33", "v34"])
 def test_pinned_prompt_keeps_diagnostic_tools(version, monkeypatch):
     monkeypatch.setattr(get_settings(), "qa_prompt_version", version)
     _, _, tools = make()
     available = roles_in("qa_run", version)
     errors_version = version if "tool_get_errors" in available else "v31"
     assert tools["get_errors"].description == load_tool_description("get_errors", errors_version).body
+    performance_version = version if "tool_get_performance" in available else "v34"
+    assert tools["get_performance"].description == load_tool_description("get_performance", performance_version).body

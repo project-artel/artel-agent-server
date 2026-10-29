@@ -332,8 +332,10 @@ def test_the_default_qa_version_is_v21() -> None:
 
     v28 adds one paragraph to the macro skill (ARTEL-1222): read the text lines a macro
     answer carries and file blank, placeholder or garbled lines with `report_issue`.
+
+    v29 adds `tool_get_performance.md` for the new `get_performance` tool (ARTEL-1223).
     """
-    assert resolve_version("qa_run") == "v33"
+    assert resolve_version("qa_run") == "v34"
 
 
 # v20 이 고쳐 쓴 v19 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
@@ -1128,6 +1130,8 @@ V25_REWRITTEN_ROLES = {
 
 
 
+
+
 def test_qa_snapshot_keeps_the_base_step_contract() -> None:
     """중간 QA 기능은 #262의 performed 계약을 요구하지 않는다."""
     version = resolve_version("qa_run")
@@ -1137,3 +1141,4 @@ def test_qa_snapshot_keeps_the_base_step_contract() -> None:
     assert "unseen errors: N" in load_prompt("qa_run", "system", version).body
     assert "first time you enter each scene" in load_prompt("qa_run", "vision_directive", version).body
     assert "**The answer lists the text the game showed while the macro ran**" in load_prompt("qa_run", "skill_macro", version).body
+    assert "tool_get_performance" in roles_in("qa_run", version)

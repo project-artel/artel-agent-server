@@ -14,6 +14,10 @@ from app.agents.qa.tools.tool_context import ToolContext
 from app.prompts import load_tool_description, resolve_version, roles_in
 from app.qa.envelope import JsonRpcAction, LogCategory
 from app.qa.game_errors import render_errors
+from app.qa.performance import PerformanceUnavailable, render_summary, summarize
+
+# `get_performance` 가 창을 안 받았을 때 쓰는 창. tool 결과 끝의 한 줄과 같은 10초다.
+DEFAULT_PERFORMANCE_SECONDS = 10.0
 
 
 def _diagnostic_description(name: str, first_version: str) -> str:
@@ -34,6 +38,7 @@ def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
         step: int, thought: str, wait_seconds: float = 0.0, current_scene: bool = False
     ) -> str:
         arrived = await channel.look(wait_seconds)
+        await ctx.performance().refresh_summary()
         messages = channel.drain_operator_messages()
         if not arrived:
             return _answer(
@@ -77,7 +82,36 @@ def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
             screen=False,
         )
 
-    return [observe_scene, inspect_object, get_errors]
+    @tool(description=_diagnostic_description("get_performance", "v34"))
+    async def get_performance(
+        step: int,
+        thought: str,
+        since_frame: int | None = None,
+        last_seconds: float | None = None,
+    ) -> str:
+        # What the agent reads is `qa_run/<version>/tool_get_performance.md`.
+        # 둘 다 없으면 지난 10초다. 둘 다 오면 orchestration 이 둘을 함께 건다.
+        if since_frame is None and last_seconds is None:
+            last_seconds = DEFAULT_PERFORMANCE_SECONDS
+        window = (
+            f"frames since {since_frame}" if since_frame is not None else ""
+        ) + (
+            f"{' and ' if since_frame is not None else ''}the last {last_seconds:g} s"
+            if last_seconds is not None
+            else ""
+        )
+        try:
+            samples = await ctx.performance().fetch(since_frame, last_seconds)
+        except PerformanceUnavailable as error:
+            body = (
+                f"Performance data could not be read — {error}. Judge from what you see, "
+                "and do not ask again in this step."
+            )
+        else:
+            body = render_summary(summarize(samples), window)
+        return _answer(body, channel.drain_operator_messages(), screen=False)
+
+    return [observe_scene, inspect_object, get_errors, get_performance]
 
 
 # capture 답에 붙는 점검 목록 (ARTEL-1221). 2026-10-22 측정에서 agent 는 capture 를 찍은 목적만
