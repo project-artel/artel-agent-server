@@ -639,6 +639,13 @@ class QaRunner:
             arch.skills,
             withheld_skills(arch),
         )
+        if arch.macros == "on":
+            system_prompt += (
+                "\nCurrent macro contract: intermediate dialogue history is not collected or returned. "
+                "Macro results describe execution outcomes. Use the current scene or screen capture "
+                "as evidence; do not assume earlier dialogue is available. This replaces any earlier "
+                "instruction promising a list of text shown during a macro."
+            )
         first_message = (
             _plan(scenario) + _macro_discovery(arch, channel) + _game_functions(arch, channel)
         )

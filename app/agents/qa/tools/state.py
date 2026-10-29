@@ -202,6 +202,9 @@ class QaRunState:
         # 상한이 필요한 이유가 phase 거절과 같다(`app/agents/qa/tools/phase.py` 의
         # `MAX_CONSECUTIVE_REFUSALS`). 되돌려 보낸 뒤 모델이 또 빠뜨리면 왕복만 탄다.
         self.verdict_memory_refusals = 0
+        # 게임의 `PERFORMANCE` 를 orchestration 에서 읽는 것 (ARTEL-1223). `ToolContext` 가 처음
+        # 쓸 때 만든다 — 그때 `qa_try_id` 와 orchestration 주소를 안다.
+        self.performance = None
         # 이 런의 phase 상태 기계, 또는 `None`. `build_tools` 가 `arch.phase_cycle` 을 보고
         # 채운다 — `off` 와 `in_verdict` 에서는 끝까지 `None` 이다.
         self.phase_cycle = None
