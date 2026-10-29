@@ -226,9 +226,8 @@ def resolve_run_config(
             reasoning=reasoning,
             arch=resolved_arch,
         )
-    tools, _middleware, fingerprint = structure_of(resolved_arch, execution_mode)
-
     prompt = load_prompt(PROMPT_AGENT, SYSTEM_ROLE, prompt_version)
+    tools, _middleware, fingerprint = structure_of(resolved_arch, execution_mode, prompt.version)
     hashes = {SYSTEM_ROLE: prompt.body_sha256}
     if resolved_arch.vision:
         # Pinned to the version just resolved, not to the caller's alias: the two

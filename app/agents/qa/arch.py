@@ -488,7 +488,9 @@ from app.llm.models import LLMModel, get_model_spec
 # v35는 사람이 수행한 시연 절차를 QA context에서 제거한다. TC 명세·현재 관찰·사람 판정 피드백은 유지한다.
 # 자동 scene capture와 응답 checklist를 제거한 구조다. 시각 점검 skill은 필요할 때 읽으며
 # 이 view와 tool 구성을 이전 실행과 구분해 기록한다.
-QA_ARCH_LABEL = "v43-tc-no-auto-visual"
+# 자동 scene capture와 응답 checklist를 제거한 구조다. 시각 점검 skill은 필요할 때 읽으며
+# 이 view와 tool 구성을 이전 실행과 구분해 기록한다.
+QA_ARCH_LABEL = "v44-visual-inspection-on-demand"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
@@ -862,6 +864,8 @@ def withheld_skills(arch: "QaArchSpec | ResolvedArch") -> frozenset[str]:
         withheld.add(CHEATS_SKILL)
     if arch.behaviors != "on":
         withheld.add(BEHAVIORS_SKILL)
+    if arch.vision is False or arch.vision is VisionMode.off:
+        withheld.add("visual_inspection")
     return frozenset(withheld)
 
 
@@ -1055,7 +1059,7 @@ def arch_fingerprint(
 
 @lru_cache(maxsize=32)
 def structure_of(
-    arch: ResolvedArch, execution_mode: str = "ORDERED"
+    arch: ResolvedArch, execution_mode: str = "ORDERED", prompt_version: str | None = None
 ) -> tuple[tuple[str, ...], tuple[str, ...], str]:
     """Tool names, middleware names and the fingerprint for one structure.
 
@@ -1078,7 +1082,7 @@ def structure_of(
     # FREE 시나리오는 `report_step` 대신 `report_case` 를 받으므로(ARTEL-1029) 같은 arch 라도
     # tool 목록과 fingerprint 가 다르다. 기록이 실제로 준 tool 을 말하도록 mode 로 만든다.
     state = QaRunState(total_steps=0, execution_mode=execution_mode)
-    tools = build_tools(_ThrowawayChannel(), state, arch)
+    tools = build_tools(_ThrowawayChannel(), state, arch, prompt_version)
     # The compaction middleware carries its own tool rather than registering it in
     # `build_tools` — a `compact_context` that sets a flag nothing reads is worse
     # than an absent one. It still has to be counted here: what the agent can call
