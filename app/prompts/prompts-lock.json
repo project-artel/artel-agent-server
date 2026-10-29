@@ -5,6 +5,8 @@
     "scenario_router/v9/criteria": "afcafa09db2105110f8f982e95b36e8f0b7e1c8ad1a54a6d64adb6ca3ebc3b82"
   },
   "prompts": {
+    "case_contract/v1/contract": "c450dcc1c01d9e564d4a221f5bd27fbb8b4428cf0c1db335262304319648843b",
+    "case_contract/v1/glossary": "40f5c55261529a5f0327125c9d0faf947f21cd0551d278522ad64cf48446b2fa",
     "decision/v1/human": "2e99200edb4ac9c6e5130286696768fc3bd1cfffecbe92d2e1bdd7869c862d3c",
     "decision/v1/system": "0629163646ce0577292aa8059face48dc4068fcc0f88874f2d3bf95918b44a14",
     "game_context/v1/human": "80bcf644a682464baa14d444af01f418c3d05ec076de6fd848c05ad077ddf243",
@@ -466,6 +468,7 @@
     "scenario_grouping/v12/system": "88272fbec8c47cd1c668996d1c01f80e8104bd82d60c74902bd5ccfd15b5952e",
     "scenario_grouping/v13/system": "71ed37184e03c60a0034eb1d419c0fb1f524a5bd77558b683cb4aac6bef9e825",
     "scenario_grouping/v14/system": "ed0c28e5d9f81f351d9b6f41a32ae185895fe110affe1087602a4e1452490198",
+    "scenario_grouping/v15/system": "da12b85807bbbb38df5340adc1dea93f86583d280430bbb79944d4640ff7074a",
     "scenario_grouping/v2/system": "e0dbd24a22d1be27765dc4579a6efffd29287309d138b8e05b139044d248b6e8",
     "scenario_grouping/v3/system": "46b50ccc3ff31e35fba8763d91afdf2422834f2df8f31a850772e8b95461cbca",
     "scenario_grouping/v4/system": "60848c1fbe3a5e4a505cdf8c1043a616a670367ca1a27efec0e1d07618d600d4",

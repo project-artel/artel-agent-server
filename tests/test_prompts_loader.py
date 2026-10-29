@@ -555,6 +555,8 @@ def test_every_live_agent_has_a_v1(monkeypatch) -> None:
             "scenario_modify",
             # TC 만들기 갈래(ARTEL-1273) — TC 초안만 낸다.
             "scenario_case",
+            # 자연어 TC 의 용어집과 계약(필요 · 남김 · 상식 추정).
+            "case_contract",
             "game_context",
             "knowledge_query",
             "screen_verdict",
