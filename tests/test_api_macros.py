@@ -35,7 +35,7 @@ def test_grammar_is_the_qa_grammar_with_developer_rules() -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert body["grammar"] == GRAMMAR + "\n\n" + NUMBER_EQUALITY
+    assert body["grammar"].startswith(GRAMMAR + "\n\n" + NUMBER_EQUALITY)
     assert body["rules"] and all(isinstance(rule, str) for rule in body["rules"])
     joined = "\n".join(body["rules"])
     for must_say in ("-> None", "docstring", "from macros import", "#id"):
@@ -191,3 +191,17 @@ def test_an_oversized_name_is_a_malformed_body() -> None:
     )
 
     assert response.status_code == 422
+
+
+def test_grammar_ends_with_the_tool_signatures_the_parser_enforces() -> None:
+    """`GRAMMAR` names the tools; an author outside the tool loop has nowhere else to learn their parameters.
+    Six agents writing from the text alone all called `press_key` with one argument (ARTEL-1290)."""
+    from app.agents.qa.macro.grammar import TOOLS
+    from app.developer_macro import tool_signatures
+
+    body = client.get("/internal/macros/grammar").json()["grammar"]
+
+    assert body.endswith(tool_signatures())
+    assert "- `press_key(key_code: string, duration_seconds: float)`" in body
+    assert "- `click(target: object, button: int = 0)`" in body
+    assert all(f"- `{tool.name}(" in body for tool in TOOLS)

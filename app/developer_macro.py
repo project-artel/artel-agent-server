@@ -13,6 +13,7 @@ import ast
 from collections.abc import Mapping
 
 from app.agents.qa.macro.errors import MacroRejection
+from app.agents.qa.macro.grammar import TOOLS, ToolSpec
 from app.agents.qa.macro.model import MacroDefinition
 from app.agents.qa.macro.parser import imported_names, macro_definition_from_source
 from app.agents.qa.macro.reference import GRAMMAR, NUMBER_EQUALITY
@@ -40,7 +41,32 @@ DEVELOPER_MACRO_RULES = (
 
 
 def developer_macro_grammar() -> str:
-    return f"{GRAMMAR}\n\n{NUMBER_EQUALITY}"
+    """The grammar text a developer macro author reads, with the tool signatures at the end.
+
+    `GRAMMAR` names the input tools but does not spell their parameters — the tool loop's model gets those
+    from the tools' own schemas, which an author outside the loop never sees. Six out of six agents writing
+    macros from the text alone called `press_key` with one argument (ARTEL-1290), and every one of those
+    macros was refused at publish. The table is generated from `TOOLS`, so it cannot drift from the parser.
+    """
+    return f"{GRAMMAR}\n\n{NUMBER_EQUALITY}\n\n{tool_signatures()}"
+
+
+def tool_signatures() -> str:
+    """One line per input tool: `press_key(key_code: string, duration_seconds: float)`."""
+    lines = ["## Tool signatures", "", "Call each tool with exactly these parameters, in this order. A parameter "
+             "with `= value` may be left out.", ""]
+    lines.extend(f"- `{_signature(tool)}`" for tool in TOOLS)
+    return "\n".join(lines)
+
+
+def _signature(tool: ToolSpec) -> str:
+    parts = []
+    for parameter in tool.parameters:
+        text = f"{parameter.name}: {parameter.declared_type.value}"
+        if not parameter.required:
+            text += f" = {parameter.default!r}"
+        parts.append(text)
+    return f"{tool.name}({', '.join(parts)})"
 
 
 def check_developer_macro(
