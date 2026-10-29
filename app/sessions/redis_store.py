@@ -1,12 +1,15 @@
-from redis.asyncio import Redis
+from typing import TYPE_CHECKING
 
 from app.sessions.schemas import SessionRecord
+
+if TYPE_CHECKING:
+    from redis.asyncio import Redis
 
 
 class RedisSessionStore:
     """Redis-backed session store with sliding TTL (refreshed on every save)."""
 
-    def __init__(self, redis: Redis, ttl_seconds: int) -> None:
+    def __init__(self, redis: "Redis", ttl_seconds: int) -> None:
         self._redis = redis
         self._ttl = ttl_seconds
 
