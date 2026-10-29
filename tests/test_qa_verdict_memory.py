@@ -78,7 +78,7 @@ def test_report_step_takes_the_two_arguments_only_when_asked_to() -> None:
         return set(tools["report_step"].args)
 
     plain = arguments(PhaseCycleMode.off)
-    assert plain == {"step", "passed", "message", "thought", "used_knowledge_ids"}
+    assert plain == {"step", "performed", "passed", "message", "thought", "used_knowledge_ids"}
     for mode in (PhaseCycleMode.remember_in_verdict, PhaseCycleMode.lite, PhaseCycleMode.full):
         assert arguments(mode) - plain == {"capability_key", "learned"}
 
@@ -96,7 +96,7 @@ def test_an_omitted_learned_is_refused_and_records_nothing() -> None:
         standing_on(channel)
 
         refused = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "saw it", "thought": "판정한다"}
+            {"step": 1, "performed": True, "passed": True, "message": "saw it", "thought": "판정한다"}
         )
 
         assert "`learned`" in refused
@@ -121,7 +121,7 @@ def test_an_empty_learned_is_an_answer_and_the_verdict_is_recorded() -> None:
         result = await tools["report_step"].ainvoke(
             {
                 "step": 1,
-                "passed": True,
+                "performed": True, "passed": True,
                 "message": "the lobby opened",
                 "thought": "판정한다",
                 "learned": "",
@@ -145,7 +145,7 @@ def test_the_verdict_goes_through_after_two_omissions_in_a_row() -> None:
     async def run() -> None:
         channel, state, tools, _sent = make(PhaseCycleMode.remember_in_verdict, total_steps=4)
         standing_on(channel)
-        verdict = {"step": 1, "passed": True, "message": "saw it", "thought": "판정한다"}
+        verdict = {"step": 1, "performed": True, "passed": True, "message": "saw it", "thought": "판정한다"}
 
         for _ in range(MAX_CONSECUTIVE_REFUSALS):
             assert "`learned`" in await tools["report_step"].ainvoke(dict(verdict))
@@ -173,7 +173,7 @@ def test_a_capability_key_this_run_was_never_shown_is_dropped() -> None:
         result = await tools["report_step"].ainvoke(
             {
                 "step": 1,
-                "passed": True,
+                "performed": True, "passed": True,
                 "message": "the lobby opened",
                 "thought": "판정한다",
                 "learned": "",
@@ -198,7 +198,7 @@ def test_a_capability_key_printed_in_the_scene_context_block_is_accepted() -> No
         result = await tools["report_step"].ainvoke(
             {
                 "step": 1,
-                "passed": True,
+                "performed": True, "passed": True,
                 "message": "the lobby opened",
                 "thought": "판정한다",
                 "learned": "",
@@ -231,7 +231,7 @@ def test_a_key_cut_from_the_block_is_accepted_once_a_search_printed_it() -> None
         before = await tools["report_step"].ainvoke(
             {
                 "step": 1,
-                "passed": True,
+                "performed": True, "passed": True,
                 "message": "saw it",
                 "thought": "판정한다",
                 "learned": "",
@@ -248,7 +248,7 @@ def test_a_key_cut_from_the_block_is_accepted_once_a_search_printed_it() -> None
         after = await tools["report_step"].ainvoke(
             {
                 "step": 2,
-                "passed": True,
+                "performed": True, "passed": True,
                 "message": "saw it",
                 "thought": "판정한다",
                 "learned": "",
@@ -258,3 +258,11 @@ def test_a_key_cut_from_the_block_is_accepted_once_a_search_printed_it() -> None
         assert "not a row this run has been shown" not in after
 
     asyncio.run(run())
+
+
+def test_message_and_performed_come_before_passed_in_the_schema() -> None:
+    """모델은 schema 순서대로 채운다. 기대값과 관찰값을 적는 `message` 가 판정보다 앞이다 (ARTEL-1220)."""
+    for mode in (PhaseCycleMode.off, PhaseCycleMode.lite):
+        _channel, _state, tools, _sent = make(mode)
+        order = list(tools["report_step"].args)
+        assert order.index("message") < order.index("performed") < order.index("passed")

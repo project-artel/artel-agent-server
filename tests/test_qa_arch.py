@@ -515,7 +515,7 @@ def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v27-game-functions"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v28-verdict-expected-observed"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -649,7 +649,11 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 # `max_behavior_calls_per_run` (ARTEL-1054) joined `QaArchSpec` and the label moved to
 # `v27-game-functions`. Both axes default to `off`, so the default tool set is unchanged; the
 # digest moved because `arch.model_dump()` gained four keys.
-_EXPECTED_DEFAULT_FINGERPRINT = "7d56243753d1"
+#
+# And from `7d56243753d1`, when `report_step` gained `performed` and its arguments were
+# reordered to `message`, `performed`, `passed` (ARTEL-1220) and the label moved to
+# `v28-verdict-expected-observed`. The tool names are unchanged; one tool schema moved.
+_EXPECTED_DEFAULT_FINGERPRINT = "2fd1bb6585a3"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
@@ -783,3 +787,5 @@ def test_macros_off_withholds_the_macro_skill_from_every_list_of_skills() -> Non
         for one in build_tools(_ThrowawayChannel(), QaRunState(total_steps=0), off, "v19")
     }["load_skill"]
     assert "macro" not in load_skill.description
+
+
