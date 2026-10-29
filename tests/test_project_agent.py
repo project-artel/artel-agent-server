@@ -4,6 +4,7 @@ import asyncio
 from typing import Any
 
 import httpx
+import anthropic
 import openai
 import pytest
 from fastapi import FastAPI
@@ -28,8 +29,9 @@ from app.agents.project_agent.prompt import (
     render_page_catalog,
 )
 from app.agents.project_agent.schemas import PageCatalog
-from app.agents.project_agent.tools import tool_schemas
+from app.agents.project_agent.tools import tool_schemas, validate_tool_call
 from app.api.project_agent import router
+from app.llm.chat_model import ClaudeApiKeyMissingError, GptApiKeyMissingError
 
 
 class FakeChat(BaseChatModel):
@@ -339,6 +341,122 @@ def test_system_prompt_tells_the_agent_not_to_treat_a_missing_snapshot_entry_as_
     assert 'Read-only fields whose description says "read-only list" hold ids as values' in text
 
 
+def test_scenario_page_and_query_kinds_are_in_the_schemas() -> None:
+    by_name = {t["function"]["name"]: t["function"] for t in tool_schemas()}
+
+    assert "testScenario" in by_name["open_page"]["parameters"]["properties"]["page"]["enum"]
+    kinds = by_name["query"]["parameters"]["properties"]["kind"]["enum"]
+    assert {"test_cases", "test_case", "build_versions"} <= set(kinds)
+    assert "verificationStatus" in by_name["query"]["description"]
+
+
+def test_system_prompt_v3_is_the_default_and_carries_the_scenario_rules() -> None:
+    text = build_system_prompt(CATALOG["pages"], "ko")
+
+    assert text.startswith("You are the project agent")
+    assert "cases_missing_from_build" in text
+    assert "testScenario.addCasesToBuild" in text
+    assert "testScenario.convertToFree" in text
+    assert "`build-versions`" in text and "`free-scenarios`" in text
+    assert "never from memory or guesses" in text
+    assert "only if that id is listed under Guides" in text
+    assert "only if that id is listed under Guides" not in build_system_prompt(CATALOG["pages"], "ko", "v2")
+    assert "cases_missing_from_build" not in build_system_prompt(CATALOG["pages"], "ko", "v1")
+
+
+def test_query_schema_declares_typed_args_and_stays_portable() -> None:
+    query = {t["function"]["name"]: t["function"]["parameters"] for t in tool_schemas()}["query"]
+    args = query["properties"]["args"]["properties"]
+
+    assert query["required"] == ["kind"]
+    assert args["id"]["type"] == "string"
+    assert args["ids"]["items"]["type"] == "string"
+    assert args["offset"]["type"] == "integer" and args["offset"]["minimum"] == 0
+    assert "DRAFT" in args["verificationStatus"]["enum"]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"kind": "test_case", "args": {}},
+        {"kind": "test_case", "args": {"id": 3}},
+        {"kind": "test_case", "args": {"id": "a", "search": "x"}},
+        {"kind": "test_cases", "args": {"offset": -1}},
+        {"kind": "test_cases", "args": {"verificationStatus": "NOPE"}},
+        {"kind": "build_versions", "args": {"id": "a"}},
+        {"kind": "qa_run", "args": {}},
+        {"kind": "nope", "args": {}},
+    ],
+)
+def test_validate_tool_call_rejects_invalid_query_args(args: dict) -> None:
+    assert validate_tool_call("query", args)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"kind": "test_case", "args": {"id": "a", "gameBuildId": "b"}},
+        {"kind": "test_cases", "args": {"ids": ["a"], "offset": 20, "verificationStatus": "DRAFT"}},
+        {"kind": "test_cases"},
+        {"kind": "build_versions", "args": {}},
+        {"kind": "qa_run", "args": {"id": "r"}},
+        {"kind": "qa_history", "args": {"testRunId": "t"}},
+        {"kind": "issues", "args": {"status": "OPEN"}},
+        {"kind": "usage"},
+    ],
+)
+def test_validate_tool_call_accepts_valid_query_args(args: dict) -> None:
+    assert validate_tool_call("query", args) is None
+    assert validate_tool_call("read_page", {}) is None
+
+
+class SequenceChat(FakeChat):
+    replies: list[AIMessage] = []
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs: Any) -> ChatResult:
+        self.seen.append(list(messages))
+        return ChatResult(generations=[ChatGeneration(message=self.replies[len(self.seen) - 1])])
+
+
+def _bad_then_good(second: AIMessage) -> Harness:
+    bad = AIMessage(
+        content="",
+        tool_calls=[{"id": "c1", "name": "query", "args": {"kind": "test_case", "args": {}}, "type": "tool_call"}],
+    )
+    harness = Harness(bad)
+    harness.chat = SequenceChat(reply=bad, seen=[], replies=[bad, second])
+    return harness
+
+
+def test_invalid_query_call_is_sent_back_to_the_model_not_the_browser() -> None:
+    good = AIMessage(
+        content="",
+        tool_calls=[
+            {"id": "c2", "name": "query", "args": {"kind": "test_case", "args": {"id": "a"}}, "type": "tool_call"}
+        ],
+    )
+    harness = _bad_then_good(good)
+
+    result = _run(harness, _request())
+
+    assert [c.id for c in result.tool_calls] == ["c2"]
+    assert len(harness.chat.seen) == 2
+    feedback = harness.chat.seen[1][-1]
+    assert feedback.tool_call_id == "c1" and "invalid arguments" in feedback.content
+
+
+def test_invalid_query_call_is_dropped_when_the_model_repeats_it() -> None:
+    bad = AIMessage(
+        content="sorry",
+        tool_calls=[{"id": "c3", "name": "query", "args": {"kind": "test_case", "args": {}}, "type": "tool_call"}],
+    )
+    harness = _bad_then_good(bad)
+
+    result = _run(harness, _request())
+
+    assert result.tool_calls == [] and result.content == "sorry"
+
+
 def _client(agent: ProjectAgent) -> TestClient:
     app = FastAPI()
     app.state.project_agent = agent
@@ -502,3 +620,145 @@ def test_page_catalog_caps_links_and_guides() -> None:
         PageCatalog(links=[{}] * 51)
     with pytest.raises(ValidationError):
         PageCatalog(guides=[{}] * 101)
+
+
+# ---- user key and failure causes ----------------------------------------------------------
+
+SECRET = "sk-secret-user-key-123"
+
+
+@pytest.fixture
+def gpt_model(monkeypatch) -> str:
+    """A `gpt/` id the catalog accepts; the fixture catalog carries none."""
+    from tests.conftest import FIXTURE_MODEL_CATALOG
+    import app.llm.models as models
+
+    model = "gpt/gpt-6-luna"
+    spec = next(iter(FIXTURE_MODEL_CATALOG.values()))
+    monkeypatch.setattr(models, "get_model_spec", lambda m: spec)
+    return model
+
+
+def _status_error(cls, status: int, text: str = "boom"):
+    response = httpx.Response(status, request=httpx.Request("POST", "http://x"))
+    return cls(text, response=response, body=None)
+
+
+def _post(error: Exception | None, **overrides: Any):
+    client = _client(ProjectAgent(model_factory=Harness(AIMessage(content=""), error).factory))
+    return client.post("/internal/project-agent/step", json=_body(**overrides))
+
+
+def test_user_key_is_bound_only_during_the_call_and_reaches_build_chat_model(gpt_model) -> None:
+    from app.llm import chat_model
+    from app.llm.credentials import bound_llm_key
+
+    seen: list[tuple] = []
+
+    def factory(model: str, tools_enabled: bool):
+        user_key = chat_model._bound_key_for(model)
+        seen.append((bound_llm_key(), user_key))
+        return FakeChat(reply=AIMessage(content="ok"), seen=[])
+
+    client = _client(ProjectAgent(model_factory=factory))
+    response = client.post(
+        "/internal/project-agent/step",
+        json=_body(model=gpt_model, llm_key={"service": "openai", "api_key": SECRET}),
+    )
+
+    assert response.status_code == 200
+    assert seen[0][0].api_key == SECRET
+    assert seen[0][1] == SECRET
+    assert bound_llm_key() is None
+
+
+def test_key_is_unbound_after_a_failed_call() -> None:
+    from app.llm.credentials import bound_llm_key
+
+    error = openai.APIConnectionError(request=httpx.Request("POST", "http://x"))
+    response = _post(error, llm_key={"service": "openrouter", "api_key": SECRET})
+
+    assert response.status_code == 502
+    assert bound_llm_key() is None
+
+
+def test_user_key_chat_model_stays_out_of_the_process_cache(monkeypatch) -> None:
+    from app.llm import chat_model
+
+    chat_model.build_chat_model.cache_clear() if hasattr(
+        chat_model.build_chat_model, "cache_clear"
+    ) else None
+    from app.llm.credentials import LlmKey, bind_llm_key, session_chat_models
+
+    bind_llm_key(LlmKey(service="openai", api_key=SECRET))
+    try:
+        chat_model.build_chat_model("gpt/gpt-6")
+        assert session_chat_models()
+    finally:
+        bind_llm_key(None)
+    assert session_chat_models() is None
+
+
+def test_gpt_model_without_user_key_is_422_key_missing(gpt_model) -> None:
+    response = _post(None, model=gpt_model)
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "llm_key_missing"
+
+
+def test_invalid_model_is_422_with_cause_code() -> None:
+    response = _post(None, model="nope/none")
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "llm_model_unavailable"
+
+
+def test_other_validation_errors_keep_the_framework_shape() -> None:
+    response = _post(None, messages=[{"role": "user", "content": " "}])
+
+    assert response.status_code == 422
+    assert isinstance(response.json()["detail"], list)
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (ClaudeApiKeyMissingError("x"), "llm_key_missing"),
+        (GptApiKeyMissingError("x"), "llm_key_missing"),
+        (_status_error(openai.AuthenticationError, 401, "Missing Authentication header"), "llm_key_missing"),
+        (_status_error(openai.AuthenticationError, 401, f"Incorrect key {SECRET}"), "llm_auth_failed"),
+        (_status_error(openai.PermissionDeniedError, 403), "llm_auth_failed"),
+        (_status_error(anthropic.AuthenticationError, 401), "llm_auth_failed"),
+        (_status_error(anthropic.PermissionDeniedError, 403), "llm_auth_failed"),
+        (_status_error(openai.RateLimitError, 429), "llm_rate_limited"),
+        (_status_error(anthropic.RateLimitError, 429), "llm_rate_limited"),
+        (_status_error(openai.NotFoundError, 404), "llm_model_unavailable"),
+        (_status_error(anthropic.NotFoundError, 404), "llm_model_unavailable"),
+        (_status_error(openai.InternalServerError, 500), "llm_provider_error"),
+        (openai.APITimeoutError(request=httpx.Request("POST", "http://x")), "llm_provider_error"),
+        (anthropic.APITimeoutError(request=httpx.Request("POST", "http://x")), "llm_provider_error"),
+    ],
+)
+def test_provider_errors_map_to_cause_codes(error: Exception, code: str) -> None:
+    response = _post(error)
+
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert detail["code"] == code
+    assert set(detail) == {"code", "message"}
+    assert SECRET not in response.text
+
+
+def test_key_never_appears_in_repr_or_logs(caplog) -> None:
+    request = ProjectAgentRequest(
+        conversation_id=1,
+        messages=[ProjectAgentMessage(role="user", content="hi")],
+        llm_key={"service": "openai", "api_key": SECRET},
+    )
+    assert SECRET not in repr(request)
+    assert SECRET not in str(request)
+
+    error = _status_error(openai.AuthenticationError, 401, f"bad {SECRET}")
+    with caplog.at_level("DEBUG"):
+        _post(error, llm_key={"service": "openai", "api_key": SECRET})
+    assert SECRET not in caplog.text

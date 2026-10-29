@@ -1,3 +1,4 @@
+import json
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -20,7 +21,7 @@ from app.agents.project_agent.schemas import (
     ProjectAgentResult,
     ProjectAgentToolCall,
 )
-from app.agents.project_agent.tools import tool_schemas
+from app.agents.project_agent.tools import tool_schemas, validate_tool_call
 from app.llm.chat_model import build_chat_model
 from app.llm.models import DEFAULT_MODEL, ReasoningConfig
 
@@ -33,6 +34,10 @@ REASONING_OFF = ReasoningConfig(max_tokens=0)
 
 # Appended as the last message when the turn has used its tool calls.
 NO_TOOLS_INSTRUCTION = "Do not call tools. Answer the user in text now."
+
+
+# How many times an invalid `query` call is sent back to the model before it is dropped.
+MAX_CORRECTIONS = 1
 
 
 def _default_model_factory(model: str, tools_enabled: bool) -> Runnable:
@@ -106,7 +111,17 @@ class ProjectAgent:
         ]
         if not request.tools_enabled:
             prompt.append(HumanMessage(content=NO_TOOLS_INSTRUCTION))
-        reply = await chat.ainvoke(prompt, context.trace_config("project-agent"))
+        trace = context.trace_config("project-agent")
+        reply = await chat.ainvoke(prompt, trace)
+        for _ in range(MAX_CORRECTIONS if request.tools_enabled else 0):
+            problems = _invalid_calls(reply)
+            if not problems:
+                break
+            # The browser would only fail on these, so the model sees the reason first.
+            prompt.append(reply)
+            prompt.extend(_correction_messages(reply, problems))
+            reply = await chat.ainvoke(prompt, trace)
+        problems = _invalid_calls(reply)
         tool_calls = [
             ProjectAgentToolCall(
                 id=call.get("id") or f"call_{uuid.uuid4().hex}",
@@ -114,6 +129,29 @@ class ProjectAgent:
                 args=call.get("args") or {},
             )
             for call in getattr(reply, "tool_calls", None) or []
-            if request.tools_enabled
+            if request.tools_enabled and (call.get("id") or "") not in problems
         ]
         return ProjectAgentResult(content=flatten_content(reply.content), tool_calls=tool_calls)
+
+
+def _invalid_calls(reply: BaseMessage) -> dict[str, str]:
+    """Call id to the reason it cannot run, for the proposed calls that fail validation."""
+    problems: dict[str, str] = {}
+    for call in getattr(reply, "tool_calls", None) or []:
+        reason = validate_tool_call(call["name"], call.get("args") or {})
+        if reason is not None:
+            problems[call.get("id") or ""] = reason
+    return problems
+
+
+def _correction_messages(reply: BaseMessage, problems: dict[str, str]) -> list[ToolMessage]:
+    """One tool message per proposed call, since a provider rejects an unanswered tool_use."""
+    messages: list[ToolMessage] = []
+    for call in getattr(reply, "tool_calls", None) or []:
+        call_id = call.get("id") or ""
+        if call_id in problems:
+            body = {"status": "error", "error": f"invalid arguments: {problems[call_id]}"}
+        else:
+            body = {"status": "error", "error": "not run because another call in this turn was invalid; call it again"}
+        messages.append(ToolMessage(content=json.dumps(body), tool_call_id=call_id))
+    return messages
