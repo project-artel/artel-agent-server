@@ -237,3 +237,32 @@ async def statement_patches(request: StatementRequest) -> list[Patch]:
     )
     out: _Patches = await structured(request.model, _Patches).ainvoke(prompt)
     return [p.model_copy(update={"name": _name(p.name), "value": _name(p.value)}) for p in out.patches]
+
+
+class ObservedRequest(BaseModel):
+    terms: list[Term] = Field(default_factory=list)
+    start_state: dict[str, str] = Field(default_factory=dict)
+    # 줄마다 `id | 행동 → 기대 || 필요 | 남김`. 통과한 TC 만이다.
+    cases: list[str] = Field(default_factory=list)
+    # 줄마다 `id: 코드이름 앞→뒤, …`.
+    observed: list[str] = Field(default_factory=list)
+    model: str = DEFAULT_MODEL
+
+
+async def observed_patches(request: ObservedRequest) -> list[Patch]:
+    """QA 가 본 값의 변화에서 계약이 빠뜨린 '남기는 것' 만. 다른 수정은 받아도 버린다."""
+    if not request.observed or not request.terms:
+        return []
+    known = {_name(t.name) for t in request.terms}
+    prompt = load_prompt(PROMPT_AGENT, "observed").body.format(
+        terms="\n".join(f"{t.name} | {t.kind} | {'/'.join(t.options) or '-'} | {t.meaning}" for t in request.terms),
+        start=", ".join(f"{k}={v}" for k, v in request.start_state.items()) or "-",
+        cases="\n".join(request.cases),
+        observed="\n".join(request.observed),
+    )
+    out: _Patches = await structured(request.model, _Patches).ainvoke(prompt)
+    return [
+        p.model_copy(update={"name": _name(p.name), "value": _name(p.value)})
+        for p in out.patches
+        if p.op == "leaves" and p.tc_id is not None and _name(p.name) in known
+    ]

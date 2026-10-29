@@ -8,9 +8,11 @@ from pydantic import BaseModel
 from app.agents.case_contract import (
     CaseContractRequest,
     CaseContractResult,
+    ObservedRequest,
     Patch,
     StatementRequest,
     extract_contracts,
+    observed_patches,
     statement_patches,
 )
 from app.llm.usage import set_usage_scope
@@ -41,5 +43,15 @@ async def case_contract_statement(payload: StatementRequest) -> StatementRespons
     set_usage_scope("SCENARIO", None)
     try:
         return StatementResponse(patches=await statement_patches(payload))
+    except openai.APIError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@router.post("/case-contracts/observed", response_model=StatementResponse)
+async def case_contract_observed(payload: ObservedRequest) -> StatementResponse:
+    # QA 가 끝난 뒤 쌓기에서 부른다. 비용은 저작 쪽(SCENARIO)에 단다 — 다음 저작의 재료라서다.
+    set_usage_scope("SCENARIO", None)
+    try:
+        return StatementResponse(patches=await observed_patches(payload))
     except openai.APIError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error

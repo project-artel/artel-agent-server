@@ -71,3 +71,27 @@ def test_the_glossary_grows_chunk_by_chunk_and_contracts_use_it(monkeypatch) -> 
     # 묻지 않은 id(999)는 버린다.
     assert sorted(c.id for c in out.contracts) == [1, 2, 3, 4, 5]
     assert out.start_state == {"상태1": "0", "상태2": "0", "상태3": "0"}
+
+
+def test_observed_patches_keep_only_leaves_of_known_names(monkeypatch):
+    import asyncio
+    from app.agents.case_contract import workflow as wf
+
+    class _Fake:
+        async def ainvoke(self, prompt):
+            assert "Inventory.hasLamp false→true" in prompt
+            return wf._Patches(patches=[
+                wf.Patch(tc_id=7, op="leaves", name="등불", value="1"),
+                wf.Patch(tc_id=7, op="needs", name="등불", value="1"),
+                wf.Patch(tc_id=7, op="leaves", name="화면 잠금", value="1"),
+                wf.Patch(op="leaves", name="등불", value="1"),
+            ])
+
+    monkeypatch.setattr(wf, "structured", lambda model, schema: _Fake())
+    request = wf.ObservedRequest(
+        terms=[wf.Term(name="등불", kind="has", meaning="lamp", start="없음")],
+        cases=["7 | 할머니한테 말을 건다 → 등불을 받는다 || - | -"],
+        observed=["7: Inventory.hasLamp false→true, Core.InteractionLock.locked false→true"],
+    )
+    patches = asyncio.run(wf.observed_patches(request))
+    assert [(p.tc_id, p.op, p.name, p.value) for p in patches] == [(7, "leaves", "등불", "1")]
