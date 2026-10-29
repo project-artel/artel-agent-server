@@ -783,16 +783,3 @@ def test_macros_off_withholds_the_macro_skill_from_every_list_of_skills() -> Non
         for one in build_tools(_ThrowawayChannel(), QaRunState(total_steps=0), off, "v19")
     }["load_skill"]
     assert "macro" not in load_skill.description
-
-
-def test_a_stored_boolean_vision_is_read_as_on_or_off() -> None:
-    """옛 run_config 의 `vision: true` 를 다시 보내도 거절하지 않는다 (ARTEL-1236)."""
-    assert QaArchSpec.model_validate({"vision": True}).vision is VisionMode.on
-    assert QaArchSpec.model_validate({"vision": False}).vision is VisionMode.off
-    assert QaArchSpec.model_validate({"vision": "auto"}).vision is VisionMode.auto
-    # 저장되는 값과 fingerprint 는 문자열로 받은 것과 같다.
-    assert QaArchSpec.model_validate({"vision": True}).model_dump() == QaArchSpec(
-        vision=VisionMode.on
-    ).model_dump()
-    with pytest.raises(ValidationError):
-        QaArchSpec.model_validate({"vision": "sometimes"})

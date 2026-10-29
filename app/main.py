@@ -7,7 +7,6 @@ from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from redis.asyncio import from_url as redis_from_url
 
 from app.agents import GameContextAgent, KnowledgeQueryAgent, StepPhrasingAgent
 from app.agents.project_agent import ProjectAgent
@@ -31,9 +30,10 @@ from app.logging_config import configure_logging
 from app.observability import configure_langsmith
 from app.prompts import validate_prompts
 from app.qa.service import QaExecutionService
-from app.qa.store import RedisQaSessionStore
+from app.qa.store import InMemoryQaSessionStore, QaSessionStore, RedisQaSessionStore
 from app.sessions.redis_store import RedisSessionStore
 from app.sessions.service import SessionService
+from app.sessions.store import InMemorySessionStore, SessionStore
 
 
 # Every business route lives here. The prefix is the trust boundary: what is
@@ -48,21 +48,31 @@ INTERNAL_PREFIX = "/internal"
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
 
-    # Redis-backed session store wired once per process. Chat models are built
-    # lazily per model slug (OpenRouter) inside the agent — no client here.
-    redis = redis_from_url(
-        settings.redis_url,
-        encoding="utf-8",
-        decode_responses=True,
-    )
-    store = RedisSessionStore(redis, settings.session_ttl_seconds)
+    # Session stores wired once per process. Chat models are built lazily per
+    # model slug (OpenRouter) inside the agent — no client here. With
+    # SESSION_STORE=memory no Redis client is created or imported.
+    redis = None
+    store: SessionStore
+    qa_store: QaSessionStore
+    if settings.session_store == "redis":
+        from redis.asyncio import from_url as redis_from_url
+
+        redis = redis_from_url(
+            settings.redis_url,
+            encoding="utf-8",
+            decode_responses=True,
+        )
+        store = RedisSessionStore(redis, settings.session_ttl_seconds)
+        # QA execution sessions share the Redis client (distinct `qa:` namespace).
+        qa_store = RedisQaSessionStore(redis, settings.session_ttl_seconds)
+    else:
+        store = InMemorySessionStore(settings.session_ttl_seconds)
+        qa_store = InMemoryQaSessionStore(settings.session_ttl_seconds)
     app.state.session_service = SessionService(
         store=store,
         history_max_turns=settings.history_max_turns,
     )
 
-    # QA execution sessions share the Redis client (distinct `qa:` namespace).
-    qa_store = RedisQaSessionStore(redis, settings.session_ttl_seconds)
     # The runner is built per session, from the config that session resolved at
     # open — see `app/qa/run_config.py`.
     app.state.qa_session_service = QaExecutionService(store=qa_store)
@@ -94,7 +104,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         await usage_buffer.stop()
         await http_client.aclose()
-        await redis.aclose()
+        if redis is not None:
+            await redis.aclose()
 
 
 def create_app() -> FastAPI:
