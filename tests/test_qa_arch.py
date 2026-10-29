@@ -515,7 +515,7 @@ def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v38-macro-shown-text"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v39-performance"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -539,6 +539,7 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
     "observe_scene",
     "inspect_object",
     "get_errors",
+    "get_performance",
     "search_knowledge",
     "record_knowledge",
     "update_knowledge",
@@ -657,7 +658,12 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 #
 # And from `2fd1bb6585a3`, when `get_errors` joined the observation tools (ARTEL-1219) and the
 # label moved to `v29-unseen-errors`.
-_EXPECTED_DEFAULT_FINGERPRINT = "d8597d07832c"
+#
+# v30 and v31 left it where it was: they changed text the model reads, not a tool or a knob.
+#
+# And from `30d40310f4fd`, when `get_performance` joined the observation tools (ARTEL-1223) and
+# the label moved to `v32-performance`.
+_EXPECTED_DEFAULT_FINGERPRINT = "d3a8de56fcd6"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
