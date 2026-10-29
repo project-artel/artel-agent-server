@@ -1,5 +1,6 @@
 """LLM configuration: model catalog, OpenRouter-backed chat and embedding models."""
 
+from app.llm.default_model import FALLBACK_MODEL, resolve_default_model
 from app.llm.chat_model import build_chat_model, select_structured_method, structured
 from app.llm.embedding_model import (
     EmbeddingBatchTooLargeError,
@@ -20,6 +21,8 @@ from app.llm.models import (
 
 __all__ = [
     "DEFAULT_MODEL",
+    "FALLBACK_MODEL",
+    "resolve_default_model",
     "EmbeddingBatchTooLargeError",
     "EmbeddingClient",
     "EmbeddingResult",
