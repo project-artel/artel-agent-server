@@ -323,8 +323,11 @@ def test_the_default_qa_version_is_v21() -> None:
     v25 changes how a step is judged (ARTEL-1220): `## How to work` step 4 asks for
     `expected:` and `observed:` lines before the verdict, and the four verdict tool
     descriptions describe the new `performed` argument.
+
+    v26 adds `tool_get_errors.md` and one paragraph to the system prompt on reading
+    `unseen errors: N` (ARTEL-1219).
     """
-    assert resolve_version("qa_run") == "v25"
+    assert resolve_version("qa_run") == "v26"
 
 
 # v20 이 고쳐 쓴 v19 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
@@ -1126,3 +1129,21 @@ def test_v25_asks_for_expected_and_observed_before_the_verdict() -> None:
         body = load_prompt("qa_run", role, "v25").body
         assert "`performed`" in body, role
         assert "`expected:` and `observed:`" in body, role
+
+
+def test_v26_adds_get_errors_and_one_system_paragraph() -> None:
+    """v26 는 v25 에 `get_errors` 설명과 system prompt 한 문단만 더한다 (ARTEL-1219)."""
+    assert set(roles_in("qa_run", "v26")) - set(roles_in("qa_run", "v25")) == {"tool_get_errors"}
+    for role in roles_in("qa_run", "v25"):
+        same = load_prompt("qa_run", role, "v26").body == load_prompt("qa_run", role, "v25").body
+        assert same is (role != "system"), role
+    system = load_prompt("qa_run", "system", "v26").body
+    paragraph = (
+        "A tool result ending `unseen errors: N` means the game logged N exceptions you have "
+        "not read: call `get_errors` before `report_step`. An exception never fails a step by "
+        "itself; file it with `report_issue`.\n\n"
+    )
+    assert system == load_prompt("qa_run", "system", "v25").body.replace(
+        "## When the game itself is broken\n\n",
+        "## When the game itself is broken\n\n" + paragraph,
+    )

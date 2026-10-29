@@ -13,6 +13,7 @@ from app.agents.qa.tools.state import capture_from_action_result
 from app.agents.qa.tools.tool_context import ToolContext
 from app.prompts import load_tool_description
 from app.qa.envelope import JsonRpcAction, LogCategory
+from app.qa.game_errors import render_errors
 
 
 def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
@@ -55,7 +56,20 @@ def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
         messages = channel.drain_operator_messages()
         return _answer(found, messages)
 
-    return [observe_scene, inspect_object]
+    @tool(description=load_tool_description("get_errors").body)
+    async def get_errors(step: int, thought: str, include_seen: bool = False) -> str:
+        # What the agent reads is `qa_run/<version>/tool_get_errors.md`.
+        # 게임에 아무것도 묻지 않는다. `PULSE` 와 `ACTION_RESULT` 가 이미 실어 온 것을 읽는다.
+        # 화면은 안 붙인다 — 화면을 바꾸지 않는 tool 이라 view 를 붙이면 지난 view 를 반복한다.
+        ledger = channel.game_errors
+        items = ledger.take(include_seen)
+        return _answer(
+            render_errors(items, ledger, include_seen),
+            channel.drain_operator_messages(),
+            screen=False,
+        )
+
+    return [observe_scene, inspect_object, get_errors]
 
 
 def build_capture_tool(ctx: ToolContext) -> BaseTool:
