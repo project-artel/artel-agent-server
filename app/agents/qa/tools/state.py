@@ -202,6 +202,9 @@ class QaRunState:
         # 상한이 필요한 이유가 phase 거절과 같다(`app/agents/qa/tools/phase.py` 의
         # `MAX_CONSECUTIVE_REFUSALS`). 되돌려 보낸 뒤 모델이 또 빠뜨리면 왕복만 탄다.
         self.verdict_memory_refusals = 0
+        # 이 런에서 view 가 한 번이라도 그려진 scene (ARTEL-1221). 처음 그려지는 tool 결과에 전체
+        # screen capture 를 한 장 찍으라는 줄이 붙는다.
+        self.scenes_entered: set[str] = set()
         # 이 런의 phase 상태 기계, 또는 `None`. `build_tools` 가 `arch.phase_cycle` 을 보고
         # 채운다 — `off` 와 `in_verdict` 에서는 끝까지 `None` 이다.
         self.phase_cycle = None
