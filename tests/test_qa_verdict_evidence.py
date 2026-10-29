@@ -206,3 +206,23 @@ def test_값을_다른_꼴로_적어도_뜻이_같으면_맞다() -> None:
     assert _same("{'path': 'Card(Clone)', 'active': True}", {"path": "Card(Clone)", "active": True, "world": {"x": 1}})
     assert _same("None", None)
     assert not _same("active: True", {"active": False})
+
+
+def test_indexed_selector_cannot_cite_another_instance_value():
+    pulse = PulseMemory()
+    pulse.apply(PulseReading.model_validate({
+        "reading": 1, "frame": 10, "scene": "Battle",
+        "active": [
+            {"selector": "Root[0]/Enemy[1]", "path": "Root/Enemy", "members": [{"on": "Enemy", "member": "hp", "value": 10}]},
+            {"selector": "Root[0]/Enemy[2]", "path": "Root/Enemy", "members": [{"on": "Enemy", "member": "hp", "value": 0}]},
+        ],
+    }))
+    result, status = cite([
+        check("yes", EvidenceSource(kind="pulse", object="Enemy[1]", member="hp", value="0")),
+        check("yes", EvidenceSource(kind="pulse", object="Battle/Root[0]/Enemy[2]", member="hp", value="0")),
+        check("yes", EvidenceSource(kind="pulse", object="Enemy[9]", member="hp", value="0")),
+    ], pulse, set(), "Battle")
+    assert [row["sources"][0]["citation"] for row in result] == ["mismatch", "match", "missing"]
+    assert status == "uncertain"
+    unindexed, _ = cite([check("yes", EvidenceSource(kind="pulse", object="Enemy", member="hp", value="0"))], pulse, set(), "Battle")
+    assert unindexed[0]["sources"][0]["citation"] == "match"
