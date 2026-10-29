@@ -27,7 +27,7 @@ from app.agents.qa.vision import (
 )
 from app.llm.catalog import get_model_catalog
 from app.qa.channel import QaRunChannel
-from app.qa.schemas import QaStepResult
+from app.qa.schemas import QaStepResult, QaCaseAttemptResult
 from app.qa.envelope import LogCategory, MessageType
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake image body"
@@ -760,8 +760,8 @@ def test_a_failed_step_adds_the_fourth_and_it_expires() -> None:
         channel.scene.scene = "BattleScene"
         await one_by_role_call(middleware, channel, sent, "one")
         state.last_action_frame = 100
-        state.step_results.append(
-            QaStepResult(step=1, passed=False, message="눌러도 안 바뀐다")
+        state.case_attempt_results.append(
+            QaCaseAttemptResult(attempt_id="a", case_id=1, verdict="FAILED", message="눌러도 안 바뀐다")
         )
         messages = await one_by_role_call(middleware, channel, sent, "failed")
         assert "the screen at the step that failed" in captions(messages)

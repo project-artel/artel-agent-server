@@ -7,6 +7,7 @@ These pin the frames themselves — category, step, and the actions inside them.
 """
 
 import asyncio
+from tests.qa_attempts import configure_attempts, start_case, report_case
 import json
 
 import pytest
@@ -47,6 +48,7 @@ def make(total_steps: int = 1, timeout: float = 0.05, reading_wait: float = 0.05
         reading_wait=reading_wait,
     )
     state = QaRunState(total_steps=total_steps)
+    configure_attempts(channel, state)
     tools = {tool.name: tool for tool in build_tools(channel, state, arch=_NO_PHASE_GATE)}
     return channel, state, tools, sent
 
@@ -769,40 +771,6 @@ def test_resume_reports_the_games_refusal() -> None:
     asyncio.run(run())
 
 
-def test_waiting_for_the_operator_returns_what_they_said() -> None:
-    async def run() -> None:
-        channel, _, tools, sent = make()
-
-        async def speak() -> None:
-            await asyncio.sleep(0)
-            channel.on_chat({"payload": {"message": "그 화면은 건너뛰어"}})
-
-        asyncio.create_task(speak())
-        result = await tools["wait_for_operator"].ainvoke(
-            {"step": 2, "thought": "시나리오에 없는 화면이라 물어본다"}
-        )
-
-        assert "그 화면은 건너뛰어" in result
-        # Nothing was asked of the game while it waited.
-        assert actions(sent) == []
-
-    asyncio.run(run())
-
-
-def test_waiting_says_so_when_nobody_answers() -> None:
-    """Silence comes back as a value, with the wait it actually made named."""
-
-    async def run() -> None:
-        _, _, tools, _ = make()
-        result = await tools["wait_for_operator"].ainvoke(
-            {"thought": "답을 기다린다", "timeout_seconds": 0.05}
-        )
-
-        assert "said nothing within 0.05s" in result
-
-    asyncio.run(run())
-
-
 def test_a_batch_result_names_which_action_failed() -> None:
     """Four outcomes in a row are unreadable unless each says what it belongs to.
 
@@ -857,66 +825,6 @@ def test_click_reports_the_failure_reason() -> None:
 
         assert "FAILED" in result
         assert "Unknown target id: 999" in result
-
-    asyncio.run(run())
-
-
-def test_every_outbound_frame_carries_the_step_number() -> None:
-    """`step` was null on all 451 rows of a real run because no tool passed one.
-
-    Without it the timeline cannot say which scenario step a row belongs to, so
-    the ACTION, the STATUS and the CHAT all have to carry the number the agent
-    named. LOG 는 이 목록에서 빠졌다 — tool 이 제 이유를 LOG 로 남기지 않게 되면서
-    (ARTEL-609) 여기서 나오는 LOG 가 없다. 그 자리의 step 은 러너가 내는 TOOL 프레임이
-    이고, `tests/test_qa_reasoning_log.py` 가 고정한다.
-    """
-
-    async def run() -> None:
-        channel, _, tools, sent = make(total_steps=2)
-
-        task = answer(channel, sent, results=[{"id": 1, "success": True}])
-        await tools["click_button"].ainvoke(
-            {"step": 4, "target_id": 12, "thought": "시작 버튼을 누른다"}
-        )
-        await task
-
-        await tools["report_step"].ainvoke(
-            {"step": 4, "passed": True, "message": "상점이 열렸다", "thought": "화면이 바뀌었다"}
-        )
-        await tools["reply_to_operator"].ainvoke(
-            {"step": 4, "message": "상점을 확인했습니다", "thought": "질문에 답한다"}
-        )
-
-        by_type: dict[str, list[int | None]] = {}
-        for frame in sent:
-            by_type.setdefault(frame["type"], []).append(frame["payload"].get("step"))
-
-        assert MessageType.LOG.value not in by_type
-        assert by_type[MessageType.ACTION.value] == [4]
-        assert by_type[MessageType.STATUS.value] == [4]
-        assert by_type[MessageType.CHAT.value] == [4]
-
-    asyncio.run(run())
-
-
-def test_reported_steps_accumulate_and_announce_the_last_one() -> None:
-    async def run() -> None:
-        _, state, tools, sent = make(total_steps=2)
-
-        first = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "상점이 열렸다", "thought": "골드 표시를 봤다"}
-        )
-        assert "1 step(s) left" in first
-
-        second = await tools["report_step"].ainvoke(
-            {"step": 2, "passed": False, "message": "골드가 줄지 않았다", "thought": "구매가 안 먹혔다"}
-        )
-        assert "last step" in second
-
-        assert [item.passed for item in state.step_results] == [True, False]
-        statuses = [frame for frame in sent if frame["type"] == MessageType.STATUS.value]
-        assert statuses[0]["payload"]["status"] == "COMPLETED"
-        assert statuses[1]["payload"]["status"] == "FAILED"
 
     asyncio.run(run())
 
@@ -1063,159 +971,6 @@ def test_the_issue_budget_stops_at_its_cap() -> None:
     asyncio.run(run())
 
 
-def test_a_failed_step_is_told_which_step_comes_next() -> None:
-    """A failure is where the loop stops on its own, so the way on is spelled out."""
-
-    async def run() -> None:
-        _, _, tools, _ = make(total_steps=3)
-
-        result = await tools["report_step"].ainvoke(
-            {
-                "step": 1,
-                "passed": False,
-                "message": "상점이 열리지 않았다",
-                "thought": "클릭했지만 화면이 그대로다",
-            }
-        )
-
-        assert "continue with step 2" in result
-        assert "not a reason to stop" in result
-
-    asyncio.run(run())
-
-
-def test_closing_over_unreported_steps_is_pushed_back_on_once() -> None:
-    """The steps never attempted are the ones the run was opened to find out about.
-
-    The push-back has to be a one-off: a game that has stopped answering must
-    still be able to close, so the second call closes whatever the state.
-    """
-
-    async def run() -> None:
-        _, state, tools, sent = make(total_steps=3)
-        await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "ok", "thought": "통과"}
-        )
-
-        pushback = await tools["finish_run"].ainvoke(
-            {"passed": True, "summary": "그만하겠다", "thought": "여기까지만 한다"}
-        )
-
-        assert not state.finished
-        assert "2, 3" in pushback
-        assert not [frame for frame in sent if frame["payload"].get("result")]
-
-        await tools["finish_run"].ainvoke(
-            {"passed": False, "summary": "진행 불가", "thought": "게임이 응답하지 않는다"}
-        )
-
-        assert state.finished
-        terminal = sent[-1]["payload"]
-        assert terminal["result"] == "FAILED"
-        assert terminal["summary"]["steps"]["failed"] == 2
-
-    asyncio.run(run())
-
-
-def test_finish_run_reports_the_tally() -> None:
-    async def run() -> None:
-        _, state, tools, sent = make(total_steps=2)
-        await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "ok", "thought": "통과"}
-        )
-        await tools["report_step"].ainvoke(
-            {"step": 2, "passed": False, "message": "no", "thought": "실패"}
-        )
-
-        await tools["finish_run"].ainvoke(
-            {"passed": False, "summary": "1/2 통과", "thought": "두 번째가 실패했다"}
-        )
-
-        assert state.finished
-        terminal = sent[-1]["payload"]
-        assert terminal["result"] == "FAILED"
-        assert terminal["summary"]["steps"]["passed"] == 1
-        assert terminal["summary"]["steps"]["failed"] == 1
-
-    asyncio.run(run())
-
-
-def test_two_tier_summary_case_verdict_is_its_verification_step() -> None:
-    """2단 판정: 모든 스텝에 성공/실패, TC 판정 = 그 구간 검증(마지막) 스텝 판정.
-
-    중간 스텝이 실패해도 검증 스텝이 통과하면 그 TC는 통과다 — 그리고 중간 실패는
-    steps에 그대로 남아 보인다(사용자 요구).
-    """
-
-    async def run() -> None:
-        # TC 12 = 스텝 1,2,3(3=검증). standalone 4. TC 20 = 스텝 5(검증).
-        step_meta = [(12, False), (12, False), (12, True), (None, False), (20, True)]
-        _, state, tools, sent = make(total_steps=5)
-        state.step_meta = step_meta
-        verdicts = [
-            (1, True, "did a1"),
-            (2, False, "a2 안됨"),   # 중간 실패
-            (3, True, "기대결과 나옴"),  # 검증 통과 → TC12 통과
-            (4, True, "did a4"),
-            (5, False, "기대결과 안나옴"),  # 검증 실패 → TC20 실패
-        ]
-        for step, passed, message in verdicts:
-            await tools["report_step"].ainvoke(
-                {"step": step, "passed": passed, "message": message, "thought": "t"}
-            )
-
-        await tools["finish_run"].ainvoke(
-            {"passed": False, "summary": "요약", "thought": "종합"}
-        )
-
-        summary = sent[-1]["payload"]["summary"]
-        # 모든 스텝이 보인다(중간 실패 포함).
-        assert summary["steps"]["total"] == 5
-        assert summary["steps"]["passed"] == 3
-        assert summary["steps"]["failed"] == 2
-        # TC 판정은 검증 스텝에서 파생.
-        cases = {c["case_id"]: c for c in summary["cases"]["items"]}
-        assert summary["cases"]["total"] == 2
-        assert cases[12]["passed"] is True   # 중간(2) 실패했지만 검증(3) 통과
-        assert cases[12]["steps"] == [1, 2, 3]
-        assert cases[12]["verify_step"] == 3
-        assert cases[20]["passed"] is False
-
-    asyncio.run(run())
-
-
-def test_verdict_tools_write_no_thought_row_of_their_own() -> None:
-    """판정 tool 들도 제 이유를 LOG 로 남기지 않는다(ARTEL-609).
-
-    report_step, finish_run, reply_to_operator 는 액션을 내지 않으므로, 종전에는 이
-    LOG 한 줄이 "왜 불렸나"를 말하는 유일한 자리였다. 지금은 러너가 호출마다 내는 TOOL
-    프레임이 그 자리를 맡고, 이 tool 들은 제 결과 프레임만 낸다.
-    """
-
-    async def run() -> None:
-        _, _, tools, sent = make(total_steps=1)
-
-        await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "상점이 열렸다", "thought": "화면이 바뀌었다"}
-        )
-        await tools["reply_to_operator"].ainvoke(
-            {"message": "상점까지 확인했습니다", "thought": "진행 상황을 묻길래 답한다"}
-        )
-        await tools["finish_run"].ainvoke(
-            {"passed": True, "summary": "전부 통과", "thought": "모든 단계가 통과했다"}
-        )
-
-        assert logs(sent) == []
-        # 판정 자체는 그대로 나간다. 사라진 것은 이유를 적던 LOG 줄뿐이다.
-        assert [frame["type"] for frame in sent] == [
-            MessageType.STATUS.value,
-            MessageType.CHAT.value,
-            MessageType.STATUS.value,
-        ]
-
-    asyncio.run(run())
-
-
 # --- what the model is handed, before any of it is called ---------------------
 
 
@@ -1269,8 +1024,8 @@ def test_the_agent_is_offered_exactly_these_tools() -> None:
         "resume_macro",
         "decline_macro_draft",
         "search_macros",
-        "wait_for_operator",
-        "report_step",
+        "ask_user",
+        "start_test_case", "report_test_case",
         "report_issue",
         "finish_run",
         "reply_to_operator",
@@ -1307,82 +1062,6 @@ def test_every_tool_takes_a_thought() -> None:
 
 
 # --- citations (ARTEL-294) ----------------------------------------------------
-
-
-def test_a_verdict_without_citations_still_goes_out() -> None:
-    """The default has to be a working call.
-
-    A model that never fills the field must produce exactly the run it produced
-    before the field existed — the metric is worth nothing if adding it changed
-    how runs behave.
-    """
-
-    async def run() -> None:
-        _, _, tools, sent = make(total_steps=1)
-
-        await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "상점이 열렸다", "thought": "화면이 바뀌었다"}
-        )
-
-        payload = [f for f in sent if f["type"] == MessageType.STATUS.value][0]["payload"]
-        assert payload["used_knowledge_ids"] == []
-        assert payload["rejected_knowledge_id_count"] == 0
-
-    asyncio.run(run())
-
-
-def test_a_verdict_carries_the_knowledge_it_rested_on() -> None:
-    async def run() -> None:
-        _, state, tools, sent = make(total_steps=1)
-        state.knowledge_seen["42"] = "점프는 스페이스바"
-
-        await tools["report_step"].ainvoke(
-            {
-                "step": 1,
-                "passed": True,
-                "message": "스페이스바로 점프했다",
-                "thought": "지식이 말한 조작이 맞았다",
-                "used_knowledge_ids": ["42"],
-            }
-        )
-
-        payload = [f for f in sent if f["type"] == MessageType.STATUS.value][0]["payload"]
-        assert payload["used_knowledge_ids"] == ["42"]
-        # 스텝 판정은 런을 끝내지 않는다. 인용이 그 규칙을 바꾸면 안 된다.
-        assert payload["result"] is None
-
-    asyncio.run(run())
-
-
-def test_an_id_this_run_never_saw_is_dropped_and_counted() -> None:
-    """The hallucinated-citation rate is itself a comparison between models.
-
-    Dropped in silence, a model that invents ids would score exactly like one
-    that does not — so the count rides on the frame and the agent is told.
-    """
-
-    async def run() -> None:
-        _, state, tools, sent = make(total_steps=1)
-        state.knowledge_seen["42"] = "본 것"
-
-        result = await tools["report_step"].ainvoke(
-            {
-                "step": 1,
-                "passed": True,
-                "message": "됐다",
-                "thought": "판정",
-                "used_knowledge_ids": ["42", "999", "없는-id"],
-            }
-        )
-
-        payload = [f for f in sent if f["type"] == MessageType.STATUS.value][0]["payload"]
-        assert payload["used_knowledge_ids"] == ["42"]
-        assert payload["rejected_knowledge_id_count"] == 2
-        # 판정 자체는 기록됐다는 것과, 무엇이 빠졌는지가 둘 다 모델에게 가야 한다.
-        assert "Recorded." in result
-        assert "not entries this run has been shown" in result
-
-    asyncio.run(run())
 
 
 def test_a_search_says_which_step_asked() -> None:
@@ -1589,26 +1268,6 @@ def _with_a_screen():
     return channel, state, tools, sent
 
 
-def test_판정_뒤_턴에도_화면이_있다() -> None:
-    """`report_step` 다음 턴이 다음 스텝을 정하는 자리다. 거기 화면이 없으면
-    에이전트가 눈감고 넘어간다.
-
-    종전에는 꼬리가 도구와 무관하게 매 턴 화면을 줘서 이 구멍이 없었다. ARTEL-621 이
-    그 꼬리를 없앤 것은 옳았지만 — 프롬프트 접두를 매 턴 깨뜨려 캐시를 못 쓰게 하고
-    있었다 — 도구 결과가 화면을 싣는지는 보지 않았다(ARTEL-635)."""
-
-    async def run() -> None:
-        _channel, _state, tools, _sent = _with_a_screen()
-
-        answered = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "확인함", "thought": "판정"}
-        )
-
-        assert "Card(Clone)[16]" in answered, answered
-
-    asyncio.run(run())
-
-
 def test_지식_검색은_화면을_안_들고_온다() -> None:
     """ARTEL-180 이 정한 것이고 그 논거가 지금도 산다 — 검색은 화면을 바꾸지 않으므로
     화면을 돌려주면 문맥을 다시 쓰는 일이다. 델타가 "마지막 행위 이후"라, 검색을 두 번
@@ -1697,188 +1356,6 @@ def test_화면은_한_번만_실린다() -> None:
     asyncio.run(run())
 
 
-def test_마지막_스텝_판정에_지식을_남기라고_말한다() -> None:
-    """도구는 있는데 안 쓴다 — 실측으로 83턴 런에서 `record_knowledge` 0회였다.
-
-    기록은 이번 런의 판정에 아무것도 안 보태므로 비용만 있는 행동이고, 무엇보다 적을 순간이
-    흐름 안에 없었다. 마지막 스텝을 판정한 자리가 그 순간이다 — 런 전체가 아직 앞에 있고
-    판정은 끝났다(ARTEL-667).
-    """
-
-    async def run() -> None:
-        _channel, _state, tools, _sent = make()
-
-        answered = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "확인함", "thought": "판정"}
-        )
-
-        assert "That was the last step" in answered, answered
-        assert "record_knowledge" in answered
-
-    asyncio.run(run())
-
-
-def test_이미_남긴_런에게는_무엇을_남겼는지_되짚게_한다() -> None:
-    """한 줄 적은 것과 그 런이 알아낸 것을 다 적은 것은 다르다(ARTEL-648).
-
-    ARTEL-667 의 문구는 아무것도 안 적은 런에만 붙었다. 이미 적은 런에게는 시키는 대신
-    지금까지 몇 개를 남겼는지 세어 주고 나머지를 되짚게 한다.
-    """
-
-    async def run() -> None:
-        _channel, state, tools, _sent = make()
-        state.knowledge_records_attempted = 1
-
-        answered = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "확인함", "thought": "판정"}
-        )
-
-        assert "That was the last step" in answered
-        assert "Knowledge recording attempts this run: 1" in answered, answered
-        assert "Check whether each one succeeded" in answered
-        assert "record_knowledge" in answered
-
-    asyncio.run(run())
-
-
-def test_실패한_스텝이_있는데_issue_가_없으면_그것을_짚는다() -> None:
-    """실측으로 83턴 런에서 `report_issue` 0회였다(ARTEL-648).
-
-    실패로 판정한 스텝이 있는데 issue 가 하나도 없으면 그 런은 무엇이 왜 실패했는지를
-    아무 데도 안 남긴 것이다. 묻는 근거는 그 실패한 스텝이고, 그것을 문구에 담아야
-    agent 가 무엇에 대해 답할지 안다.
-    """
-
-    async def run() -> None:
-        _channel, _state, tools, _sent = make()
-
-        answered = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": False, "message": "안 열렸다", "thought": "판정"}
-        )
-
-        assert "Steps judged failed this run: 1" in answered, answered
-        assert "Issue reports sent: none" in answered
-        assert "report_issue" in answered
-
-    asyncio.run(run())
-
-
-def test_실패한_스텝이_없으면_결함은_묻지_않는다() -> None:
-    """근거 없이 물으면 agent 가 무엇에 대해 답할지 모르고, 그래도 답하려고 아무거나
-    적으면 다음 런에 도움이 안 되는 줄만 쌓인다."""
-
-    async def run() -> None:
-        _channel, _state, tools, _sent = make()
-
-        answered = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "확인함", "thought": "판정"}
-        )
-
-        assert "That was the last step" in answered, answered
-        assert "report_issue" not in answered
-        assert "Steps judged failed" not in answered
-
-    asyncio.run(run())
-
-
-def test_이미_낸_issue_가_있어도_남은_실패를_되짚게_한다() -> None:
-    """실패한 스텝 수와 낸 issue 수를 나란히 세어 준다. 하나 냈다고 나머지 실패가
-    덮이지는 않는다."""
-
-    async def run() -> None:
-        _channel, state, tools, _sent = make()
-        state.issues_attempted = 1
-
-        answered = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": False, "message": "안 열렸다", "thought": "판정"}
-        )
-
-        assert "Steps judged failed this run: 1" in answered, answered
-        assert "Issue reports sent: 1" in answered
-        assert "report_issue" in answered
-
-    asyncio.run(run())
-
-
-def test_적을_것이_없다는_것도_답이라고_말한다() -> None:
-    """억지로 적게 만들면 지식창고가 다음 런에 도움이 안 되는 줄로 채워진다. 묻되
-    강요하지 않고, 런을 닫으라는 말은 그대로 남는다."""
-
-    async def run() -> None:
-        _channel, _state, tools, _sent = make()
-
-        answered = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": False, "message": "안 열렸다", "thought": "판정"}
-        )
-
-        assert "Nothing to write is an answer" in answered, answered
-        assert "call `finish_run` yourself" in answered
-
-    asyncio.run(run())
-
-
-def test_마지막_판정_후에도_agent_가_finish_run_을_부를_때까지_런이_살아_있다() -> None:
-    """Scenario report 는 판정이지 terminal signal 이 아니다(ARTEL-648).
-
-    마지막 판정 뒤에도 agent 가 issue 를 남길 수 있고, `finish_run` 이
-    `result` 를 실은 유일한 STATUS 여야 한다.
-    """
-
-    async def run() -> None:
-        _channel, state, tools, sent = make()
-
-        answered = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": False, "message": "안 열렸다", "thought": "판정"}
-        )
-
-        assert "does not close the run" in answered
-        assert not state.finished
-        assert not [frame for frame in sent if frame["payload"].get("result")]
-
-        await tools["report_issue"].ainvoke(
-            {
-                "step": 1,
-                "severity": "MAJOR",
-                "title": "상점이 열리지 않는다",
-                "expected": "상점이 열린다",
-                "actual": "버튼을 눌러도 화면이 그대로다",
-                "reproduction": ["상점 버튼을 누른다"],
-                "thought": "결함을 남긴다",
-            }
-        )
-
-        assert not state.finished
-        assert [frame for frame in sent if frame["type"] == MessageType.ISSUE.value]
-
-        await tools["finish_run"].ainvoke(
-            {"passed": False, "summary": "상점 스텝 실패", "thought": "종료"}
-        )
-
-        assert state.finished
-        terminal = [frame for frame in sent if frame["payload"].get("result")]
-        assert len(terminal) == 1
-        assert terminal[0]["payload"]["result"] == "FAILED"
-
-    asyncio.run(run())
-
-
-def test_중간_스텝에서는_말하지_않는다() -> None:
-    """말할 자리는 마지막 판정 하나다. 매 스텝마다 붙이면 표가 뜻을 잃는다."""
-
-    async def run() -> None:
-        _channel, _state, tools, _sent = make(total_steps=3)
-
-        answered = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": False, "message": "안 열렸다", "thought": "판정"}
-        )
-
-        assert "step(s) left" in answered, answered
-        assert "record_knowledge" not in answered
-        assert "report_issue" not in answered
-
-    asyncio.run(run())
-
-
 def test_current_scene_을_청하면_전량이_온다() -> None:
     """주소를 모르면 `inspect_object` 로도 못 묻는다. 실제 런에서 `Card(Clone)` 을 찍어서
     묻고 없다는 답을 받았다(ARTEL-673)."""
@@ -1912,4 +1389,105 @@ def test_current_scene_이_행위_경계를_안_옮긴다() -> None:
 
         assert state.last_action_frame == 99
 
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("verdict", ["PASSED", "FAILED", "INCONCLUSIVE"])
+def test_tc_outcomes_use_http_and_do_not_close_the_run(verdict):
+    async def run():
+        channel, state, tools, sent = make(total_steps=3)
+        await start_case(tools, 2)
+        result = await tools["report_test_case"].ainvoke({"case_id": 2, "verdict": verdict, "message": "관측", "thought": "판정"})
+        assert verdict in result
+        assert not state.finished and state.step_results == []
+        assert state.case_attempt_results[0].verdict == verdict
+        path, payload = channel.evaluation.requests[-1]
+        assert path.endswith('/report') and payload['verdict'] == verdict
+        assert not any(f['type'] in ('STATUS', 'ISSUE', 'LOG') for f in sent)
+    asyncio.run(run())
+
+
+def test_attempts_accumulate_and_summary_uses_latest_case_outcome():
+    async def run():
+        channel, state, tools, sent = make(total_steps=3)
+        for case_id, passed in [(1, False), (1, True), (2, False)]:
+            await start_case(tools, case_id)
+            await report_case(tools, case_id, passed)
+        await tools['finish_run'].ainvoke({'passed': False, 'summary': '검증 종료', 'thought': '끝'})
+        summary = sent[-1]['payload']['summary']
+        assert state.finished and len(summary['attempts']) == 3
+        assert len({r['attempt_id'] for r in summary['attempts']}) == 3
+        assert summary['cases']['passed'] == 1
+        assert summary['cases']['failed'] == 1
+        assert summary['cases']['untested'] == 1
+        assert summary['steps']['failed'] == 0
+    asyncio.run(run())
+
+
+def test_unreported_reference_steps_do_not_block_finish_or_become_failures():
+    async def run():
+        _, state, tools, sent = make(total_steps=3)
+        await tools['finish_run'].ainvoke({'passed': False, 'summary': '사용자 종료', 'thought': '종료'})
+        assert state.finished
+        assert sent[-1]['payload']['summary']['cases']['untested'] == 3
+        assert sent[-1]['payload']['summary']['steps']['failed'] == 0
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('citations,expected', [([], []), (['42'], ['42']), (['42', '42', '999'], ['42'])])
+def test_tc_citations_only_include_seen_unique_knowledge(citations, expected):
+    async def run():
+        channel, state, tools, sent = make()
+        state.knowledge_seen['42'] = '점프는 스페이스바'
+        await start_case(tools)
+        answer = await report_case(tools, used_knowledge_ids=citations)
+        assert channel.evaluation.requests[-1][1]['usedKnowledgeIds'] == expected
+        rejected = len(set(citations) - set(expected))
+        assert channel.evaluation.requests[-1][1]['rejectedKnowledgeIdCount'] == rejected
+        assert ('not entries this run has been shown' in answer) == bool(rejected)
+        assert not state.finished
+    asyncio.run(run())
+
+
+def test_tc_verdict_keeps_the_screen_and_operator_instructions():
+    async def run():
+        channel, _, tools, _ = make()
+        channel.on_pulse(reading(objects=[start_button()]))
+        await start_case(tools)
+        channel.on_chat({'payload': {'message': '천천히 확인해'}})
+        text = await report_case(tools)
+        assert '<<pulse>>' in text and text.count('<<pulse>>') == 1
+        assert '천천히 확인해' in text
+        assert 'record_knowledge' in text
+        assert 'TC와 무관한' in text
+    asyncio.run(run())
+
+
+def test_ask_user_appends_the_answer_to_standing_instructions():
+    async def run():
+        channel, _, tools, _ = make()
+        async def ask(question, cancelled):
+            assert question == '어디로 갈까요?' and not cancelled()
+            return '상점으로 이동해'
+        channel.evaluation.ask = ask
+        result = await tools['ask_user'].ainvoke({'question': '어디로 갈까요?', 'thought': '진행 질문'})
+        assert '상점으로 이동해' in result
+        assert channel.operator_instructions == ['상점으로 이동해']
+    asyncio.run(run())
+
+
+def test_ask_user_waits_until_answer_without_completing_run():
+    async def run():
+        channel, state, tools, _ = make()
+        ready, answer = asyncio.Event(), asyncio.Event()
+        async def ask(question, cancelled):
+            ready.set()
+            await answer.wait()
+            return '계속해'
+        channel.evaluation.ask = ask
+        task = asyncio.create_task(tools['ask_user'].ainvoke({'question': '진행?', 'thought': '질문'}))
+        await ready.wait()
+        assert not task.done() and not state.finished
+        answer.set()
+        assert '계속해' in await task
     asyncio.run(run())
