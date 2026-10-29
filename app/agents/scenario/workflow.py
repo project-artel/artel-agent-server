@@ -232,6 +232,15 @@ class ModifyPlan(BaseModel):
             " asks to convert: FREE (fill `case_ids`) or ORDERED (write full `steps`)."
         ),
     )
+    # 수정하며 필요해진 상태 변화를 만드는 TC 가 없고 사용자가 그 방법을 말했으면 TC 초안으로 낸다(묶기의 것과 같다).
+    # 없으면 스텝이 그 변화를 지어낸다 — "여관에서 저녁까지 쉰다" 를 근거 없는 스텝으로 적었다(MCP 확인, 2026-10-29).
+    proposed_cases: list[ProposedCase] = Field(
+        default_factory=list,
+        description=(
+            "TC drafts for a state change the edited journey needs that no listed case makes, when the user"
+            " said how it happens. Give each a ref of -1, -2, … and put the ref as the case_id of its step."
+        ),
+    )
     # **나누기의 나머지 절반.** 칸이 시나리오 하나뿐이던 동안 "2개로 나눠 줘" 는 한쪽만 남기고 다른
     # 쪽을 "새로 만들까요?" 로 되물었다 — 사용자가 이미 나누라고 한 것을 다시 물은 것이다.
     split_off: list["SplitPart"] = Field(
@@ -1156,13 +1165,14 @@ async def run_modify_workflow(
         return p.title or original.title
 
     def to_scenario(p: ModifyPlan) -> ScenarioPlan:
-        return ScenarioPlan(
+        # 초안을 가리키는 스텝은 저장 계약에 맞춘다 — 음수 case_id 는 오케가 없는 번호로 막는다.
+        return _detach_drafts(ScenarioPlan(
             scenario_id=p.scenario_id,
             title=p.title or original.title,
             description=p.description or original.description,
             steps=p.steps,
             execution_mode=p.execution_mode,
-        )
+        ), ko, {d.ref for d in p.proposed_cases if d.ref < 0}, known_case_ids)
 
     # 합치기에서 걷어낼 것들. 대상 자신과 모르는 번호는 뺀다 — 지우는 일에 유령 번호가
     # 닿으면 안 된다. 실제로 지울지는 오케가 한 번 더 센다.
@@ -1307,7 +1317,9 @@ async def run_modify_workflow(
             )]})
         # 남긴 이유는 저쪽 문장을 그대로 옮긴다 — 왜 못 지웠는지는 센 쪽만 안다.
         detail = "\n".join(part for part in (plan.detail.strip(), *answer.kept) if part)
-        return _answer(request, result, detail, _questions(plan.questions), changes=changes)
+        used = {step.proposed_case for step in to_scenario(plan).steps if step.proposed_case}
+        drafts = [draft for draft in plan.proposed_cases if draft.ref in used]
+        return _answer(request, result, detail, _questions(plan.questions), changes=changes, drafts=drafts)
     # 저장되지 않은 수정의 설명은 싣지 않는다 — 일어나지 않은 변경을 설명하게 된다.
     return _answer(
         request,

@@ -121,6 +121,10 @@ comes). Do this instead:
 3. A case right after it in the journey already checks that result. Then this is the way
    there.
 
+These three do not apply to **a state change the journey needs and no case makes** (above): "여관에서
+저녁까지 쉰다 → 밤이 된다" keeps going until night, but night is what the later case depends on and
+nothing else checks it — draft it, with the state as `expected`, and put its ref in the journey.
+
 **`detail` must match what you produced.** If a part of the request is covered only by a
 step and not checked by any case or draft, say it is played through but not checked. Never
 say you left something out when the journey includes it, or the reverse.
