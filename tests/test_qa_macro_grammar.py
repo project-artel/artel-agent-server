@@ -255,6 +255,7 @@ def test_the_macro_table_names_exactly_the_tools_a_macro_may_call() -> None:
             "get_errors",
             "get_performance",
             "capture_screen",
+            "load_skill",
             "compact_context",
             "search_knowledge",
             "record_knowledge",
