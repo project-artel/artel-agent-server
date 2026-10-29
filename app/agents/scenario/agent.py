@@ -164,6 +164,11 @@ def _previous_turn(request: ScenarioAgentRequest) -> PreviousTurn | None:
     return None
 
 
+def _asked(assistant: str) -> bool:
+    """직전 Agent 답이 사용자에게 무언가를 물었나. 대화 기록의 질문 줄은 `질문:` / `Question:` 으로 시작한다."""
+    return any(line.startswith(("질문:", "Question:")) for line in assistant.splitlines())
+
+
 def _hint(request: ScenarioAgentRequest) -> str:
     """라우터에게 주는 문맥 — 직전 턴(마지막 사용자·Agent 발화)을 **자르지 않고** (ARTEL-942).
 
@@ -247,6 +252,13 @@ class ScenarioAgent:
                 # "새 시나리오로 만들까요?" 를 되묻는다 — 실측(MCP 확인, 2026-10-29): 저작이 물은 게임 사실에
                 # 답했더니("처음부터 낮이에요") 그 답이 수정으로 가서 한 번 더 물었다. 만드는 갈래로 보낸다.
                 logger.info("[scenario] %s with no scenario to change — authoring instead", verdict.route.value)
+                verdict = verdict.model_copy(update={"route": Route.AUTHORING})
+            previous = _previous_turn(request)
+            if verdict.route is Route.ASK and previous is not None and _asked(previous.assistant):
+                # **방금 물은 것의 답이면 대상을 되묻지 않는다.** 저작이 "밤은 어떻게 되나요?" 라고 묻고 사용자가
+                # "여관에서 저녁까지 쉬면 밤이 돼요" 라고 답했는데 "고칠지 새로 만들지" 를 되물었다(MCP 확인,
+                # 2026-10-29). 만드는 갈래로 보낸다 — 대화를 보고 방금 쓴 시나리오를 이어 채운다. 덮어쓰지 않는 쪽이다.
+                logger.info("[scenario] ask right after our own question — authoring instead")
                 verdict = verdict.model_copy(update={"route": Route.AUTHORING})
             if verdict.route is Route.ASK:
                 # **되묻는다.** 결정 모델 라우터가 갈래와 대상이 어긋났다고 말한 자리다.

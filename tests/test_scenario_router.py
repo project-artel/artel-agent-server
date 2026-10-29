@@ -738,6 +738,30 @@ def test_modify_with_no_scenario_in_the_run_goes_to_authoring(monkeypatch) -> No
         assert out.message == "워크플로" and hit == {"authoring": True}
 
 
+def test_an_answer_to_our_own_question_is_not_asked_back(monkeypatch) -> None:
+    """방금 물은 것에 답했는데 라우터가 대상을 되물으면 만드는 갈래로 간다(실측: 밤이 되는 방법을 답했더니 되물었다)."""
+    import asyncio as aio
+    import app.agents.scenario.agent as agent_mod
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    hit = {}
+
+    async def fake_workflow(request, context, channel):
+        hit["authoring"] = True
+        from app.agents.scenario.schemas import ScenarioAgentResult
+        return ScenarioAgentResult(message="워크플로", scenarios=[])
+
+    monkeypatch.setattr(agent_mod, "run_authoring_workflow", fake_workflow)
+    agent = ScenarioAgent(agent_factory=_capturing_factory({}), router=_fixed_router(Route.ASK))
+    history = [HumanMessage(content="밤에 늑대한테 다가가 줘"), AIMessage(content="숲 입구까지 만들었어요.\n질문: 밤은 어떻게 되나요?")]
+    out = aio.run(agent.run(
+        _request(user_input="여관에서 쉬면 밤이 돼요", test_case_list=_case_list(),
+                 current_scenarios=[_saved_scenario()], history=history),
+        _CTX, _channel(),
+    ))
+    assert out.message == "워크플로" and hit == {"authoring": True}
+
+
 def test_modify_route_enters_the_edit_workflow(monkeypatch) -> None:
     """Step 3: MODIFY 는 이제 E 갈래로 간다 — 루프도, 끊김도 아니다."""
     import asyncio as aio
