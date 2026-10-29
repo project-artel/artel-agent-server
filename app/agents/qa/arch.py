@@ -425,7 +425,19 @@ from app.llm.models import LLMModel, get_model_spec
 # only because `arch.model_dump()` gained four keys (the v4 note above). The label moves anyway,
 # the v8 argument: the structure now has shapes a run must say it was or was not filed under, and
 # orchestration turns the axes on per run from the build's catalog.
-QA_ARCH_LABEL = "v27-game-functions"
+#
+# v29 because the model now reads how many exceptions the game logged and it has not looked at,
+# and can read them (ARTEL-1219). The SDK puts `errors` on `PULSE` and `ACTION_RESULT`
+# (ARTEL-1218); `QaRunChannel.game_errors` keeps them by `(type, message, stackHead)`. Every tool
+# answer that goes through `ToolContext.answer` ends with `unseen errors: N` while N is above 0,
+# and the new `get_errors` tool lists the unseen items and marks them seen, so an item read once
+# is not counted again however often it repeats. Putting the items themselves into every call was
+# rejected: gyemong logs two of its own exceptions during a scan, and the luna models filed false
+# alarms in 169 of 170 L1 runs. `get_errors` is in `ANY_PHASE`, since it is called after ACT and
+# before VERIFY. One tool joined the default set, so `arch_fingerprint` moves; the line in every
+# answer does not, which is the fourth item AGENTS.md names.
+# #262의 performed 계약 없이 이 단계의 QA 구조를 구분한다.
+QA_ARCH_LABEL = "v36-game-errors"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
