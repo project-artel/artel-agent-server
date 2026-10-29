@@ -46,3 +46,10 @@ Save a handoff so the next session can pick up without re-reading the conversati
 ## Blockers / Open Questions
 {or "None"}
 ```
+
+## Project Writing Style
+
+Before writing the result, follow [writing-style.md](../../docs/writing-style.md).
+Use its natural Korean prose and concrete-title rules while preserving required
+templates, paths, metadata, and machine-readable verdicts. Pass the same rules
+to any reviewer subagents invoked by this skill.

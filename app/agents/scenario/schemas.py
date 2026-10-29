@@ -5,7 +5,7 @@ from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.llm.default_model import resolve_default_model
-from app.llm.models import LLMModel
+from app.llm.models import LLMModel, ReasoningConfig
 
 
 class OutputLanguage(StrEnum):
@@ -99,6 +99,21 @@ class SceneExit(BaseModel):
     by: str | None = None
 
 
+class SceneEdge(BaseModel):
+    """One screen transition from the whole map, not tied to any case.
+
+    `SceneExit` above rides on a case, so a screen carrying no case never shows
+    its outgoing steps — and the model reads that absence as "no way there". This
+    is the same fact (where a screen leads, what to press; ``by`` empty means the
+    game moves on its own), sent once for the whole map, so the shape block can
+    fold it into routes between screens.
+    """
+
+    from_scene: str
+    to_scene: str
+    by: str | None = None
+
+
 class TestCaseListItem(BaseModel):
     """One TestCase as the session receives it, in the project's whole list.
 
@@ -159,6 +174,9 @@ class ScenarioAgentRequest(BaseModel):
     test_case_list: list[TestCaseListItem] = Field(default_factory=list)
     # Recent conversation, text-only, already windowed by the session layer.
     history: list[BaseMessage] = Field(default_factory=list)
+    # 세션 창 밖으로 밀려난 대화가 있는가(ARTEL-942). 잘라 낸 뒤의 `history` 만으로는 알 수 없고,
+    # 모델이 "원래 없던 말" 과 "밀려난 말" 을 가르려면 이것이 필요하다.
+    history_truncated: bool = False
     # Authoritative current draft (may contain the user's manual edits). Legacy;
     # run-scoped authoring uses `current_scenarios` below instead.
     draft: ScenarioDraft | None = None
@@ -166,6 +184,8 @@ class ScenarioAgentRequest(BaseModel):
     # existing scenario for edits by echoing its `scenario_id`. Empty for a fresh run.
     current_scenarios: list["ScenarioPlan"] = Field(default_factory=list)
     model: LLMModel = Field(default_factory=resolve_default_model)
+    # 이 턴의 추론 예산. 없으면 안 켠다 — 지금까지가 그랬다.
+    reasoning: ReasoningConfig | None = None
     # Locale for the natural-language output (message + scenario text).
     locale: OutputLanguage = DEFAULT_LANGUAGE
     # Which run this turn belongs to (ARTEL-650). Carried for one reason: the
@@ -173,6 +193,11 @@ class ScenarioAgentRequest(BaseModel):
     # the prompt the model saw plus its raw answer are the only two things that
     # never reach it. Without the id they cannot be filed with the rest.
     run_id: int | None = None
+    # 묶기·순서 검증(워크플로 B 미니 루프)이 오케 채점 창구를 부를 때 쓰는 스코프.
+    # 채점의 지도 읽기가 project + user 로 좁혀지므로 둘 다 있어야 한다. 없으면
+    # (구 배포가 안 보냄) 검증을 건너뛴다 — 턴은 그대로 진행된다.
+    project_id: int | None = None
+    app_user_id: int | None = None
     # Walkable flows, worked out by orchestration before the turn starts (ARTEL-658).
     #
     # Which cases belong in one scenario and in what order is what decides whether the
@@ -191,6 +216,21 @@ class ScenarioAgentRequest(BaseModel):
     # was used only inside orchestration's own calculation and never told to the
     # model. Absent means "not sent", which the shape block prints as such.
     entry_scene: str | None = None
+    # The whole map's screen transitions (flows-off experiment). Folded into
+    # screen-to-screen routes by the shape block, because per-case `exits` answer
+    # one step only and the model reads a missing second step as "no way there" —
+    # the same misreading the pair matrix used to correct, 1,126 cells of it.
+    # Empty from an older orchestration; the shape block then says nothing new.
+    scene_edges: list[SceneEdge] = Field(default_factory=list)
+    # Which router branch this request is already on (workflow Step 1). None means
+    # "not yet routed" — the agent routes once and re-enters with the branch set,
+    # so a re-entry (e.g. the slim question turn) is never routed twice.
+    current_route: str | None = None
+    # What every value starts as when the game boots (flows-off experiment).
+    # The flow calculation used to be the only holder of this fact; with flows
+    # off nothing carried it, and the model could not even tell whether the
+    # first case of a scenario is placeable.
+    starting_values: dict[str, str] = Field(default_factory=dict)
 
 
 class AuthoredFlow(BaseModel):
@@ -299,6 +339,33 @@ class ScenarioPlan(BaseModel):
     # 시나리오 본문 = 순서 있는 스텝 리스트. 검증 스텝은 `search_test_cases`로 찾은 TC의 id를
     # `case_id`로 단다. 빈 리스트는 `scenarios`가 비어있을 때만 정상(작성할 게 없는 턴).
     steps: list[AuthoredStep] = Field(default_factory=list)
+    # ORDERED 는 스텝 순서대로 실행하고, FREE 는 순서 없는 TC 묶음이라 QA agent 가 순서를 정한다.
+    # FREE 의 스텝은 TC 마다 하나(`action` 은 비고 `case_id` 만 있다)다.
+    #
+    # None 은 "말하지 않음" 이다. 제출에서는 새 시나리오면 ORDERED, `scenario_id` 가 있으면 저장된
+    # 모드를 그대로 둔다는 뜻이고, `current_scenarios` 로 받은 값에서는 ORDERED 로 읽는다 —
+    # 이 칸을 안 보내는 orchestration 의 시나리오는 전부 ORDERED 였다. 그렇게 읽는 곳이 [mode] 다.
+    execution_mode: Literal["ORDERED", "FREE"] | None = None
+
+    def mode(self) -> Literal["ORDERED", "FREE"]:
+        """비어 있으면 ORDERED 로 읽은 실행 모드."""
+        return self.execution_mode or "ORDERED"
+
+    def is_free(self) -> bool:
+        return self.mode() == "FREE"
+
+
+def free_steps(case_ids: list[int]) -> list[AuthoredStep]:
+    """FREE 시나리오의 스텝 — 중복을 뺀 case id 하나에 스텝 하나, 받은 순서대로.
+
+    모델에게 쓰게 하지 않는다. FREE 스텝에는 문장도 순서도 없어서 쓸 것이 없고, 모델이 쓰면
+    같은 TC 를 두 번 싣거나 `case_id` 없는 스텝을 섞어 orchestration 이 `invalid_free_scenario`
+    로 돌려보낸다.
+    """
+    return [
+        AuthoredStep(action="", case_id=case_id, step_source="CASE")
+        for case_id in dict.fromkeys(case_ids)
+    ]
 
 
 class ReviewedCases(BaseModel):
@@ -362,6 +429,49 @@ class ScenarioQuestion(BaseModel):
     allow_free_text: bool = True
 
 
+class ScenarioChange(BaseModel):
+    """이번 턴에 바뀐 시나리오 하나 (ARTEL-936). 화면이 결과 박스에 색으로 나눠 그린다."""
+
+    action: Literal["created", "updated", "removed"]
+    title: str
+    # 지운 것은 이제 없으므로 번호가 없을 수 있다. 있으면 화면이 그 시나리오로 잇는다.
+    scenario_id: int | None = None
+
+
+class AgentReply(BaseModel):
+    """한 턴의 답을 사람이 읽는 세 칸으로 (ARTEL-927, 질문 칸은 ARTEL-1116).
+
+    한 덩어리 글이던 답에서는 무엇을 했는지와 왜 그랬는지가 섞여, 사용자가 반박하거나
+    결정할 자리가 보이지 않았다. 세 번째 칸인 질문([asks])은 예전에 답과 따로 질문
+    메시지로 나갔다 — 화면이 그것을 모달로 받았다. 이제 대화를 기억하므로(ARTEL-942)
+    답 맨 아래에 함께 싣고, 사용자는 평범한 대화로 답한다.
+    """
+
+    # 코드가 센 한 줄. 몇 건을 생성·수정·삭제했는지(ARTEL-936) — 무엇이 바뀌었는지는 [changes].
+    result: str
+    # 판단한 모델의 말. 마크다운(문단·목록·표)이고, 모양은 읽기 쉬운 쪽으로 모델이 고른다.
+    detail: str = ""
+    # 바뀐 시나리오 목록(ARTEL-936). [result] 는 이것을 센 한 줄이다.
+    changes: list[ScenarioChange] = Field(default_factory=list)
+    # 사용자가 정할 것(ARTEL-1116). 비어 있으면 물을 것이 없는 턴이다. 선택지는 사용자의
+    # 말로 쓰여 있어, 화면은 누르면 입력 칸에 그 말을 채운다 — 답은 다음 대화로 온다.
+    asks: list[ScenarioQuestion] = Field(default_factory=list)
+
+
+class Ref(BaseModel):
+    """답 속 `[[tc:N]]`·`[[ts:N]]` 표식이 가리키는 것 (ARTEL-931).
+
+    번호는 표식 안에서 기계만 읽는다. 화면은 [label] 로 칩을 그리고, TC 칩을 누르면
+    [detail](사전조건·기대값)을 보여 준다 — TC 를 따로 볼 화면이 없어서다.
+    """
+
+    # tr · qa · issue · build 는 질문 답이 서비스 페이지로 보내는 표식이다(ARTEL-1097).
+    kind: Literal["tc", "ts", "tr", "qa", "issue", "build"]
+    id: int
+    label: str
+    detail: str | None = None
+
+
 class ScenarioAgentResult(BaseModel):
     message: str
     # The run goal, decomposed. Empty when no matching cases were found: the agent
@@ -373,11 +483,12 @@ class ScenarioAgentResult(BaseModel):
     # population to be exhaustive over. Orchestration reads None as "skip the check",
     # which is also the rollback path: stop emitting this and the checking stops.
     reviewed: ReviewedCases | None = None
-    # One thing to ask the user (ARTEL-487). None on an ordinary turn.
-    #
-    # **One at a time.** Two questions leave the user no way to say which one they
-    # answered, and the screen no way to route the reply.
-    question: ScenarioQuestion | None = None
+    # The answer split for the screen (ARTEL-927). None for a plain reply — a greeting,
+    # an off-topic decline, a failure — which stays `message` alone.
+    reply: AgentReply | None = None
+    # What every `[[tc:N]]`/`[[ts:N]]` marker in `reply` (its asks included) points at
+    # (ARTEL-931). Only markers that resolved are listed; the rest were removed.
+    refs: list[Ref] = Field(default_factory=list)
 
 
 # ScenarioAgentRequest references ScenarioPlan (defined after it) via a forward

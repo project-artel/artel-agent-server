@@ -2,6 +2,8 @@ import uuid
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
+from app.agents.scenario.router import JevScenarioRouter, ScenarioRouter
+from app.config import get_settings
 from app.agents import (
     DEFAULT_LANGUAGE,
     AgentContext,
@@ -12,15 +14,25 @@ from app.agents import (
     ScenarioDraft,
     ScenarioPlan,
     AuthoredFlow,
+    SceneEdge,
     TestCaseListItem,
 )
 from app.llm.default_model import resolve_default_model
-from app.llm.models import LLMModel
+from app.llm.models import LLMModel, ReasoningConfig
 from app.llm.usage import set_usage_scope
 from app.sessions.channel import ScenarioChannel
 from app.sessions.schemas import HistoryTurn, SessionRecord
 from app.sessions.store import SessionExpired, SessionStore
 
+
+def _build_router() -> ScenarioRouter | None:
+    """입구 라우터를 설정대로 짓는다. 안 켜면 `None` 이고 그때는 모든 입력이 종전 루프로 간다."""
+    settings = get_settings()
+    if not settings.scenario_router_enabled:
+        return None
+    if settings.scenario_router_engine == "jev":
+        return JevScenarioRouter()
+    return ScenarioRouter()
 
 class SessionService:
     def __init__(
@@ -30,7 +42,9 @@ class SessionService:
         history_max_turns: int = 10,
     ) -> None:
         self._store = store
-        self._agent = agent or ScenarioAgent()
+        self._agent = agent or ScenarioAgent(
+            router=_build_router(),
+        )
         # One turn == one user message + one assistant message.
         self._history_max_messages = history_max_turns * 2
 
@@ -42,11 +56,15 @@ class SessionService:
         test_case_list: list[TestCaseListItem] | None = None,
         flows: list[AuthoredFlow] | None = None,
         entry_scene: str | None = None,
+        scene_edges: list[SceneEdge] | None = None,
+        starting_values: dict[str, str] | None = None,
         model: LLMModel | None = None,
+        reasoning: ReasoningConfig | None = None,
         locale: OutputLanguage = DEFAULT_LANGUAGE,
         test_scenario_id: int | None = None,
         run_id: int | None = None,
         project_id: int | None = None,
+        app_user_id: int | None = None,
         current_scenarios: list[ScenarioPlan] | None = None,
     ) -> str:
         model = model or resolve_default_model()
@@ -57,12 +75,16 @@ class SessionService:
             test_case_list=test_case_list or [],
             flows=flows or [],
             entry_scene=entry_scene,
+            scene_edges=scene_edges or [],
+            starting_values=starting_values or {},
             pending_user_input=user_input,
             model=model,
+            reasoning=reasoning,
             locale=locale,
             test_scenario_id=test_scenario_id,
             run_id=run_id,
             project_id=project_id,
+            app_user_id=app_user_id,
             current_scenarios=current_scenarios or [],
         )
         await self._store.save(session_id, record)
@@ -150,12 +172,18 @@ class SessionService:
             test_case_list=record.test_case_list,
             flows=record.flows,
             entry_scene=record.entry_scene,
+            scene_edges=record.scene_edges,
+            starting_values=record.starting_values,
             history=self._replay_messages(record),
+            history_truncated=record.history_dropped > 0,
             draft=draft,
             current_scenarios=record.current_scenarios,
             model=record.model,
+            reasoning=record.reasoning,
             locale=record.locale,
             run_id=record.run_id,
+            project_id=record.project_id,
+            app_user_id=record.app_user_id,
         )
         result = await self._agent.run(
             request, AgentContext(session_id=session_id), channel
@@ -171,5 +199,6 @@ class SessionService:
             )
         )
         if len(record.history) > self._history_max_messages:
+            record.history_dropped += len(record.history) - self._history_max_messages
             record.history = record.history[-self._history_max_messages :]
         return result

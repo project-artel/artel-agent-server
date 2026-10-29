@@ -1,0 +1,132 @@
+"""macro 가 거절하거나 멈추는 자리의 코드와 예외 둘.
+
+거절이 두 층이다. 하나는 **저장 시점**이고, 그것이 `MacroRejection` 이다. 저장 때
+잡는 것이 런타임에 잡는 것보다 언제나 낫다 — 런타임에 걸리면 이미 게임에 나간 action
+은 되돌릴 수 없다. 다른 하나는 **실행 시점**이고 그것이 `MacroFailure` 다. 값은 돌 때
+도착하므로 저장 때 알 수 없는 것이 남는다.
+
+코드에 `MACRO_` 접두를 붙이지 않는다. `REQUIRE_FAILED` 이지
+`MACRO_REQUIRE_FAILED` 가 아니다. 저장 시점 거절 하나만 `MACRO_NODE_REJECTED` 이고,
+그것은 접두가 아니라 그 코드의 이름 전체다.
+"""
+
+from dataclasses import dataclass, field
+from typing import Any
+
+# 저장 시점 거절. parser 가 허용 node 목록에 없는 node 를 만났거나, 타입·이름·상한
+# 규칙을 어겼을 때. `register_macro` 는 이 코드로 거절하고 아무것도 등록하지 않는다.
+MACRO_NODE_REJECTED = "MACRO_NODE_REJECTED"
+
+# 조건이 거짓이었다. 게임이 다르게 동작한 것이고, agent 는 결함을 적을지 판단한다.
+REQUIRE_FAILED = "REQUIRE_FAILED"
+# 조건이 거짓인데 아직 아무 action 도 안 나갔다. 들어선 자리가 틀렸다는 말이다.
+SCENE_MISMATCH = "SCENE_MISMATCH"
+# 환경이나 호출이 틀렸다. step 을 실패로 적지 않는 코드다.
+ACTION_REJECTED = "ACTION_REJECTED"
+# macro 텍스트에 적힌 조회가 지금 아무것도 안 잡는다. 정의를 고칠 일이다.
+SELECTOR_NOT_FOUND = "SELECTOR_NOT_FOUND"
+# 같은 글자를 띄운 객체가 둘 이상이다. 서버가 임의로 하나를 고르지 않는다.
+SELECTOR_AMBIGUOUS = "SELECTOR_AMBIGUOUS"
+# 이 런에서 몇 statement 전에 푼 값이 그 사이에 죽었다. 다시 부르면 되는 일이고,
+# `SELECTOR_NOT_FOUND` 와 섞으면 agent 가 할 일이 뒤바뀐다.
+STALE_BINDING = "STALE_BINDING"
+# macro 가 물을 수 없는 것을 물었다. 게임이 틀린 것이 아니라 macro 정의가 틀린 것이라
+# `REQUIRE_FAILED` 와 같은 코드로 낼 수 없다 — 그렇게 내면 agent 가 macro 의 잘못을
+# 게임의 결함으로 적는다. step 을 실패로 적지 않는다.
+COMPARISON_REJECTED = "COMPARISON_REJECTED"
+
+# action 이 나갔는데 화면이 연달아 몇 번 그대로였다. 일곱 중에 맞는 것이 없어 새로
+# 둔다. `REQUIRE_FAILED` 는 저자가 적은 조건이 거짓이었다는 뜻인데 여기에는 적힌 조건이
+# 없고, `ACTION_REJECTED` 는 step 을 실패로 적지 않는 코드인데 멈춘 화면은 QA 가 찾는
+# 결함 그 자체일 수 있다. 어느 쪽인지는 agent 가 정한다.
+SCREEN_UNCHANGED = "SCREEN_UNCHANGED"
+# macro 가 도는 동안 operator 가 말을 걸었다. 게임의 잘못도 macro 의 잘못도 아니라
+# 둘 중 어느 코드로도 낼 수 없다. step 을 실패로 적지 않는다.
+OPERATOR_INTERRUPTED = "OPERATOR_INTERRUPTED"
+# 반복이 상한에 닿았다 — `while` 의 조건이 50 회째에도 참이었거나, `for` 가 돌 것이
+# 50 개를 넘었거나, macro 가 실행한 statement 가 1000 개를 넘었다. `REQUIRE_FAILED` 와
+# 가른다. 그쪽은 저자가 적은 조건이 거짓이었다는 말이고, 이쪽은 저자가 기다린 변화가
+# 정해진 회수 안에 안 왔다는 말이다. 게임이 안 바뀐 것인지 조건을 잘못 적은 것인지는
+# agent 가 정한다.
+LOOP_LIMIT = "LOOP_LIMIT"
+
+# `wait_until` 의 조건이 기다린 시간 안에 참이 되지 않았다. `REQUIRE_FAILED` 와 가른다.
+# 그쪽은 게임이 다르게 동작했다는 말이고, 이쪽은 게임이 그 상태로 **아직** 안 갔다는 말일
+# 수도 있다 — 기다린 시간이 짧았는지 게임이 멈췄는지를 agent 가 관측해서 가린다. payload 의
+# `readings` 가 0 이면 그동안 `pulse` 가 한 장도 안 온 것이라 조건이 틀린 것이 아니다.
+WAIT_TIMEOUT = "WAIT_TIMEOUT"
+
+# `decide` 나 `ask` 에서 Jev 가 답하지 못했다 — 네트워크 오류, API key 없음, 선택지에 없는
+# 답. 게임의 잘못도 macro 의 잘못도 아니라 step 을 실패로 적지 않는다. agent 에게 조용히
+# 넘기지 않고 멈추는 이유는, 넘기면 Jev 가 없는 런과 있는 런이 같은 결과로 보이기 때문이다.
+JEV_FAILED = "JEV_FAILED"
+
+# 산술식이나 숫자 `def` 의 `return` 에 도착한 값이 숫자가 아니다. `member`·`static`·
+# `observable`·`at_start` 는 모양을 값이 도착해야 알므로 저장 때 못 거른다.
+# `COMPARISON_REJECTED` 와 같은 이유로 macro 정의의 잘못이고, step 을 실패로 적지 않는다.
+ARITHMETIC_REJECTED = "ARITHMETIC_REJECTED"
+# `/` 의 오른쪽이 0 이었다. 값이 도착해야 알 수 있다. 0 이나 무한대로 바꿔 계속 가면 그 뒤의
+# 비교가 조용히 틀리므로 멈춘다.
+DIVIDED_BY_ZERO = "DIVIDED_BY_ZERO"
+# `at_start(...)` 의 값을 줄 수 없다 — host 가 step 시작 때의 `pulse` 를 들지 않거나(QA 런의
+# `run_macro` 가 그렇다), 그 object 나 member 가 step 이 시작될 때의 `pulse` 에 없었다.
+AT_START_UNAVAILABLE = "AT_START_UNAVAILABLE"
+
+RUNTIME_CODES = (
+    REQUIRE_FAILED,
+    SCENE_MISMATCH,
+    ACTION_REJECTED,
+    SELECTOR_NOT_FOUND,
+    SELECTOR_AMBIGUOUS,
+    STALE_BINDING,
+    COMPARISON_REJECTED,
+    SCREEN_UNCHANGED,
+    OPERATOR_INTERRUPTED,
+    WAIT_TIMEOUT,
+    JEV_FAILED,
+    ARITHMETIC_REJECTED,
+    DIVIDED_BY_ZERO,
+    AT_START_UNAVAILABLE,
+)
+
+
+class MacroRejection(Exception):
+    """저장 시점 거절. 받을 수 있는 것을 `reason` 이 이름으로 전부 대야 한다.
+
+    `line` 은 거절한 node 의 줄 번호다. 모델이 고칠 자리를 찾는 데 쓰이고, `ast` node
+    에 없으면 비운다.
+    """
+
+    code = MACRO_NODE_REJECTED
+
+    def __init__(self, reason: str, line: int | None = None) -> None:
+        self.reason = reason
+        self.line = line
+        super().__init__(reason if line is None else f"line {line}: {reason}")
+
+    def render(self) -> str:
+        """모델이 읽는 한 문단. 어느 줄이 문제였는지와 무엇을 고치면 되는지."""
+        where = "" if self.line is None else f" (line {self.line})"
+        return f"{self.code}{where} — {self.reason}"
+
+
+@dataclass
+class MacroFailure(Exception):
+    """실행 시점 멈춤. `code` 는 `RUNTIME_CODES` 중 하나다.
+
+    `payload` 는 그 코드가 기대·관측·되는 연산자 같은 것을 싣는 자리다. 코드마다 싣는
+    것이 달라 사전으로 둔다 — 코드마다 필드를 다 합친 하나의 모양을 만들면 어느
+    코드에서 어느 칸이 뜻을 갖는지 읽는 쪽이 모른다.
+
+    **key 하나가 두 타입을 갖지 않게 한다.** `observed` 는 사전이고 조건이 읽은 호출들이다.
+    `arrived` 는 문자열 하나이고 비교에 도착한 값이다. 종전에는 둘 다 `observed` 라
+    그리는 쪽이 문자열에 `.items()` 를 불렀고, `COMPARISON_REJECTED` 가 나는 순간
+    예외가 tool 밖으로 나가 **런이 통째로 죽었다.**
+    """
+
+    code: str
+    reason: str
+    payload: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        super().__init__(f"{self.code} — {self.reason}")

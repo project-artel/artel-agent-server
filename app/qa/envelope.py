@@ -10,7 +10,9 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_serializer
+
+from app.qa.game_functions import ActiveBehavior, UsedCheat
 
 
 class MessageType(StrEnum):
@@ -140,6 +142,23 @@ class MessageType(StrEnum):
     # 답인지는 payload 의 `type` 이 말한다. 저쪽은 제안에 대한 답(`SCREEN_SELECTOR_VERDICT`)
     # 에도 이 타입으로 답하므로, 그 `type` 을 확인하지 않으면 남의 답을 제 것으로 읽는다.
     SCREEN_SELECTOR_RESULT = "SCREEN_SELECTOR_RESULT"
+    # Orchestration -> Agent
+    #
+    # 새로 굳은 `screen` 행 하나에 이름을 지어 달라는 요청 (ARTEL-909). 답은
+    # [SCREEN_NAME] 이고 봉투의 `correlationId` 가 이 frame 의 `messageId` 다.
+    #
+    # [SCREEN_SELECTOR_PROPOSAL] 과 겸하지 않는다. 제안은 `(scene, selector)` 마다 평생
+    # 한 번만 나가서 대부분의 `screen` 은 제안 없이 생기고, 이름 짓기를 판정에 얹으면 그
+    # screen 들이 이름 없이 남는다 (ARTEL-908). 언제 물어볼지는 orchestration 이 정한다.
+    SCREEN_NAME_REQUEST = "SCREEN_NAME_REQUEST"
+    # Agent -> Orchestration
+    #
+    # [SCREEN_NAME_REQUEST] 하나에 대한 답 (ARTEL-909).
+    #
+    # QA agent 가 보내지 않는다. 판정과 같은 이유다 — 게임을 하고 있는 agent 를 세워
+    # 이름을 짓게 하면 기다리는 동안 게임이 흘러간다. 답하는 것은 QA 런 밖에서 도는 단발
+    # agent 다(`app/qa/screen_name.py`).
+    SCREEN_NAME = "SCREEN_NAME"
     # Agent -> Orchestration
     #
     # 이 런이 capability 하나에 대해 배운 것을 지도에 적는다 (ARTEL-644).
@@ -159,6 +178,46 @@ class MessageType(StrEnum):
     # `ERROR` 다 — 지식 쓰기(ARTEL-331)와 화면 판정 목록(ARTEL-657)이 이미 그 짝이라 이쪽에
     # 새로 나눠 볼 것이 생기지 않는다.
     CAPABILITY_WRITE_RESULT = "CAPABILITY_WRITE_RESULT"
+    # Agent -> Orchestration
+    #
+    # 등록된 macro 정의를 `content_map` 에 적고, 이름으로 다시 읽는다 (ARTEL-925).
+    #
+    # 철자와 payload 는 orchestration 의 `contentmap/macro/MacroWriteFrames.kt` 가 정한
+    # 것 그대로다. **여기서 지어내지 않는다** — PR 135 는 없는 frame 을 이 저장소가
+    # 정의했다가 통째로 닫혔다.
+    #
+    # 이 두 프레임이 macro 를 런 밖으로 내보내는 유일한 길이다. [MACRO_REGISTER] 가 없으면
+    # 등록된 macro 도 런이 끝나면 사라지고, [MACRO_READ] 가 없으면 지난 런이 등록한 것을
+    # 이번 런이 부를 수 없다.
+    MACRO_REGISTER = "MACRO_REGISTER"
+    MACRO_READ = "MACRO_READ"
+    # Orchestration -> Agent
+    #
+    # 위 둘의 답이고, 한 타입이 둘을 겸하지 않는다. 쓰기 답은 id 를 싣고 읽기 답은
+    # `source` 와 tree 를 실어 모양 자체가 다르다 — `KNOWLEDGE_WRITE_RESULT` 와
+    # `KNOWLEDGE_SEARCH_RESULT` 가 갈린 것과 같다.
+    #
+    # 거절은 둘 다 요청의 `correlationId` 를 문 `ERROR` 다.
+    MACRO_WRITE_RESULT = "MACRO_WRITE_RESULT"
+    MACRO_READ_RESULT = "MACRO_READ_RESULT"
+    # Agent -> Orchestration
+    #
+    # 이 build 의 `content_map` 에 등록된 macro 를 이름과 docstring 으로 찾는다
+    # (ARTEL-984). `KNOWLEDGE_SEARCH` 와 같은 왕복이고 범위는 `MACRO_READ` 와 같다.
+    # 계약은 `.plan/general/2026-10-13-macro-docstring-and-search.md` 의 `Contract` 절이다.
+    MACRO_SEARCH = "MACRO_SEARCH"
+    # Orchestration -> Agent
+    #
+    # [MACRO_SEARCH] 의 답. 범위 밖의 요청과 `content_map` 이 없는 런은 요청의
+    # `correlationId` 를 문 `ERROR` 를 받는다.
+    MACRO_SEARCH_RESULT = "MACRO_SEARCH_RESULT"
+    # Orchestration -> Agent
+    #
+    # 게임이 돌리던 behavior 하나가 끝났다(ARTEL-1054). orchestration 이 SDK frame 에서 `type` 만
+    # 빼고 payload 로 중계한다. 계약은 workspace 의
+    # `.plan/general/2026-10-14-game-functions-wire-contract.md` 다. 묻고 받는 답이 아니라서
+    # 풀어 줄 `future` 가 없고, 다음 tool 결과 끝에 붙는다.
+    BEHAVIOR_ENDED = "BEHAVIOR_ENDED"
     # Bidirectional
     ERROR = "ERROR"
     # Bidirectional. The operator talking to the Agent mid-run, and its reply.
@@ -332,7 +391,11 @@ class ActionResultItem(BaseModel):
     # What the action produced, for the actions that produce something. Absent on
     # every action that does not, which is why it cannot be required. `capture_screen`
     # puts the uploaded image's URL here; the bytes never travel over this socket.
-    returnValue: dict | None = None
+    #
+    # `Any` 인 이유: `invoke_cheat` 의 답이 handler 가 돌려준 값을 싣는다(ARTEL-1054). 계약은
+    # 지금 dict 만 적지만, 읽는 쪽이 dict 인지 보고 읽으면 다른 모양이 와도 frame 하나 때문에
+    # `ACTION_RESULT` 전체가 검증에서 떨어지지 않는다.
+    returnValue: Any | None = None
 
     @property
     def status(self) -> ActionItemStatus:
@@ -541,6 +604,22 @@ class LogPayload(BaseModel):
     category: LogCategory
     message: str
     step: int | None = None
+
+
+class ContextUsage(BaseModel):
+    used_tokens: int
+    max_tokens: int
+
+
+class ContextUsagePayload(LogPayload):
+    """A `LOG` line that also carries how full the model's context was on one call.
+
+    Rides on `LOG` rather than a new type: Orchestration rejects a type it does not
+    know, and it stores and relays a `LOG` payload whole. Screens find these lines by
+    the `context` key; every other `LOG` frame lacks it.
+    """
+
+    context: ContextUsage
 
 
 class ToolCallPayload(BaseModel):
@@ -995,6 +1074,55 @@ class ScreenSelectorResultPayload(BaseModel):
 
 
 
+# --- screen name frames (ARTEL-909 의 계약) ------------------------------------
+#
+# frame 둘이다. orchestration 이 새로 굳은 `screen` 하나를 들고 물어보고
+# (`SCREEN_NAME_REQUEST`), 이쪽이 이름 하나로 답한다(`SCREEN_NAME`). 그 사이에 왕복이
+# 더 없다.
+#
+# `screen` 과 `scene` 이 판정 frame 의 것과 **같은 모델**이다. 저쪽이 같은 철자로 싣기로
+# 정했고, 같은 값의 두 번째 모델을 두면 한쪽만 필드가 늘어도 아무도 모른다 — `SCREEN_SETTLED`
+# 가 [ScreenSelectorProposalPayload] 를 그대로 쓰는 것과 같은 판단이다.
+
+# 이름 길이 상한. 넘으면 버리고 이름 없이 답한다 (자르지 않는다 — 잘린 이름은 틀린 이름이고,
+# 이름 없는 `screen` 은 그냥 이름이 없을 뿐이다).
+MAX_SCREEN_NAME_LENGTH = 60
+
+
+class ScreenNameRequestPayload(BaseModel):
+    """`SCREEN_NAME_REQUEST` 의 payload. 이름을 물어보는 `screen` 하나.
+
+    `request_id` 가 답의 `correlation_id` 가 된다. 봉투의 `messageId` 와 같은 값이지만
+    payload 에도 싣는다 — 봉투를 안 보는 경로가 생겨도 답이 미아가 되지 않는다.
+
+    필드가 전부 기본값을 갖는다. 판정 frame 과 같은 이유다: 한 칸이 비었다고 frame 을
+    통째로 버리면 그 `screen` 은 영영 이름을 못 받는다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    request_id: str = ""
+    screen: ScreenSelectorScreenRef = Field(default_factory=ScreenSelectorScreenRef)
+    scene: ScreenSelectorSceneRef = Field(default_factory=ScreenSelectorSceneRef)
+
+
+class ScreenNamePayload(BaseModel):
+    """`SCREEN_NAME` 의 payload. 요청 하나에 대한 답이다 (ARTEL-909).
+
+    **`name` 이 `null` 인 답이 정상이다.** 모델이 형식을 어겼을 때도, 상한을 넘겼을 때도,
+    근거가 없어 못 지었을 때도 같은 모양으로 나간다. 이름은 표시값이라 없으면 `screen` 이
+    이름 없이 남을 뿐이고, 스키마를 채우려고 지어낸 이름은 사람이 content map 에서 그
+    화면을 계속 잘못 찾게 만든다.
+
+    `note` 는 한 문장이거나 `null` 이다. frame 이 `qa_log` 에 남으므로, 이름이 없는 답에서
+    이 문장이 "왜 이 `screen` 은 이름이 없나" 에 답하는 유일한 기록이다.
+    """
+
+    request_id: str
+    name: str | None = None
+    note: str | None = None
+
+
 # --- capability write frames (ARTEL-644 의 계약) -------------------------------
 #
 # 프레임 셋이 전부 여기 있다. 계약 원본은 orchestration 의
@@ -1115,6 +1243,178 @@ class CapabilityWriteResultPayload(BaseModel):
     created: bool = False
 
 
+# --- macro write frames (ARTEL-921 의 계약) ------------------------------------
+#
+# 계약 원본은 orchestration 의 `contentmap/macro/MacroWriteFrames.kt` 다. 그 저장소에
+# 산문 문서가 없다 — 그 KDoc 이 계약을 지고, payload 표는 PR 본문에 있다.
+#
+# id 는 전부 **JSON 문자열**이다. `screen.id` 를 싣는 `screens` 도 그렇다. 64비트 값이
+# JSON 숫자로 오가면 자바스크립트 소비자에서 정밀도가 깎인다 — 이 소켓의 다른 id 가 전부
+# 같은 이유로 문자열이다.
+
+
+class MacroRegisterPayload(BaseModel):
+    """`MACRO_REGISTER` 의 payload. 등록된 macro 정의 하나를 지도에 적는다.
+
+    `source` 가 원본이고 `definition` 이 파생이다. 둘 다 싣는 이유는
+    `app/agents/qa/macro/model.py` 가 적어 둔 것과 같다 — `ast.parse` 가 주석과 공백을
+    버리므로 tree 에서 텍스트를 다시 찍어내면 agent 가 적은 그대로가 아니고, tree 를 함께
+    적어 두는 것은 실행할 때마다 다시 파싱하지 않기 위해서다.
+
+    `definition` 만 `dict` 다. 저쪽은 이것을 `jsonb` 칸으로 그대로 넘기고 필드를 읽지
+    않으므로 passthrough 이고, 모양을 정하는 곳은 `MacroDefinition` 하나다. 다만 저쪽의
+    `ck_macro_require_carries_remedy` 와 `MacroDefinitionService` 가 `require` node 의
+    `kind` 와 `remedy` 두 key 에 기댄다 — `tests/test_qa_macro_model.py` 가 그 둘을
+    못박는다.
+
+    `parameters` 는 진입점 `def` 줄의 parameter 이름이고 **순서가 뜻을 가진다.**
+
+    `screens` 는 `screen.id` 문자열의 배열이고 **기존 관계에 더한다.** 저쪽은 이
+    build 의 `content_map` 에 없는 id 를 거절하므로 `scene` 이름을 실으면 안 된다.
+    비어 있는 것은 정상이고 "아직 어디서 쓸지 모른다" 는 뜻이다.
+    """
+
+    name: str
+    source: str
+    definition: dict[str, Any]
+    parameters: list[str] = Field(default_factory=list)
+    screens: list[str] = Field(default_factory=list)
+    # 진입점 `def` 의 docstring, `inspect.cleandoc` 로 정리한 것. 없으면 `None` 이다.
+    # orchestration 은 Python 을 파싱하지 않으므로 summary 와 검색에 쓸 글을 여기서 따로
+    # 싣는다. 이 칸을 모르는 orchestration 은 모르는 field 를 무시한다.
+    docstring: str | None = None
+
+
+class MacroReadPayload(BaseModel):
+    """`MACRO_READ` 의 payload. 이름 하나로 조회한다.
+
+    찾는 범위는 이 build 의 `content_map` 안이다. 같은 이름이 다른 build 에 있어도 그것은
+    이 게임에서 돌지 않으므로 안 돌아온다.
+    """
+
+    name: str
+
+
+class MacroWriteResultPayload(BaseModel):
+    """`MACRO_WRITE_RESULT` 의 payload. `MACRO_REGISTER` 의 답이다.
+
+    `type` 은 무엇의 답인가다. 확인하지 않으면 남의 답으로 tool 을 풀어 준다 —
+    `CapabilityWriteResultPayload` 와 같은 검사이고 같은 이유다.
+
+    `created` 는 행을 **새로** 넣었을 때만 true 다. 같은 이름을 다시 등록한 갱신이면
+    false 이고, 그것을 모델에게 말해 주지 않으면 방금 새 macro 를 만들었다고 읽는다.
+
+    `screen_ids` 는 관계를 더한 **뒤의** 상태다. 이번에 보낸 것만이 아니라 이 macro 에
+    달린 `screen` 전부다.
+
+    전부 기본값이 있다. 필드를 하나 더한 orchestration 이 기다리는 tool 을 풀지 못하게
+    만들면 안 된다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str = ""
+    macro_id: str = ""
+    name: str = ""
+    created: bool = False
+    screen_ids: list[str] = Field(default_factory=list)
+
+
+class MacroReadResultPayload(BaseModel):
+    """`MACRO_READ_RESULT` 의 payload. 저장된 정의 하나가 돌아온다.
+
+    `source` 가 이 payload 에서 실제로 쓰이는 칸이다. 이쪽은 그것을 다시 파싱해
+    `MacroDefinition` 을 만든다 — `definition` tree 를 그대로 모델로 읽지 않는 이유는
+    `app/agents/qa/macro/model.py` 가 정의를 만드는 길을
+    `macro_definition_from_source` 하나로 못박았기 때문이고, 다시 파싱하면 그 사이에
+    좁아진 허용 목록도 실행 전에 걸린다.
+
+    전부 기본값이 있다. 이유는 `MacroWriteResultPayload` 와 같다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str = ""
+    macro_id: str = ""
+    name: str = ""
+    source: str = ""
+    definition: dict[str, Any] = Field(default_factory=dict)
+    parameters: list[str] = Field(default_factory=list)
+    screen_ids: list[str] = Field(default_factory=list)
+    # 저장된 `docstring` 칸. 이쪽은 `source` 를 다시 파싱해 docstring 을 얻으므로 이 칸은
+    # 읽지 않고, 저쪽이 보내는 모양을 적어 둔다.
+    docstring: str | None = None
+
+
+class MacroSearchPayload(BaseModel):
+    """`MACRO_SEARCH` 의 payload. 이 build 의 등록된 macro 를 글로 찾는다 (ARTEL-984).
+
+    범위는 보내지 않는다. 저쪽이 `MACRO_READ` 와 같은 방법으로 런에서 `content_map` 을
+    찾는다. `limit` 은 1 에서 10, `query` 는 비어 있지 않고 500자 이하 — tool 이 보내기 전에
+    확인한다. `step` 은 로그용이고 결과를 바꾸지 않는다.
+    """
+
+    query: str
+    limit: int
+    step: int | None = None
+
+
+class _MacroSearchPart(BaseModel):
+    """`MACRO_SEARCH_RESULT` 안의 객체가 공유하는 설정.
+
+    이 소켓의 payload 는 snake_case 이고 scene context 응답은 camelCase 다. 계약 문서는
+    `matchedBy` · `screenId` 처럼 camelCase 로 적었으므로 두 철자를 모두 받는다 — 한쪽
+    철자만 받으면 저쪽이 어느 쪽으로 보내든 field 하나가 조용히 기본값이 된다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+
+class MacroSearchParameter(_MacroSearchPart):
+    name: str = ""
+    type: str = ""
+
+
+class MacroSearchScreen(_MacroSearchPart):
+    screen_id: str = Field(
+        default="", validation_alias=AliasChoices("screen_id", "screenId")
+    )
+    scene_name: str = Field(
+        default="", validation_alias=AliasChoices("scene_name", "sceneName")
+    )
+
+
+class MacroSearchItem(_MacroSearchPart):
+    """찾은 macro 하나. `parameters` 와 `screens` 는 scene context `macros[]` 와 같은 모양이다.
+
+    `score` 는 reciprocal rank fusion 점수라 순서만 뜻이 있다. 모델에게 보여 주지 않는다.
+    """
+
+    name: str = ""
+    parameters: list[MacroSearchParameter] = Field(default_factory=list)
+    docstring: str | None = None
+    screens: list[MacroSearchScreen] = Field(default_factory=list)
+    matched_by: list[str] = Field(
+        default_factory=list, validation_alias=AliasChoices("matched_by", "matchedBy")
+    )
+    score: float = 0.0
+
+
+class MacroSearchResultPayload(_MacroSearchPart):
+    """`MACRO_SEARCH_RESULT` 의 payload. 좋은 것이 먼저이고 최대 `limit` 개다.
+
+    `vector_available` 이 false 면 query embedding 이 실패해 keyword 일치만 담겼다.
+    기본값이 true 인 이유는 이 칸을 빠뜨린 답을 "similarity 검색이 실패했다" 로 읽지 않기
+    위해서다. 빈 `items` 는 정상 답이다.
+    """
+
+    items: list[MacroSearchItem] = Field(default_factory=list)
+    vector_available: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("vector_available", "vectorAvailable"),
+    )
+
+
 class StatusPayload(BaseModel):
     status: StepStatus
     # Always present: null for per-step frames, PASSED|FAILED only on the
@@ -1145,6 +1445,19 @@ class StatusPayload(BaseModel):
     # itself a comparison between models — discarded in silence, that signal is
     # gone, and a model that invents ids scores exactly like one that does not.
     rejected_knowledge_id_count: int = 0
+    # 이 step 에서 쓴 cheat 와 판정할 때 돌던 behavior (ARTEL-1054). 모델이 아니라 agent-server 가
+    # 채운다. `None` 이면 frame 에서 key 를 뺀다 — 축이 꺼진 run 의 `STATUS` 는 이 두 필드가
+    # 생기기 전과 같은 key 를 싣는다.
+    used_cheats: list[UsedCheat] | None = None
+    active_behaviors: list[ActiveBehavior] | None = None
+
+    @model_serializer(mode="wrap")
+    def _drop_unset_function_fields(self, handler):
+        data = handler(self)
+        for key in ("used_cheats", "active_behaviors"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
 
 
 class IssueSeverity(StrEnum):
@@ -1192,6 +1505,11 @@ class ErrorPayload(BaseModel):
     code: str
     retryable: bool = False
     detail: dict | None = None
+    # run 이 예외로 멈췄을 때만 채운다. 클래스 이름과 `module:function:line` 뿐이고
+    # 예외 메시지와 파일 경로는 싣지 않는다(`app/qa/failure_site.py`).
+    # wire 이름은 camelCase 다 — `outbound_envelope` 가 alias 로 내보낸다.
+    exception_type: str | None = Field(default=None, serialization_alias="exceptionType")
+    frames: list[str] | None = None
 
 
 def outbound_envelope(
@@ -1213,5 +1531,5 @@ def outbound_envelope(
         "correlationId": correlation_id,
         "sequence": sequence,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "payload": payload.model_dump(),
+        "payload": payload.model_dump(by_alias=True),
     }

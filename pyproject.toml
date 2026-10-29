@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "artel-agent-server"
 version = "0.1.0"
 description = "AI agent operation server backend"
+license = {text = "AGPL-3.0-only"}
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -20,6 +21,9 @@ dependencies = [
     "langchain-core>=0.3.0",
     "langchain-openai>=0.2.0",
     "langchain-aws>=0.2.0",
+    # The floor is the version `app/llm/claude_api.py` was checked against: its
+    # `thinking`, `output_config` and `with_structured_output(method="json_schema")`.
+    "langchain-anthropic>=1.7.6,<2",
     "pdfplumber>=0.11.0",
     "pydantic-settings>=2.7.0",
     "redis>=5.0.0",
@@ -40,7 +44,9 @@ dev = [
 packages = ["app"]
 
 [tool.setuptools.package-data]
-"app.prompts" = ["**/*.md"]
+# `.json` 은 판본 디렉터리의 자료 파일이다(`scenario_router/v7/criteria.json`).
+# 빠뜨리면 런타임 휠에서 **조용히 사라지고** 라우터가 기동 때 터진다.
+"app.prompts" = ["**/*.md", "**/*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

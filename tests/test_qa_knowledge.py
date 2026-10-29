@@ -16,6 +16,7 @@ one path here that loses knowledge outright, and it has its own section below.
 """
 
 import asyncio
+from collections.abc import Callable
 
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -33,23 +34,57 @@ from app.agents.qa.knowledge import (
     render_hit,
 )
 from app.agents.qa.runner import QaRunner
+from app.qa.run_config import resolve_run_config
+from app.agents.qa.arch import PhaseCycleMode, QaArchSpec, default_resolved_arch
 from app.agents.qa.tools import QaRunState, build_tools
 from app.qa.schemas import QaCaseRef, QaScenario, QaStep
-from app.qa.channel import QaRunChannel
+from app.qa.channel import KNOWLEDGE_SEARCH_TIMEOUT_SECONDS, QaRunChannel
 from app.qa.envelope import KnowledgeSearchHit, LogCategory, MessageType
 from app.qa.scene import SCENE_VIEW_START_PREFIX
 
 
-def make(timeout: float = 0.05):
-    """A channel whose knowledge search times out fast unless a test answers it."""
+# phase gate 를 끈다. 이 파일은 tool 하나하나가 무엇을 하는지 보는 자리이고, gate 는 그 위층
+# 이다. 기본값이 무엇인지는 `tests/test_qa_arch.py` 가 지킨다.
+_NO_PHASE_GATE = default_resolved_arch().model_copy(
+    update={"phase_cycle": PhaseCycleMode.off}
+)
+
+
+def _run_config_without_the_gate():
+    """같은 것을 런 전체에 대해. `build_tools` 가 아니라 `QaRunner` 가 받는 자리다."""
+    return resolve_run_config(arch=QaArchSpec(phase_cycle=PhaseCycleMode.off))
+
+def make(
+    timeout: float = 0.05,
+    search_timeout: float = KNOWLEDGE_SEARCH_TIMEOUT_SECONDS,
+    on_send: Callable[[QaRunChannel, dict], None] | None = None,
+):
+    """A channel whose actions and writes time out fast unless a test answers them.
+
+    검색은 기본값 그대로 기다린다. 검색에 답하는 테스트는 답을 별도 task 로 보내므로,
+    짧게 줄이면 그 답과 `timeout` 이 경주한다. 아무도 답하지 않는 검색을 재는 테스트만
+    `search_timeout` 을 줄인다.
+
+    `on_send` 는 frame 이 나가는 그 자리에서 동기로 불린다. 요청이 `_pending` 에 올라간
+    뒤이고 `timeout` 이 돌기 전이므로, 거기서 넣은 답은 그 요청이 아직 떠 있을 때 도착한다는
+    것이 순서로 보장된다.
+    """
     sent: list[dict] = []
 
     async def send(frame: dict) -> None:
         sent.append(frame)
+        if on_send is not None:
+            on_send(channel, frame)
 
-    channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=timeout, write_timeout=timeout)
+    channel = QaRunChannel(
+        qa_try_id=7,
+        send=send,
+        action_timeout=timeout,
+        write_timeout=timeout,
+        search_timeout=search_timeout,
+    )
     state = QaRunState(total_steps=1)
-    tools = {tool.name: tool for tool in build_tools(channel, state)}
+    tools = {tool.name: tool for tool in build_tools(channel, state, arch=_NO_PHASE_GATE)}
     return channel, state, tools, sent
 
 
@@ -77,7 +112,7 @@ def make_with_undeliverable(*types: MessageType):
 
     channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=0.05, write_timeout=0.05)
     state = QaRunState(total_steps=1)
-    tools = {tool.name: tool for tool in build_tools(channel, state)}
+    tools = {tool.name: tool for tool in build_tools(channel, state, arch=_NO_PHASE_GATE)}
     return channel, state, tools, sent
 
 
@@ -374,18 +409,15 @@ def test_an_empty_result_is_answered_as_an_answer() -> None:
     asyncio.run(run())
 
 
-def test_a_search_nobody_answers_gives_up_and_says_what_to_do(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_search_nobody_answers_gives_up_and_says_what_to_do() -> None:
     """The run must not sit on a knowledge lookup; nothing answers here at all.
 
     The timeout is shortened rather than waited out — what is under test is what
     the agent is told afterwards, not how long the wait is.
     """
-    monkeypatch.setattr("app.qa.channel.KNOWLEDGE_SEARCH_TIMEOUT_SECONDS", 0.01)
 
     async def run() -> None:
-        _, _, tools, _ = make()
+        _, _, tools, _ = make(search_timeout=0.01)
 
         result = await tools["search_knowledge"].ainvoke(
             {"step": 1, "thought": "확인", "query": "구매 규칙"}
@@ -476,22 +508,26 @@ def test_an_unknown_tag_costs_neither_a_round_trip_nor_a_search() -> None:
     asyncio.run(run())
 
 
-def test_a_reply_to_a_foreign_request_does_not_resolve_this_search(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_reply_to_a_foreign_request_does_not_resolve_this_search() -> None:
     """A reply that arrives after its own search gave up must not be handed to
     whatever asked next — the agent would read one question's answer as another's."""
-    monkeypatch.setattr("app.qa.channel.KNOWLEDGE_SEARCH_TIMEOUT_SECONDS", 0.05)
+
+    def reply_to_someone_else(channel: QaRunChannel, frame: dict) -> None:
+        # 이 검색이 나가는 그 자리에서 남의 답을 넣는다. 검색이 떠 있는 동안 도착한다는
+        # 것이 `timeout` 길이가 아니라 순서로 정해진다.
+        if frame["type"] != MessageType.KNOWLEDGE_SEARCH.value:
+            return
+        channel.on_knowledge_search_result(
+            {
+                "type": MessageType.KNOWLEDGE_SEARCH_RESULT.value,
+                "correlationId": "a-request-we-already-gave-up-on",
+                "payload": {"query": "q", "model": "e5", "results": [hit()]},
+            }
+        )
 
     async def run() -> None:
-        channel, _, tools, sent = make()
+        _, _, tools, _ = make(search_timeout=0.05, on_send=reply_to_someone_else)
 
-        answer(
-            channel,
-            sent,
-            {"query": "q", "model": "e5", "results": [hit()]},
-            correlation="a-request-we-already-gave-up-on",
-        )
         result = await tools["search_knowledge"].ainvoke(
             {"step": 1, "thought": "확인", "query": "구매 규칙"}
         )
@@ -508,7 +544,7 @@ def test_a_reply_to_a_foreign_request_does_not_resolve_this_search(
 def test_a_search_neither_touches_the_game_nor_returns_a_scene() -> None:
     """The regression this tool was most likely to cause.
 
-    Every acting tool answers with the scene it produced, and `fold_stale_scenes`
+    Every acting tool answers with the scene it produced, and `fold_context`
     exists because those views pile up. A search changes no screen, so returning
     one would re-spend the context that fold was written to save — and it would
     also cost a game round trip for a picture the agent already has.
@@ -561,7 +597,7 @@ def test_the_description_says_when_not_to_use_it() -> None:
     _, _, tools, _ = make()
     description = tools["search_knowledge"].description
 
-    assert "Do NOT" in description
+    assert "Not for what is on screen" in description
     assert "observe_scene" in description
 
 
@@ -1044,27 +1080,28 @@ def test_a_late_write_answer_does_not_resolve_the_next_request() -> None:
     across kinds rather than within each one.
     """
 
+    stale: list[str] = []
+
+    def answer_the_abandoned_write(channel: QaRunChannel, frame: dict) -> None:
+        # 버려진 쓰기의 답이 검색이 떠 있는 동안 도착한다. 검색 frame 이 나가는 그 자리에서
+        # 넣으므로 검색의 `timeout` 이 먼저 끝날 수 없다.
+        if frame["type"] != MessageType.KNOWLEDGE_SEARCH.value:
+            return
+        channel.on_knowledge_write_result(
+            {
+                "type": MessageType.KNOWLEDGE_WRITE_RESULT.value,
+                "correlationId": stale[0],
+                "payload": {"type": "KNOWLEDGE_CREATE", "knowledge_id": "77"},
+            }
+        )
+
     async def run() -> None:
-        channel, _, tools, sent = make()
+        _, _, tools, sent = make(search_timeout=0.05, on_send=answer_the_abandoned_write)
 
+        # 쓰기가 제 `timeout` 으로 끝난 것을 먼저 기다린다. 늦은 답은 그 뒤에만 나간다.
         await asyncio.wait_for(record(tools), timeout=1.0)
-        stale = creates(sent)[-1]["messageId"]
+        stale.append(creates(sent)[-1]["messageId"])
 
-        async def late() -> None:
-            # The abandoned write's answer arrives while a search is in flight.
-            for _ in range(50):
-                if searches(sent):
-                    break
-                await asyncio.sleep(0)
-            channel.on_knowledge_write_result(
-                {
-                    "type": MessageType.KNOWLEDGE_WRITE_RESULT.value,
-                    "correlationId": stale,
-                    "payload": {"type": "KNOWLEDGE_CREATE", "knowledge_id": "77"},
-                }
-            )
-
-        asyncio.create_task(late())
         result = await tools["search_knowledge"].ainvoke(
             {"step": 2, "thought": "확인한다", "query": "골드"}
         )
@@ -1578,7 +1615,7 @@ def test_a_successful_record_closes_the_outstanding_deletion() -> None:
 
 def test_a_write_neither_touches_the_game_nor_returns_a_scene() -> None:
     """The same regression `search_knowledge` had to avoid. Neither write changes
-    a screen, so returning one would re-spend the context `fold_stale_scenes` was
+    a screen, so returning one would re-spend the context `fold_context` was
     written to save, and cost a game round trip for a picture already in hand."""
 
     async def run() -> None:
@@ -1640,7 +1677,7 @@ def test_the_record_description_draws_the_line_it_has_to_draw() -> None:
     for name in KNOWLEDGE_TAGS:
         assert name in description
     # This run's own state is not knowledge.
-    assert "500 gold" in description
+    assert "this run's state" in description
     # A bug is reported, not recorded.
     assert "report_step" in description
 
@@ -1653,16 +1690,22 @@ def test_the_forget_description_sets_the_bar_high_and_points_at_the_repair() -> 
 
     assert str(MAX_FORGETS_PER_RUN) in description
     # One contradiction is more often a bug than stale documentation.
-    assert "ONE contradiction is not enough" in description
+    assert "One contradiction is more often a bug" in description
     assert "report_step" in description
     # Correcting is `update_knowledge`, not a deletion.
-    assert "Do NOT delete in order to correct" in description
     assert "update_knowledge" in description
-    # The delete-then-record route is still described, as the safety net it now is.
-    assert "record_knowledge" in description
-    assert "IMMEDIATELY" in description
+    # The long form of the same bar, and the delete-then-record safety net, live
+    # in the knowledge_base skill; the description points at it by name.
+    assert "knowledge_base skill" in description
     # And deleting is only possible for what the run has read.
-    assert "search_knowledge" in description
+    assert "search hit" in description
+
+    from app.prompts import load_skill
+
+    skill = load_skill("knowledge_base", "v19").body
+    assert "the bar is high" in skill
+    assert "Do not delete in order to correct" in skill
+    assert "call `record_knowledge` immediately afterwards" in skill
 
 
 def test_the_update_description_draws_the_line_against_forget_and_against_a_bug() -> None:
@@ -1677,12 +1720,11 @@ def test_the_update_description_draws_the_line_against_forget_and_against_a_bug(
     for name in KNOWLEDGE_TAGS:
         assert name in description
     # Correct versus delete.
-    assert "forget_knowledge" in description
-    assert "keeps its id" in description
+    assert "keeping its id" in description
     # A disagreement may be a bug, and a bug is reported.
     assert "report_step" in description
     # Partial updates, and the id rule.
-    assert "Send only what changes" in description
+    assert "Send only the fields that change" in description
     assert "search_knowledge" in description
 
 
@@ -1827,7 +1869,9 @@ def test_a_run_searches_knowledge_and_carries_on_to_its_verdict(
             }
         )
 
-    channel = QaRunChannel(qa_try_id=1, send=send)
+    # `observe_scene` 은 액션을 안 보내므로 이 가짜 게임에서는 `pulse` 가 오지 않는다. 그
+    # 대기는 이 테스트가 재는 것이 아니므로 짧게 준다.
+    channel = QaRunChannel(qa_try_id=1, send=send, reading_wait=0.05)
     state = QaRunState(total_steps=1)
     scenario = QaScenario(
         title="구매 실패 확인",
@@ -1841,7 +1885,10 @@ def test_a_run_searches_knowledge_and_carries_on_to_its_verdict(
         ],
     )
 
-    asyncio.run(QaRunner().run(channel, scenario, state))
+    # 대본의 tool 순서는 phase 축이 생기기 전에 쓰였다 — 이 런들은 지식을 판정보다
+    # 먼저 적는데, gate 는 `UPDATE_MEMORY` 를 `VERIFY` 뒤에 둔다. 여기서 보는 것은
+    # 지식 tool 과 런 loop 이므로 gate 를 끄고 본다.
+    asyncio.run(QaRunner(_run_config_without_the_gate()).run(channel, scenario, state))
 
     assert state.finished
     assert len(searches(sent)) == 1
@@ -1980,7 +2027,9 @@ def test_a_run_corrects_an_entry_by_deleting_it_and_recording_the_new_one(
                 }
             )
 
-    channel = QaRunChannel(qa_try_id=1, send=send)
+    # 쓰기에는 아무도 답하지 않는다 — 이 테스트가 정한 상황이다. 그 `timeout` 을 운영값대로
+    # 기다리면 쓰기 하나에 5초가 들고, 답 없는 쓰기가 무엇을 돌려주는지는 같다.
+    channel = QaRunChannel(qa_try_id=1, send=send, write_timeout=0.05)
     state = QaRunState(total_steps=1)
     scenario = QaScenario(
         title="구매 규칙 확인",
@@ -1994,7 +2043,10 @@ def test_a_run_corrects_an_entry_by_deleting_it_and_recording_the_new_one(
         ],
     )
 
-    asyncio.run(QaRunner().run(channel, scenario, state))
+    # 대본의 tool 순서는 phase 축이 생기기 전에 쓰였다 — 이 런들은 지식을 판정보다
+    # 먼저 적는데, gate 는 `UPDATE_MEMORY` 를 `VERIFY` 뒤에 둔다. 여기서 보는 것은
+    # 지식 tool 과 런 loop 이므로 gate 를 끄고 본다.
+    asyncio.run(QaRunner(_run_config_without_the_gate()).run(channel, scenario, state))
 
     assert state.finished
     assert deletes(sent)[0]["payload"] == {"knowledge_id": "41"}
@@ -2102,7 +2154,9 @@ def test_a_run_corrects_an_entry_in_place_with_the_update_tool(
                 }
             )
 
-    channel = QaRunChannel(qa_try_id=1, send=send)
+    # 쓰기에는 아무도 답하지 않는다 — 이 테스트가 정한 상황이다. 그 `timeout` 을 운영값대로
+    # 기다리면 쓰기 하나에 5초가 들고, 답 없는 쓰기가 무엇을 돌려주는지는 같다.
+    channel = QaRunChannel(qa_try_id=1, send=send, write_timeout=0.05)
     state = QaRunState(total_steps=1)
     scenario = QaScenario(
         title="구매 규칙 확인",
@@ -2116,7 +2170,10 @@ def test_a_run_corrects_an_entry_in_place_with_the_update_tool(
         ],
     )
 
-    asyncio.run(QaRunner().run(channel, scenario, state))
+    # 대본의 tool 순서는 phase 축이 생기기 전에 쓰였다 — 이 런들은 지식을 판정보다
+    # 먼저 적는데, gate 는 `UPDATE_MEMORY` 를 `VERIFY` 뒤에 둔다. 여기서 보는 것은
+    # 지식 tool 과 런 loop 이므로 gate 를 끄고 본다.
+    asyncio.run(QaRunner(_run_config_without_the_gate()).run(channel, scenario, state))
 
     assert state.finished
     # One frame, naming the entry that already existed. Nothing was deleted and

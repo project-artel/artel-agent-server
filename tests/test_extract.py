@@ -81,7 +81,9 @@ def _failing_agent() -> GameContextAgent:
     def boom(_i):
         raise OutputParserException("bad json")
 
-    return GameContextAgent(structured_factory=lambda model: RunnableLambda(boom))
+    return GameContextAgent(
+        structured_factory=lambda model: RunnableLambda(boom), retry_backoff=False
+    )
 
 
 def _app_with_service(service: ExtractionService) -> FastAPI:

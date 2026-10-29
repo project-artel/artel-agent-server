@@ -88,7 +88,7 @@ def test_agent_retries_a_parse_failure_then_succeeds() -> None:
         return KnowledgeQueries(queries=["골드 없으면?"])
 
     agent = KnowledgeQueryAgent(
-        structured_factory=lambda model: RunnableLambda(flaky)
+        structured_factory=lambda model: RunnableLambda(flaky), retry_backoff=False
     )
 
     out = asyncio.run(agent.run(_request(), _CTX))
@@ -98,15 +98,24 @@ def test_agent_retries_a_parse_failure_then_succeeds() -> None:
 
 
 def test_agent_raises_after_exhausting_retries() -> None:
+    calls = {"n": 0}
+
     def always_fail(_inputs):
+        calls["n"] += 1
         raise OutputParserException("still bad")
 
     agent = KnowledgeQueryAgent(
-        structured_factory=lambda model: RunnableLambda(always_fail)
+        structured_factory=lambda model: RunnableLambda(always_fail), retry_backoff=False
     )
 
     with pytest.raises(KnowledgeQueryGenerationError):
         asyncio.run(agent.run(_request(), _CTX))
+    assert calls["n"] == 5
+
+
+def test_the_production_agent_waits_between_retries() -> None:
+    # `app/main.py` 가 세우는 모양 그대로다. 테스트가 끄는 backoff 가 운영에서는 켜져 있다.
+    assert KnowledgeQueryAgent().retry_backoff is True
 
 
 def test_run_batch_calls_the_model_once_per_item_and_keeps_ids_attached() -> None:

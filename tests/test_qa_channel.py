@@ -12,13 +12,21 @@ from app.qa.channel import (
 from app.qa.envelope import JsonRpcAction, MessageType
 
 
-def make_channel(timeout: float = 30.0) -> tuple[QaRunChannel, list[dict]]:
+def make_channel(
+    timeout: float = 30.0, reading_wait: float = READING_WAIT_SECONDS
+) -> tuple[QaRunChannel, list[dict]]:
     sent: list[dict] = []
 
     async def send(frame: dict) -> None:
         sent.append(frame)
 
-    channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=timeout, write_timeout=timeout)
+    channel = QaRunChannel(
+        qa_try_id=7,
+        send=send,
+        action_timeout=timeout,
+        write_timeout=timeout,
+        reading_wait=reading_wait,
+    )
     return channel, sent
 
 
@@ -97,7 +105,9 @@ def test_looking_reports_false_when_nothing_has_ever_arrived() -> None:
     """
 
     async def run() -> None:
-        channel, sent = make_channel(timeout=0.05)
+        # 빈손으로 끝나는 길이 재는 것이고, 그 길이는 아니다. 운영값의 상한에서 풀리는지는
+        # `test_a_still_screen_is_not_the_game_failing_to_answer` 가 잰다.
+        channel, sent = make_channel(timeout=0.05, reading_wait=0.05)
         assert await channel.look(0.0) is False
         assert sent == [], "빈손이어도 묻지는 않는다"
 
@@ -363,6 +373,98 @@ def test_operator_messages_are_appended_to_a_tool_result() -> None:
     merged = with_operator_messages("scene: Lobby", ["메뉴로 가"])
     assert "scene: Lobby" in merged
     assert "메뉴로 가" in merged
+
+
+def test_wait_for_reading_returns_on_a_new_pulse() -> None:
+    async def run() -> None:
+        channel, sent = make_channel()
+        waiting = asyncio.create_task(channel.wait_for_reading(30.0))
+        await asyncio.sleep(0)
+        channel.on_pulse(pulse_frame())
+
+        assert await asyncio.wait_for(waiting, 0.5) == 1
+        assert sent == []
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("already_pending", [False, True])
+def test_wait_for_reading_returns_on_operator_message_without_draining(
+    already_pending: bool,
+) -> None:
+    async def run() -> None:
+        channel, _ = make_channel()
+        if already_pending:
+            channel.on_chat({"payload": {"message": "천천히"}})
+        waiting = asyncio.create_task(channel.wait_for_reading(30.0))
+        await asyncio.sleep(0)
+        if not already_pending:
+            channel.on_chat({"payload": {"message": "천천히"}})
+
+        assert await asyncio.wait_for(waiting, 0.5) == 0
+        assert channel.pending_operator_messages() == ("천천히",)
+        assert channel.drain_operator_messages() == ["천천히"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("already_cancelled", [False, True])
+def test_wait_for_reading_raises_when_cancelled(already_cancelled: bool) -> None:
+    async def run() -> None:
+        channel, _ = make_channel()
+        if already_cancelled:
+            channel.on_cancel()
+        waiting = asyncio.create_task(channel.wait_for_reading(30.0))
+        await asyncio.sleep(0)
+        if not already_cancelled:
+            channel.on_cancel()
+
+        with pytest.raises(QaCancelled):
+            await asyncio.wait_for(waiting, 0.5)
+
+    asyncio.run(run())
+
+
+def test_wait_for_reading_counts_every_pulse_that_arrived_before_it_woke() -> None:
+    # 대기 task 가 돌기 전에 둘이 도착하면 한 번 깨어나도 둘이다.
+    async def run() -> None:
+        channel, _ = make_channel()
+        waiting = asyncio.create_task(channel.wait_for_reading(30.0))
+        await asyncio.sleep(0)
+        channel.on_pulse(pulse_frame(reading=1))
+        channel.on_pulse(pulse_frame(reading=2))
+
+        assert await asyncio.wait_for(waiting, 0.5) == 2
+
+    asyncio.run(run())
+
+
+def test_wait_for_reading_ignores_a_pulse_that_arrived_before_the_call() -> None:
+    async def run() -> None:
+        channel, _ = make_channel()
+        channel.on_pulse(pulse_frame())
+        assert await channel.wait_for_reading(0.01) == 0
+
+    asyncio.run(run())
+
+
+def test_wait_for_reading_times_out_without_a_pulse() -> None:
+    async def run() -> None:
+        channel, _ = make_channel()
+        assert await channel.wait_for_reading(0.01) == 0
+
+    asyncio.run(run())
+
+
+def test_pending_operator_messages_copies_without_draining() -> None:
+    channel, _ = make_channel()
+    channel.on_chat({"payload": {"message": "천천히"}})
+    copied = channel.pending_operator_messages()
+    channel.on_chat({"payload": {"message": "메뉴로 가"}})
+
+    assert copied == ("천천히",)
+    assert channel.pending_operator_messages() == ("천천히", "메뉴로 가")
+    assert channel.drain_operator_messages() == ["천천히", "메뉴로 가"]
 
 
 # --- 판독이 흐를 때의 도착 판정 (ARTEL-516) ---------------------------------

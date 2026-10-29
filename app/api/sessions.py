@@ -14,10 +14,12 @@ from app.agents import (
     ScenarioGenerationError,
     ScenarioPlan,
     AuthoredFlow,
+    SceneEdge,
     TestCaseListItem,
 )
+from app.llm.catalog import ModelCatalogUnavailableError
 from app.llm.default_model import resolve_default_model
-from app.llm.models import LLMModel
+from app.llm.models import EnabledLLMModel, ReasoningConfig, validate_reasoning
 from app.sessions.channel import ScenarioChannel
 from app.sessions.service import SessionService
 from app.sessions.store import SessionExpired
@@ -40,8 +42,16 @@ class OpenSessionRequest(BaseModel):
     flows: list[AuthoredFlow] = Field(default_factory=list)
     # Which screen the game boots into (ARTEL-670). Empty from an older orchestration.
     entry_scene: str | None = None
+    # The whole map's screen transitions and boot values (flows-off experiment).
+    # Empty from an older orchestration; the shape block then adds nothing.
+    scene_edges: list[SceneEdge] = Field(default_factory=list)
+    starting_values: dict[str, str] = Field(default_factory=dict)
     user_input: str
-    model: LLMModel = Field(default_factory=resolve_default_model)
+    # 관리자가 끈 모델은 422 로 거절한다(`EnabledLLMModel`).
+    model: EnabledLLMModel = Field(default_factory=resolve_default_model)
+    # 추론 예산. 안 보내면 안 켠다 — 지금까지의 저작이 그랬다. 모델이 그 설정을 못 받으면
+    # `validate_reasoning` 이 거절한다(조용히 낮추지 않는다, QA 런과 같은 규칙이다).
+    reasoning: ReasoningConfig | None = None
     # Applies to the whole session, including the first turn (run from the stored
     # pending input when the WS connects), so it must be set here, not only on the
     # per-turn message below.
@@ -54,6 +64,8 @@ class OpenSessionRequest(BaseModel):
     # pre-run-scope callers keep working.
     run_id: int | None = None
     project_id: int | None = None
+    # 세션을 연 사용자 — 묶기·순서 검증(B 미니 루프)의 지도 읽기 스코프. 안 오면 검증을 건너뛴다.
+    app_user_id: int | None = None
     # The run's current scenarios at open (ARTEL-206 Step 6); lets the agent edit
     # existing scenarios by echoing their `scenario_id`. Empty for a fresh run.
     current_scenarios: list[ScenarioPlan] = Field(default_factory=list)
@@ -71,7 +83,8 @@ class TurnMessage(BaseModel):
     type: str = "turn"
     user_input: str
     draft: ScenarioDraft | None = None
-    model: LLMModel | None = None
+    # 턴 도중 모델을 바꾸는 값도 사용자가 고른 것이라 꺼진 모델을 거절한다.
+    model: EnabledLLMModel | None = None
     # Optional mid-session locale switch; None keeps the session's locale.
     locale: OutputLanguage | None = None
     # The run's current scenarios at this turn (ARTEL-206 Step 6), refreshed by
@@ -94,6 +107,13 @@ def _result_event(result: ScenarioAgentResult) -> dict:
     # rollback path — not an empty object, which would read as "reviewed nothing".
     if result.reviewed is not None:
         event["reviewed"] = result.reviewed.model_dump(by_alias=True)
+    # Same rule for the split answer (ARTEL-927): absent on a plain reply, so the
+    # receiving side keeps reading `message` alone exactly as before. Questions ride
+    # inside it as `reply.asks` (ARTEL-1116) — no separate `questions` key any more.
+    if result.reply is not None:
+        event["reply"] = result.reply.model_dump()
+    if result.refs:
+        event["refs"] = [ref.model_dump() for ref in result.refs]
     return event
 
 
@@ -106,18 +126,25 @@ async def open_session(
     payload: OpenSessionRequest,
     request: Request,
 ) -> OpenSessionResponse:
+    # **못 켜는 모델이면 열 때 거절한다.** 이 검사는 `build_chat_model` 도 하지만 그것은
+    # 턴 도중이라, 사용자는 세션이 열린 뒤에야 실패를 본다. QA 런과 같은 자리로 당긴다.
+    validate_reasoning(payload.model, payload.reasoning)
     session_id = await _service(request.app).open(
         unity_context=payload.unity_context,
         game_context=payload.game_context,
         test_case_list=payload.test_case_list,
         flows=payload.flows,
         entry_scene=payload.entry_scene,
+        scene_edges=payload.scene_edges,
+        starting_values=payload.starting_values,
         user_input=payload.user_input,
         model=payload.model,
+        reasoning=payload.reasoning,
         locale=payload.locale,
         test_scenario_id=payload.test_scenario_id,
         run_id=payload.run_id,
         project_id=payload.project_id,
+        app_user_id=payload.app_user_id,
         current_scenarios=payload.current_scenarios,
     )
     return OpenSessionResponse(session_id=session_id)
@@ -143,9 +170,10 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
     send `test_case_search` frames and needs their `test_case_search_result`
     answers back on the same socket. So each turn runs as its own task and this
     coroutine keeps reading, routing inbound frames — search replies to the
-    channel, `close` to teardown, a `turn` arriving mid-turn back as a busy
-    error. This mirrors `app/api/qa_sessions.py`'s dispatch, with a persistent
-    receive so a frame is never lost to a cancellation when a turn completes.
+    channel, `close` to teardown, `cancel` to end the turn without the session
+    (ARTEL-954), a `turn` arriving mid-turn back as a busy error. This mirrors
+    `app/api/qa_sessions.py`'s dispatch, with a persistent receive so a frame is
+    never lost to a cancellation when a turn completes.
     """
     service = _service(websocket.app)
     await websocket.accept()
@@ -238,6 +266,32 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 await send({"type": "closed"})
                 break
 
+            if kind == "cancel":
+                # **턴만 끊는다 — 세션은 살아 있다**(ARTEL-954). `close` 와 따로 두는 이유가 이것
+                # 하나다: 저쪽은 기다림을 그만두려는 것이지 대화를 끝내려는 것이 아니다. `close`
+                # 로 대신하면 Redis 의 세션이 지워져 다음 말이 새 세션을 열고, 그 대화는 앞엣것을
+                # 모른다.
+                #
+                # 이미 넘어간 것은 되돌리지 않는다. 이 턴이 `submit_scenario` 로 넘긴 시나리오는
+                # 저쪽에 저장돼 있고, 여기서 지울 방법도 지울 이유도 없다 — 사용자가 멈춘 것은
+                # 남은 작업이지 끝난 작업이 아니다.
+                #
+                # 끊긴 턴은 `history` 에 남지 않는다. `service.run_turn` 이 모델 호출을 지난 뒤에
+                # 적고 저장하므로, 중간에 끊기면 사용자 말도 답도 안 적힌다 — 하지 않은 답을
+                # 적어 두면 다음 턴이 그것을 지난 대화로 읽는다.
+                if current is not None and not current.done():
+                    current.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await current
+                    current = None
+                    await send({"type": "cancelled", "was_running": True})
+                else:
+                    # 한가하거나, **방금 끝났다.** 뒤엣것은 결과가 이미 손에 있다는 뜻이라
+                    # 여기서 버리지 않는다 — 다음 바퀴가 드레인해 평소대로 내보낸다. 사용자에게
+                    # 무엇을 보일지는 저쪽이 정한다(취소를 먼저 말했으면 그 결과를 버린다).
+                    await send({"type": "cancelled", "was_running": False})
+                continue
+
             if kind == "turn":
                 if current is not None:
                     # One turn at a time: a second while one is in flight would
@@ -250,6 +304,9 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                     turn = TurnMessage.model_validate(raw)
                 except ValidationError as error:
                     await send(_error_event("bad_request", str(error)))
+                    continue
+                except ModelCatalogUnavailableError as error:
+                    await send(_error_event("model_catalog_unavailable", str(error)))
                     continue
                 current = asyncio.create_task(
                     service.run_turn(

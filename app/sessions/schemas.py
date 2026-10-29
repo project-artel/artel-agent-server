@@ -7,10 +7,11 @@ from app.agents import (
     OutputLanguage,
     ScenarioPlan,
     AuthoredFlow,
+    SceneEdge,
     TestCaseListItem,
 )
 from app.llm.default_model import resolve_default_model
-from app.llm.models import LLMModel
+from app.llm.models import LLMModel, ReasoningConfig
 
 
 class HistoryTurn(BaseModel):
@@ -36,11 +37,19 @@ class SessionRecord(BaseModel):
     # The screen the game boots into (ARTEL-670). Frozen with the rest — it is one
     # more thing the same map read already knows.
     entry_scene: str | None = None
+    # The whole map's screen transitions and the values the game boots with
+    # (flows-off experiment). Frozen with the rest — same map read, same reason.
+    scene_edges: list[SceneEdge] = Field(default_factory=list)
+    starting_values: dict[str, str] = Field(default_factory=dict)
     # Full conversation turns; windowed for prompt reconstruction by the service.
     history: list[HistoryTurn] = Field(default_factory=list)
+    # 창을 넘어 잘라 낸 메시지 수(ARTEL-942). 0 이 아니면 이 세션의 앞 대화가 기억에 없다.
+    history_dropped: int = 0
     # First user input, consumed when the WS connects to run the first turn.
     pending_user_input: str | None = None
     model: LLMModel = Field(default_factory=resolve_default_model)
+    # 이 세션의 추론 예산(ARTEL 실험). 모델과 같은 자리에 둔다 — 세션 내내 안 바뀐다.
+    reasoning: ReasoningConfig | None = None
     # Output locale for generated scenarios. Default keeps records saved
     # before this field was introduced deserializing as Korean.
     locale: OutputLanguage = DEFAULT_LANGUAGE
@@ -54,6 +63,8 @@ class SessionRecord(BaseModel):
     # scope (and existing tests) omit them.
     run_id: int | None = None
     project_id: int | None = None
+    # 세션을 연 사용자 — 묶기·순서 검증(B 미니 루프)의 지도 읽기 스코프.
+    app_user_id: int | None = None
     # The run's current scenarios (ARTEL-206 Step 6), refreshed every turn by the
     # orchestration server. Fed to the agent so it can target existing scenarios
     # for edits (echoing `scenario_id`). Default empty keeps older records valid.

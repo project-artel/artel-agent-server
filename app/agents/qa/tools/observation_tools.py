@@ -8,28 +8,11 @@ from typing import Any
 
 from langchain_core.tools import BaseTool, tool
 
-from app.agents.qa.tools.state import PendingCapture
+from app.agents.qa.arch import ScreenCaptureMode
+from app.agents.qa.tools.state import capture_from_action_result
 from app.agents.qa.tools.tool_context import ToolContext
+from app.prompts import load_tool_description
 from app.qa.envelope import JsonRpcAction, LogCategory
-
-
-# The one description written out here rather than left as a docstring, because
-# it has to name the cap and a docstring cannot interpolate one. An agent told
-# only "screenshots are limited" spends them at the first opportunity; the number
-# is what makes the budget something it can actually ration.
-CAPTURE_SCREEN_DESCRIPTION = """Look at the actual picture on screen, not just the scene text.
-
-Use this when the step is about how something *looks*: a layout that may be
-broken, a button that may be covered by other UI, a sprite in the wrong state,
-text that may be unreadable. The scene listing cannot express any of that.
-
-Leave `target_id` out for the whole screen. Give one to see just that element's
-area, at higher detail.
-
-You get {limit} screenshots for the whole run and no more, so spend them on the
-steps where looking is what decides the verdict.
-
-The picture arrives right after this result, as its own message."""
 
 
 def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
@@ -37,26 +20,10 @@ def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
     channel, state = ctx.channel, ctx.state
     _answer = ctx.answer
 
-    @tool
+    @tool(description=load_tool_description("observe_scene").body)
     async def observe_scene(
         step: int, thought: str, wait_seconds: float = 0.0, current_scene: bool = False
     ) -> str:
-        """Look at the game screen. Returns what changed since your last look.
-
-        Use `wait_seconds` when the screen needs time first — a loading screen, an
-        animation, a countdown. Always look before acting.
-
-        `current_scene` asks for the whole scene instead: every object being held
-        and every value known, with `(changed)` on the ones that moved since your
-        last look. Reach for it when the ordinary view cannot answer you — when a
-        value you need has not moved since it was last shown, or when you want to
-        act on something the view has not been printing and so have no address
-        for. It is several times the size of the ordinary view, so ask for it
-        when you need it, not every turn.
-
-        `step` is the scenario step you are working on and `thought` is why you
-        are looking; both go on the timeline.
-        """
         arrived = await channel.look(wait_seconds)
         messages = channel.drain_operator_messages()
         if not arrived:
@@ -82,18 +49,8 @@ def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
         state.watermark = channel.scene.updates
         return _answer(view, messages, screen=False)
 
-    @tool
+    @tool(description=load_tool_description("inspect_object").body)
     async def inspect_object(step: int, selector: str, thought: str) -> str:
-        """Read every value the game holds on one object.
-
-        The scene block shows what CHANGED and what you can ACT ON. It does not
-        list every value, because most of them do not move and a screen with a
-        hundred objects would push everything else out of your context.
-
-        Use this when a step turns on a value you cannot see there — an enemy's
-        health, a counter, a flag. `selector` is the address printed in the scene
-        block, and a partial one matches (`RangedCat` finds `RangedCat(Clone)[17]`).
-        """
         found = channel.scene.pulse.inspect(selector)
         messages = channel.drain_operator_messages()
         return _answer(found, messages)
@@ -111,9 +68,18 @@ def build_capture_tool(ctx: ToolContext) -> BaseTool:
     channel, state, arch = ctx.channel, ctx.state, ctx.arch
     _answer = ctx.answer
 
-    @tool(description=CAPTURE_SCREEN_DESCRIPTION.format(limit=arch.max_captures_per_run))
+    # Both arms of the screen-capture comparison run on one `prompt_version`, so the
+    # every-call note is chosen here. `arch_fingerprint` hashes `screen_capture`, so
+    # the two descriptions still land in two structures rather than folding into one.
+    description = load_tool_description("capture_screen").body.format(
+        limit=arch.max_captures_per_run
+    )
+    if arch.screen_capture is not ScreenCaptureMode.on_demand:
+        description += " " + load_tool_description("capture_screen_every_call").body
+
+    @tool(description=description)
     async def capture_screen(step: int, thought: str, target_id: int | None = None) -> str:
-        # What the agent reads is CAPTURE_SCREEN_DESCRIPTION above, not this.
+        # What the agent reads is tool_capture_screen.md, not this.
         # Returns the capture as a promise: the image itself is handed to the
         # vision middleware and arrives on the next model call.
         if state.captures_attempted >= arch.max_captures_per_run:
@@ -154,31 +120,25 @@ def build_capture_tool(ctx: ToolContext) -> BaseTool:
                 messages,
             )
 
-        captured = item.returnValue or {}
-        url = captured.get("url")
-        if not url:
+        capture = capture_from_action_result(item, what, whole_screen=target_id is None)
+        if capture is None:
             return _answer(
                 "The game reported a capture but no image to read. Judge from the "
                 "scene text.",
                 messages,
             )
 
-        caption = f"This is {what} right now."
-        if captured.get("clipped"):
-            # Worth saying out loud: a cropped-off element is itself a finding, and
-            # the agent would otherwise read the partial image as the whole thing.
-            caption += " Part of it is off the edge of the screen."
-
-        state.add_pending_capture(
-            PendingCapture(
-                capture_id=str(captured.get("captureId") or ""),
-                url=url,
-                mime_type=str(captured.get("mimeType") or "image/jpeg"),
-                caption=caption,
-            )
-        )
+        state.add_pending_capture(capture)
         # On the timeline so a reviewer can open exactly what the agent looked at.
-        await channel.note(f"Captured {what}: {url}", LogCategory.OBSERVATION, step)
+        #
+        # Not what separates a tool capture from an automatic one, though it looks
+        # like it could: a tool capture that fails or times out returns above
+        # without writing this note, so subtracting notes from `capture_screen`
+        # ACTION rows overcounts the automatic ones. What separates them exactly is
+        # `step`. This dispatch always carries one because the tool requires it;
+        # `QaCaptureVisionMiddleware` sends none, so its ACTION rows have
+        # `payload.step` null (ARTEL-868).
+        await channel.note(f"Captured {what}: {capture.url}", LogCategory.OBSERVATION, step)
 
         return _answer(f"Captured {what}. The image follows.", messages)
 

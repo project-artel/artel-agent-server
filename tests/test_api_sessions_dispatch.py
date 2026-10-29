@@ -140,3 +140,48 @@ def test_an_unhandled_turn_failure_is_reported_instead_of_hanging() -> None:
 
     assert frame["type"] == "error"
     assert frame["code"] == "turn_failed"
+
+
+def test_cancel_ends_the_turn_and_the_session_takes_the_next_one() -> None:
+    """ESC 가 하는 일(ARTEL-954): 기다림은 끝나고 대화는 남는다.
+
+    `close` 와 갈라 둔 값어치가 두 번째 단정에 있다 — 끊은 뒤에 보낸 말이 `busy` 로 막히지도,
+    세션이 없어 만료로 떨어지지도 않고 평소대로 한 턴을 돈다.
+    """
+    client = TestClient(_app())
+    session_id = _open(client)
+
+    with client.websocket_connect(f"/sessions/{session_id}") as ws:
+        # 첫 턴이 케이스를 묻고 답을 기다린다 — 여기서 끊는다.
+        assert ws.receive_json()["type"] == "test_case_search"
+
+        ws.send_json({"type": "cancel"})
+        cancelled = ws.receive_json()
+        assert cancelled == {"type": "cancelled", "was_running": True}
+
+        # 끊긴 턴은 결과도 오류도 보내지 않는다. 다음 말이 새 턴으로 받아들여지는 것이
+        # 그 증거다(`busy` 였다면 앞엣것이 아직 돈다는 뜻이다).
+        ws.send_json({"type": "turn", "user_input": "다시 해 줘"})
+        again = ws.receive_json()
+        assert again["type"] == "test_case_search"
+
+
+def test_cancel_with_nothing_running_says_so() -> None:
+    """한가할 때의 ESC. 오류가 아니다 — 끊을 것이 없었다고만 답한다."""
+    client = TestClient(_app())
+    session_id = _open(client)
+
+    with client.websocket_connect(f"/sessions/{session_id}") as ws:
+        # 첫 턴을 끝까지 돌려 세션을 한가하게 만든다.
+        search = ws.receive_json()
+        ws.send_json(
+            {
+                "type": "test_case_search_result",
+                "correlationId": search["messageId"],
+                "results": [],
+            }
+        )
+        assert ws.receive_json()["type"] == "result"
+
+        ws.send_json({"type": "cancel"})
+        assert ws.receive_json() == {"type": "cancelled", "was_running": False}

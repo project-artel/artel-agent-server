@@ -52,7 +52,7 @@ class CountingAgent(ScenarioAgent):
     def __init__(self, result: ScenarioAgentResult) -> None:
         self.calls = 0
 
-        def factory(*, model, tools, system_prompt):
+        def factory(*, model, tools, system_prompt, reasoning=None):
             def run(_inputs):
                 self.calls += 1
                 return {"messages": [], "structured_response": result}
@@ -445,7 +445,7 @@ def test_a_scenario_turn_books_its_spend_against_the_run() -> None:
         """
 
         def __init__(self) -> None:
-            def factory(*, model, tools, system_prompt):
+            def factory(*, model, tools, system_prompt, reasoning=None):
                 def run(_inputs):
                     seen.append(_scope.get())
                     return {"messages": [], "structured_response": _result()}
@@ -465,3 +465,26 @@ def test_a_scenario_turn_books_its_spend_against_the_run() -> None:
     assert scope is not None
     assert scope.service == "SCENARIO"
     assert scope.reference_id == 31
+
+
+def test_a_trimmed_history_is_flagged_on_the_next_request() -> None:
+    """창 밖으로 밀려난 대화가 있으면 다음 요청이 그 사실을 안다(ARTEL-942).
+
+    모델이 "원래 없던 말"과 "창 밖으로 밀려난 말"을 가르려면, 밀려났다는 사실이 요청까지
+    와야 한다. 잘라 낸 뒤의 기록만 보고는 알 수 없다.
+    """
+    store = InMemorySessionStore()
+    seen: list[bool] = []
+
+    class Recording(CapturingAgent):
+        async def run(self, request, context, channel):  # type: ignore[override]
+            seen.append(request.history_truncated)
+            return self._result
+
+    service = SessionService(store=store, agent=Recording(_result()), history_max_turns=1)
+    session_id = asyncio.run(service.open({}, {}, "First input."))
+    asyncio.run(service.start_first_turn(session_id, _channel()))   # 기록 2개 — 창 가득
+    asyncio.run(service.run_turn(session_id, _channel(), "second", draft=None))  # 앞 2개가 밀려남
+    asyncio.run(service.run_turn(session_id, _channel(), "third", draft=None))
+
+    assert seen == [False, False, True]

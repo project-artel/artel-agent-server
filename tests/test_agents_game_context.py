@@ -73,7 +73,9 @@ def test_game_context_agent_retries_on_parse_error_then_succeeds() -> None:
             raise OutputParserException("bad json")
         return result
 
-    agent = GameContextAgent(structured_factory=lambda model: RunnableLambda(flaky))
+    agent = GameContextAgent(
+        structured_factory=lambda model: RunnableLambda(flaky), retry_backoff=False
+    )
 
     out = asyncio.run(agent.run(_request(), _CTX))
 
@@ -82,15 +84,24 @@ def test_game_context_agent_retries_on_parse_error_then_succeeds() -> None:
 
 
 def test_game_context_agent_raises_after_exhausting_retries() -> None:
+    calls = {"n": 0}
+
     def always_fail(_inputs):
+        calls["n"] += 1
         raise OutputParserException("still bad")
 
     agent = GameContextAgent(
-        structured_factory=lambda model: RunnableLambda(always_fail)
+        structured_factory=lambda model: RunnableLambda(always_fail), retry_backoff=False
     )
 
     with pytest.raises(GameContextExtractionError):
         asyncio.run(agent.run(_request(), _CTX))
+    assert calls["n"] == 5
+
+
+def test_the_production_agent_waits_between_retries() -> None:
+    # `app/main.py` 가 세우는 모양 그대로다. 테스트가 끄는 backoff 가 운영에서는 켜져 있다.
+    assert GameContextAgent().retry_backoff is True
 
 
 def test_game_context_defaults_to_empty_sections() -> None:

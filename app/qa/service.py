@@ -5,13 +5,22 @@ from collections.abc import Awaitable, Callable
 
 from pydantic import ValidationError
 
+from app.agents.planner_executer.developer_macros import (
+    NO_DEVELOPER_MACROS,
+    LoadedDeveloperMacros,
+    fetch_developer_macros,
+    load_developer_macros,
+)
+from app.agents.planner_executer.runner import PlannerExecuterRunner
 from app.agents.qa.arch import DEFAULT_ARCH, QaArchSpec
 from app.agents.qa.reset import DEFAULT_RESET_POLICY, ResetPolicy
 from app.agents.qa.runner import QaRunner
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage
+from app.llm.credentials import LlmKey, bind_llm_key
 from app.llm.models import LLMModel, ReasoningConfig
 from app.llm.usage import set_usage_scope
 from app.qa.channel import QaRunChannel
+from app.qa.game_functions import GameFunctionCatalog, GameFunctionEntry
 from app.qa.envelope import (
     ErrorPayload,
     MessageType,
@@ -22,6 +31,7 @@ from app.qa.envelope import (
 from app.qa.run_config import RunConfig, resolve_run_config
 from app.qa.scene_context import fetch_scene_context
 from app.qa.schemas import QaRunScenario, QaSessionRecord
+from app.qa.screen_name import ScreenNamer
 from app.qa.screen_verdict import ScreenSelectorAdjudicator
 from app.qa.store import QaSessionStore
 from app.sessions.store import SessionExpired
@@ -29,6 +39,15 @@ from app.sessions.store import SessionExpired
 logger = logging.getLogger(__name__)
 
 Send = Callable[[dict], Awaitable[None]]
+
+
+def _build_runner(
+    *, config: RunConfig, developer: LoadedDeveloperMacros = NO_DEVELOPER_MACROS
+) -> QaRunner | PlannerExecuterRunner:
+    """The runner for the engine the run asked for (`QaArchSpec.engine`)."""
+    if config.arch.engine == "planner_executer":
+        return PlannerExecuterRunner(config, developer=developer)
+    return QaRunner(config)
 
 
 def _build_adjudicator(run_config: RunConfig) -> ScreenSelectorAdjudicator:
@@ -45,6 +64,18 @@ def _build_adjudicator(run_config: RunConfig) -> ScreenSelectorAdjudicator:
     return ScreenSelectorAdjudicator(model=run_config.model)
 
 
+def _build_namer(run_config: RunConfig) -> ScreenNamer:
+    """이 런의 모델로 이름 짓는 자리를 세운다 (ARTEL-909).
+
+    `_build_adjudicator` 와 같은 이유로 런의 모델을 쓴다 — 그림을 봐야 하는 일이라, 그
+    게임을 상대할 만하다고 이미 고른 모델이 여기서도 맞다.
+
+    프롬프트 버전은 `SCREEN_NAME_PROMPT_VERSION` 이 정한다. 런의 `prompt_version` 도
+    판정의 것도 끌어 쓰지 않는다 — 셋은 서로 다른 파일에 서로 다른 속도로 산다.
+    """
+    return ScreenNamer(model=run_config.model)
+
+
 class QaExecutionService:
     """Opens QA sessions and runs one agent loop per connected session.
 
@@ -56,19 +87,24 @@ class QaExecutionService:
     def __init__(
         self,
         store: QaSessionStore,
-        runner_factory: Callable[..., QaRunner] | None = None,
+        runner_factory: Callable[..., QaRunner | PlannerExecuterRunner] | None = None,
         reset_policy: ResetPolicy | None = None,
         adjudicator_factory: Callable[[RunConfig], ScreenSelectorAdjudicator] | None = None,
+        namer_factory: Callable[[RunConfig], ScreenNamer] | None = None,
     ) -> None:
         self._store = store
-        self._runner_factory = runner_factory or (lambda *, config: QaRunner(config))
+        self._runner_factory = runner_factory or _build_runner
         # 시나리오 사이 게임 초기화 정책(seam). 기본은 전체 초기화; 나중에 최소-초기화로 교체.
         self._reset_policy = reset_policy or DEFAULT_RESET_POLICY
         # 화면 제안을 판정하는 자리(seam, ARTEL-656). 채널과 나란히 두고 함께 버린다 —
         # 판정은 QA 런의 일이 아니므로 `QaRunChannel` 안에 살지 않는다.
         self._adjudicator_factory = adjudicator_factory or _build_adjudicator
+        # 새로 굳은 `screen` 에 이름을 짓는 자리(seam, ARTEL-909). 판정기와 나란히 두고
+        # 함께 버린다 — 이름 짓기도 QA 런의 일이 아니므로 `QaRunChannel` 안에 살지 않는다.
+        self._namer_factory = namer_factory or _build_namer
         self._channels: dict[str, QaRunChannel] = {}
         self._adjudicators: dict[str, ScreenSelectorAdjudicator] = {}
+        self._namers: dict[str, ScreenNamer] = {}
 
     async def open(
         self,
@@ -82,6 +118,9 @@ class QaExecutionService:
         arch: QaArchSpec = DEFAULT_ARCH,
         project_id: int | None = None,
         game_build_id: int | None = None,
+        llm_key: LlmKey | None = None,
+        cheats: list[GameFunctionEntry] | None = None,
+        behaviors: list[GameFunctionEntry] | None = None,
     ) -> tuple[str, RunConfig]:
         """Open a run-scoped session and return its id alongside what it will run with.
 
@@ -91,13 +130,24 @@ class QaExecutionService:
         gets an error, instead of failing a run that has already been reported as
         started) and returned because Orchestration records the resolved form, not
         the request.
+
+        `llm_key` 는 세션 기록에만 남고 `run_config` 에는 들어가지 않는다.
         """
+        # run_config 는 session 에 하나다. 시나리오가 모두 FREE 일 때만 FREE 의 tool 목록으로
+        # 기록한다. ORDERED 와 FREE 가 섞인 session 은 ORDERED 로 기록되고, FREE 시나리오의
+        # `report_case` 는 그 기록에 빠진다.
+        execution_mode = (
+            "FREE"
+            if scenarios and all(item.scenario.execution_mode == "FREE" for item in scenarios)
+            else "ORDERED"
+        )
         run_config = resolve_run_config(
             model=model,
             language=language,
             prompt_version=prompt_version,
             reasoning=reasoning,
             arch=arch,
+            execution_mode=execution_mode,
         )
         session_id = uuid.uuid4().hex
         record = QaSessionRecord(
@@ -107,6 +157,9 @@ class QaExecutionService:
             run_config=run_config,
             project_id=project_id,
             game_build_id=game_build_id,
+            llm_key=llm_key,
+            cheats=cheats or [],
+            behaviors=behaviors or [],
         )
         await self._store.save(session_id, record)
         return session_id, run_config
@@ -122,6 +175,17 @@ class QaExecutionService:
         record = await self._load(session_id)
         return record.scenarios[0].qa_try_id
 
+    async def bind_llm_key(self, session_id: str) -> None:
+        """세션의 사용자 key 를 부르는 task 에 묶는다. key 가 없는 세션이면 공용 key 로 둔다.
+
+        socket handler 가 런과 receive loop 를 시작하기 전에 부른다. 그래야 둘 다 이 key 를
+        물려받는다. 런은 agent 와 compaction 의 모델을 만들고, receive loop 는 `deliver` 에서
+        `screen_verdict` 와 `screen_name` 의 task 를 띄우며 그 task 들이 런의 모델로 모델을
+        만든다.
+        """
+        record = await self._load(session_id)
+        bind_llm_key(record.llm_key)
+
     async def close(self, session_id: str) -> None:
         self._channels.pop(session_id, None)
         adjudicator = self._adjudicators.pop(session_id, None)
@@ -129,6 +193,11 @@ class QaExecutionService:
             # 소켓이 사라진 뒤에도 모델 호출이 계속 도는 것을 막는다. 끊긴 판정은 답 없이
             # 끝나고, 그것은 지도를 종전대로 두는 결과다.
             adjudicator.close()
+        namer = self._namers.pop(session_id, None)
+        if namer is not None:
+            # 같은 이유로 끊는다. 끊긴 요청은 답 없이 끝나고, 그 `screen` 은 이름 없이
+            # 남는다.
+            namer.close()
         await self._store.delete(session_id)
 
     # --- the run --------------------------------------------------------------
@@ -146,6 +215,16 @@ class QaExecutionService:
         """
         record = await self._load(session_id)
         total = len(record.scenarios)
+        # developer macro 는 planner–executer 엔진만 쓴다(ARTEL-1101). 시나리오마다가 아니라 런에
+        # 한 번 읽고 한 번 파싱한다 — 런 중에 누가 macro 를 고쳐도 한 런의 시나리오들은 같은 macro
+        # 를 보고, 파싱되지 않는 macro 의 log 도 런에 한 줄이다. 파싱은 channel 이 필요 없다
+        # (`DeveloperMacros` 는 developer macro 안에서만 import 를 푼다). 다른 엔진의 runner
+        # factory 에는 넘기지 않는다.
+        runner_options = {}
+        if record.run_config.arch.engine == "planner_executer":
+            runner_options["developer"] = await load_developer_macros(
+                await fetch_developer_macros(record.project_id, record.game_build_id)
+            )
 
         for index, item in enumerate(record.scenarios):
             # Every model call inherits this label; the contextvar rides the task.
@@ -159,6 +238,10 @@ class QaExecutionService:
             if previous is not None:
                 previous.close()
             self._adjudicators[session_id] = self._adjudicator_factory(record.run_config)
+            previous_namer = self._namers.get(session_id)
+            if previous_namer is not None:
+                previous_namer.close()
+            self._namers[session_id] = self._namer_factory(record.run_config)
 
             # Reset before every scenario but the first — the first act of this
             # scenario's try, so the reset frame is attributed to a try about to be
@@ -192,7 +275,13 @@ class QaExecutionService:
                 qa_try_id=item.qa_try_id,
             )
 
-            runner = self._runner_factory(config=record.run_config)
+            # session open 의 catalog (ARTEL-1054). 씬 맥락처럼 채널에 얹는다 — 도구와 runner 가
+            # 채널을 이미 쥐고 있어서 runner 의 서명을 안 바꾼다.
+            channel.game_functions = GameFunctionCatalog(
+                cheats=record.cheats, behaviors=record.behaviors
+            )
+
+            runner = self._runner_factory(config=record.run_config, **runner_options)
             try:
                 state, failure = await runner.run_with_deadline(channel, item.scenario)
             finally:
@@ -202,6 +291,9 @@ class QaExecutionService:
                 ending = self._adjudicators.pop(session_id, None)
                 if ending is not None:
                     ending.close()
+                ending_namer = self._namers.pop(session_id, None)
+                if ending_namer is not None:
+                    ending_namer.close()
 
             if channel.cancelled:
                 await self._send_terminal(
@@ -211,8 +303,16 @@ class QaExecutionService:
             if failure is not None:
                 # The agent never closed this scenario, so nothing else will say it
                 # ended. Report it and carry on to the next scenario.
+                # 테스트용 가짜 runner 는 state 가 `None` 일 수 있다.
+                failure_site = getattr(state, "failure_site", None)
                 await channel.emit(
-                    MessageType.ERROR, ErrorPayload(message=failure, code="run_incomplete")
+                    MessageType.ERROR,
+                    ErrorPayload(
+                        message=failure,
+                        code="run_incomplete",
+                        exception_type=failure_site.exception_type if failure_site else None,
+                        frames=failure_site.frames if failure_site else None,
+                    ),
                 )
                 await self._send_terminal(
                     channel, StepStatus.FAILED, RunResult.FAILED, failure, state
@@ -278,6 +378,16 @@ class QaExecutionService:
                 adjudicator = self._adjudicators.get(session_id)
                 if adjudicator is not None:
                     adjudicator.answer_later(channel, raw)
+            elif message_type == MessageType.SCREEN_NAME_REQUEST:
+                # 채널은 이 frame 에서 아무것도 안 읽는다 (ARTEL-909). 방금 굳은 행 하나에
+                # 이름을 물어보는 것이고, agent 가 지금 어느 `screen` 에 서 있는가는
+                # `SCREEN_SETTLED` 가 말한다.
+                #
+                # **아무것도 기다리지 않는다.** 이 loop 가 이름 하나를 기다리면 그동안
+                # `PULSE` 도 `ACTION_RESULT` 도 안 들어오고, 그것이 곧 런이 서는 것이다.
+                namer = self._namers.get(session_id)
+                if namer is not None:
+                    namer.answer_later(channel, raw)
             elif message_type == MessageType.SCREEN_SETTLED:
                 # 화면이 바뀔 때마다 온다 (ARTEL-668). 판정기에 안 넘긴다 — 이 프레임은
                 # 아무것도 안 물어보고 후보도 안 싣는다.
@@ -286,6 +396,15 @@ class QaExecutionService:
                 channel.on_screen_selector_result(raw)
             elif message_type == MessageType.CAPABILITY_WRITE_RESULT:
                 channel.on_capability_write_result(raw)
+            elif message_type == MessageType.MACRO_WRITE_RESULT:
+                channel.on_macro_write_result(raw)
+            elif message_type == MessageType.MACRO_READ_RESULT:
+                channel.on_macro_read_result(raw)
+            elif message_type == MessageType.MACRO_SEARCH_RESULT:
+                channel.on_macro_search_result(raw)
+            elif message_type == MessageType.BEHAVIOR_ENDED:
+                # 무엇도 기다리지 않는다. 다음 tool 결과 끝에 붙는다(ARTEL-1054).
+                channel.on_behavior_ended(raw)
             elif message_type == MessageType.ERROR:
                 # Always accepted, answered or not. ERROR is a legitimate frame in
                 # both directions, so answering it with "unsupported inbound frame"

@@ -70,3 +70,10 @@ Return VERDICT: PASS or VERDICT: NONPASS. Cite file:line for concrete issues.
 - Block only on correctness, maintainability risk, scope creep, or missing validation.
 - Do not block on style preferences without a concrete maintainability or correctness impact.
 - Prefer the smallest change that preserves clarity and long-term maintainability.
+
+## Project Writing Style
+
+Before writing the result, follow [writing-style.md](../../docs/writing-style.md).
+Use its natural Korean prose and concrete-title rules while preserving required
+templates, paths, metadata, and machine-readable verdicts. Pass the same rules
+to any reviewer subagents invoked by this skill.

@@ -1,6 +1,10 @@
-from pydantic import BaseModel, Field
+from typing import Literal
 
+from pydantic import BaseModel, Field, field_validator
+
+from app.llm.credentials import LlmKey
 from app.qa.envelope import QaChatTurn
+from app.qa.game_functions import CaseFunctions, GameFunctionEntry
 from app.qa.run_config import RunConfig
 
 
@@ -16,6 +20,9 @@ class QaCaseRef(BaseModel):
     precondition: str | None = None
     test_step: str | None = None
     expected: str = ""
+    # 이 TC 에서 쓸 수 있는 cheat 와 behavior (ARTEL-1054). 없으면 run 이 받은 것 전부다.
+    # run 의 목록을 좁히기만 한다(`app/qa/game_functions.py` 의 `allowed_names`).
+    functions: CaseFunctions | None = None
 
 
 class QaStep(BaseModel):
@@ -35,6 +42,16 @@ class QaScenario(BaseModel):
     title: str = ""
     description: str = ""
     steps: list[QaStep] = Field(default_factory=list)
+    # `ORDERED` 는 위 스텝을 순서대로 실행한다. `FREE` 는 스텝 하나가 TC 하나이고 `case_id` 가
+    # 겹치지 않는 TC 묶음이라, 순서와 방법을 agent 가 정한다(ARTEL-1029). 이 필드를 모르는
+    # orchestration 은 보내지 않으므로 없으면 `ORDERED` 다.
+    execution_mode: Literal["ORDERED", "FREE"] = "ORDERED"
+
+    @field_validator("execution_mode", mode="before")
+    @classmethod
+    def _null_is_ordered(cls, value: object) -> object:
+        # Jackson 이 빈 값을 생략하지 않고 `null` 로 보내는 경우도 없는 것과 같게 읽는다.
+        return "ORDERED" if value is None else value
 
 
 class QaStepResult(BaseModel):
@@ -75,8 +92,8 @@ class QaSessionRecord(BaseModel):
     qa_run_id: int
     game_instance_id: int
     # 이 런이 무엇을 도는지 orchestration 에 되물을 수 있게 하는 두 값 (ARTEL-612).
-    # 씬 맥락 조회가 경로에 둘 다 요구한다. **선택이다** — orchestration 이 아직
-    # 세션 open 에 싣지 않으므로, 없으면 조회를 하지 않고 런은 블록 없이 돈다.
+    # 씬 맥락 조회가 경로에 둘 다 요구한다. **선택이다** — 없으면 조회를 하지 않고 런은
+    # 블록 없이 돈다. orchestration 은 세션 open 에 둘을 싣는다.
     project_id: int | None = None
     game_build_id: int | None = None
     # The run's scenarios, executed in order — each carries its own qa_try_id.
@@ -89,3 +106,14 @@ class QaSessionRecord(BaseModel):
     # append: the whole record is rewritten to Redis each turn, so it cannot grow
     # without bound, and only the recent turns are what steer the next decision.
     chat: list[QaChatTurn] = Field(default_factory=list)
+    # 런을 시작한 사용자의 LLM API key. 사용자 key 로 도는 런에만 있다.
+    #
+    # `run_config` 에 두지 않는다 — 그것은 orchestration 으로 돌아가 try 에 영구히 남는다.
+    # 여기 있는 동안은 세션 TTL 만큼 Redis 에 있고, 세션이 닫히면 기록과 함께 지워진다.
+    # `repr` 에서 빼서 기록을 찍는 로그에 key 가 남지 않게 한다.
+    llm_key: LlmKey | None = Field(default=None, repr=False)
+    # session open 의 `context.cheats` / `context.behaviors` (ARTEL-1054). orchestration 이 이미
+    # run 의 허용 목록으로 걸러서 보낸다. 런 중에는 바뀌지 않는다 — SDK 가 런 중에 등록한 function
+    # 은 `pulse` 에는 보여도 여기에 없어 tool 이 거절한다.
+    cheats: list[GameFunctionEntry] = Field(default_factory=list)
+    behaviors: list[GameFunctionEntry] = Field(default_factory=list)
