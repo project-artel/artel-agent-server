@@ -13,7 +13,8 @@ stamps ``source`` when merging documents into a project's game_context.
 
 from pydantic import BaseModel, Field
 
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.default_model import resolve_default_model
+from app.llm.models import LLMModel
 
 
 class Overview(BaseModel):
@@ -79,4 +80,4 @@ class GameContext(BaseModel):
 class GameContextAgentRequest(BaseModel):
     # Normalized document text produced upstream by a DocumentLoader.
     document_text: str
-    model: LLMModel = DEFAULT_MODEL
+    model: LLMModel = Field(default_factory=resolve_default_model)
