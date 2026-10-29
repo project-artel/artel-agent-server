@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from app.agents.planner_executer.prompts import candidate_list, case_view, this_step
 from app.agents.qa.arch import QaArchSpec
 from app.agents.qa.runner import _plan
+from app.config import get_settings
 from app.main import create_app
 from app.prompts import known_agents
 from app.qa.schemas import QaCaseRef, QaRunScenario, QaScenario, QaStep
@@ -53,7 +54,9 @@ def test_이전_snapshot을_열어도_삭제된_시연_prompt_hash를_기록하�
     assert not any(key.startswith("demonstration/") for key in configuration.prompt_hashes)
 
 
-def test_시연_추출_API와_prompt를_제거():
+def test_시연_추출_API와_prompt를_제거(monkeypatch):
+    # API 제거 검증은 Redis 정리 기능의 접속 여부와 분리한다.
+    monkeypatch.setattr(get_settings(), "session_store", "memory")
     app = create_app()
     with TestClient(app) as client:
         assert client.post("/internal/demonstrations/extract", json={}).status_code == 404
