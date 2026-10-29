@@ -332,8 +332,10 @@ def test_the_default_qa_version_is_v21() -> None:
 
     v28 adds one paragraph to the macro skill (ARTEL-1222): read the text lines a macro
     answer carries and file blank, placeholder or garbled lines with `report_issue`.
+
+    v29 adds `tool_get_performance.md` for the new `get_performance` tool (ARTEL-1223).
     """
-    assert resolve_version("qa_run") == "v28"
+    assert resolve_version("qa_run") == "v29"
 
 
 # v20 이 고쳐 쓴 v19 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
@@ -1179,3 +1181,12 @@ def test_v28_adds_one_paragraph_to_the_macro_skill() -> None:
     added = load_prompt("qa_run", "skill_macro", "v28").body
     assert "**The answer lists the text the game showed while the macro ran**" in added
     assert "`[MISSING TEXT: STORY_003]`" in added
+
+
+def test_v29_adds_only_the_get_performance_description() -> None:
+    """v29 는 v28 에 `get_performance` 설명 하나만 더한다 (ARTEL-1223)."""
+    assert set(roles_in("qa_run", "v29")) - set(roles_in("qa_run", "v28")) == {
+        "tool_get_performance"
+    }
+    for role in roles_in("qa_run", "v28"):
+        assert load_prompt("qa_run", role, "v29").body == load_prompt("qa_run", role, "v28").body, role
