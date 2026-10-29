@@ -13,7 +13,8 @@
 
 from pydantic import BaseModel, Field
 
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.default_model import resolve_default_model
+from app.llm.models import LLMModel
 from app.qa.envelope import ScreenSelectorProposalPayload
 
 class ProposedEntry(BaseModel):
@@ -50,4 +51,4 @@ class ScreenVerdictRequest(BaseModel):
     """
 
     proposal: ScreenSelectorProposalPayload
-    model: LLMModel = DEFAULT_MODEL
+    model: LLMModel = Field(default_factory=resolve_default_model)

@@ -222,7 +222,7 @@ def test_a_case_the_planner_keeps_for_later_is_reported_unreached_at_the_limits(
     (verdict,) = _verdicts(fake)
     assert verdict["status"] == "FAILED"
     assert verdict["message"].startswith(
-        "UNREACHED (도달 못함) DEFERRED: the planner kept leaving it for later, so it was not played — 0 plays and 1 reset."
+        "UNREACHED DEFERRED: the planner kept leaving it for later, so it was not played — 0 plays and 1 reset."
     )
     assert "Start needs 10 coins" in verdict["message"]
     assert seen == [] and _resets(fake) == 1
@@ -240,7 +240,7 @@ def test_a_case_still_unreached_after_its_plays_is_reported_unreached() -> None:
     (verdict,) = _verdicts(fake)
     assert verdict["status"] == "FAILED"
     assert verdict["message"].startswith(
-        "UNREACHED (도달 못함) GOAL_UNREACHED: play never reached the case's goal — 2 plays and 1 reset."
+        "UNREACHED GOAL_UNREACHED: play never reached the case's goal — 2 plays and 1 reset."
     )
     assert _resets(fake) == 1
 
@@ -277,7 +277,7 @@ def test_a_plan_still_refused_fails_the_scenes_own_cases() -> None:
 
     (verdict,) = _verdicts(fake)
     assert verdict["status"] == "FAILED"
-    assert verdict["message"].startswith("PLANNER-REFUSED: the scene plan was still refused after 1 rewrites:")
+    assert verdict["message"].startswith("PLANNER-REFUSED: the macro plan was still refused after 1 rewrites:")
 
 
 MENU_SECOND = _case(9, "Menu", "Read the Start button.", "Start is shown.")
@@ -323,7 +323,7 @@ def test_a_case_the_scene_verdict_leaves_out_is_asked_for_again_then_fails() -> 
     verdicts = asyncio.run(SceneEvaluator(_config(), judge).judge(_free(MAP_CASE, MENU_CASE), plays, "menu"))
 
     assert verdicts[1] == (True, "case 7 ok")
-    assert not verdicts[2][0] and verdicts[2][1].startswith("EVALUATOR-ERROR: no readable verdict for the case")
+    assert not verdicts[2][0] and verdicts[2][1].startswith("EVALUATOR-ERROR: no readable verdict in 2 answers")
     # The second question only carries the case still missing.
     assert '"case_id": 8' in seen[1][1] and '"case_id": 7' not in seen[1][1]
 
@@ -414,5 +414,5 @@ def test_a_move_that_does_not_arrive_is_logged_and_its_cases_end_scene_unreached
     assert travels[0]["message"].startswith("Travel Menu → Map: not reached, ended in Menu")
     (verdict,) = _verdicts(fake)
     assert verdict["message"].startswith(
-        "UNREACHED (도달 못함) SCENE_UNREACHED: play could not reach the case's scene, so it was not played"
+        "UNREACHED SCENE_UNREACHED: play could not reach the case's scene, so it was not played"
     )
