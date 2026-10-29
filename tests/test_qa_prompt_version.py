@@ -325,7 +325,7 @@ def test_the_default_qa_version_is_v21() -> None:
     other file is v24's with only the version line moved, so a run with the axis off reads
     what it read under v24.
     """
-    assert resolve_version("qa_run") == "v41"
+    assert resolve_version("qa_run") == "v42"
 
 
 def test_v25_is_v24_plus_the_verdict_checks_description() -> None:
