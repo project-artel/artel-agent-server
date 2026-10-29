@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from app.agents.planner_executer.executer import StepPlay
 from app.agents.planner_executer.prompts import EVALUATOR_ROLE, SCENE_EVALUATOR_ROLE, case_view, prompt_text, this_step
 from app.agents.qa.tools import QaRunState
+from app.agents.scenario import OutputLanguage
 from app.llm.chat_model import structured
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import MessageType, StatusPayload, StepStatus
@@ -53,7 +54,7 @@ class Verdict(BaseModel):
 class Evaluator:
     def __init__(self, config: RunConfig, judge: Judge | None = None) -> None:
         self._config = config
-        self._system = prompt_text(EVALUATOR_ROLE, config.prompt_version)
+        self._system = prompt_text(EVALUATOR_ROLE, config.prompt_version, config.language)
         self._judge = judge or self._ask_model
 
     async def judge(self, scenario: QaScenario, step: int, play: StepPlay) -> tuple[bool, str]:
@@ -68,9 +69,9 @@ class Evaluator:
             except Exception as error:  # noqa: BLE001 - an unreadable answer is asked again
                 problem = f"{type(error).__name__}: {str(error)[:200]}"
                 continue
-            note = "" if play.stopped == "done" else f" (executer stopped: {play.stopped})"
+            note = stop_note(play.stopped, self._config.language)
             return verdict.passed, verdict.reason + note
-        return False, f"EVALUATOR-ERROR: no readable verdict in {ATTEMPTS} answers ({problem})"
+        return False, verdict_error(problem, self._config.language)
 
     async def _ask_model(self, system: str, user: str) -> Verdict:
         chain = structured(self._config.model, Verdict, self._config.reasoning)
@@ -101,7 +102,7 @@ class SceneEvaluator:
         """`{step: (passed, message)}` for each played case, asked `CASES_PER_JUDGEMENT` at a time in
         play order. Each group starts from the screen the case before it left."""
         if self._system is None:
-            self._system = prompt_text(SCENE_EVALUATOR_ROLE, self._config.prompt_version)
+            self._system = prompt_text(SCENE_EVALUATOR_ROLE, self._config.prompt_version, self._config.language)
         results: dict[int, tuple[bool, str]] = {}
         start = first_screen
         for at in range(0, len(played), CASES_PER_JUDGEMENT):
@@ -133,17 +134,29 @@ class SceneEvaluator:
                 if verdict.case_id not in by_case:
                     continue
                 step, play = by_case[verdict.case_id]
-                note = "" if play.stopped == "done" else f" (executer stopped: {play.stopped})"
+                note = stop_note(play.stopped, self._config.language)
                 results[step] = (verdict.passed, verdict.reason + note)
-            problem = "the answer left cases out"
+            problem = "응답에 일부 case가 없습니다" if self._config.language == OutputLanguage.ko else "the answer left cases out"
         for step, _ in played:
             if step not in results:
-                results[step] = (False, f"EVALUATOR-ERROR: no readable verdict for the case in {ATTEMPTS} answers ({problem})")
+                results[step] = (False, verdict_error(problem, self._config.language))
         return results
 
     async def _ask_model(self, system: str, user: str) -> SceneVerdicts:
         chain = structured(self._config.model, SceneVerdicts, self._config.reasoning)
         return await chain.ainvoke([SystemMessage(system), HumanMessage(user)])
+
+
+def stop_note(stopped: str, language: OutputLanguage) -> str:
+    if stopped == "done":
+        return ""
+    return f" (executer 중단: {stopped})" if language == OutputLanguage.ko else f" (executer stopped: {stopped})"
+
+
+def verdict_error(problem: str, language: OutputLanguage) -> str:
+    if language == OutputLanguage.ko:
+        return f"EVALUATOR-ERROR: 응답 {ATTEMPTS}회에서 유효한 판정을 받지 못했습니다 ({problem})"
+    return f"EVALUATOR-ERROR: no readable verdict in {ATTEMPTS} answers ({problem})"
 
 
 def scene_request(scenario: QaScenario, played: list[tuple[int, StepPlay]], first_screen: str) -> str:
