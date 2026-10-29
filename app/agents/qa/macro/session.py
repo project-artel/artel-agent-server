@@ -35,6 +35,9 @@ class MacroSession:
         # 시나리오 step 하나에 속한다.
         self.step = step
         self.task: asyncio.Task[MacroRunResult] | None = None
+        # `QaRunChannel.shown_text` 의 위치. macro 답이 이 뒤에 뜬 글자를 싣고 위치를 옮긴다 —
+        # `resume_macro` 의 답은 멈춘 뒤에 뜬 것만 싣는다(ARTEL-1222).
+        self.text_mark = 0
         self._paused = asyncio.Event()
         self._decision: asyncio.Future[bool] | None = None
         self._result: MacroRunResult | None = None
