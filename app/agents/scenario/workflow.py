@@ -741,7 +741,9 @@ def _groups_of(plan: GroupingPlan, request: ScenarioAgentRequest) -> list[Group]
         case_ids = [i for i in group.case_ids if i in known_ids]
         if mode == "FREE":
             case_ids = list(dict.fromkeys(case_ids))
-        if case_ids:
+        # 처음부터 TC 가 없는 ORDERED 묶음은 이동만 하는 시나리오다("광장까지 가 봐"). 지어낸 번호가 걸러져
+        # 빈 묶음과는 다르다 — 그것은 버리고, 이것은 스텝만으로 쓴다.
+        if case_ids or (mode == "ORDERED" and not group.case_ids):
             groups.append(group.model_copy(update={
                 "case_ids": case_ids, "scenario_id": scenario_id, "execution_mode": mode,
             }))
@@ -987,7 +989,9 @@ async def run_authoring_workflow(
     # 미반영분(저장 못 한 시나리오, 자리를 못 찾은 TC)도 설명에 사과문으로 섞지 않고 질문으로
     # 낸다 — 사용자가 정할 일이기 때문이다. 어느 칸에도 번호는 없다.
     # 계획대로 다 저장됐으면 모델의 첫 줄을 쓴다. 하나라도 빠졌으면 모델의 말이 사실과 달라지므로 코드가 센 줄이다.
-    result = plan.result.strip() if plan.result.strip() and not dropped else _summary(changes, ko)
+    # 묶음을 냈는데 하나도 저장되지 않았으면 "만들었어요" 는 거짓이다 — 그때도 코드가 센 줄이다.
+    told = plan.result.strip() and not dropped and (changes or not plan.groups)
+    result = plan.result.strip() if told else _summary(changes, ko)
 
     asks = list(plan.questions)
     if dropped:
