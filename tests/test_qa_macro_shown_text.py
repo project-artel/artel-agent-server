@@ -126,3 +126,32 @@ def test_run_macro_lists_every_line_the_presses_went_past() -> None:
     # 글자 줄이 붙은 결과는 끝까지 갔어도 marker 로 감싸 `fold` 가 줄째로 접는다.
     assert answer.startswith("<<macro result: advance_story ran to the end")
     assert "<<end macro result>>" in answer
+
+
+def test_existing_typewriter_line_changed_after_mark_is_returned():
+    log = ShownTextLog()
+    log.apply(said("[MISSING", 1))
+    mark = log.mark()
+    log.apply(said("[MISSING TEXT: STORY_003]", 2))
+    lines = log.since(mark)
+    assert [line.text for line in lines] == ["[MISSING TEXT: STORY_003]"]
+    next_mark = log.mark()
+    log.apply(said("[MISSING TEXT: STORY_003]", 3))
+    assert log.since(next_mark) == []
+    log.apply(said("[MISSING TEXT: STORY_003] done", 4))
+    assert lines[0].text == "[MISSING TEXT: STORY_003]"
+    assert [line.text for line in log.since(next_mark)] == ["[MISSING TEXT: STORY_003] done"]
+
+
+def test_change_cursor_survives_dropping_old_entries(monkeypatch):
+    monkeypatch.setattr("app.qa.shown_text.MAX_SHOWN_TEXT_ENTRIES", 2)
+    log = ShownTextLog()
+    log.apply(said("before", 1))
+    log.apply(said("begin", 2))
+    mark = log.mark()
+    log.apply(said("beginning", 3))
+    log.apply(said("next", 4))
+    assert [line.text for line in log.since(mark)] == ["beginning", "next"]
+    mark = log.mark()
+    log.apply(said("next line", 5))
+    assert [line.text for line in log.since(mark)] == ["next line"]

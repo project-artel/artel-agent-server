@@ -98,8 +98,10 @@ def _same(cited: str, recorded: Any) -> bool:
 
 
 def _names_object(cited: str, *names: str | None) -> bool:
-    plain = _plain(cited)
-    return any(name and (_plain(name) == plain or _plain(name).endswith("/" + plain)) for name in names)
+    # instance를 지정한 인용은 다른 index나 index 없는 path로 완화하지 않는다.
+    normalize = (lambda text: text.strip().strip("/").lower()) if re.search(r"\[\d+\]", cited) else _plain
+    wanted = normalize(cited)
+    return any(name and (normalize(name) == wanted or normalize(name).endswith("/" + wanted)) for name in names)
 
 
 def _names_member(cited: str, on: str | None, member: str | None) -> bool:

@@ -11,13 +11,21 @@ from langchain_core.tools import BaseTool, tool
 from app.agents.qa.arch import ScreenCaptureMode
 from app.agents.qa.tools.state import capture_from_action_result
 from app.agents.qa.tools.tool_context import ToolContext
-from app.prompts import load_tool_description
+from app.prompts import load_tool_description, resolve_version, roles_in
 from app.qa.envelope import JsonRpcAction, LogCategory
 from app.qa.game_errors import render_errors
 from app.qa.performance import PerformanceUnavailable, render_summary, summarize
 
 # `get_performance` 가 창을 안 받았을 때 쓰는 창. tool 결과 끝의 한 줄과 같은 10초다.
 DEFAULT_PERFORMANCE_SECONDS = 10.0
+
+
+def _diagnostic_description(name: str, first_version: str) -> str:
+    """구버전 prompt에 없는 진단 도구만 최초 지원 description을 사용한다."""
+    version = resolve_version("qa_run")
+    if f"tool_{name}" not in roles_in("qa_run", version):
+        version = first_version
+    return load_tool_description(name, version).body
 
 
 def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
@@ -61,7 +69,7 @@ def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
         messages = channel.drain_operator_messages()
         return _answer(found, messages)
 
-    @tool(description=load_tool_description("get_errors").body)
+    @tool(description=_diagnostic_description("get_errors", "v27"))
     async def get_errors(step: int, thought: str, include_seen: bool = False) -> str:
         # What the agent reads is `qa_run/<version>/tool_get_errors.md`.
         # 게임에 아무것도 묻지 않는다. `PULSE` 와 `ACTION_RESULT` 가 이미 실어 온 것을 읽는다.
@@ -74,7 +82,7 @@ def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
             screen=False,
         )
 
-    @tool(description=load_tool_description("get_performance").body)
+    @tool(description=_diagnostic_description("get_performance", "v29"))
     async def get_performance(
         step: int,
         thought: str,
