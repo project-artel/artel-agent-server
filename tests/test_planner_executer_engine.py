@@ -59,7 +59,7 @@ def test_the_planner_executer_run_is_filed_under_its_own_label_and_digest() -> N
 
     assert config.arch.engine == "planner_executer"
     assert config.arch.planner == PlannerExecuterArchSpec()
-    assert config.agent_arch == PLANNER_EXECUTER_LABEL == "pe2-free"
+    assert config.agent_arch == PLANNER_EXECUTER_LABEL == "pe3-output-language"
     assert config.agent_fingerprint != agent.agent_fingerprint
     assert config.decision_model == resolve_decision_model()
     assert config.citation_reporting is False and config.compaction_model is None
@@ -81,7 +81,7 @@ def test_the_planner_prompt_is_recorded_with_the_macro_grammar_it_reads() -> Non
     config = resolve_run_config(arch=PLANNER_EXECUTER)
 
     assert config.prompt_version == "v3"
-    assert set(config.prompt_hashes) == {"rules", "evaluator", "scene_rules", "scene_evaluator", "macro_grammar"}
+    assert set(config.prompt_hashes) == {"rules", "evaluator", "scene_rules", "scene_evaluator", "macro_grammar", "language"}
     locked = read_lock()["prompts"]
     for role in ("rules", "evaluator", "scene_rules", "scene_evaluator"):
         assert locked[f"qa_planner/v3/{role}"] == config.prompt_hashes[role]

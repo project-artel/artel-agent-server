@@ -33,7 +33,7 @@ from enum import StrEnum
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.agents.planner_executer.arch import PlannerExecuterArchSpec
 from app.config import get_settings
@@ -738,6 +738,29 @@ class QaArchSpec(BaseModel):
     # field enters `arch_fingerprint` — see there.
     engine: Literal["agent", "planner_executer"] = "agent"
     planner: PlannerExecuterArchSpec | None = None
+
+    @field_validator("vision", mode="before")
+    @classmethod
+    def vision_accepts_a_boolean(cls, value: object) -> object:
+        """`true` 는 `on`, `false` 는 `off` 로 받는다 (ARTEL-1236).
+
+        `vision` 이 `auto`/`on`/`off` 가 되기 전의 run_config 는 이 칸에 boolean 을 저장했다.
+        그 run_config 를 그대로 다시 보내면 422 로 거절됐고, orchestration 이 그것을 503 으로
+        바꿔 사용자는 agent-server 가 죽은 것으로 읽었다 (2026-10-22). `auto` 로 받지 않는 것은
+        저장된 값이 "보여 준다" 를 고른 것이지 "모델에 맡긴다" 를 고른 것이 아니기 때문이다.
+        """
+        if value is True:
+            return VisionMode.on
+        if value is False:
+            return VisionMode.off
+        # 이 422 는 orchestration 을 거쳐 `agent_rejected_request` 의 `message` 로 사용자에게 간다.
+        # pydantic 의 기본 문장은 boolean 을 받는다는 것을 말하지 못하므로 여기서 쓴다.
+        if value not in {mode.value for mode in VisionMode} and not isinstance(value, VisionMode):
+            raise ValueError(
+                f"vision must be 'auto', 'on' or 'off' (true and false from a stored "
+                f"run_config are read as 'on' and 'off'), not {value!r}"
+            )
+        return value
 
     @model_validator(mode="after")
     def planner_knobs_need_their_engine(self) -> "QaArchSpec":
