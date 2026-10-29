@@ -13,7 +13,10 @@ from app.agents.case_contract.workflow import (
     CaseContractResult,
     ContractCase,
     Term,
+    Patch,
+    StatementRequest,
     extract_contracts,
+    statement_patches,
     to_wire,
 )
 
@@ -23,6 +26,9 @@ __all__ = [
     "CaseContractResult",
     "ContractCase",
     "Term",
+    "Patch",
+    "StatementRequest",
     "extract_contracts",
+    "statement_patches",
     "to_wire",
 ]

@@ -112,8 +112,15 @@ class SessionService:
         model: LLMModel | None = None,
         locale: OutputLanguage | None = None,
         current_scenarios: list[ScenarioPlan] | None = None,
+        test_case_list: list | None = None,
+        starting_values: dict[str, str] | None = None,
     ) -> ScenarioAgentResult:
         record = await self._load(session_id)
+        # 계약이 바뀐 턴에만 온다. 기억(history)은 그대로 두고 TC 목록만 갈아 끼운다.
+        if test_case_list is not None:
+            record.test_case_list = test_case_list
+        if starting_values is not None:
+            record.starting_values = starting_values
         if model is not None:
             record.model = model
         if locale is not None:
