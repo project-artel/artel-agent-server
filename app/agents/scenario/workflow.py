@@ -201,6 +201,14 @@ class CasePlan(BaseModel):
     questions: list[Ask] = Field(default_factory=list, description=_QUESTIONS_DESCRIPTION)
 
 
+class SplitPart(BaseModel):
+    """나누기로 떼어 낸 시나리오 하나. 새 시나리오로 저장된다."""
+
+    title: str
+    description: str = ""
+    steps: list[AuthoredStep] = Field(default_factory=list)
+
+
 class ModifyPlan(BaseModel):
     """E 의 출력 — 고칠 시나리오 하나의 완성본. 대상을 못 가리면 questions 만 채운다."""
 
@@ -222,6 +230,15 @@ class ModifyPlan(BaseModel):
         description=(
             "Empty keeps the scenario's current mode. Set it only when the user explicitly"
             " asks to convert: FREE (fill `case_ids`) or ORDERED (write full `steps`)."
+        ),
+    )
+    # **나누기의 나머지 절반.** 칸이 시나리오 하나뿐이던 동안 "2개로 나눠 줘" 는 한쪽만 남기고 다른
+    # 쪽을 "새로 만들까요?" 로 되물었다 — 사용자가 이미 나누라고 한 것을 다시 물은 것이다.
+    split_off: list["SplitPart"] = Field(
+        default_factory=list,
+        description=(
+            "Only when the user asks to split this scenario: every part that leaves it, each a complete"
+            " scenario runnable from a fresh start. Empty for any other request."
         ),
     )
     # **합치기의 나머지 절반.** 칸이 `scenario_id` 하나뿐이던 동안, "이 둘을 합쳐 줘" 는 한쪽에
@@ -1171,8 +1188,8 @@ async def run_modify_workflow(
         프롬프트로는 막을 수 없다. 안 고치고도 고쳤다고 말하는 것을 막는 유일한 방법은
         **낸 것과 원본을 코드가 비교하는 것**이다. 같으면 성공이라 말하지 않는다.
         """
-        if absorbed_of(p):
-            return False  # 걷어낼 것을 지목했으면 이 턴이 한 일이 있다
+        if absorbed_of(p) or p.split_off:
+            return False  # 걷어낼 것이나 떼어 낼 것을 지목했으면 이 턴이 한 일이 있다
         if (p.title or original.title) != original.title:
             return False
         if (p.description or original.description) != original.description:
@@ -1252,7 +1269,34 @@ async def run_modify_workflow(
             for one in answer.saved
         ] or [_change_of("updated", title, plan.scenario_id)]
         changes += [_change_of("removed", gone) for gone in answer.absorbed]
+        # 떼어 낸 쪽은 새 시나리오로 하나씩 낸다. 못 들어간 것은 사실대로 묻는다 — 사라진 채 넘어가지 않게.
+        lost: list[str] = []
+        for part in plan.split_off:
+            if not part.steps:
+                continue
+            piece = ScenarioPlan(
+                scenario_id=None, title=part.title, description=part.description,
+                steps=part.steps, execution_mode=plan.execution_mode,
+            )
+            got = await channel.submit_scenario(piece.model_dump(by_alias=True), [])
+            if got is not None and got.accepted:
+                changes += [
+                    _change_of("created" if one.created else "updated", one.title, one.scenario_id)
+                    for one in got.saved
+                ] or [_change_of("created", part.title)]
+            else:
+                lost.append(part.title)
+        if plan.split_off:
+            trace.record(run_id, "워크플로 E — 나누기", f"떼어 낸 것 {len(plan.split_off)} · 못 넣음 {len(lost)}")
         result = _summary(changes, ko)
+        if lost:
+            plan = plan.model_copy(update={"questions": [*plan.questions, Ask(
+                text=(
+                    f"나눈 시나리오 중 {_bold(lost)} 는 실행 확인을 통과하지 못해 저장하지 못했어요. 다시 써 볼까요?"
+                    if ko else f"{_bold(lost)} did not pass the run check and was not saved. Try again?"
+                ),
+                options=["다시 써 줘", "그냥 둬"] if ko else ["Write it again", "Leave it out"],
+            )]})
         # 남긴 이유는 저쪽 문장을 그대로 옮긴다 — 왜 못 지웠는지는 센 쪽만 안다.
         detail = "\n".join(part for part in (plan.detail.strip(), *answer.kept) if part)
         return _answer(request, result, detail, _questions(plan.questions), changes=changes)
