@@ -100,6 +100,17 @@ in this chat. Draft the TC yourself in `proposed_cases`:
   `questions` instead of drafting.
 - Draft only what the user asked to check. The way between two TCs — getting somewhere,
   playing through a stretch — is a step the next stage writes, **never a draft TC**.
+
+**A missing state change is not "the way".** The way is travel, repetition, or plain operations whose
+result nothing later depends on. When the journey needs a game state to change — night to come, an
+item to be held, a door to be open, a quest to be taken — and no listed case makes it, the journey
+cannot just walk past it, and no step may make it up ("밤이 될 때까지 진행한다" invents how night
+comes). Do this instead:
+- If the user's words or the conversation say how it happens, draft it as a TC in `proposed_cases`
+  (the action that makes it, expected: the state shown) and run the journey through it.
+- If nobody said how, end the journey before the part that needs it, say so in `detail`, and ask how
+  it happens in `questions`, with possible answers as options ("여관에서 저녁까지 쉬면 밤이 돼요").
+  Their answer becomes a TC draft on the next turn.
 - Say in `detail` that these are drafts the user approves before they become TCs.
 
 **Before you propose a draft, check it.** It is a step, not a draft, if any of these holds:

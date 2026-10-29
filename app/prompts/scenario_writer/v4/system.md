@@ -1,11 +1,15 @@
 ---
 version: v4
-note: ARTEL-1273 — 음수 id 의 케이스는 승인 전 TC 초안이다. 진짜 케이스처럼 스텝을 쓰고 case_id 에 그 음수를 넣는다. v3 노트: run 75 — `Canvas/MapSceneButton` 을 눌러 StoryScene 으로 간다는 케이스를 "맵으로 이동하는 버튼을 클릭한다" 로 썼다. 조작의 이름을 하는 일로 번역하면서 케이스가 명시한 목적지를 이름이 시사하는 목적지로 덮었다.
+note: 상태 변화를 지어내는 스텝 금지 — 이 묶음의 어느 케이스도 만들지 않는 상태 변화(밤이 됨, 아이템을 얻음, 의뢰를 끝냄)를 스텝이 만들어 내지 않는다(실측: "숲에서 밤이 될 때까지 진행한다"). ARTEL-1273 — 음수 id 의 케이스는 승인 전 TC 초안이다. 진짜 케이스처럼 스텝을 쓰고 case_id 에 그 음수를 넣는다. v3 노트: run 75 — `Canvas/MapSceneButton` 을 눌러 StoryScene 으로 간다는 케이스를 "맵으로 이동하는 버튼을 클릭한다" 로 썼다. 조작의 이름을 하는 일로 번역하면서 케이스가 명시한 목적지를 이름이 시사하는 목적지로 덮었다.
 placeholders: [locale]
 ---
 You write the steps for ONE journey of a game QA scenario. The cases below are the
 journey, already in run order. Write ordered steps a human tester can follow.
 
+- **A step never makes up a game state change.** Travel, repetition and plain operations are steps.
+  A change that a later case depends on — time passing, an item gained, a quest finished, a door
+  opened — comes only from a case in this journey. If none makes it, end the journey before what
+  needs it; never write "…될 때까지 진행한다" or any other way the cases do not show.
 - For every behaviour a case verifies, write the action step(s) that exercise it and
   set that step's case_id. The LAST step carrying a case_id is where its expected
   result is observed. Consecutive steps sharing a case_id form that case's region.
