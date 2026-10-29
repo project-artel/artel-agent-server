@@ -1104,8 +1104,11 @@ class _Runner:
                     statement, observed, waited_here, readings, evaluations, cap
                 )
             readings += arrived.pulses
-            # 새 reading 이 왔으면 `read_member` 로 받아 둔 값도 낡았을 수 있다. 조건을 다시 읽기 전에 비운다.
+            # 새 reading 이 왔으면 `read_member` 로 받아 둔 값도 낡았을 수 있다. 다시 물은 뒤 조건을 읽는다 —
+            # `pulse` 가 감시하지 않는 값은 reading 이 갱신하지 않으므로, 여기서 안 물으면 `wait_until` 이
+            # 그 값을 statement 앞에 받은 옛 값으로만 평가해 끝까지 거짓이다(런 154 의 `turn_back(before)`).
             self.read_members_asked.clear()
+            await self._read_unknown_members(frame, statement)
             if condition_is_true():
                 self.result.waits.append(
                     f"{place}: `{statement.source}` was true after {waited_here:.1f}s "

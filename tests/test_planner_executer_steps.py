@@ -175,7 +175,13 @@ def test_the_planner_writes_macros_from_the_rules_the_grammar_the_map_and_the_sc
          "`def look_around` has no docstring"),
         (MACROS.replace('wait_until(scene() == "Map", 1,', 'require(scene() == "Map" and exists(start),'),
          "MACRO_NODE_REJECTED"),
-        (MACROS.replace("def look_around() -> None:", "def look_around(times: int) -> None:"), "takes parameters"),
+        # 인자 있는 `-> None` def 는 helper 라 action 이 아니다. 둘 다 helper 가 되면 action 이 없다.
+        (
+            MACROS.replace("def look_around() -> None:", "def look_around(times: int) -> None:").replace(
+                "def press_start() -> None:", "def press_start(times: int) -> None:"
+            ),
+            "at least one action",
+        ),
     ],
 )
 def test_a_refused_answer_goes_back_with_the_refusal_and_the_rewrite_is_used(refused: str, said: str) -> None:
@@ -185,6 +191,25 @@ def test_a_refused_answer_goes_back_with_the_refusal_and_the_rewrite_is_used(ref
 
     assert written.macros is not None
     assert said in asked.calls[1][1] and "The macro parser refused it" in asked.calls[1][1]
+
+
+def test_a_def_with_parameters_is_a_helper_the_actions_call_and_not_an_option() -> None:
+    """developer macro 본문이 그렇게 쓰여 있다(`fill_spell(word: string)`). editor 가 그 본문을 재사용할 수
+    있어야 하므로 helper 는 거절도 선택지도 아니다(ARTEL-1288)."""
+    fake = _menu()
+    with_helper = (
+        MACROS.replace("    click(start)\n", "    press(start)\n")
+        + "\n\ndef press(target: object) -> None:\n    click(target)\n"
+    )
+
+    async def go():
+        fake.push_reading()
+        return await parse_step(with_helper, RegisteredMacros(fake.channel))
+
+    macros = asyncio.run(go())
+
+    assert list(macros.actions) == ["press_start", "look_around"]
+    assert "press" not in macros.actions
 
 
 def test_an_answer_still_refused_after_the_rewrites_is_returned_with_its_refusal() -> None:
@@ -248,6 +273,41 @@ def test_the_action_jev_names_is_the_one_that_runs() -> None:
 
     assert [turn.get("picked") for turn in play.turns] == ["look_around", "press_start", None]
     assert play.stopped == "done"
+
+
+def test_jev_is_told_what_the_last_action_turns_did_when_it_picks_again() -> None:
+    fake = _menu()
+    jev = FakeJev(picks=("look_around", "look_around", "press_start"))
+
+    play = _play(fake, jev)
+
+    first, second, third = jev.asked("choice")
+    # 첫 turn 에는 지난 action 이 없어 state 가 전과 같다.
+    assert "recent_actions" not in first["state"]
+    assert second["state"]["recent_actions"] == ["turn 0: look_around → passed, sent no input to the game"]
+    assert third["state"]["recent_actions"] == [
+        "turn 0: look_around → passed, sent no input to the game",
+        "turn 1: look_around → passed, sent no input to the game",
+    ]
+    assert play.turns[2]["recent_actions"] == third["state"]["recent_actions"]
+    assert play.stopped == "done"
+
+
+def test_recent_action_lines_carry_failures_flags_and_repairs_and_keep_the_last_three() -> None:
+    turns = [
+        {"turn": 0, "picked": "a", "outcome": "passed", "sent": [{"summary": "click(x)"}]},
+        {"turn": 1, "done": True},  # `done()` 만 읽은 turn 은 빠진다
+        {"turn": 2, "picked": "none_fits"},  # action 을 안 돌린 turn 도 빠진다
+        {"turn": 3, "picked": "b", "outcome": "failed", "sent": [], "reason": "WAIT_TIMEOUT at b step 2 of 2"},
+        {"turn": 4, "picked": "c", "outcome": "passed", "sent": [], "flags": [{"place": "c step 2", "message": "no card"}]},
+        {"turn": 5, "picked": "c", "outcome": "passed", "sent": [], "repair": {"action": "c", "attempt": 1, "replaced": False}},
+    ]
+
+    assert executer_module.recent_action_lines(turns) == [
+        "turn 3: b → failed, sent no input to the game (WAIT_TIMEOUT at b step 2 of 2)",
+        "turn 4: c → passed, sent no input to the game; flag: no card",
+        "turn 5: c → passed, sent no input to the game; a rewrite was refused after this",
+    ]
 
 
 def test_nothing_fitting_waits_for_the_screen_and_stops_after_the_grace() -> None:

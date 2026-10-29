@@ -6,7 +6,10 @@ Each turn:
 2. read `done()` on the current screen. When it holds, ask Jev whether the step's goal has really
    been reached. Agreed — stop, `done`. Not agreed — note a disagreement and go on;
    `max_done_disagreements` of them stop play;
-3. ask Jev which action to run now: the actions' docstrings are the options, with `none_fits`;
+3. ask Jev which action to run now: the actions' docstrings are the options, with `none_fits`. The
+   state Jev reads carries the last `RECENT_ACTIONS_SHOWN` action turns — what ran, whether it sent an
+   input, why it stopped (ARTEL-1288): a screen that did not move looks the same every turn, and
+   without this Jev picked the same idle action eleven times in a row;
 4. `none_fits` — wait for the next reading, and stop once nothing has fit for
    `no_action_grace_seconds`. Otherwise run the action with the macro runner; `max_failures_in_a_row`
    failed actions stop play, and so do `max_idle_turns_in_a_row` actions that ran without sending the
@@ -55,6 +58,9 @@ PICK_QUESTION = "Which of these should the player do now to progress this step?"
 
 # How long the executer waits for a reading when nothing fits, before it asks again.
 IDLE_LOOK_SECONDS = 1.0
+# How many of the latest action turns Jev is told about when it picks the next action. Three is
+# enough to show a repeat; the screen itself says the rest.
+RECENT_ACTIONS_SHOWN = 3
 # Readings come in bursts and are applied one frame at a time. A decision taken between two of
 # them decides on the past, so each turn first lets the burst land: it waits until no reading has
 # landed for `SETTLE_QUIET_SECONDS`, at most `SETTLE_ROUNDS` times.
@@ -197,7 +203,10 @@ class Executer:
                 options = {name: macros.description(name) for name in macros.actions}
                 record["question"] = f"{PICK_QUESTION} The step: {action}"
                 record["options"] = list(options)
-                record["picked"] = picked = await self._pick(record["question"], options)
+                recent = recent_action_lines(play.turns[:-1])
+                if recent:
+                    record["recent_actions"] = recent
+                record["picked"] = picked = await self._pick(record["question"], options, recent)
                 if picked == NONE_FITS:
                     await self._send(record)
                     none_since = none_since or now
@@ -280,12 +289,18 @@ class Executer:
         except JevError as error:
             raise JevStopped(str(error)) from error
 
-    async def _pick(self, question: str, options: dict[str, str]) -> str:
+    async def _pick(self, question: str, options: dict[str, str], recent: list[str] | None = None) -> str:
+        """Jev 가 고른 action. `recent` 가 있으면 state 에 `recent_actions` 로 함께 간다 — 화면이 안 움직인
+        turn 은 화면만으로는 첫 turn 과 같아, 방금 무엇을 했고 그것이 입력을 보냈는지를 Jev 가 알아야
+        같은 수를 되풀이하지 않는다(ARTEL-1288, 런 153)."""
+        state = self._state()
+        if recent:
+            state["recent_actions"] = recent
         try:
             return await self._jev.choose(
                 question,
                 {**options, NONE_FITS: NONE_FITS_DESCRIPTION},
-                self._state(),
+                state,
             )
         except JevError as error:
             raise JevStopped(str(error)) from error
@@ -327,6 +342,31 @@ class Executer:
 
     async def _send(self, record: dict) -> None:
         await self._channel.emit(MessageType.LOG, _turn_log(record))
+
+
+def recent_action_lines(turns: list[dict]) -> list[str]:
+    """The last `RECENT_ACTIONS_SHOWN` turns that ran an action, one line each, oldest first.
+
+    `turn 11: prepare_any_spell → passed, sent no input to the game` is the shape; a failure adds its
+    reason and a `flag(...)` adds its message. Turns that picked `none_fits` or only read `done()` are
+    left out — they changed nothing Jev needs to know about.
+    """
+    ran = [turn for turn in turns if turn.get("picked") and "outcome" in turn]
+    lines = []
+    for turn in ran[-RECENT_ACTIONS_SHOWN:]:
+        sent = turn.get("sent") or []
+        line = f"turn {turn.get('turn')}: {turn['picked']} → {turn['outcome']}, "
+        line += f"sent {len(sent)} input{'s' if len(sent) != 1 else ''} to the game" if sent else "sent no input to the game"
+        if turn.get("reason"):
+            line += f" ({str(turn['reason'])[:MAX_REASON_CHARS]})"
+        for flagged in turn.get("flags") or []:
+            message = flagged.get("message") if isinstance(flagged, dict) else str(flagged)
+            if message:
+                line += f"; flag: {message}"
+        if turn.get("repair"):
+            line += "; the macros were rewritten after this" if turn["repair"].get("replaced") else "; a rewrite was refused after this"
+        lines.append(line)
+    return lines
 
 
 def _turn_log(record: dict) -> TurnLogPayload:

@@ -310,3 +310,32 @@ def test_a_reading_without_the_new_fields_renders_as_before() -> None:
 
     assert "coverage gaps" not in plain and "audio playing" not in plain and "ui:" not in plain
     assert "Enemy.hp = 5" in plain
+
+
+def test_wait_until_asks_a_fetched_value_again_on_every_new_reading() -> None:
+    """`pulse` 가 감시하지 않는 값은 reading 이 갱신하지 않는다. `wait_until` 이 statement 앞에 받은 값만
+    보면 끝까지 거짓이다(런 154 의 `end_turn`). 새 reading 마다 다시 묻는다."""
+    fake = FakeGame("Battle", {"Root/Enemy": {"text": "Enemy", "members": {}}})
+    score = {"value": 0}
+    fake.answers["read_member"] = lambda params: {"values": [{"value": score["value"]}]}
+    source = (
+        "def check() -> None:\n"
+        '    wait_until(static("Game.Score") == 1, 2, "Score never reached 1.")\n'
+    )
+
+    async def go():
+        fake.push_reading()
+        loop = asyncio.get_running_loop()
+
+        def bump() -> None:
+            score["value"] = 1
+            fake.push_reading()
+
+        loop.call_later(0.05, bump)
+        host = ChannelMacroHost(fake.channel, JevClient(post=FakeJev()), 1)
+        return await run_macro(host, macro_definition_from_source("check", source), {}, 1)
+
+    result = asyncio.run(go())
+
+    assert result.failure is None
+    assert [params for method, params in fake.actions if method == "read_member"] == [["Game::Score"], ["Game::Score"]]
