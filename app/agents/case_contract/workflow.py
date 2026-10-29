@@ -79,6 +79,7 @@ class _CaseStates(BaseModel):
     removes: list[str] = Field(default_factory=list)
     sets_values: list[_Value] = Field(default_factory=list)
     counters_add: list[_CounterAdd] = Field(default_factory=list)
+    arrives_at: str = Field(default="", description="The screen the TC ends on when it moves the player elsewhere; empty otherwise.")
 
 
 class _Contracts(BaseModel):
@@ -108,6 +109,8 @@ class CaseContract(BaseModel):
     condition: dict | None = None
     state_after: str = ""
     assumed_before: str = ""
+    # 다른 화면으로 가는 TC 면 도착 화면(TC 들이 부르는 이름). 씬 전이 TC 의 표식이다.
+    arrives_at: str = ""
 
 
 class CaseContractResult(BaseModel):
@@ -161,6 +164,7 @@ def to_wire(case: _CaseStates) -> CaseContract:
         condition=_group("every", parts) if parts else None,
         state_after="; ".join(after),
         assumed_before="; ".join(f"{t['left']} {t['operator']} {t['right']}" for t in assumed),
+        arrives_at=case.arrives_at.strip(),
     )
 
 
