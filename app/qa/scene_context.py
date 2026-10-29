@@ -40,6 +40,9 @@ without the advice. The block is simply absent.
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Sequence
+from typing import Any
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -80,6 +83,16 @@ MAX_KNOWLEDGE_IN_SCENE_CONTEXT = 6
 # 아니라 방금 본 것에 해당하는 줄을 찾는 것이라, 검색이 그 일에 맞는 모양이다.
 MAX_NOT_A_STEP_IN_SCENE_CONTEXT = 6
 
+# 첫 메시지의 macro 목록이 그리는 줄 수 (ARTEL-935).
+#
+# orchestration 이 이름순으로 30개까지 보낸다. 이 목록은 시나리오의 첫 메시지에 한 번 앉고
+# 런이 끝날 때까지 문맥에 남으므로(compaction 이 돌면 요약으로 바뀐다), 줄 하나는 모든 호출이
+# 치르는 값이다. macro 한 줄은 이름과 인자와 설명과 scene 을 합쳐 100~150자라 12줄이면
+# 1.5KB 안쪽이다. capability 8줄 · knowledge 6줄과 같은 규모에서 고른 수이고, 30줄 전부는
+# 4KB 를 넘겨 첫 메시지의 시나리오 본문과 자리를 다툰다. 잘린 macro 는 목록에서 안 보이지만
+# 사라진 것이 아니다 — `_cut_note` 가 자른 수를 말한다.
+MAX_MACROS_IN_FIRST_MESSAGE = 12
+
 # Per free-text field. A summary is written as one line, but nothing enforces
 # that on the way in, and one pathological entry must not be able to double the
 # block. Clipped rather than dropped, and the clip is visible, so the agent can
@@ -87,7 +100,7 @@ MAX_NOT_A_STEP_IN_SCENE_CONTEXT = 6
 MAX_TEXT_CHARS = 160
 
 # The markers the rendered block is wrapped in. Its own pair, distinct from
-# `SCENE_VIEW_START_PREFIX`, and drawn OUTSIDE it: `fold_stale_scenes` replaces
+# `SCENE_VIEW_START_PREFIX`, and drawn OUTSIDE it: `fold_context` replaces
 # everything between that other pair with a placeholder, and a block inside it
 # would be folded away with the screen it describes. Nothing folds this one —
 # folding rewrites a message the model has already been sent, which is what broke
@@ -197,6 +210,23 @@ class SceneContextEntry(_Payload):
     not_a_step_capabilities: list[SceneCapability] = Field(default_factory=list)
     knowledge: list[SceneKnowledge] = Field(default_factory=list)
 
+    def printed_actionable(self) -> list[SceneCapability]:
+        """block 이 찍는 "여기서 할 수 있는 것" 줄. 잘린 나머지는 여기 없다."""
+        return self.capabilities[:MAX_CAPABILITIES_IN_SCENE_CONTEXT]
+
+    def printed_happenings(self) -> list[SceneCapability]:
+        """block 이 찍는 "여기서 일어나는 것" 줄 (ARTEL-680)."""
+        return self.not_a_step_capabilities[:MAX_NOT_A_STEP_IN_SCENE_CONTEXT]
+
+    def printed_capabilities(self) -> list[SceneCapability]:
+        """block 이 실제로 찍는 줄 전부.
+
+        `_entry_lines` 와 `_not_a_step_lines` 가 위 둘로 그리고, `report_step` 의
+        `capability_key` 검사가 이 목록에 묻는다. 자르는 수를 두 자리에서 따로 적으면 검사가
+        찍힌 적 없는 키를 받아 준다.
+        """
+        return [*self.printed_actionable(), *self.printed_happenings()]
+
     def all_capabilities(self) -> list[SceneCapability]:
         """두 목록을 합친 것. `list_scene_capabilities` 가 뒤지는 대상이다.
 
@@ -205,6 +235,33 @@ class SceneContextEntry(_Payload):
         싣는 프롬프트의 캐시가 통째로 깨진다.
         """
         return [*self.capabilities, *self.not_a_step_capabilities]
+
+
+class SceneMacroParameter(_Payload):
+    """macro 가 받는 인자 하나. 이름과 선언된 type 이 전부다."""
+
+    name: str = ""
+    type: str = ""
+
+
+class SceneMacroScreen(_Payload):
+    """macro 를 단 `screen` 하나. 목록에는 scene 이름만 그린다."""
+
+    screen_id: str = ""
+    scene_name: str = ""
+
+
+class SceneMacro(_Payload):
+    """지난 런이 이 빌드에 등록한 macro 하나 (ARTEL-934, ARTEL-935).
+
+    `summary` 는 macro 진입점 `def` 의 docstring 이고 없으면 `None` 이다 (ARTEL-984). `screens` 가 비어
+    있으면 어디서 쓰는지 아직 모른다는 뜻이다 — 쓸 수 없다는 뜻이 아니다.
+    """
+
+    name: str = ""
+    parameters: list[SceneMacroParameter] = Field(default_factory=list)
+    summary: str | None = None
+    screens: list[SceneMacroScreen] = Field(default_factory=list)
 
 
 class SceneContext(_Payload):
@@ -222,6 +279,42 @@ class SceneContext(_Payload):
     content_map_id: str | None = None
     capture: str | None = None
     scenes: list[SceneContextEntry] = Field(default_factory=list)
+    # 이 빌드에 등록된 macro, 이름순 최대 30개 (ARTEL-934). `macros_total` 은 자르기 전의 수라
+    # `len(macros)` 보다 클 수 있다. 이 칸을 모르는 orchestration 에서는 비고 0이다.
+    macros: list[SceneMacro] = Field(default_factory=list)
+    macros_total: int = 0
+
+    def macro_section(self) -> str:
+        """시나리오 첫 메시지 끝에 붙는 macro 목록. 없으면 빈 문자열.
+
+        **첫 메시지에 붙이는 이유.** 이 목록은 씬과 무관하게 빌드 전체의 것이라 `<<scene
+        context>>` 블록(씬에 처음 들어갈 때 도구 결과 밑에 그려진다)에 얹으면 씬마다 같은
+        목록이 다시 실린다. 매 모델 호출 끝에 붙였다 떼는 방식은 프롬프트 접두를 매 턴
+        깨뜨린다(ARTEL-621). 첫 메시지는 런이 시작할 때 한 번 정해지고 뒤로 바뀌지 않아 접두의
+        일부가 된다 — 이 글은 `self` 만 읽으므로 두 번째 턴에 다시 그려도 같은 글이다.
+
+        빈 목록에는 아무것도 안 낸다. "등록된 macro 가 없다" 는 문장은 이 칸을 모르는
+        orchestration 에서도 똑같이 나오는데, 그때 그 문장은 배포 상태를 말한 것이다.
+        """
+        if not self.macros:
+            return ""
+        shown = self.macros[:MAX_MACROS_IN_FIRST_MESSAGE]
+        total = max(self.macros_total, len(self.macros))
+        heading = "Macros registered by earlier runs of this build"
+        if len(shown) < total:
+            heading = f"{heading} ({_cut_note(len(shown), total, 'macros')})"
+        lines = [heading + ":"]
+        for macro in shown:
+            lines.extend(_macro_lines(macro))
+        lines.append(
+            "These were registered by earlier runs of this build; the docstring under each "
+            "says what it does. When a step has one, run it with `run_macro` as that "
+            "step's first action and act by hand only if it fails; `read_macro` shows its "
+            "source. Check the scene first — a macro tagged with a scene was written "
+            "there. If nothing here fits, `search_macros` finds registered macros by name "
+            "and docstring before you write a new one."
+        )
+        return "\n\n" + "\n".join(lines)
 
     def entry_for(self, scene_name: str | None) -> SceneContextEntry | None:
         """The slice for one scene, by exact name.
@@ -310,6 +403,78 @@ def _capability_line(capability: SceneCapability) -> str:
     return line
 
 
+def _macro_lines(macro: SceneMacro) -> list[str]:
+    """첫 메시지 목록의 macro 하나. 모양은 `render_macro` 에 있다."""
+    return render_macro(
+        macro.name,
+        [(parameter.name, parameter.type) for parameter in macro.parameters],
+        macro.summary,
+        scene_labels(macro.screens),
+        indent="  ",
+    )
+
+
+def scene_labels(screens: Sequence[Any]) -> list[str]:
+    """`screens` 의 scene 이름. 중복은 한 번만 적고 처음 나온 순서를 지킨다.
+
+    이름이 비어 오는 `screen` 은 `screen <id>` 로 적는다. scene context 의 `SceneMacroScreen`
+    과 `MACRO_SEARCH_RESULT` 의 `MacroSearchScreen` 이 같은 두 field 를 들어서 둘 다 받는다.
+    """
+    labels: list[str] = []
+    for screen in screens:
+        label = screen.scene_name or (f"screen {screen.screen_id}" if screen.screen_id else "")
+        if label and label not in labels:
+            labels.append(label)
+    return labels
+
+
+def docstring_summary(docstring: str | None, limit: int = MAX_TEXT_CHARS) -> str | None:
+    """docstring 의 첫 문단을 공백을 한 칸으로 줄여 `limit` 에서 자른 것. 없으면 `None`.
+
+    첫 문단만 쓰는 이유는 목록 한 줄의 크기다. 둘째 문단부터는 `read_macro` 가 source 로
+    돌려준다.
+    """
+    if not docstring or not docstring.strip():
+        return None
+    first_paragraph = re.split(r"\n\s*\n", docstring.strip(), maxsplit=1)[0]
+    text = " ".join(first_paragraph.split())
+    if len(text) > limit:
+        text = f"{text[:limit].rstrip()}…"
+    return text
+
+
+def render_macro(
+    name: str,
+    parameters: Sequence[tuple[str, str]],
+    docstring: str | None,
+    scenes: Sequence[str],
+    indent: str = "",
+    docstring_chars: int = MAX_TEXT_CHARS,
+) -> list[str]:
+    """등록된 macro 하나를 agent 가 보는 모양으로. 줄 둘, docstring 이 없으면 하나다.
+
+    ```
+    def cast_pair_at_enemy(spell: object, enemy: object)  [TurnBattleScene]
+        \"\"\"Cast the spell card and the element card at one enemy.\"\"\"
+    ```
+
+    첫 메시지 목록, `report_step` 의 hint, `search_macros` 결과가 모두 이 함수를 쓴다.
+    Python 의 `def` 와 docstring 모양으로 그리는 이유는 모델이 그 둘째 줄을 그 macro 의
+    설명으로 읽게 하려는 것이다. `screens` 가 비면 `[no screen yet]` — 쓸 곳을 아직 모르는
+    것이지 쓸 수 없는 것이 아니다.
+    """
+    written = ", ".join(
+        f"{parameter}: {declared}" if declared else parameter
+        for parameter, declared in parameters
+    )
+    where = ", ".join(scenes) if scenes else "no screen yet"
+    lines = [f"{indent}def {name}({written})  [{where}]"]
+    summary = docstring_summary(docstring, docstring_chars)
+    if summary:
+        lines.append(f'{indent}    """{summary}"""')
+    return lines
+
+
 def _cut_note(shown: int, total: int, what: str) -> str:
     """What a truncated list says about itself.
 
@@ -335,7 +500,7 @@ def _not_a_step_lines(entry: SceneContextEntry) -> list[str]:
         return []
 
     total = len(entry.not_a_step_capabilities)
-    shown = entry.not_a_step_capabilities[:MAX_NOT_A_STEP_IN_SCENE_CONTEXT]
+    shown = entry.printed_happenings()
     lines = [""]
     heading = (
         "things the map says HAPPEN here — not controls to press, results to watch for "
@@ -380,7 +545,7 @@ def _entry_lines(entry: SceneContextEntry) -> list[str]:
             "the content map knows this scene and lists nothing that can be done here."
         )
     else:
-        shown = entry.capabilities[:MAX_CAPABILITIES_IN_SCENE_CONTEXT]
+        shown = entry.printed_actionable()
         heading = f"the content map says this can be done here ({len(entry.capabilities)} known)"
         if len(shown) < len(entry.capabilities):
             heading = (
@@ -459,11 +624,10 @@ async def fetch_scene_context(
     is strictly worse: the block makes a good run better, and its absence costs
     nothing the agent cannot get from a tool.
 
-    `None` is also the answer when the caller has no ids to ask with. Today
-    Orchestration's session open does not send `project_id`/`game_build_id`
-    (`QaSessionOpenContext` carries `game_instance_id` and `qa_run_id`), so this
-    lands on the same path as a failed lookup until it does — deliberately, so
-    the feature ships dark rather than shipping a run that refuses to open.
+    `None` is also the answer when the caller has no ids to ask with.
+    Orchestration's session open sends `project_id`/`game_build_id`
+    (`QaSessionOpenContext`); a caller that leaves them out lands on the same
+    path as a failed lookup rather than on a run that refuses to open.
     """
     if project_id is None or game_build_id is None:
         return None

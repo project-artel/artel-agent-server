@@ -114,7 +114,12 @@ def build_system_prompt(request: ScenarioAgentRequest) -> tuple[str, str]:
     """
     system: PromptFile = load_prompt(PROMPT_AGENT, "system")
     body = system.body.format(
-        game_shape=render_game_shape(request.test_case_list, request.entry_scene),
+        game_shape=render_game_shape(
+            request.test_case_list,
+            request.entry_scene,
+            request.scene_edges,
+            request.starting_values,
+        ),
         test_case_list=render_test_case_list(request.test_case_list),
         flows=render_flows(request.flows),
         language_directive=LANGUAGE_DIRECTIVES[request.locale],

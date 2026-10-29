@@ -1,6 +1,6 @@
 """Compacting the QA run's conversation when it outgrows the model.
 
-`fold_stale_scenes` (`app/agents/qa/context.py`) holds down the biggest source of
+`fold_context` (`app/agents/qa/context.py`) holds down the biggest source of
 growth, but not the rest of it: folded placeholders, action outcome lines, step
 verdicts, knowledge search results and the model's own reasoning all stay in the
 conversation for the whole run. A long scenario still reaches the provider's
@@ -43,8 +43,9 @@ from langchain_core.messages import AnyMessage, BaseMessage, HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.tools import BaseTool, tool
 
-from app.agents.qa.context import fold_stale_scenes
+from app.agents.qa.context import FoldKind, fold_every_stale_block
 from app.agents.qa.tools import QaRunState
+from app.prompts import load_tool_description
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import LogCategory
 from app.qa.scene_context import SCENE_CONTEXT_START
@@ -77,23 +78,6 @@ _SUMMARY_SOURCE = "summarization"
 _SUMMARY_PREAMBLE = "Here is a summary of the conversation to date:"
 
 
-COMPACT_CONTEXT_DESCRIPTION = """Compress your own conversation history.
-
-Reach for this when the history behind you has become unwieldy — many steps done,
-long stretches of exploration, repeated looks at the same screen — and it is
-getting in the way of deciding what to do next. It happens automatically when the
-conversation approaches the model's limit; this is for when you would rather not
-wait for that.
-
-Everything that matters survives: the verdicts you have recorded, which steps
-still need one, the step to do next, and anything the operator told you are all
-restated to you immediately afterwards, and the current screen is attached to
-every turn regardless. What you lose is the detail of how you got here.
-
-Say what to do next in `reason` and then simply carry on — there is no need to
-call this again or to re-check what you have already recorded."""
-
-
 def build_compact_tool(state: QaRunState) -> BaseTool:
     """The agent's own handle on compaction.
 
@@ -106,7 +90,7 @@ def build_compact_tool(state: QaRunState) -> BaseTool:
     already knows how to cut without splitting a call from its result.
     """
 
-    @tool(description=COMPACT_CONTEXT_DESCRIPTION)
+    @tool(description=load_tool_description("compact_context").body)
     async def compact_context(reason: str) -> str:
         state.compaction_requested = True
         return (
@@ -134,7 +118,16 @@ def render_progress_ledger(state: QaRunState, channel: QaRunChannel) -> str:
         f"Scenario steps: {state.total_steps}",
     ]
 
-    if state.step_results:
+    free = state.execution_mode == "FREE"
+    if state.step_results and free:
+        # FREE 는 `report_case` 가 case_id 로 받으므로 원장도 case_id 로 적는다. 판정을 한 번
+        # 덮어쓸 수 있으므로 "다시 하지 말라" 고 하지 않는다.
+        lines.append("")
+        lines.append("Verdicts already recorded (case_id):")
+        for result in state.step_results:
+            verdict = "PASS" if result.passed else "FAIL"
+            lines.append(f"  case {result.case_id}: {verdict} — {result.message}")
+    elif state.step_results:
         lines.append("")
         lines.append("Verdicts already recorded — do NOT report or re-attempt these:")
         for result in state.step_results:
@@ -146,13 +139,29 @@ def render_progress_ledger(state: QaRunState, channel: QaRunChannel) -> str:
 
     remaining = state.unreported_steps()
     if remaining:
-        listed = ", ".join(str(step) for step in remaining)
-        lines.append("")
-        lines.append(f"Steps still without a verdict: {listed}")
-        lines.append(
-            f"Continue with step {remaining[0]}. Observe the screen first if you "
-            "are unsure where the game is."
-        )
+        if free:
+            listed = ", ".join(str(state.case_of_step(step)) for step in remaining)
+            lines.append("")
+            lines.append(f"Test cases still without a verdict (case_id): {listed}")
+        else:
+            listed = ", ".join(str(step) for step in remaining)
+            lines.append("")
+            lines.append(f"Steps still without a verdict: {listed}")
+        if free:
+            # FREE 시나리오는 순서를 agent 가 정하므로 가장 작은 번호를 다음으로 지정하지 않는다.
+            # 압축이 "시간이 없다" 로 읽히지 않게 한 줄을 더한다 — 2026-10-14 qa_try 3 에서 압축
+            # 직후 agent 가 그렇게 판단하고 남은 TC 를 시도 없이 실패로 보고했다(`app/qa/reach.py`).
+            lines.append(
+                "Choose which of these to verify next. Observe the screen first if "
+                "you are unsure where the game is. This compaction is not a sign that "
+                "time is running out: there is no time or token budget to save, so "
+                "reach and carry out every remaining case before you report it."
+            )
+        else:
+            lines.append(
+                f"Continue with step {remaining[0]}. Observe the screen first if you "
+                "are unsure where the game is."
+            )
     else:
         lines.append("")
         lines.append("Every step has a verdict. Call `finish_run` to close the run.")
@@ -249,13 +258,20 @@ def _insert_after_summary(
 def _folded_token_counter(messages) -> int:
     """Count what the model is actually sent, not what the graph is holding.
 
-    `fold_stale_scenes` runs as a `wrap_model_call`, so it rewrites one request
+    `fold_context` runs as a `wrap_model_call`, so it rewrites one request
     and leaves the graph's own messages alone. Counting those unfolded messages
     would measure a conversation that is never sent, and compaction would fire
     while there was still plenty of room — repeatedly, since folding keeps the
     real size flat while the stored size climbs.
+
+    This folds every stale scene view rather than following `fold_context`'s
+    batches, which need the run's state. So it can read short by up to one batch,
+    `DEFAULT_FOLD_THRESHOLD_CHARS`, which is noise against a trigger set at 90%
+    of the model's window.
     """
-    return count_tokens_approximately(fold_stale_scenes(list(messages)))
+    return count_tokens_approximately(
+        fold_every_stale_block(list(messages), [FoldKind.scene_view])
+    )
 
 
 class QaCompactionMiddleware(SummarizationMiddleware):
@@ -364,7 +380,7 @@ class QaCompactionMiddleware(SummarizationMiddleware):
         # 오퍼레이터에게 보고되지 않고 그 자체로 터지게 하려는 것이다. 다만 이 한 번의
         # 폴딩만 밖에 있다. `_folded_token_counter`가 base class 안에서 다시 폴딩하고,
         # 그 호출은 아래 핸들러 아래에 있다.
-        folded = fold_stale_scenes(state["messages"])
+        folded = fold_every_stale_block(state["messages"], [FoldKind.scene_view])
 
         try:
             update = await super().abefore_model({**state, "messages": folded}, runtime)
@@ -391,6 +407,12 @@ class QaCompactionMiddleware(SummarizationMiddleware):
             await self._decline_compaction()
             return None
 
+        # `claude/` 모델에서는 요약이 앞 turn 을 바꾸므로, 남긴 꼬리 turn 의 thinking block 이
+        # 무효가 된다. 그 block 들은 요약 전의 전체 이력을 앞에 두고 만들어졌다.
+        # Claude API 는 block 앞의 메시지가 바뀐 채로 그 block 을 다시 받으면 400 을 돌려준다
+        # (2026-08-31 이후 만든 계정). `ClaudeApiChat`(`app/llm/claude_api.py`)이 그런 block 을
+        # 그 요청에서 빼므로 400 은 나지 않지만, 바뀐 지점 뒤 turn 들의 추론은 다음 호출에 넘어가지
+        # 않는다.
         update["messages"] = _insert_after_summary(
             messages, HumanMessage(content=render_progress_ledger(self._state, self._channel))
         )

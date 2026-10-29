@@ -63,3 +63,10 @@ until replacement succeeds so callers retain deterministic fallback behavior.
 
 Jira: ARTEL-123
 ```
+
+## Writing Style
+
+Follow [writing-style.md](writing-style.md) when adding or editing text covered
+by this document. Its wording and title rules supersede older tone examples;
+preserve project-specific workflows, templates, terminology, and localization.
+For UI copy, retain the sentence forms defined in this document.

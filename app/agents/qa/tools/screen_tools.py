@@ -6,12 +6,11 @@
 from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.screen import (
-    EXCLUDE_SCREEN_SELECTOR_DESCRIPTION,
-    INCLUDE_SCREEN_SELECTOR_DESCRIPTION,
     MAX_PATTERN_LENGTH,
     SCREEN_SELECTOR_MATCHES,
     UNCONFIRMED_RULE,
     render_rule_result,
+    screen_tool_description,
 )
 from app.agents.qa.tools.tool_context import ToolContext
 from app.qa.channel import KnowledgeRequestFailed, QaCancelled, with_operator_messages
@@ -104,11 +103,11 @@ def build_screen_selector_tools(ctx: ToolContext) -> list[BaseTool]:
             return with_operator_messages(UNCONFIRMED_RULE, messages)
         return with_operator_messages(render_rule_result(answer), messages)
 
-    @tool(description=INCLUDE_SCREEN_SELECTOR_DESCRIPTION)
+    @tool(description=screen_tool_description("include_screen_selector"))
     async def include_screen_selector(
         step: int, thought: str, match: str, pattern: str, reason: str
     ) -> str:
-        # What the agent reads is INCLUDE_SCREEN_SELECTOR_DESCRIPTION, not this.
+        # What the agent reads is tool_include_screen_selector.md, not this.
         #
         # 화면을 안 돌려준다. 이 호출은 게임을 건드리지 않으므로 화면을 실으면 에이전트가
         # 이미 들고 있는 것을 문맥에 한 번 더 사는 것이다 — 지식 tool 들과 같은 판단이다
@@ -117,11 +116,11 @@ def build_screen_selector_tools(ctx: ToolContext) -> list[BaseTool]:
             match, pattern, reason, screen_defining=True
         )
 
-    @tool(description=EXCLUDE_SCREEN_SELECTOR_DESCRIPTION)
+    @tool(description=screen_tool_description("exclude_screen_selector"))
     async def exclude_screen_selector(
         step: int, thought: str, match: str, pattern: str, reason: str
     ) -> str:
-        # What the agent reads is EXCLUDE_SCREEN_SELECTOR_DESCRIPTION, not this.
+        # What the agent reads is tool_exclude_screen_selector.md, not this.
         return await _write_screen_selector_rule(
             match, pattern, reason, screen_defining=False
         )

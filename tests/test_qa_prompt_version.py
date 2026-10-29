@@ -11,6 +11,7 @@ import logging
 import pytest
 
 from app.agents.qa import runner as runner_module
+from app.agents.qa.arch import PhaseCycleMode, QaArchError, QaArchSpec
 from app.agents.qa.runner import QaRunner
 from app.agents.qa.tools import QaRunState, build_tools
 from app.api.qa_sessions import OpenQaSessionRequest
@@ -87,7 +88,9 @@ class RecordingRunner:
         return None, None
 
 
-async def _run_session(prompt_version: str | None) -> str | None:
+async def _run_session(
+    prompt_version: str | None, arch: QaArchSpec | None = None
+) -> str | None:
     seen: list[str | None] = []
     runner = RecordingRunner()
 
@@ -105,6 +108,7 @@ async def _run_session(prompt_version: str | None) -> str | None:
             QaRunScenario(qa_try_id=7, test_scenario_id=1, scenario=make_scenario())
         ],
         prompt_version=prompt_version,
+        **({"arch": arch} if arch is not None else {}),
     )
 
     async def send(_frame: dict) -> None:
@@ -116,7 +120,10 @@ async def _run_session(prompt_version: str | None) -> str | None:
 
 
 def test_the_requested_version_reaches_the_runner() -> None:
-    assert asyncio.run(_run_session("v1")) == "v1"
+    # `v1` predates the phase cycle, so the rung that reads no `phase_directive`
+    # travels with it. What is under test is which version the runner was handed.
+    off = QaArchSpec(phase_cycle=PhaseCycleMode.off)
+    assert asyncio.run(_run_session("v1", off)) == "v1"
 
 
 def test_omitting_the_version_resolves_it_before_the_run() -> None:
@@ -176,9 +183,14 @@ def test_the_run_start_log_names_the_prompt_version(stubbed_agent, caplog) -> No
 
     with caplog.at_level(logging.INFO, logger="app.agents.qa.runner"):
         asyncio.run(
-            QaRunner(resolve_run_config(prompt_version="v1")).run(
-                channel, scenario, QaRunState(total_steps=1)
-            )
+            QaRunner(
+                # `v1` predates the phase cycle and has no `phase_directive`; the
+                # rung that needs none comes with it. The log line under test
+                # names the prompt version either way.
+                resolve_run_config(
+                    prompt_version="v1", arch=QaArchSpec(phase_cycle=PhaseCycleMode.off)
+                )
+            ).run(channel, scenario, QaRunState(total_steps=1))
         )
 
     starting = [
@@ -255,7 +267,7 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     assert len(v3) < len(v2)
 
 
-def test_the_default_qa_version_is_v16() -> None:
+def test_the_default_qa_version_is_v21() -> None:
     """A run that names no version has to get the newest prompt.
 
     This is also the trap in adding a version: `resolve_version` returns the
@@ -264,8 +276,210 @@ def test_the_default_qa_version_is_v16() -> None:
     same change as the tools it talks about — a prompt that names
     `set_input_axis` before the tool exists teaches the agent to reach for
     something that is not there.
+
+    v18 is what that rule looks like when the tools are conditional. The
+    arguments it describes — `report_step`'s `capability_key` and `learned` —
+    exist only when `phase_cycle` is past `off`, so the text describing them is
+    not in `system.md` at all: it is the `memory_directive` role, injected by
+    `QaRunner.run` only on a run that has them, exactly as `vision_directive` is
+    injected only on a run that can see. With all three placeholders empty the
+    body is byte for byte the v17 text, which is what the test below pins and
+    what makes `phase_cycle=off` on v18 the same prompt an `off` run read before
+    v18 existed.
+
+    The default rung is `lite`, so a default run does read the injected text. The
+    two defaults move together on purpose: a version that carries these roles is
+    the only one a gated run can be honestly given, which
+    `test_an_old_prompt_version_is_refused_rather_than_gated_in_silence` below
+    holds the other end of.
+
+    v19 is the same v18 roles plus the skills: the long sections of `system.md`
+    became `skill_*.md` files, and every tool description became a `tool_*.md`
+    file. It was first written as v18 on a branch, and develop released its own
+    v18 first, so it took the next number and v18 stays as released.
+
+    v20 ships with `search_macros` and the macro docstring (ARTEL-984): the macro
+    skill teaches the entry docstring as the summary `register_macro` requires,
+    `tool_search_macros.md` describes the new tool, and the macro memory directive
+    asks for a search before a new macro is written.
+
+    v21 ships with `wait_until` and the `-> bool` predicate (ARTEL-988): the macro
+    skill's grammar gains the Waiting and Predicates sections, and its third example
+    writes an `or` as a predicate and waits for the victory banner.
+
+    v22 ships with `from macros import`, `match decide(...)` and `ask(...)`: the
+    macro skill's grammar gains the Imports, Deciding, Asking and What Jev reads
+    sections, a fourth example plays a scene by letting Jev pick an imported macro
+    per turn, and the macro memory directive asks for that orchestration macro when
+    a scene already has macros.
+
+    v23 raises the macro call depth limit from 3 to 9 (ARTEL-1056): only the
+    macro skill's limits paragraph changes.
+
+    v24 ships with the game function tools (ARTEL-1054): `tool_run_cheat.md`,
+    `tool_start_behavior.md`, `tool_stop_behavior.md`, `tool_extend_behavior.md`, and the
+    `cheats` and `behaviors` skills. Every v23 role is carried over unchanged.
     """
-    assert resolve_version("qa_run") == "v16"
+    assert resolve_version("qa_run") == "v24"
+
+
+# v20 이 고쳐 쓴 v19 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
+V20_REWRITES_FROM_V19 = {
+    "skill_macro": (
+        "**Refused outright:**",
+        "**`register_macro` is what makes a draft callable**",
+        "What these do that a first draft usually does not:",
+        "```python\ndef attack_first_enemy_with",
+        "```python\ndef clear_the_wave",
+        "    # Name the screen first, as every macro should.",
+        "```python\ndef rename_the_save_slot",
+        "def confirm_combination() -> None:",
+    ),
+    "macro_memory_directive": (
+        "In this run, macros are how you operate the game.",
+        "Macros live inside the phase order too.",
+    ),
+}
+
+
+def test_v20_teaches_the_macro_docstring_and_search_and_keeps_the_rest_of_v19() -> None:
+    """v20 은 macro 문단 몇 개만 고친다 (ARTEL-984). 고친 문단은 이름으로 대고, 나머지는 v19 그대로다."""
+    skill = load_prompt("qa_run", "skill_macro", "v20").body
+    assert "**The docstring.** The entry `def` opens with a docstring" in skill
+    assert "`register_macro` refuses an entry\n`def` without one" in skill
+    assert "a docstring, re-assignment" not in skill
+    assert '    """Combine two cards from the hand' in skill
+
+    directive = load_prompt("qa_run", "macro_memory_directive", "v20").body
+    assert "call `search_macros` with what the step does" in directive
+    assert "`write_macro`, `edit_macro`, `read_macro` and `search_macros` ignore it" in directive
+
+    for role, rewrites in V20_REWRITES_FROM_V19.items():
+        v19 = load_prompt("qa_run", role, "v19").body
+        v20 = load_prompt("qa_run", role, "v20").body
+        for paragraph in v19.split("\n\n"):
+            if paragraph.lstrip("\n").startswith(rewrites):
+                continue
+            assert paragraph in v20, (role, paragraph[:80])
+
+
+def test_v18_without_the_memory_directive_renders_the_v17_text() -> None:
+    """An `off` run reads exactly what it read before v18 existed.
+
+    This is the whole safety argument for letting the default resolve to v18, and
+    for every arm of the phase-cycle comparison sharing one `prompt_version`. If
+    the empty placeholder left so much as a blank line behind, an `off` run would
+    be reading a different prompt from the v17 runs it is the baseline for, and
+    the difference would be invisible in `prompt_hashes` — that records the file,
+    not what was rendered from it.
+
+    Compared after `.format`, not before: the placeholder is the only difference
+    in the file, so comparing the bodies would pass on a template that renders
+    wrongly.
+    """
+    filled = {"language_directive": "L", "vision_directive": "V"}
+    empty = {"memory_directive": "", "phase_directive": "", "decide_directive": ""}
+    v17 = load_prompt("qa_run", "system", "v17").body.format(**filled)
+    v18 = load_prompt("qa_run", "system", "v18").body.format(**filled, **empty)
+    assert v18 == v17
+
+
+def test_an_old_prompt_version_is_refused_rather_than_gated_in_silence() -> None:
+    """A version that predates a rung cannot be run at that rung.
+
+    `phase_directive`, `decide_directive` and `memory_directive` arrived in v18;
+    v1 through v17 have `system` and `vision_directive` and nothing else. So a
+    run pinned to one of those and asked for `lite` wants a phase gate whose
+    rules the prompt never states — the state machine refuses an out-of-phase
+    call and the model was never told there were phases.
+
+    Filling the missing role with an empty string would make that run start and
+    look normal, and the record would file it under `phase_cycle=lite` beside
+    runs that did read the text. Refusing puts the choice back where it can be
+    made: pin a newer version, or ask for the rung the old one can carry.
+
+    The refusal has to name both halves, because either one can be the mistake.
+    """
+    with pytest.raises(QaArchError) as refused:
+        resolve_run_config(
+            prompt_version="v1", arch=QaArchSpec(phase_cycle=PhaseCycleMode.lite)
+        )
+
+    message = str(refused.value)
+    assert "v1" in message
+    assert "phase_directive" in message
+    assert "phase_cycle=lite" in message
+
+    # The same version at the rung that needs none of those roles is fine, and
+    # that is the way out the message points at.
+    assert (
+        resolve_run_config(
+            prompt_version="v1", arch=QaArchSpec(phase_cycle=PhaseCycleMode.off)
+        ).prompt_version
+        == "v1"
+    )
+
+
+def test_every_version_carries_the_roles_its_rungs_need() -> None:
+    """The newest version decides what an unpinned run at any rung resolves to.
+
+    This is what makes the refusal above a narrow rule rather than a trap: the
+    default `prompt_version` is the newest directory, and the newest directory
+    has every role. A new version that forgot to copy one of these files would
+    break the default run of a rung, which is the failure this catches on the
+    day the directory is added rather than on the day someone runs `full`.
+    """
+    roles = roles_in("qa_run", resolve_version("qa_run"))
+
+    for role in ("system", "vision_directive", "memory_directive",
+                 "phase_directive", "decide_directive"):
+        assert role in roles
+
+    for mode in PhaseCycleMode:
+        config = resolve_run_config(arch=QaArchSpec(phase_cycle=mode))
+        assert config.arch.phase_cycle is mode
+
+
+def test_v18_with_the_memory_directive_adds_the_report_step_arguments() -> None:
+    """And when it is injected, it is actually there and names both arguments."""
+    body = load_prompt("qa_run", "system", "v18").body.format(
+        language_directive="L",
+        vision_directive="V",
+        memory_directive=load_prompt("qa_run", "memory_directive", "v18").body,
+        phase_directive="",
+        decide_directive="",
+    )
+    assert "`capability_key`" in body
+    assert "`learned`" in body
+
+
+def test_v19_with_the_memory_directive_adds_the_report_step_arguments() -> None:
+    """v19 carries the same role, now closing the scene context paragraphs.
+
+    v18 slotted `memory_directive` into the content map section of `system.md`.
+    v19 moved that section into the `content_map` skill, so the directive sits at
+    the end of "Reading what the game sends back" and names the skill it
+    overrides instead of "the paragraph above it". With every placeholder empty
+    the paragraph before it and the next heading stay one blank line apart.
+    """
+    template = load_prompt("qa_run", "system", "v19").body
+    common = {
+        "language_directive": "L",
+        "vision_directive": "V",
+        "phase_directive": "",
+        "decide_directive": "",
+        "skills_directive": "",
+    }
+    with_memory = template.format(
+        **common, memory_directive=load_prompt("qa_run", "memory_directive", "v19").body
+    )
+    assert "`capability_key`" in with_memory
+    assert "`learned`" in with_memory
+    assert "content_map skill" in with_memory
+    assert "the paragraph above it" not in with_memory
+
+    without = template.format(**common, memory_directive="")
+    assert "not something to aim at.\n\n## Finding the step's target" in without
 
 
 def test_v12_drops_the_screen_map_and_says_what_a_screen_anchors() -> None:
@@ -486,6 +700,86 @@ def test_v16_binds_the_verdict_to_report_step_and_keeps_the_rest_of_v15() -> Non
         assert paragraph in v16
 
 
+V17_REWRITES_FROM_V16 = (
+    "1. Call `observe_scene` before acting. You cannot act on a screen you have not "
+    "seen, and ids only mean anything in the scene you just observed.\n"
+    "2. Carry out the step's `action` with `click_button`, `enter_text`, `press_key`, "
+    "or the pointer and hold tools described below. Take ids from the scene you just "
+    "observed — never invent one.\n"
+    "3. Each of those returns the outcome AND the scene it produced, written as what "
+    "CHANGED. That is the evidence the step's `expected` is about; you usually do not "
+    "need a separate observation afterwards.\n"
+    "4. Call `report_step` with your verdict and the evidence you saw.\n"
+    "5. Repeat for every step, then call `finish_run` exactly once.",
+    "Neither is a target the scene gives no id for. The scene prints each element as "
+    "`@ x,y wxh` — `x,y` is its CENTRE, the point to aim at, and `wxh` its size. Those "
+    "numbers go into `move_pointer` and `drag_pointer` VERBATIM: the tools take exactly "
+    "the pixels the scene reports, so never convert, flip or recompute them. An element "
+    "marked `(off screen)` has no position you can aim at — bring it into view first.",
+    "Some tools leave the game in a state you set: `hold_mouse_button` and `hold_key` "
+    "for input the game reads as held, `pause_game_time` for a screen that will not "
+    "hold still long enough to judge — an effect, a countdown, a toast that vanishes. "
+    "Whatever you hold or freeze, undo it in the same step, before you report that "
+    "step's verdict. A key, a button or game time left as you set it poisons every "
+    "step after it. When a plain drag is all you need, use `drag_pointer` rather than "
+    "holding the button yourself.",
+)
+
+
+def test_v17_teaches_the_polymorphic_target_and_keeps_the_rest_of_v16() -> None:
+    """The pointer tools stop taking `x`/`y`; every one of them aims with `target`.
+
+    `click_at` becomes `click`, `double_click_at` becomes `double_click`, `drag_pointer`
+    becomes `drag` with an independent `target` on each end, and `move_pointer` keeps
+    its name but not its arguments. `click_button` stays but is DEPRECATED: `click` on
+    the same id goes through the pointer and the game's own `EventSystem`, so occlusion
+    shows up instead of being stepped past, and it reaches anything on screen rather
+    than only a `Button`.
+
+    A `target` is a string in one of two forms the agent can actually get at runtime:
+    the id the scene view prints in brackets, or the coordinate it prints beside the
+    element. The scene view never prints a hierarchy selector, and the content map's
+    `control_selector_hint` is explicitly not an aiming key (see the paragraph on
+    `A capability line is what the map recorded`), so the prompt does not teach the
+    agent to build one.
+    """
+    v16 = load_prompt("qa_run", "system", "v16").body
+    v17 = load_prompt("qa_run", "system", "v17").body
+
+    # The new vocabulary: `click` replaces `click_button` in the workflow, and
+    # `click_button` itself is still callable but named as deprecated.
+    assert "2. Carry out the step's `action` with `click`, `enter_text`, `press_key`" in v17
+    assert "`click_button` is deprecated" not in v17  # taught by the tool description, not here
+
+    # The scene view line, and both halves of it being aimable.
+    assert "`[id] name (type) @ x,y wxh`" in v17
+    assert "`#12345` for the id, `640,360` for the coordinate" in v17
+    assert "Prefer the id: the SDK resolves it at the moment the action runs" in v17
+    assert "a coordinate is a snapshot of where it was" in v17
+    assert "`drag` takes two targets, one per end, and mixes the two freely" in v17
+
+    # The hold-state paragraph now names `drag`, not `drag_pointer`.
+    assert "use `drag` rather than holding the button yourself" in v17
+
+    # A selector is not something the prompt tells the agent to construct.
+    assert "Root[0]/Canvas[1]" not in v17
+    assert "hierarchy selector" not in v17
+
+    for paragraph in v16.split("\n\n"):
+        if paragraph.startswith(V17_REWRITES_FROM_V16):
+            assert paragraph not in v17, "rewritten but the old paragraph is still there"
+            continue
+        assert paragraph in v17
+
+
+def test_v17_defines_the_same_roles_as_v16() -> None:
+    """The pointer tools took a new argument shape; reading a screen did not."""
+    assert roles_in("qa_run", "v17") == roles_in("qa_run", "v16")
+    assert load_prompt("qa_run", "vision_directive", "v17").body == (
+        load_prompt("qa_run", "vision_directive", "v16").body
+    )
+
+
 def test_v15_defines_the_same_roles_as_v14() -> None:
     """화면을 읽는 법은 안 바뀌었으므로 vision 쪽도 안 바뀐다."""
     assert roles_in("qa_run", "v15") == roles_in("qa_run", "v14")
@@ -686,3 +980,116 @@ def test_v10_adds_the_citation_section_and_keeps_v9_intact() -> None:
     # Everything v9 said, v10 still says: the addition is an insertion, not a rewrite.
     for paragraph in v9.split("\n\n"):
         assert paragraph in v10
+
+
+# v21 이 고쳐 쓴 v20 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
+V21_REWRITES_FROM_V20 = {
+    "skill_macro": (
+        "**The shape.**",
+        "**The statements.**",
+        "**Conditions.**",
+        "**Refused outright:**",
+        "**What you hold, you release.**",
+        "**The limits.**",
+        "- the entry `def` opens with a docstring",
+        "A macro that walks every matching card",
+        "```python\ndef clear_the_wave",
+        "    Use on the Battle scene to finish a wave.",
+        "    # `range(n)` counts passes.",
+        '    flag("played every matching card',
+    ),
+}
+
+
+def test_v21_teaches_wait_until_and_predicates_and_keeps_the_rest_of_v20() -> None:
+    """v21 은 macro skill 의 문단 몇 개만 고친다 (ARTEL-988). 고친 문단은 이름으로 대고, 나머지는 v20 그대로다."""
+    skill = load_prompt("qa_run", "skill_macro", "v21").body
+    assert "**Waiting.** `require` judges the screen" in skill
+    assert "**Predicates.** A `def` declared `-> bool` is a predicate." in skill
+    assert "`return` outside a predicate" in skill
+    assert "def wave_is_over() -> bool:" in skill
+
+    for role, rewrites in V21_REWRITES_FROM_V20.items():
+        v20 = load_prompt("qa_run", role, "v20").body
+        v21 = load_prompt("qa_run", role, "v21").body
+        for paragraph in v20.split("\n\n"):
+            if paragraph.lstrip("\n").startswith(rewrites):
+                continue
+            assert paragraph in v21, (role, paragraph[:80])
+
+
+# v22 가 고쳐 쓴 v21 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
+V22_REWRITES_FROM_V21 = {
+    "skill_macro": (
+        "**The shape.**",
+        "**The statements.**",
+        "**Checkpoints.**",
+        "**Conditions.**",
+        "**Refused outright:**",
+        "**What you hold, you release.**",
+        "**The limits.**",
+        "**`resume_macro` answers a macro paused",
+        "## Three macros that pass",
+    ),
+    "tool_resume_macro": ("Carry on, or stop,",),
+    "macro_memory_directive": ("3. Send by hand only",),
+}
+
+
+def test_v22_teaches_import_decide_and_ask_and_keeps_the_rest_of_v21() -> None:
+    """v22 는 macro skill, resume_macro 설명, macro 지시문의 문단 몇 개만 고친다."""
+    skill = load_prompt("qa_run", "skill_macro", "v22").body
+    assert "**Imports.** `from macros import end_turn, cast_pair`" in skill
+    assert "**Deciding.** `match decide(" in skill
+    assert "**Asking.** `ask(" in skill
+    assert "**What Jev reads.**" in skill
+    assert "def play_the_battle() -> None:" in skill
+    directive = load_prompt("qa_run", "macro_memory_directive", "v22").body
+    assert "write one orchestration macro for the scene" in directive
+
+    for role, rewrites in V22_REWRITES_FROM_V21.items():
+        v21 = load_prompt("qa_run", role, "v21").body
+        v22 = load_prompt("qa_run", role, "v22").body
+        for paragraph in v21.split("\n\n"):
+            if paragraph.lstrip("\n").startswith(rewrites):
+                continue
+            assert paragraph in v22, (role, paragraph[:80])
+
+
+def test_v23_changes_only_the_call_depth_in_the_macro_limits() -> None:
+    """v23 은 macro skill 의 상한 절에서 호출 깊이 하나만 바꾼다. 나머지 파일은 v22 와 같다."""
+    v22_limits = "at most 3 deep counting the entry point and every imported macro."
+    v23_limits = "at most 9 deep counting the entry point and every imported macro."
+    v22_skill = load_prompt("qa_run", "skill_macro", "v22").body
+    v23_skill = load_prompt("qa_run", "skill_macro", "v23").body
+    assert v22_limits in v22_skill
+    assert v23_skill == v22_skill.replace(v22_limits, v23_limits)
+
+    assert roles_in("qa_run", "v23") == roles_in("qa_run", "v22")
+    for role in roles_in("qa_run", "v22"):
+        if role == "skill_macro":
+            continue
+        v22 = load_prompt("qa_run", role, "v22")
+        v23 = load_prompt("qa_run", role, "v23")
+        assert v23.body_sha256 == v22.body_sha256, role
+
+
+# v24 가 v23 위에 더한 파일. 나머지 role 은 한 글자도 안 바뀌어야 한다 (ARTEL-1054).
+V24_ADDED_ROLES = {
+    "tool_run_cheat",
+    "tool_start_behavior",
+    "tool_stop_behavior",
+    "tool_extend_behavior",
+    "skill_cheats",
+    "skill_behaviors",
+}
+
+
+def test_v24_adds_the_game_function_tools_and_keeps_every_v23_role() -> None:
+    """v24 는 v23 을 그대로 옮기고 game function tool 설명 넷과 skill 둘만 더한다."""
+    v23_roles = set(roles_in("qa_run", "v23"))
+    v24_roles = set(roles_in("qa_run", "v24"))
+
+    assert v24_roles - v23_roles == V24_ADDED_ROLES
+    for role in sorted(v23_roles):
+        assert load_prompt("qa_run", role, "v24").body == load_prompt("qa_run", role, "v23").body, role

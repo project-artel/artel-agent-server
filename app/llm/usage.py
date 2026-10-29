@@ -31,13 +31,10 @@ from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.outputs import LLMResult
 
 from app.config import get_settings
-from app.llm.models import MODEL_SPECS, LLMModel
+from app.llm.catalog import get_model_catalog
+from app.llm.models import ModelPricing
 
 logger = logging.getLogger(__name__)
-
-# `LLMModel(model)` 은 모르는 값에 ValueError 를 던진다. 사용량 기록이 예외를 내면
-# 안 되므로(이 모듈 전체가 그 규율이다) 던지기 전에 걸러 낸다.
-_MODEL_VALUES = frozenset(item.value for item in LLMModel)
 
 USAGE_PATH = "/internal/llm-usage"
 
@@ -45,7 +42,19 @@ USAGE_PATH = "/internal/llm-usage"
 # rather than sent as one oversized one.
 MAX_RECORDS_PER_REQUEST = 200
 
-Service = Literal["QA_RUN", "SCENARIO", "KNOWLEDGE_QUERY", "GAME_CONTEXT", "EMBEDDING"]
+Service = Literal[
+    "QA_RUN",
+    "SCENARIO",
+    "KNOWLEDGE_QUERY",
+    "GAME_CONTEXT",
+    "EMBEDDING",
+    "PROJECT_AGENT",
+]
+
+# 그 호출을 누구의 key 로 했는가. `user` 는 세션에 묶인 사용자 key(`app/llm/credentials.py`),
+# `platform` 은 관리자가 넣은 공용 key 다. orchestration 은 `llm_usage.key_source` 에 남겨
+# 공용 지출과 개인 지출을 가른다.
+KeySource = Literal["platform", "user"]
 
 
 @dataclass(frozen=True)
@@ -73,6 +82,20 @@ def _isoformat(moment: datetime) -> str:
     )
 
 
+def _catalog_pricing(model: str) -> ModelPricing | None:
+    """catalog 에 적힌 `model` 의 단가. 모르는 id 거나 catalog 를 못 읽으면 None 이다.
+
+    사용량 기록이 예외를 내면 안 되므로(이 모듈 전체가 그 규율이다) catalog 의 어떤
+    실패도 여기서 None 으로 바꾼다. 꺼진 row 의 단가도 그대로 쓴다.
+    """
+    try:
+        spec = get_model_catalog().get(model)
+    except Exception:  # noqa: BLE001 - 사용량 기록은 어떤 이유로도 실패하면 안 된다.
+        logger.debug("[llm-usage] model catalog unavailable; cost left empty")
+        return None
+    return spec.pricing if spec is not None else None
+
+
 def _estimate_cost(
     model: str,
     *,
@@ -93,16 +116,36 @@ def _estimate_cost(
     before the full-price rate is applied — the same containment rule the
     receiving side documents. `cache_write_tokens` is not, and is priced whole.
     """
-    spec = MODEL_SPECS.get(LLMModel(model)) if model in _MODEL_VALUES else None
-    pricing = spec.pricing if spec else None
+    pricing = _catalog_pricing(model)
     if pricing is None:
         return None
     full_input = max(input_tokens - cached_input_tokens, 0)
+    # Anthropic 의 장문 요금은 prompt 가 임계를 넘으면 요청 전체에 적용된다.
+    # Bedrock usage 에서 cache write 는 `input_tokens` 밖에 따로 오므로 함께 세야 실제
+    # prompt 길이가 된다.
+    long_context = (
+        pricing.long_context_threshold_tokens is not None
+        and input_tokens + cache_write_tokens > pricing.long_context_threshold_tokens
+    )
+    if long_context:
+        assert pricing.long_context_input_per_mtok is not None
+        assert pricing.long_context_output_per_mtok is not None
+        assert pricing.long_context_cache_write_per_mtok is not None
+        assert pricing.long_context_cache_read_per_mtok is not None
+        input_rate = pricing.long_context_input_per_mtok
+        output_rate = pricing.long_context_output_per_mtok
+        cache_write_rate = pricing.long_context_cache_write_per_mtok
+        cache_read_rate = pricing.long_context_cache_read_per_mtok
+    else:
+        input_rate = pricing.input_per_mtok
+        output_rate = pricing.output_per_mtok
+        cache_write_rate = pricing.cache_write_per_mtok
+        cache_read_rate = pricing.cache_read_per_mtok
     return (
-        full_input * pricing.input_per_mtok
-        + cached_input_tokens * pricing.cache_read_per_mtok
-        + cache_write_tokens * pricing.cache_write_per_mtok
-        + output_tokens * pricing.output_per_mtok
+        full_input * input_rate
+        + cached_input_tokens * cache_read_rate
+        + cache_write_tokens * cache_write_rate
+        + output_tokens * output_rate
     ) / 1_000_000
 
 
@@ -119,21 +162,21 @@ def _estimate_cost(
 # 이름에 `5m` 이 박힌 것은 캐시 TTL 이다. 단가가 TTL 마다 다르므로(`ModelSpec.pricing` 의
 # 주석) 1 시간짜리를 쓰게 되면 그 이름이 함께 바뀐다. 그때 이 목록에 더하고 단가도 같이
 # 고쳐야 한다 — 여기만 더하면 비싼 쓰기를 싼 값으로 세게 된다.
-_CACHE_WRITE_KEYS = ("ephemeral_5m_input_tokens", "cache_creation")
-
-
 def _cache_write_of(usage: dict[str, Any]) -> int:
-    """캐시에 실은 토큰. 이름이 provider 마다 달라 아는 것을 순서대로 본다.
+    """캐시에 실은 토큰. 이름이 provider 마다 달라, 아는 이름들을 이렇게 읽는다.
 
-    합치지 않고 **처음 값이 있는 것 하나**를 쓴다. 두 이름이 같은 것을 가리키므로 더하면
-    같은 토큰을 두 번 센다 — Bedrock 이 둘 다 실어 보내는데 한쪽이 0 인 것이 그 증거다.
+    TTL 별 내역(`ephemeral_5m/1h_input_tokens`)은 서로소 분할이라 **합치고**, 내역이
+    없을 때만 `cache_creation` 을 본다. langchain-aws 는 내역이 실려 오면
+    `cache_creation` 을 0 으로 덮으므로(같은 값의 두 이름) 내역과 그것을 더하면 같은
+    토큰을 두 번 센다 — 그래서 합산은 내역끼리만 한다.
     """
     details = usage.get("input_token_details") or {}
-    for key in _CACHE_WRITE_KEYS:
-        value = details.get(key)
-        if value:
-            return int(value)
-    return 0
+    ephemeral = (details.get("ephemeral_5m_input_tokens") or 0) + (
+        details.get("ephemeral_1h_input_tokens") or 0
+    )
+    if ephemeral:
+        return int(ephemeral)
+    return int(details.get("cache_creation") or 0)
 
 
 def _build_record(
@@ -147,6 +190,7 @@ def _build_record(
     cost_usd: float | None = None,
     started_at: datetime,
     latency_ms: int,
+    key_source: KeySource = "platform",
 ) -> dict[str, Any] | None:
     """One record in the wire shape, or None when the call has no scope.
 
@@ -172,6 +216,7 @@ def _build_record(
         "reasoningTokens": reasoning_tokens,
         "latencyMs": latency_ms,
         "calledAt": _isoformat(started_at),
+        "keySource": key_source,
     }
     # provider 가 청구액을 줬으면 그것이 답이다. 계산은 안 줄 때만 한다 — 실제로 나간
     # 돈을 추정치로 덮으면 그 행은 영영 되돌릴 수 없다.
@@ -317,14 +362,28 @@ class UsageCallback(AsyncCallbackHandler):
     accounting gap; an exception would be a failed QA run.
     """
 
-    def __init__(self, buffer: UsageBuffer | None = None, slug: str | None = None) -> None:
+    def __init__(
+        self,
+        buffer: UsageBuffer | None = None,
+        slug: str | None = None,
+        input_includes_cache_write: bool = False,
+        key_source: KeySource = "platform",
+    ) -> None:
         self._buffer = buffer
+        # client 하나는 key 하나로 만들어지므로(`build_chat_model` 의 cache key) 출처도 client
+        # 마다 하나다.
+        self._key_source = key_source
         # 카탈로그가 쓰는 이름. 응답이 vendor 접두를 잃고 돌아올 때 이것으로 되살린다.
         # Bedrock 이 그렇다 — 클라이언트에는 `bedrock/` 을 뗀 profile ID 만 넘기므로
         # 응답의 `model_name` 에 슬래시가 없고, 그러면 `provider` 가 모델 이름
         # 전체가 되어 `provider VARCHAR(40)` 을 넘긴다. 같은 함정을 embedding 쪽이
         # 먼저 밟았고(`_record_from_embedding`), 거기서 쓴 처방과 같다.
         self._slug = slug
+        # langchain-anthropic 은 `input_tokens` 에 `cache_read` 와 `cache_creation` 을 모두
+        # 더해 준다. 받는 쪽 규칙은 cache write 를 `inputTokens` 밖에 두는 것이라(Bedrock 이
+        # 그렇게 온다) True 이면 그 몫을 뺀다. 빼지 않으면 cache write 가 입력 단가와 쓰기
+        # 단가로 두 번 계산된다.
+        self._input_includes_cache_write = input_includes_cache_write
         # ponytail: a run that ends without either end or error callback leaves
         # its entry here. Bound it (TTL or deque) if that ever adds up — one
         # abandoned run costs a timestamp pair.
@@ -346,17 +405,26 @@ class UsageCallback(AsyncCallbackHandler):
     async def on_llm_end(self, response: LLMResult, *, run_id: UUID, **kwargs: Any) -> None:
         started = self._started.pop(run_id, None)
         try:
-            record = _record_from_response(response, started, self._slug)
+            record = _record_from_response(
+                response,
+                started,
+                self._slug,
+                self._input_includes_cache_write,
+                self._key_source,
+            )
             if record is not None:
                 await self._target.add(record)
         except Exception:  # noqa: BLE001 - accounting never propagates
             logger.warning("[llm-usage] could not read chat usage", exc_info=True)
 
 
+
 def _record_from_response(
     response: LLMResult,
     started: tuple[float, datetime] | None,
     slug: str | None = None,
+    input_includes_cache_write: bool = False,
+    key_source: KeySource = "platform",
 ) -> dict[str, Any] | None:
     generations = response.generations[0] if response.generations else []
     message = getattr(generations[0], "message", None) if generations else None
@@ -378,19 +446,24 @@ def _record_from_response(
         model = slug
     cost = raw_usage.get("cost")
     now = time.monotonic()
+    cache_write_tokens = _cache_write_of(usage)
+    input_tokens = usage.get("input_tokens", 0)
+    if input_includes_cache_write:
+        input_tokens = max(input_tokens - cache_write_tokens, 0)
 
     return _build_record(
         model,
-        input_tokens=usage.get("input_tokens", 0),
+        input_tokens=input_tokens,
         output_tokens=usage.get("output_tokens", 0),
         cached_input_tokens=(usage.get("input_token_details") or {}).get(
             "cache_read", 0
         ),
-        cache_write_tokens=_cache_write_of(usage),
+        cache_write_tokens=cache_write_tokens,
         reasoning_tokens=(usage.get("output_token_details") or {}).get("reasoning", 0),
         cost_usd=float(cost) if isinstance(cost, (int, float)) else None,
         started_at=started[1] if started else datetime.now(UTC),
         latency_ms=int((now - started[0]) * 1000) if started else 0,
+        key_source=key_source,
     )
 
 

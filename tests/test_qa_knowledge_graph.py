@@ -16,8 +16,9 @@ from app.agents.qa.knowledge import (
     render_expansion,
     render_neighbour,
 )
+from app.agents.qa.arch import PhaseCycleMode, default_resolved_arch
 from app.agents.qa.tools import QaRunState, build_tools
-from app.qa.channel import QaRunChannel
+from app.qa.channel import KNOWLEDGE_SEARCH_TIMEOUT_SECONDS, QaRunChannel
 from app.qa.envelope import (
     KnowledgeExpandResultPayload,
     KnowledgeNeighbour,
@@ -27,15 +28,27 @@ from app.qa.envelope import (
 )
 
 
-def make(total_steps: int = 1):
+# phase gate 를 끈다. 이 파일은 tool 하나하나가 무엇을 하는지 보는 자리이고, gate 는 그 위층
+# 이다. 기본값이 무엇인지는 `tests/test_qa_arch.py` 가 지킨다.
+_NO_PHASE_GATE = default_resolved_arch().model_copy(
+    update={"phase_cycle": PhaseCycleMode.off}
+)
+
+def make(total_steps: int = 1, search_timeout: float = KNOWLEDGE_SEARCH_TIMEOUT_SECONDS):
     sent: list[dict] = []
 
     async def send(frame: dict) -> None:
         sent.append(frame)
 
-    channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=0.05, write_timeout=0.05)
+    channel = QaRunChannel(
+        qa_try_id=7,
+        send=send,
+        action_timeout=0.05,
+        write_timeout=0.05,
+        search_timeout=search_timeout,
+    )
     state = QaRunState(total_steps=total_steps)
-    tools = {tool.name: tool for tool in build_tools(channel, state)}
+    tools = {tool.name: tool for tool in build_tools(channel, state, arch=_NO_PHASE_GATE)}
     return channel, state, tools, sent
 
 
@@ -213,7 +226,7 @@ def test_a_neighbour_line_appears_under_its_hit() -> None:
 def test_deleting_something_only_glimpsed_is_refused_with_what_to_do() -> None:
     """The regression this feature could most easily ship.
 
-    `FORGET_KNOWLEDGE_DESCRIPTION` calls deletion the most destructive thing the
+    `tool_forget_knowledge.md` calls deletion the most destructive thing the
     agent does; a clipped one-line summary is not having read the entry. The
     message has to name the reason, or the agent meets a refusal it cannot
     explain — it can see the id right there in the transcript.
@@ -499,19 +512,12 @@ def test_expand_that_times_out_is_not_a_failed_step() -> None:
     """None of timeout, refusal or empty answer is a reason to stop judging."""
 
     async def run() -> None:
-        _, state, tools, _ = make()
+        _, state, tools, _ = make(search_timeout=0.01)
         seen(state, "1")
         # Nobody answers; the channel's own timeout is what returns.
-        from app.qa import channel as channel_module
-
-        original = channel_module.KNOWLEDGE_SEARCH_TIMEOUT_SECONDS
-        channel_module.KNOWLEDGE_SEARCH_TIMEOUT_SECONDS = 0.01
-        try:
-            result = await tools["expand_knowledge"].ainvoke(
-                {"step": 1, "thought": "t", "knowledge_id": "1"}
-            )
-        finally:
-            channel_module.KNOWLEDGE_SEARCH_TIMEOUT_SECONDS = original
+        result = await tools["expand_knowledge"].ainvoke(
+            {"step": 1, "thought": "t", "knowledge_id": "1"}
+        )
 
         assert "did not answer in time" in result
 

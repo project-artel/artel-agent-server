@@ -96,10 +96,15 @@ def test_unparseable_output_is_a_failure_not_an_empty_answer() -> None:
 
         return RunnableLambda(raise_parse_error)
 
-    agent = StepPhrasingAgent(structured_factory=failing)
+    agent = StepPhrasingAgent(structured_factory=failing, retry_backoff=False)
 
     with pytest.raises(StepPhrasingError):
         asyncio.run(agent.run(_request(), _CTX))
+
+
+def test_the_production_agent_waits_between_retries() -> None:
+    # `app/main.py` 가 세우는 모양 그대로다. 테스트가 끄는 backoff 가 운영에서는 켜져 있다.
+    assert StepPhrasingAgent().retry_backoff is True
 
 
 def test_missing_neighbours_are_named_rather_than_left_blank() -> None:

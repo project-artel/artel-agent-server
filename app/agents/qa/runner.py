@@ -8,37 +8,50 @@ a game that never volunteered its state left the run idle forever.
 import asyncio
 import json
 import logging
+import re
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import wrap_model_call
 from langchain_core.messages import ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
-from app.agents.qa.arch import ResolvedArch
+from app.agents.qa.arch import ResolvedArch, withheld_skills
 from app.agents.qa.compaction import QaCompactionMiddleware
-from app.qa.scene import SCENE_VIEW_START_PREFIX
 from app.agents.qa.context import (
+    FOLDED_PULSE_VIEW_PREFIX,
     FOLDED_VIEW_PREFIX,
-    fold_stale_knowledge,
-    fold_stale_scenes,
+    FoldKind,
+    count_full_views,
+    fold_context,
 )
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.agents.qa.tools import QaRunState, build_tools
+from app.agents.qa.tools.game_function_tools import focus
+from app.agents.qa.tools.tool_context import ToolContext
 from app.agents.qa.vision import QaCaptureVisionMiddleware
 from app.llm.chat_model import build_chat_model
-from app.llm.models import LLMModel, get_model_spec
-from app.prompts import load_prompt
+from app.llm.models import get_model_spec
+from app.prompts import load_prompt, load_skill, skill_descriptions, skill_names
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory
+from app.qa.failure_site import failure_site_of
+from app.qa.game_functions import render_catalog
+from app.qa.reach import UnreachedJudge
+from app.qa.relevance import PulseRelevanceJudge
 from app.qa.schemas import QaScenario, QaStep
 from app.qa.run_config import (
     COMPACTION_PROMPT_AGENT,
     COMPACTION_ROLE,
+    DECIDE_ROLE,
+    MACRO_MEMORY_ROLE,
+    MEMORY_ROLE,
+    PHASE_ROLE,
     PROMPT_AGENT,
     SYSTEM_ROLE,
     VISION_ROLE,
     RunConfig,
     resolve_run_config,
+    macro_memory_directive_applies,
 )
 
 logger = logging.getLogger(__name__)
@@ -58,6 +71,105 @@ _REASONING_KEYS = ("text", "thinking", "reasoning", "reasoning_content")
 _TURN_PRODUCING_NODES = frozenset({"model", "tools"})
 
 
+# The first `qa_run` version whose system prompt leaves the skills out.
+_FIRST_SKILL_VERSION = 19
+
+_VERSION_NUMBER = re.compile(r"^v(\d+)$")
+
+
+def system_prompt_with_skills(
+    system_prompt: str,
+    prompt_version: str,
+    skills: str,
+    withheld: frozenset[str] = frozenset(),
+) -> str:
+    """The system prompt the run sends, with or without the skill bodies inlined.
+
+    From v19 the long sections of the system prompt are `skill_<name>.md` files.
+    With `skills="on_demand"` the agent reads them through `load_skill`, so the
+    prompt goes out as written. With `skills="off"` every skill body is appended
+    here, in name order, so the model reads all of it on every call the way it
+    did in v17. That is the comparison arm: one prompt version, two shapes.
+
+    A version before v19 has no skill files and is returned unchanged whatever
+    the axis says.
+
+    Appended after `str.format` has run on the system prompt, so a brace in a
+    skill body is never read as a placeholder. Each skill becomes a
+    `## Skill: <name>` section, the name the tool descriptions use ("the
+    held_state skill"), and the body's own headings move two levels down under it.
+    """
+    match = _VERSION_NUMBER.match(prompt_version)
+    if skills != "off" or match is None or int(match.group(1)) < _FIRST_SKILL_VERSION:
+        return system_prompt
+    sections = [system_prompt.rstrip()]
+    for name in skill_names(prompt_version):
+        if name in withheld:
+            continue
+        sections.append(_as_section(name, load_skill(name, prompt_version).body.strip()))
+    return "\n\n".join(sections) + "\n"
+
+
+_HEADING = re.compile(r"^(#+)(?= )", re.MULTILINE)
+
+
+def phase_directive_for(arch: ResolvedArch, prompt_version: str) -> str:
+    """system prompt 의 `{phase_directive}` 자리에 들어가는 글.
+
+    phase 를 강제하는 런에만 실린다. macro 가 켜진 런이면 그 뒤에 지식화 단계에서 macro 를
+    만들게 하는 문단(`macro_memory_directive`)이 붙어 그 순서의 일부로 읽힌다. 조립을 여기
+    하나에 두는 이유는 `tests/test_qa_phase_cycle.py` 가 이 글과 phase 표를 맞대기 때문이다
+    — 테스트가 따로 조립하면 런이 읽는 글이 아닌 것을 잰다.
+    """
+    if not arch.phase_cycle.gates_phases:
+        return ""
+    directive = load_prompt(PROMPT_AGENT, PHASE_ROLE, prompt_version).body
+    if macro_memory_directive_applies(arch, prompt_version):
+        directive = (
+            directive.rstrip()
+            + "\n\n"
+            + load_prompt(PROMPT_AGENT, MACRO_MEMORY_ROLE, prompt_version).body
+        )
+    return directive
+
+
+def _skills_directive(
+    prompt_version: str, skills: str, withheld: frozenset[str] = frozenset()
+) -> str:
+    """The system prompt's Skills section, present only when the agent can load skills.
+
+    With `skills="off"` every skill body is already inlined, and the tool
+    descriptions say "the X skill" without naming a tool, so a section telling the
+    agent to call `load_skill` would send it looking for a tool it was not given.
+
+    The list of skills is not written in `skills_directive.md`. Each skill file
+    carries its own `description` in frontmatter, and `{skill_list}` is filled
+    with one line per skill, in name order, so the line that advertises a skill
+    cannot drift away from the skill it advertises.
+    """
+    match = _VERSION_NUMBER.match(prompt_version)
+    if skills != "on_demand" or match is None or int(match.group(1)) < _FIRST_SKILL_VERSION:
+        return ""
+    skill_list = "\n".join(
+        f"- `{name}` — {description}"
+        for name, description in skill_descriptions(prompt_version).items()
+        if name not in withheld
+    )
+    return load_prompt(PROMPT_AGENT, "skills_directive", prompt_version).body.format(
+        skill_list=skill_list
+    )
+
+
+def _as_section(name: str, body: str) -> str:
+    """One skill body as a `## Skill: <name>` section of the system prompt.
+
+    The tool descriptions refer to a skill by that name ("the held_state skill"),
+    so the inlined section carries it. The body's own headings move below it.
+    """
+    shifted = _HEADING.sub(lambda heading: heading.group(1) + "##", body)
+    return f"## Skill: {name}\n\n{shifted}"
+
+
 def _clip(text: str) -> str:
     if len(text) <= MAX_LOGGED_CHARS:
         return text
@@ -75,6 +187,37 @@ def _action_line(step: QaStep) -> str:
     return f"{line}  ({'; '.join(extras)})" if extras else line
 
 
+def _macro_discovery(arch: ResolvedArch, channel: QaRunChannel) -> str:
+    """시나리오 첫 메시지에 붙는, 지난 런이 이 빌드에 등록한 macro 목록 (ARTEL-935).
+
+    macro 를 켠 런에만, 그리고 목록이 있을 때만 글이 나온다. `macros=off` 인 런은 종전과
+    같은 글을 읽는다 — A/B 가 갈라 보는 것이 그 차이 하나여야 한다.
+
+    **첫 메시지인 이유.** 매 호출 끝에 붙였다 떼면 프롬프트 접두가 턴마다 깨진다
+    (`tool_context.py` 의 `answer` 와 ARTEL-621). 씬 문맥 블록에 얹으면 목록이 씬마다
+    다시 실려 같은 글이 여러 번 쌓인다. 첫 메시지는 런이 시작할 때 한 번 정해지고 접두의
+    일부로 남는다. `channel.scene.scene_context` 는 `QaExecutionService` 가 시나리오를
+    시작하기 전에 한 번 받아 얹으므로(`service.py`) 이 시점에 이미 있다.
+    """
+    if arch.macros != "on":
+        return ""
+    context = channel.scene.scene_context
+    return context.macro_section() if context is not None else ""
+
+
+def _game_functions(arch: ResolvedArch, channel: QaRunChannel) -> str:
+    """첫 메시지 끝에 붙는, 이 run 이 부를 수 있는 cheat 와 behavior 의 catalog (ARTEL-1054).
+
+    축이 켜진 쪽만 적는다. 둘 다 꺼진 run 은 빈 문자열이라 첫 메시지가 종전 그대로다. 첫
+    메시지인 이유는 `_macro_discovery` 와 같다.
+    """
+    catalog = channel.game_functions
+    return render_catalog(
+        catalog.cheats if arch.cheats == "on" else None,
+        catalog.behaviors if arch.behaviors == "on" else None,
+    )
+
+
 def _step_plan(scenario: QaScenario) -> list[tuple[int | None, bool]]:
     """스텝별 (case_id, is_verification). **연속 동일 case_id = 한 TC 구간**이고, 그 구간의
     **마지막 스텝 = 검증 스텝**(is_verification=True). case_id 없는 스텝은 검증이 아니다.
@@ -83,6 +226,10 @@ def _step_plan(scenario: QaScenario) -> list[tuple[int | None, bool]]:
     TC 판정 = 그 구간 검증 스텝의 판정(파생)이라 여기 하드코딩되지 않는다.
     """
     steps = scenario.steps
+    if scenario.execution_mode == "FREE":
+        # FREE 시나리오는 스텝 하나가 TC 하나라 모든 보고가 그 TC 의 판정이다. 연속 구간으로
+        # 자르지 않는 것은 보고가 어떤 순서로 와도 같은 표가 나와야 해서다.
+        return [(step.case_id, step.case_id is not None) for step in steps]
     plan: list[tuple[int | None, bool]] = []
     for idx, step in enumerate(steps):
         cid = step.case_id
@@ -101,6 +248,8 @@ def _plan(scenario: QaScenario) -> str:
     (기대결과)가 붙는다. `verify`가 있는 스텝의 passed는 **기대결과가 나왔는가**(그게 그 TC의 최종
     판정), 그 외 스텝의 passed는 **그 행위를 수행/성립했는가**다.
     """
+    if scenario.execution_mode == "FREE":
+        return _free_plan(scenario)
     plan = _step_plan(scenario)
     items: list[dict] = []
     prev_cid: int | None = None
@@ -131,6 +280,87 @@ def _plan(scenario: QaScenario) -> str:
         f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
         "Begin. Observe the screen first."
     )
+
+
+def _free_plan(scenario: QaScenario) -> str:
+    """FREE 시나리오(TC 묶음)의 첫 메시지 (ARTEL-1029).
+
+    스텝 하나가 TC 하나다. 실행 순서, scene 사이의 경로, 조작 방법은 agent 가 정하므로
+    `do` 와 `try:`·`via:` 는 싣지 않고 TC 의 네 칸(scene, precondition, test_step, expected)만
+    싣는다. 보고는 `report_case(case_id, ...)` 로 받고, 순서와 상관없다.
+
+    "아직 도달하지 못했다" 를 판정으로 보고하지 말라는 문장과 시간을 아낄 필요가 없다는
+    문장은 2026-10-14 로컬 run(qa_try 3, Claude Haiku 4.5)에서 넣었다. 압축 뒤 agent 가 "time is
+    limited" 라고 스스로 판단하고 TC 5개를 시도하지 않은 채 실패로 보고했다. 그 run 에는
+    마감도 호출 상한도 걸리지 않았다.
+    """
+    items: list[dict] = []
+    for step in scenario.steps:
+        case = step.case
+        item: dict = {"case_id": step.case_id}
+        if case and case.scene:
+            item["scene"] = case.scene
+        if case and case.precondition:
+            item["precondition"] = case.precondition
+        item["test_step"] = (case.test_step if case and case.test_step else step.action).strip()
+        item["expected"] = case.expected if case else ""
+        items.append(item)
+    total = len(items)
+    return (
+        f"Scenario: {scenario.title} — {scenario.description}\n\n"
+        f"This scenario is a set of {total} test cases, not a script. You choose the order "
+        "and the method: which case to verify first, how to move between scenes, and which "
+        "controls to use. Plan a route before you start — verify the cases that share a "
+        "scene or a precondition together, and revisit a scene whenever a case needs it. "
+        "Some preconditions only hold before other cases change the game state (an "
+        "untouched save, a stage not yet cleared, a node not yet unlocked), so read every "
+        "precondition first and verify those cases before the ones that destroy them.\n"
+        "Call report_case(case_id, passed, message) once for EVERY test case, in whatever "
+        "order you verify them.\n"
+        "- Report a case only after you have carried out its `test_step` with its "
+        "`precondition` holding and watched what happened. `passed` = whether the "
+        "`expected` result occurred.\n"
+        "- Not having reached a case yet is NOT a verdict. A battle still in progress, a "
+        "stage not cleared yet, a scene you are not in yet: go there and finish it, then "
+        "report. Never report a case failed because you have not got to it.\n"
+        "- There is no time or token budget for you to save. The run stops you itself if it "
+        "ever has to; until then, keep playing. A compacted conversation is not a sign that "
+        "time is running out.\n"
+        "- If a `precondition` cannot be reached any more — another case already destroyed "
+        "it and the game offers no way back — report the case passed=false with a message "
+        "beginning 'SETUP-FAILED:' and do NOT report_issue (an unreachable precondition is "
+        "not a defect).\n"
+        "- `test_step` says what to check, not how. Find the way through the game yourself.\n"
+        "- If you later see a case behave differently from the verdict you gave it, report "
+        "it again with `overwrite=true`. Each case can be overwritten once.\n\n"
+        f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
+        "Begin. Observe the screen first, then plan your route through the cases."
+    )
+
+
+def fold_kinds_for(arch: ResolvedArch) -> frozenset[FoldKind]:
+    """Which kinds of stale block this structure folds out of what the model reads.
+
+    Scene views pile up whether or not the model can see. Skills only when the run
+    loads them: with `skills=off` every skill is in the system prompt and no tool
+    result carries one. Images only when the run can see; only an `on_demand`
+    capture stays in the conversation, so in the automatic modes there is never one
+    to fold.
+    """
+    kinds = set()
+    if arch.fold_stale_scenes:
+        kinds.add(FoldKind.scene_view)
+    if arch.fold_stale_knowledge:
+        kinds.add(FoldKind.knowledge_neighbours)
+    if arch.skills == "on_demand" and arch.fold_stale_skills:
+        kinds.add(FoldKind.skill)
+    if arch.fold_stale_macro_results:
+        kinds.add(FoldKind.macro_result)
+    if arch.vision:
+        kinds.add(FoldKind.image)
+    return frozenset(kinds)
+
+
 def middleware_names_for(arch: ResolvedArch) -> tuple[str, ...]:
     """Which middleware this structure wraps its model calls in, in order.
 
@@ -145,18 +375,16 @@ def middleware_names_for(arch: ResolvedArch) -> tuple[str, ...]:
     Order only sequences middleware sharing a hook.
     """
     names = ["compaction"] if arch.compaction else []
-    # Folding runs on every request; the scene views pile up whether or not the
-    # model can see.
-    if arch.fold_stale_scenes:
-        names.append("fold_scene_views")
-    # A separate middleware rather than one more job inside the fold above. The
-    # two have to be switchable independently — they are experiment axes, and the
-    # fingerprint hashes this list's order — and what they fold is recovered by
-    # different tools out of different budgets.
-    if arch.fold_stale_knowledge:
-        names.append("fold_knowledge_neighbours")
+    # 네 종류의 `fold` 를 middleware 하나가 한 번에 한다(`fold_context`). 따로 두면 각자 제 시점에
+    # 프롬프트 중간을 고쳐 써서 `cache` 손실을 종류 수만큼 따로 낸다. 종류마다 켜고 끄는 것은
+    # 여전히 실험 축이라 `fold_kinds_for` 가 `arch` 에서 읽는다.
+    #
+    # `capture_vision` 보다 앞(바깥)이어야 한다. 그래야 대화에 저장된 `on_demand` 그림은 보고,
+    # 자동 모드가 이 호출에만 붙이는 그림은 보지 않는다.
+    if fold_kinds_for(arch):
+        names.append("fold_context")
     # Only when the run can see. On a text-only run it would have nothing to
-    # inject and nothing to trim.
+    # inject.
     if arch.vision:
         names.append("capture_vision")
     # 여기에 라이브 씬을 붙이던 자리다. 뺐다 — 매 모델 호출 맨 뒤에 붙었다 사라지는 메시지가
@@ -185,7 +413,7 @@ def build_middleware(
             # Not the run's model, and not `cache_prompt`: summarizing is one
             # call over a prefix nothing will send again, so caching it would pay
             # the write premium for a read that never happens.
-            model=build_chat_model(LLMModel(config.compaction_model)),
+            model=build_chat_model(config.compaction_model),
             summary_prompt=load_prompt(
                 COMPACTION_PROMPT_AGENT, COMPACTION_ROLE, config.compaction_prompt_version
             ).body,
@@ -198,34 +426,50 @@ def build_middleware(
             trim_tokens=arch.compaction_trim_tokens,
             on_compacted=on_compacted,
         ),
-        "fold_scene_views": lambda: _fold_scene_views,
-        "fold_knowledge_neighbours": lambda: _fold_knowledge_neighbours,
-        "capture_vision": lambda: QaCaptureVisionMiddleware(state),
+        "fold_context": lambda: _fold_context_for(
+            fold_kinds_for(arch), arch.fold_threshold_chars, state, channel
+        ),
+        "capture_vision": lambda: QaCaptureVisionMiddleware(state, channel, arch),
         "log_token_usage": lambda: _log_token_usage,
     }
     return [builders[name]() for name in middleware_names_for(arch)]
 
 
-@wrap_model_call
-async def _fold_scene_views(request, handler):
-    """Fold stale scene views out of what one model call actually receives.
+def _fold_context_for(
+    kinds: frozenset[FoldKind], threshold_chars: int, state: QaRunState, channel: QaRunChannel
+):
+    """Fold stale blocks out of what one model call actually receives, in batches.
 
     `request.override` replaces only this call's messages, not the graph's own
     state, so the timeline and the console logging below keep the full text —
     see `app/agents/qa/context.py` for the fold itself.
+
+    런마다 만든다. 지난 호출까지 `fold` 한 block 을 `state.folded_blocks` 에 두었다가 이번 호출에
+    다시 `fold` 해야 프롬프트 앞이 그대로이고, 새 batch 에 view 가 들었으면 그 런의
+    `PulseMemory` 에 말해야 한다.
     """
-    return await handler(request.override(messages=fold_stale_scenes(request.messages)))
 
+    @wrap_model_call(name="_fold_context")
+    async def fold_context_middleware(request, handler):
+        fold = fold_context(
+            request.messages, kinds, state.folded_blocks, threshold_chars=threshold_chars
+        )
+        # 새 batch 에 view 가 들었다. 지금 모델이 받는 것은 가장 새 view 하나와 `placeholder` 뿐이고,
+        # 그 view 는 델타라 지워진 view 에서 한 번 말하고 가만히 있던 값이 어디에도 없다. 그래서
+        # 다음 도구 결과의 `pulse` view 가 가진 값을 전부 다시 그리게 한다. 이 호출 한 번은 그
+        # 값 없이 판단하고, 그 다음 도구 결과부터 돌아온다.
+        if FoldKind.scene_view in fold.newly_folded_kinds:
+            channel.scene.pulse.redraw_all_values_next()
+        state.folded_blocks = fold.folded_keys
+        # `claude/` 모델에서는 앞의 도구 결과를 `placeholder` 로 고쳐 쓰는 순간, 그 뒤 assistant
+        # turn 의 thinking block 이 무효가 된다.
+        # Claude API 는 block 앞의 메시지가 바뀐 채로 그 block 을 다시 받으면 400 을 돌려준다
+        # (2026-08-31 이후 만든 계정). `ClaudeApiChat`(`app/llm/claude_api.py`)이 그런 block 을
+        # 그 요청에서 빼므로 400 은 나지 않지만, 바뀐 지점 뒤 turn 들의 추론은 다음 호출에 넘어가지
+        # 않는다.
+        return await handler(request.override(messages=fold.messages))
 
-@wrap_model_call
-async def _fold_knowledge_neighbours(request, handler):
-    """Fold volunteered neighbour blocks out of what one model call receives.
-
-    Model-input only, like the scene fold above. Only the neighbour lines go —
-    the hits themselves stay, because re-reading one costs a search and the run
-    only has six. See `app/agents/qa/context.py`.
-    """
-    return await handler(request.override(messages=fold_stale_knowledge(request.messages)))
+    return fold_context_middleware
 
 
 def _context_shape(messages) -> str:
@@ -258,12 +502,13 @@ def _context_shape(messages) -> str:
         text = content if isinstance(content, str) else ""
 
         if isinstance(message, ToolMessage):
-            # 접힌 자리와 전문으로 남은 자리를 가른다. `fold_stale_scenes` 가 실제로
+            # 접힌 자리와 전문으로 남은 자리를 가른다. `fold_context` 가 실제로
             # 얼마나 누르는지는 이 둘의 비에서만 나온다.
-            if FOLDED_VIEW_PREFIX in text:
-                folded += 1
-            elif SCENE_VIEW_START_PREFIX in text:
-                kept += 1
+            #
+            # 메시지가 아니라 view 를 센다. `pulse` view 도 센다 — scene view 만 세던 때는
+            # 실제 런이 `pulse` view 만 받아서 매 호출 `folded=0 kept=0` 이었다.
+            folded += text.count(FOLDED_VIEW_PREFIX) + text.count(FOLDED_PULSE_VIEW_PREFIX)
+            kept += count_full_views(text)
 
         kind = type(message).__name__.removesuffix("Message").lower()
         by_kind[kind] = by_kind.get(kind, 0) + size
@@ -360,13 +605,48 @@ class QaRunner:
             if arch.vision
             else ""
         )
-        system_prompt = prompt.body.format(
-            language_directive=LANGUAGE_DIRECTIVES[config.language],
-            vision_directive=vision_directive,
+        # The same arrangement one axis over. The paragraph this replaces asks for
+        # a separate `record_capability_verdict` call, and that is still the only
+        # way on a run with `phase_cycle=off` — so the base text keeps saying it,
+        # and this directive overrides it only where `report_step` really does
+        # take the answer. Empty otherwise, which is what makes the rendered
+        # prompt of an `off` run the v17 text it has always been.
+        memory_directive = (
+            load_prompt(PROMPT_AGENT, MEMORY_ROLE, config.prompt_version).body
+            if arch.phase_cycle.remembers_in_verdict
+            else ""
         )
-        first_message = _plan(scenario)
+        # phase 를 강제하는 런에만, 그리고 `DECIDE` 가 자기 turn 을 갖는 런에만. 안 실리면
+        # 빈 문자열이라 렌더 결과가 그만큼 그대로다.
+        phase_directive = phase_directive_for(arch, config.prompt_version)
+        decide_directive = (
+            load_prompt(PROMPT_AGENT, DECIDE_ROLE, config.prompt_version).body
+            if arch.phase_cycle.decides_in_its_own_turn
+            else ""
+        )
+        system_prompt = system_prompt_with_skills(
+            prompt.body.format(
+                language_directive=LANGUAGE_DIRECTIVES[config.language],
+                vision_directive=vision_directive,
+                memory_directive=memory_directive,
+                phase_directive=phase_directive,
+                decide_directive=decide_directive,
+                skills_directive=_skills_directive(
+                    prompt.version, arch.skills, withheld_skills(arch)
+                ),
+            ),
+            prompt.version,
+            arch.skills,
+            withheld_skills(arch),
+        )
+        first_message = (
+            _plan(scenario) + _macro_discovery(arch, channel) + _game_functions(arch, channel)
+        )
         total_steps = len(scenario.steps)
-        tools = build_tools(channel, state, arch)
+        tools = build_tools(channel, state, arch, prompt.version)
+        # view 의 function 줄을 1번 step 의 TC 기준으로 둔다. 다음부터는 tool 이 옮긴다.
+        if arch.cheats == "on" or arch.behaviors == "on":
+            focus(ToolContext(channel, state, arch), 1)
 
         # The whole starting context in one place. Reading a run afterwards means
         # knowing what the model was actually given, and the prompt is assembled
@@ -428,7 +708,7 @@ class QaRunner:
                 # prompt change from a structural one.
                 "metadata": {
                     "qa_try_id": channel.qa_try_id,
-                    "model": config.model.value,
+                    "model": config.model,
                     "language": config.language.value,
                     "prompt_version": config.prompt_version,
                     "agent_arch": config.agent_arch,
@@ -517,6 +797,7 @@ class QaRunner:
                 if kind != "ai":
                     continue
 
+                await self._report_context(channel, message)
                 text = self._text_of(message)
                 calls = getattr(message, "tool_calls", None) or []
                 logger.info(
@@ -531,6 +812,20 @@ class QaRunner:
                     await channel.note(text, LogCategory.THOUGHT)
                 for call in calls:
                     await self._log_tool_call(channel, call)
+
+    async def _report_context(self, channel: QaRunChannel, message) -> None:
+        """Tell the timeline how full the context was on this model call.
+
+        `input_tokens` is what the provider counted for the call, cached prefix
+        included, so it is the number compaction's trigger should be read against.
+        A call that came back without usage reports nothing rather than a zero.
+        """
+        usage = getattr(message, "usage_metadata", None) or {}
+        used = usage.get("input_tokens")
+        maximum = get_model_spec(self._config.model).max_input_tokens
+        if not isinstance(used, int) or used <= 0 or maximum <= 0:
+            return
+        await channel.context_usage(used, maximum)
 
     @staticmethod
     def _step_of(args: dict) -> int | None:
@@ -582,16 +877,56 @@ class QaRunner:
         deadline still carries the verdicts it managed to record.
         """
         step_meta = _step_plan(scenario)
-        state = QaRunState(total_steps=len(scenario.steps), step_meta=step_meta)
+        state = QaRunState(
+            total_steps=len(scenario.steps),
+            step_meta=step_meta,
+            step_texts=[step.action for step in scenario.steps],
+            execution_mode=scenario.execution_mode,
+            step_functions=[
+                step.case.functions if step.case is not None else None
+                for step in scenario.steps
+            ],
+        )
+        if scenario.execution_mode == "FREE":
+            # FREE run 은 실패 판정이 미도달인지 Jev 에 묻는다(`app/qa/reach.py`).
+            state.step_expected = [
+                step.case.expected if step.case else "" for step in scenario.steps
+            ]
+            state.unreached_judge = UnreachedJudge()
         deadline = self._config.arch.deadline_seconds
+        # `pulse_relevance` 가 켜진 run 만 판정기를 단다(ARTEL-958). 이미 도착한 reading 이
+        # 있을 수 있어서 한 번 바로 부른다 — 다음 reading 까지 기다리면 첫 화면이 판정 없이
+        # 지나간다. 여기서 다는 것은 아래 `finally` 가 run 이 어떻게 끝나든 닫게 하려는 것이다.
+        if self._config.arch.pulse_relevance:
+            channel.pulse_relevance = PulseRelevanceJudge()
+            channel.pulse_relevance.notice(channel.scene.pulse)
         try:
             await asyncio.wait_for(self.run(channel, scenario, state), timeout=deadline)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as error:
+            state.failure_site = failure_site_of(error)
             return state, f"The run exceeded its {int(deadline)}s limit."
         except QaCancelled:
             return state, None
         except Exception as error:  # noqa: BLE001 - the reason has to reach the timeline
+            state.failure_site = failure_site_of(error)
             return state, f"The run stopped on an error: {error}"
+        finally:
+            # `checkpoint` 에서 멈춘 채 남은 macro 를 끊는다. 눌러 둔 것은 없다 — parser 가
+            # 누름과 뗌 사이의 `checkpoint` 를 거절한다(`app/agents/qa/macro/session.py`).
+            if state.paused_macro is not None:
+                state.paused_macro.cancel()
+                state.paused_macro = None
+            if state.jev is not None:
+                jev, state.jev = state.jev, None
+                await jev.aclose()
+            judge = channel.pulse_relevance
+            if judge is not None:
+                channel.pulse_relevance = None
+                await judge.aclose()
+            unreached_judge = state.unreached_judge
+            if isinstance(unreached_judge, UnreachedJudge):
+                state.unreached_judge = None
+                await unreached_judge.aclose()
         if not state.finished:
             return state, "The agent stopped without closing the run."
         return state, None

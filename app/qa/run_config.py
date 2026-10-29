@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict
 
 from app.agents.qa.arch import (
     DEFAULT_ARCH,
+    QaArchError,
     QaArchSpec,
     ResolvedArch,
     resolve_arch,
@@ -30,6 +31,7 @@ from app.agents.qa.arch import (
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage
 from app.config import get_settings
 from app.llm.chat_model import TEMPERATURE
+from app.llm.decision import resolve_decision_model
 from app.llm.default_model import resolve_default_model
 from app.llm.models import (
     LLMModel,
@@ -37,7 +39,8 @@ from app.llm.models import (
     get_model_spec,
     validate_reasoning,
 )
-from app.prompts import load_prompt
+from app.prompts import load_prompt, roles_in, skill_names
+from app.prompts.loader import SKILL_ROLE_PREFIX
 
 # Directories under app/prompts/ holding these agents' prompt versions. The
 # summarizing prompt is versioned apart from the run's own: it is a different call
@@ -48,14 +51,73 @@ COMPACTION_PROMPT_AGENT = "qa_compaction"
 # The roles that make up the run's system prompt. `vision_directive` only reaches
 # a run that can see — telling a text-only model about a tool it does not have
 # sends it looking for one — so it is hashed only when it is used.
+#
+# `memory_directive` is the same shape for the same reason. `report_step` carries
+# `capability_key` and `learned` only when `phase_cycle` is past `off`, so on a
+# default run those arguments do not exist and describing them would send the
+# model reaching for them. Keeping the text in its own role is also what lets
+# every arm of the phase-cycle comparison share one `prompt_version`: the arms
+# differ by the arch knob alone, and `agent_fingerprint` separates them.
 SYSTEM_ROLE = "system"
 VISION_ROLE = "vision_directive"
+MEMORY_ROLE = "memory_directive"
+# 같은 까닭으로 조건부다. `phase_directive` 는 phase 를 강제하는 런에만,
+# `decide_directive` 는 `decide_next_action` 이 tool 목록에 있는 런에만 닿는다.
+PHASE_ROLE = "phase_directive"
+DECIDE_ROLE = "decide_directive"
+# The Skills section of the system prompt, read only by a run with
+# `skills=on_demand`; with `off` the skill bodies are inlined instead.
+SKILLS_ROLE = "skills_directive"
+# macro 를 지식화 단계에서 만들라는 문단. phase 를 강제하고 macro 가 켜진 런에만, 그리고 그
+# 파일을 가진 prompt version 에만 닿는다 — `qa_run/v18` 은 macro 보다 먼저 나와서 없다. 없는
+# version 에서 거절하지 않는 이유는 skills 와 다르다: 이것이 빠져도 tool 이 깨지지 않고, 지식화
+# 단계에서 macro 를 권하는 말만 없다.
+MACRO_MEMORY_ROLE = "macro_memory_directive"
 COMPACTION_ROLE = "summary"
+
+def macro_memory_directive_applies(arch, prompt_version: str) -> bool:
+    """`macro_memory_directive` 가 이 런의 system prompt 에 실리나.
+
+    runner 와 이 파일이 같은 답을 내야 hash 가 실제로 실린 글을 가리킨다. 그래서 한 곳이다.
+    """
+    from app.prompts.loader import roles_in
+
+    return (
+        arch.phase_cycle.gates_phases
+        and arch.macros == "on"
+        and MACRO_MEMORY_ROLE in roles_in(PROMPT_AGENT, prompt_version)
+    )
+
 
 # This build reports citations. Declared as a constant rather than written inline
 # so that a build which one day cannot — a stripped tool set, a structure without
 # `report_step` — has one place to say so instead of a literal to hunt for.
 CITATION_REPORTING = True
+
+
+
+def _conditional_hash(role: str, version: str, asked_by: str) -> str:
+    """Hash one of the roles that only some structures read, or refuse the pair.
+
+    A version directory is a complete set, and the sets differ: every version up
+    to `v17` predates the phase cycle, so none of them holds a `phase_directive`.
+    Asking for one out of `v17` is not a broken file — it is a request for two
+    things that do not go together, a run gated into phases by a prompt that
+    never mentions phases.
+
+    Refused rather than substituted with an empty string. The gate answers an
+    out-of-phase call with a refusal, so a run given the gate and not the text
+    gets told off for a rule nobody told it, and the resulting numbers would be
+    filed under a structure that does not describe them. Either half is available
+    by asking for it; the pair is not.
+    """
+    if role not in roles_in(PROMPT_AGENT, version):
+        raise QaArchError(
+            f"Prompt version {version} has no {role!r}, which {asked_by} needs. "
+            f"Use a version that carries it — the newest does — or ask for a "
+            f"structure that does not need it."
+        )
+    return load_prompt(PROMPT_AGENT, role, version).body_sha256
 
 
 class RunConfig(BaseModel):
@@ -101,9 +163,29 @@ class RunConfig(BaseModel):
     # axes do not describe. Null when the structure has compaction off.
     compaction_model: str | None
     compaction_prompt_version: str | None
+    # 이 런의 Jev 질문(macro decide·ask, `pulse` relevance, reach)에 답하는 model.
+    # 관리자 설정이므로 런의 model 축과 따로 움직인다. 세션을 열 때의 값이고, 런 중간에
+    # 관리자가 바꾸면 다음 질문부터 새 model 이 답한다.
+    decision_model: str
     # Null outside a built image. Reported as null rather than guessed.
     git_sha: str | None
     image_tag: str | None
+
+
+def _compaction_model(configured: str | None, run_model: str) -> str:
+    """압축에 쓸 모델. 설정이 비어 있으면 런의 모델이다.
+
+    설정 값은 settings 를 읽을 때 검사할 수 없다 — catalog 는 orchestration server 에
+    있다. 그래서 세션을 열 때 여기서 검사하고, 틀렸으면 설정 이름을 적어 거절한다.
+    꺼진 row 도 받는다.
+    """
+    if not configured:
+        return run_model
+    try:
+        get_model_spec(configured)
+    except ValueError as error:
+        raise ValueError(f"qa_compaction_model (QA_COMPACTION_MODEL): {error}") from error
+    return configured
 
 
 def resolve_run_config(
@@ -112,8 +194,12 @@ def resolve_run_config(
     prompt_version: str | None = None,
     reasoning: ReasoningConfig | None = None,
     arch: QaArchSpec = DEFAULT_ARCH,
+    execution_mode: str = "ORDERED",
 ) -> RunConfig:
     """Settle every axis of one run, or refuse the request.
+
+    `execution_mode` 는 이 session 의 시나리오가 모두 FREE 일 때 "FREE" 다. FREE run 은
+    `report_case` 를 받으므로 tool 목록과 fingerprint 가 그것으로 기록된다(ARTEL-1029).
 
     Raises ``ValueError`` (``QaArchError`` is one) when the request cannot be
     honoured as asked — a reasoning budget the model has no setting for, a
@@ -129,7 +215,19 @@ def resolve_run_config(
     reasoning = validate_reasoning(model, reasoning)
     spec = get_model_spec(model)
     resolved_arch = resolve_arch(arch, model)
-    tools, _middleware, fingerprint = structure_of(resolved_arch)
+    if resolved_arch.engine == "planner_executer":
+        # FREE 도 돈다(ARTEL-1149). 시나리오마다 `execution_mode` 로 갈라 도는 것은 runner 의 몫이다.
+        # Imported here: that module builds a `RunConfig`, which is defined in this one.
+        from app.agents.planner_executer.run_config import resolve_planner_executer_config
+
+        return resolve_planner_executer_config(
+            model=model,
+            language=language,
+            prompt_version=prompt_version,
+            reasoning=reasoning,
+            arch=resolved_arch,
+        )
+    tools, _middleware, fingerprint = structure_of(resolved_arch, execution_mode)
 
     prompt = load_prompt(PROMPT_AGENT, SYSTEM_ROLE, prompt_version)
     hashes = {SYSTEM_ROLE: prompt.body_sha256}
@@ -139,12 +237,41 @@ def resolve_run_config(
         hashes[VISION_ROLE] = load_prompt(
             PROMPT_AGENT, VISION_ROLE, prompt.version
         ).body_sha256
+    asked_by = f"phase_cycle={resolved_arch.phase_cycle.value}"
+    if resolved_arch.phase_cycle.gates_phases:
+        hashes[PHASE_ROLE] = _conditional_hash(PHASE_ROLE, prompt.version, asked_by)
+    if resolved_arch.phase_cycle.decides_in_its_own_turn:
+        hashes[DECIDE_ROLE] = _conditional_hash(DECIDE_ROLE, prompt.version, asked_by)
+    if resolved_arch.phase_cycle.remembers_in_verdict:
+        # Hashed only when it is used, like the vision half above. A run with
+        # `phase_cycle=off` reads none of this text, and recording its hash would
+        # say the run was given something it never saw.
+        hashes[MEMORY_ROLE] = _conditional_hash(MEMORY_ROLE, prompt.version, asked_by)
+    if macro_memory_directive_applies(resolved_arch, prompt.version):
+        hashes[MACRO_MEMORY_ROLE] = load_prompt(
+            PROMPT_AGENT, MACRO_MEMORY_ROLE, prompt.version
+        ).body_sha256
+    if resolved_arch.skills == "on_demand":
+        # The same refusal one axis over. `qa_run/v18` carries the phase directives
+        # but no skill files, so `skills=on_demand` on it would offer `load_skill`
+        # with nothing to load; asked of `v18` or older, the pair is refused here
+        # instead of failing when the run builds its tools.
+        hashes[SKILLS_ROLE] = _conditional_hash(SKILLS_ROLE, prompt.version, "skills=on_demand")
+    # Every run of a version that has skill files reads them: inlined into the
+    # system prompt when `skills=off`, through `load_skill` when `on_demand`. Each
+    # one is recorded under its own role, `skill_<name>`. The hash covers the
+    # description as well as the body (see `loader.content_sha256`), so a run is
+    # filed under the text the model was offered, including the Skills section
+    # built from the descriptions. `skills_directive` alone holds only the template.
+    for skill in skill_names(prompt.version):
+        role = f"{SKILL_ROLE_PREFIX}{skill}"
+        hashes[role] = load_prompt(PROMPT_AGENT, role, prompt.version).body_sha256
 
     settings = get_settings()
     # 설정이 비어 있으면 런의 모델로 압축한다. 그래야 압축이 런과 같은 provider 를
     # 쓰고, 한쪽 credit 이 없을 때 압축만 조용히 실패하는 일이 없다.
     compaction_model = (
-        (settings.qa_compaction_model or model.value)
+        _compaction_model(settings.qa_compaction_model, model)
         if resolved_arch.compaction
         else None
     )
@@ -174,6 +301,7 @@ def resolve_run_config(
         citation_reporting=CITATION_REPORTING,
         compaction_model=compaction_model,
         compaction_prompt_version=compaction_prompt.version if compaction_prompt else None,
+        decision_model=resolve_decision_model(),
         git_sha=settings.git_sha,
         image_tag=settings.image_tag,
     )

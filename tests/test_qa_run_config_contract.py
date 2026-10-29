@@ -9,8 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.agents.qa.arch import QA_ARCH_LABEL, RUN_DEADLINE_SECONDS, TOOL_CALLS_PER_STEP
-from app.llm.default_model import FALLBACK_MODEL
-from app.llm.models import LLMModel
+from app.llm.models import DEFAULT_MODEL
 from app.main import app
 from app.prompts import load_prompt, resolve_version
 from app.qa.service import QaExecutionService
@@ -45,7 +44,7 @@ def test_the_response_carries_what_the_run_will_use() -> None:
     config = body["run_config"]
 
     assert body["session_id"]
-    assert config["model"] == FALLBACK_MODEL.value
+    assert config["model"] == DEFAULT_MODEL
     assert config["provider"] == "openai"
     assert config["agent_arch"] == QA_ARCH_LABEL
     assert len(config["agent_fingerprint"]) == 12
@@ -64,7 +63,10 @@ def test_the_prompt_version_comes_back_resolved() -> None:
 def test_the_prompt_hash_is_the_body_that_was_loaded() -> None:
     """A version directory is a name someone chose; editing `v3` in place would
     otherwise file two different prompts under one bucket."""
-    config = open_session(prompt_version="v1")["run_config"]
+    # `v1` predates the phase cycle, so it carries no `phase_directive` and the
+    # gate is asked off along with it. What this test reads is the hash of the
+    # `system` role, which the rung does not touch.
+    config = open_session(prompt_version="v1", arch={"phase_cycle": "off"})["run_config"]
 
     assert config["prompt_version"] == "v1"
     assert config["prompt_hashes"]["system"] == load_prompt("qa_run", "system", "v1").body_sha256
@@ -74,7 +76,7 @@ def test_a_model_without_reasoning_says_so_rather_than_going_quiet() -> None:
     """`reasoning: null` alone has two meanings — not asked for, and not
     offered. A comparison that cannot tell them apart reads a model's missing
     capability as a choice nobody made."""
-    config = open_session(model=LLMModel.gpt_chat_latest.value)["run_config"]
+    config = open_session(model="qwen/qwen3.7-max")["run_config"]
 
     assert config["reasoning"] is None
     assert config["reasoning_supported"] is False
@@ -82,7 +84,7 @@ def test_a_model_without_reasoning_says_so_rather_than_going_quiet() -> None:
 
 def test_a_reasoning_model_reports_what_it_was_given() -> None:
     config = open_session(
-        model=LLMModel.claude_sonnet_5.value, reasoning={"effort": "high"}
+        model="anthropic/claude-sonnet-5.5", reasoning={"effort": "high"}
     )["run_config"]
 
     # Nulls are kept rather than stripped: the record's shape stays the same
@@ -141,3 +143,24 @@ def test_the_response_says_this_run_can_report_citations() -> None:
     left on the run at the time. This field is that mark.
     """
     assert open_session()["run_config"]["citation_reporting"] is True
+
+
+def test_the_decision_model_is_recorded(monkeypatch) -> None:
+    """Jev 질문에 답한 model 은 런의 model 축과 따로 움직이므로 따로 남긴다."""
+    from types import SimpleNamespace
+
+    from app.llm import decision
+
+    monkeypatch.setattr(
+        decision,
+        "get_model_settings_provider",
+        lambda: SimpleNamespace(get_decision_model=lambda: None),
+    )
+    assert open_session()["run_config"]["decision_model"] == "typesafe/jev-1.13"
+
+    monkeypatch.setattr(
+        decision,
+        "get_model_settings_provider",
+        lambda: SimpleNamespace(get_decision_model=lambda: "openai/gpt-6-luna"),
+    )
+    assert open_session()["run_config"]["decision_model"] == "openai/gpt-6-luna"

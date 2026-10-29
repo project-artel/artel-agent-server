@@ -44,7 +44,6 @@ from app.agents.screen_verdict.prompt import (
     build_screen_verdict_prompt,
 )
 from app.agents.screen_verdict.validate import usable_entries
-from app.llm.models import LLMModel
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import MessageType, ScreenSelectorProposalPayload
 from app.qa.screen_verdict import ScreenSelectorAdjudicator
@@ -440,7 +439,9 @@ def _agent(answer) -> ScreenVerdictAgent:
             raise answer
         return answer
 
-    return ScreenVerdictAgent(structured_factory=lambda model: RunnableLambda(respond))
+    return ScreenVerdictAgent(
+        structured_factory=lambda model: RunnableLambda(respond), retry_backoff=False
+    )
 
 
 def test_a_malformed_reply_is_a_failure_and_not_an_invention() -> None:
@@ -452,6 +453,12 @@ def test_a_malformed_reply_is_a_failure_and_not_an_invention() -> None:
                 ScreenVerdictRequest(proposal=_payload(counters_in_names())), _CTX
             )
         )
+
+
+def test_the_production_agent_waits_between_retries() -> None:
+    # `app/qa/screen_verdict.py` 가 세우는 모양 그대로다. `_agent` 가 끄는 backoff 가
+    # 운영에서는 켜져 있다.
+    assert ScreenVerdictAgent().retry_backoff is True
 
 
 def test_an_empty_answer_is_a_complete_answer() -> None:
@@ -520,7 +527,7 @@ def test_a_model_that_cannot_see_is_not_sent_a_capture(monkeypatch) -> None:
 
     asyncio.run(
         agent.run(
-            ScreenVerdictRequest(proposal=_payload(proposal), model=LLMModel.gpt_chat_latest),
+            ScreenVerdictRequest(proposal=_payload(proposal), model="openai/gpt-6-luna"),
             _CTX,
         )
     )

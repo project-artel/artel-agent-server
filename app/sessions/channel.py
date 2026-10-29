@@ -83,6 +83,20 @@ class UncoveredCases(BaseModel):
     scenes: list[UncoveredScene] = Field(default_factory=list)
 
 
+class SavedScenario(BaseModel):
+    """저쪽이 이번 제출로 저장한 시나리오 하나 (ARTEL-937).
+
+    하나를 냈는데 검수가 둘로 나눌 수 있고, 같은 제목이면 새로 만들지 않고 기존 것을 고친다.
+    그래서 무엇을 새로 만들고 무엇을 고쳤는지는 우리가 낸 `scenario_id` 가 아니라 이것을 믿는다.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    scenario_id: int = Field(alias="scenarioId")
+    title: str
+    created: bool
+
+
 class ScenarioAccepted(BaseModel):
     """시나리오 하나를 넘긴 것에 대한 저쪽의 답.
 
@@ -94,7 +108,18 @@ class ScenarioAccepted(BaseModel):
     accepted: bool = False
     # 이번 턴에 지금까지 받아들여진 수. 저쪽이 세므로 모델이 따로 셀 필요가 없다.
     written: int = 0
+    # **저장된 최종본의 스텝 수** — 우리가 낸 수가 아니다. 검수가 나누기·메우기를 하고 코드가
+    # `bridge` 를 끼운 뒤의 수라 둘은 자주 다르다. 사용자에게 말할 수 있는 수는 이것뿐이다
+    # (실측: 우리는 37개라 말했는데 화면에 뜬 것은 다른 수였다).
+    steps: int = 0
+    # 합치기에서 실제로 걷어낸 시나리오 제목 / 걷어내지 못하고 남긴 것의 이유 문장.
+    # 지운 것도 남긴 것도 저쪽이 판정하므로 우리는 이 목록을 옮겨 말하기만 한다 — "합쳤습니다"
+    # 를 우리가 지어내면 안 된다.
+    absorbed: list[str] = Field(default_factory=list)
+    kept: list[str] = Field(default_factory=list)
     detail: str | None = None
+    # 이번 제출로 저장한 것(ARTEL-937). 옛 서버는 안 보내므로 비어 있을 수 있다.
+    saved: list[SavedScenario] = Field(default_factory=list)
 
 
 class ScenarioPath(BaseModel):
@@ -196,11 +221,39 @@ class ScenarioChannel:
         self._path_waiter: asyncio.Future[ScenarioPath] | None = None
         self._pending_path_id: str | None = None
         self._pending_facts_id: str | None = None
+        # 리소스 조회(ARTEL-1086)는 모델이 한 걸음에 여럿을 부를 수 있다. 답을 messageId 로 짝짓는다.
+        self._resource_waiters: dict[str, asyncio.Future[dict]] = {}
 
     # --- outbound -------------------------------------------------------------
 
-    async def submit_scenario(self, scenario: dict) -> ScenarioAccepted | None:
+    async def query_resource(self, request: dict) -> dict | None:
+        """서비스 엔터티를 읽는다(ARTEL-1086, POC). `op`(find · get · related) · `kind` · `id` · `text` ·
+        `relation` · `limit` 을 그대로 넘긴다. 범위(프로젝트 · TR 버전)는 저쪽이 세션에서 정한다.
+
+        답은 `{items, note}`. 아무도 답하지 않으면 `None` — 조회는 곁가지라 턴을 죽이지 않는다.
+        """
+        loop = asyncio.get_running_loop()
+        message_id = str(uuid4())
+        waiter: asyncio.Future[dict] = loop.create_future()
+        self._resource_waiters[message_id] = waiter
+        try:
+            await self._send({"type": "resource_query", "messageId": message_id, **request})
+            return await asyncio.wait_for(waiter, timeout=self._search_timeout)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            self._resource_waiters.pop(message_id, None)
+
+    async def submit_scenario(
+        self, scenario: dict, absorbed_scenario_ids: list[int] | None = None
+    ) -> ScenarioAccepted | None:
         """시나리오 하나를 넘긴다. 아무도 답하지 않으면 `None`.
+
+        `absorbed_scenario_ids` 는 합치기의 나머지 절반이다 — 이 본문 안으로 들어와 이제
+        따로 있을 이유가 없어진 기존 시나리오들. **여기에 적는 것은 요청이지 명령이 아니다**:
+        지울지는 저쪽이 센다(흡수된 쪽 케이스가 남는 쪽에 전부 있는지, QA 실행 이력이 없는지).
+        시나리오 본문 안이 아니라 프레임 바깥에 싣는 이유는 이것이 본문의 일부가 아니라
+        **이 제출에 딸린 정리 지시**이고, 검수(`reconcile`)가 알 필요가 없기 때문이다.
 
         마지막 답에 전부 담는 대신 하나씩 넘긴다. 한 답에 전부를 담으면 두 가지가 어긋나는
         것을 실측했다. 하나는 쓰는 시간이 답의 길이라는 것 — 8,000 token 이 token 당 5.3ms 로
@@ -220,6 +273,7 @@ class ScenarioChannel:
                 "type": "submit_scenario",
                 "messageId": message_id,
                 "scenario": scenario,
+                "absorbedScenarioIds": absorbed_scenario_ids or [],
             })
             try:
                 return await asyncio.wait_for(waiter, timeout=self._search_timeout)
@@ -318,8 +372,12 @@ class ScenarioChannel:
             self._search_waiter = None
             self._pending_search_id = None
 
-    async def report(self, stage: str) -> None:
+    async def report(self, stage: str, done: int | None = None, total: int | None = None) -> None:
         """Say where the turn is. Fire-and-forget: nothing waits for an answer.
+
+        `done`/`total` 은 셀 수 있는 노드에만 붙는다(문장 쓰기의 묶음 n/N). 한 줄로 "3/7" 을
+        말할 수 있어야 그 구간이 **움직이고 있다**는 것이 보인다 — 실측(run 87)에서 문장 쓰기
+        한 묶음이 29~54초였고, 그 사이 프레임이 하나도 없으면 멈춘 것과 같아 보였다.
 
         The far side sees every tool call as a frame, but not the model turns in
         between — and those are most of the wall clock. Without this, a turn that
@@ -330,8 +388,13 @@ class ScenarioChannel:
         and a socket that has gone away will fail again on the result frame, where
         the failure actually means something.
         """
+        frame: dict[str, object] = {"type": "progress", "stage": stage}
+        if done is not None:
+            frame["done"] = done
+        if total is not None:
+            frame["total"] = total
         try:
-            await self._send({"type": "progress", "stage": stage})
+            await self._send(frame)
         except Exception:  # noqa: BLE001 - see docstring
             logger.debug("[scenario] progress frame dropped (%s)", stage, exc_info=True)
 
@@ -374,6 +437,11 @@ class ScenarioChannel:
                     and raw.get("correlationId") == self._pending_path_id
                 ):
                     waiter.set_result(ScenarioPath.model_validate(raw))
+                return True
+            if message_type == "resource_query_result":
+                waiter = self._resource_waiters.get(raw.get("correlationId") or "")
+                if waiter is not None and not waiter.done():
+                    waiter.set_result({"items": raw.get("items") or [], "note": raw.get("note")})
                 return True
             if message_type == "test_case_search_result":
                 if self._answers_pending(raw):
