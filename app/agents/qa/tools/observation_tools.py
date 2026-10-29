@@ -11,8 +11,17 @@ from langchain_core.tools import BaseTool, tool
 from app.agents.qa.arch import ScreenCaptureMode
 from app.agents.qa.tools.state import capture_from_action_result
 from app.agents.qa.tools.tool_context import ToolContext
-from app.prompts import load_tool_description
+from app.prompts import load_tool_description, resolve_version, roles_in
 from app.qa.envelope import JsonRpcAction, LogCategory
+from app.qa.game_errors import render_errors
+
+
+def _diagnostic_description(name: str, first_version: str) -> str:
+    """구버전 prompt에 없는 진단 도구만 최초 지원 description을 사용한다."""
+    version = resolve_version("qa_run")
+    if f"tool_{name}" not in roles_in("qa_run", version):
+        version = first_version
+    return load_tool_description(name, version).body
 
 
 def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
@@ -55,7 +64,20 @@ def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
         messages = channel.drain_operator_messages()
         return _answer(found, messages)
 
-    return [observe_scene, inspect_object]
+    @tool(description=_diagnostic_description("get_errors", "v31"))
+    async def get_errors(step: int, thought: str, include_seen: bool = False) -> str:
+        # What the agent reads is `qa_run/<version>/tool_get_errors.md`.
+        # 게임에 아무것도 묻지 않는다. `PULSE` 와 `ACTION_RESULT` 가 이미 실어 온 것을 읽는다.
+        # 화면은 안 붙인다 — 화면을 바꾸지 않는 tool 이라 view 를 붙이면 지난 view 를 반복한다.
+        ledger = channel.game_errors
+        items = ledger.take(include_seen)
+        return _answer(
+            render_errors(items, ledger, include_seen),
+            channel.drain_operator_messages(),
+            screen=False,
+        )
+
+    return [observe_scene, inspect_object, get_errors]
 
 
 def build_capture_tool(ctx: ToolContext) -> BaseTool:
