@@ -11,6 +11,8 @@
     "knowledge_query/v1/human": "1a78e2a5de666395f13cb2360eb3292af512c4a08c7ef27a7b29baa076e2718d",
     "knowledge_query/v1/system": "c804a3cdb07f75a13534f4b18c5d5281a84054219987d706622d3ebb0e9ad956",
     "project_agent/v1/system": "f4bd759f3afb6de887998ebb2b14632a3ff77577052dbc46f37ca44aedb380d8",
+    "project_agent/v2/system": "ba7902dd44745039b5d7ca597c31c54a5738e59768b196c5edd3e305a90615ed",
+    "project_agent/v3/system": "ae23404c038b30d96bcda98391abd26c9a1a5b7afe089af2ec6fdc965c47f244",
     "qa_compaction/v1/summary": "76f818f25cafb4afc96cd63b5cf965c0dbecc5c252b7e80b80a894e1feda5491",
     "qa_planner/v1/evaluator": "d4f0c33ce2d1e3faa317adaf1fbe47af49bcaa106cf0a274eaddf2c6872f5ea3",
     "qa_planner/v1/rules": "c710cb896574f2a6e8f417654352a9f3767d1f1894f8785d9256c678d778794f",

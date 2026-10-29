@@ -10,7 +10,8 @@ from app.agents import (
     SceneEdge,
     TestCaseListItem,
 )
-from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig
+from app.llm.default_model import resolve_default_model
+from app.llm.models import LLMModel, ReasoningConfig
 
 
 class HistoryTurn(BaseModel):
@@ -46,7 +47,7 @@ class SessionRecord(BaseModel):
     history_dropped: int = 0
     # First user input, consumed when the WS connects to run the first turn.
     pending_user_input: str | None = None
-    model: LLMModel = DEFAULT_MODEL
+    model: LLMModel = Field(default_factory=resolve_default_model)
     # 이 세션의 추론 예산(ARTEL 실험). 모델과 같은 자리에 둔다 — 세션 내내 안 바뀐다.
     reasoning: ReasoningConfig | None = None
     # Output locale for generated scenarios. Default keeps records saved
