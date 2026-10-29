@@ -18,6 +18,7 @@ from app.agents.planner_executer.macros import RegisteredMacros, parse_step
 from app.agents.planner_executer.planner import Planner
 from app.agents.planner_executer.runner import PlannerExecuterRunner
 from app.agents.qa.arch import QaArchSpec
+from app.agents.scenario import OutputLanguage
 from app.qa.jev import JevClient
 from app.qa.run_config import resolve_run_config
 from app.qa.scene_context import SceneCapability, SceneContext, SceneContextEntry
@@ -106,6 +107,7 @@ def _scenario() -> QaScenario:
 
 def _config(**knobs):
     return resolve_run_config(
+        language=OutputLanguage.en,
         arch=QaArchSpec(engine="planner_executer", planner=PlannerExecuterArchSpec(**knobs))
     )
 
@@ -161,7 +163,8 @@ def test_the_planner_writes_macros_from_the_rules_the_grammar_the_map_and_the_sc
     assert written.macros.description("press_start").startswith("Press Start on the title screen.")
     system, user = asked.calls[0]
     assert system.startswith("You write ONE test step of a game as macros.")
-    assert GRAMMAR in system and system.rstrip().endswith(NUMBER_EQUALITY)
+    assert GRAMMAR in system and NUMBER_EQUALITY in system
+    assert "in English" in system
     assert "Scenes in this build" in user and '- click "Start" — starts a game' in user
     assert '"verify": "The map opens."' in user
     assert "Current screen:" in user and "Root/Start" in user
@@ -429,7 +432,7 @@ def test_a_step_whose_macros_stay_refused_fails_without_play() -> None:
 
     (verdict,) = _verdicts(fake)
     assert verdict["status"] == "FAILED"
-    assert verdict["message"].startswith("PLANNER-REFUSED: the step's macros were still refused after 1 rewrites:")
+    assert verdict["message"].startswith("PLANNER-REFUSED: the macro plan was still refused after 1 rewrites:")
     assert fake.actions == [] and seen == []
 
 
