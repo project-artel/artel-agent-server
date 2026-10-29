@@ -240,6 +240,14 @@ class ScenarioAgent:
             verdict = await self._router.route(
                 request.user_input, context_hint=_hint(request), previous=_previous_turn(request)
             )
+            if verdict.route in (Route.MODIFY, Route.ASK) and not any(
+                scenario.scenario_id is not None for scenario in request.current_scenarios
+            ):
+                # **고칠 시나리오가 없으면 고치는 갈래는 성립하지 않는다.** 런이 비었는데 수정으로 보내면 E 가
+                # "새 시나리오로 만들까요?" 를 되묻는다 — 실측(MCP 확인, 2026-10-29): 저작이 물은 게임 사실에
+                # 답했더니("처음부터 낮이에요") 그 답이 수정으로 가서 한 번 더 물었다. 만드는 갈래로 보낸다.
+                logger.info("[scenario] %s with no scenario to change — authoring instead", verdict.route.value)
+                verdict = verdict.model_copy(update={"route": Route.AUTHORING})
             if verdict.route is Route.ASK:
                 # **되묻는다.** 결정 모델 라우터가 갈래와 대상이 어긋났다고 말한 자리다.
                 # 모델을 부르지 않는다 — 물어볼 것이 언제나 같은 하나다.
