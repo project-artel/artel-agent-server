@@ -445,8 +445,18 @@ from app.llm.models import LLMModel, get_model_spec
 # 0 of 3 runs (no run captured at step 1), and cards drawn without their art in 0 of 3, although
 # all three captured the hand. Nothing hashed moves: the tool set, the schemas and the middleware
 # list are unchanged, so the label is the only record of this change.
+#
+# v31 because a `run_macro` or `resume_macro` answer now lists the text the game put on screen
+# while the macro ran, one line per text, with a sentence asking for `report_issue` on a blank
+# line, a placeholder or garbled characters (ARTEL-1222). `QaRunChannel.shown_text` records every
+# `text` a `pulse` carries, in arrival order, and grows a line in place while a typewriter effect
+# lengthens it. On 2026-10-22 a build whose opening had one line replaced by
+# `[MISSING TEXT: STORY_003]` was caught in 0 of 3 runs: `advance_story` pressed Return 12 to 22
+# times and only the last line was ever in front of the model. A clean result that carries these
+# lines is wrapped in the macro result markers so `fold_context` folds it once its step is
+# reported. Nothing hashed moves.
 # #262의 performed 계약 없이 이 단계의 QA 구조를 구분한다.
-QA_ARCH_LABEL = "v37-capture-checklist"
+QA_ARCH_LABEL = "v38-macro-shown-text"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
