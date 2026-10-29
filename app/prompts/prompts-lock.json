@@ -8,6 +8,7 @@
   "prompts": {
     "case_contract/v1/contract": "c450dcc1c01d9e564d4a221f5bd27fbb8b4428cf0c1db335262304319648843b",
     "case_contract/v1/glossary": "40f5c55261529a5f0327125c9d0faf947f21cd0551d278522ad64cf48446b2fa",
+    "case_contract/v1/observed": "028699554a16e5aacf52adf4fc624fd6006c7e5993d37d0c0292ff58e8e77775",
     "case_contract/v1/statement": "84e149e7b3efd730d9142d1abc7c89048783d7ba2761702cade73a015e1a1967",
     "decision/v1/human": "2e99200edb4ac9c6e5130286696768fc3bd1cfffecbe92d2e1bdd7869c862d3c",
     "decision/v1/system": "0629163646ce0577292aa8059face48dc4068fcc0f88874f2d3bf95918b44a14",
