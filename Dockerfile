@@ -21,6 +21,9 @@ RUN python -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml
 COPY README.md ./
 COPY app ./app
 COPY tests ./tests
+# prompt source 보존 테스트가 읽는 manifest와 원본 자료는 test stage에만 포함한다.
+COPY docs/pr-consolidation-prompt-sources.json ./docs/
+COPY docs/pr-consolidation-sources ./docs/pr-consolidation-sources
 
 # 의존성은 위에서 끝났다. 여기서는 이 패키지만 설치한다.
 RUN pip install --no-cache-dir --no-deps -e .
