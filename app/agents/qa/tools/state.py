@@ -15,7 +15,7 @@ from app.qa.jev import JevClient
 from app.qa.envelope import ActionResultItem, JsonRpcAction
 from app.qa.failure_site import FailureSite
 from app.qa.game_functions import CaseFunctions, UsedCheat
-from app.qa.schemas import QaStepResult
+from app.qa.schemas import QaStepResult, QaCaseAttemptResult
 
 
 @dataclass(frozen=True)
@@ -106,6 +106,7 @@ class QaRunState:
         # 폴백(case_id/is_verification 미상) — 구식 호출자·테스트 호환용.
         self.step_meta: list[tuple[int | None, bool]] = step_meta or []
         self.step_results: list[QaStepResult] = []
+        self.case_attempt_results: list[QaCaseAttemptResult] = []
         # FREE 시나리오에서 `report_case(overwrite=True)` 로 판정을 한 번 뒤집은 스텝(ARTEL-1029).
         # 한 TC 는 한 번만 덮어쓴다.
         self.overwritten_steps: set[int] = set()
@@ -254,6 +255,15 @@ class QaRunState:
         # return the image itself — an image block on a tool result is rejected by
         # the chat/completions API every model here is reached through.
         self._pending_captures: list[PendingCapture] = []
+        # 이 런에서 모델 앞에 놓인 캡처의 id(ARTEL-1133). 판정이 근거로 댄 캡처가 실제로 본
+        # 사진인지 이것과 맞춰 본다. `cites_captures` 는 `verdict_evidence` 를 켠 런에서 켜지고,
+        # 그때만 사진 설명에 id 를 적어 모델이 인용할 수 있게 한다.
+        self.shown_captures: set[str] = set()
+        self.cites_captures = False
+        # `verdict_evidence` 런의 판정 도구가 `_record_verdict` 에 넘기는 기대 항목, 그리고 판정과
+        # 항목이 어긋나 돌려보낸 연속 횟수.
+        self.pending_checks: list | None = None
+        self.evidence_refusals = 0
         # Set by `compact_context`, read and cleared by the compaction middleware
         # before the next model call. A flag rather than the tool doing the work
         # itself: the tool runs inside the tools node, where its own AIMessage is
@@ -392,32 +402,46 @@ class QaRunState:
         return units
 
     def build_summary(self) -> dict:
-        """종단 STATUS에 싣는 2단 요약. steps[]가 원천, cases[]는 파생(구간 검증 스텝).
-
-        finish_run(정상 종료)과 service._send_terminal(중단/실패)이 같은 형태를 내도록 한 곳에서
-        만든다 — 두 경로가 다른 요약을 내면 다운스트림이 종료 사유마다 다른 스키마를 보게 된다.
-        """
-        total = self.total_steps
-        steps_passed = sum(1 for result in self.step_results if result.passed)
-        cases = self.case_units()
-        cases_passed = sum(1 for unit in cases if unit["passed"])
+        """TC 검증 시도를 집계한다. 참고 step을 실패 판정으로 계산하지 않는다."""
+        # 별도 planner_executer engine은 기존 step 결과를 쓴다. QA tool은 이 목록에 쓰지 않는다.
+        if self.step_results and not self.case_attempt_results:
+            cases = self.case_units()
+            passed = sum(result.passed for result in self.step_results)
+            cases_passed = sum(unit["passed"] for unit in cases)
+            return {
+                "steps": {"total": self.total_steps, "passed": passed, "failed": self.total_steps - passed,
+                          "items": [result.model_dump() for result in self.step_results]},
+                "cases": {"total": len(cases), "passed": cases_passed, "failed": len(cases) - cases_passed, "items": cases},
+            }
+        outcomes = self.case_attempt_results
+        case_ids = {identifier for identifier, _ in self.step_meta if identifier is not None}
+        latest = {result.case_id: result for result in outcomes}
+        cases = [{"case_id": identifier,
+                  "verdict": latest[identifier].verdict if identifier in latest else "UNTESTED",
+                  "passed": latest[identifier].verdict == "PASSED" if identifier in latest else None,
+                  "message": latest[identifier].message if identifier in latest else ""}
+                 for identifier in sorted(case_ids)]
         return {
-            "steps": {
-                "total": total,
-                "passed": steps_passed,
-                "failed": total - steps_passed,
-                "items": [result.model_dump() for result in self.step_results],
-            },
-            "cases": {
-                "total": len(cases),
-                "passed": cases_passed,
-                "failed": len(cases) - cases_passed,
-                "items": cases,
-            },
+            "steps": {"total": 0, "passed": 0, "failed": 0, "items": []},
+            "cases": {"total": len(cases),
+                      "passed": sum(case["verdict"] == "PASSED" for case in cases),
+                      "failed": sum(case["verdict"] == "FAILED" for case in cases),
+                      "inconclusive": sum(case["verdict"] == "INCONCLUSIVE" for case in cases),
+                      "untested": sum(case["verdict"] == "UNTESTED" for case in cases),
+                      "items": cases},
+            "attempts": [result.model_dump() for result in outcomes],
         }
 
     def add_pending_capture(self, capture: PendingCapture) -> None:
         self._pending_captures.append(capture)
+
+    def saw_capture(self, capture_id: str, caption: str) -> str:
+        """모델 앞에 놓인 캡처를 적고, 그 사진에 붙일 설명을 돌려준다."""
+        if capture_id:
+            self.shown_captures.add(capture_id)
+        if self.cites_captures and capture_id:
+            return f"{caption} (capture {capture_id})"
+        return caption
 
     def take_pending_captures(self) -> list[PendingCapture]:
         pending = self._pending_captures

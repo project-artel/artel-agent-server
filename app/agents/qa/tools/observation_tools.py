@@ -69,7 +69,7 @@ def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
         messages = channel.drain_operator_messages()
         return _answer(found, messages)
 
-    @tool(description=_diagnostic_description("get_errors", "v31"))
+    @tool(description=_diagnostic_description("get_errors", "v27"))
     async def get_errors(step: int, thought: str, include_seen: bool = False) -> str:
         # What the agent reads is `qa_run/<version>/tool_get_errors.md`.
         # 게임에 아무것도 묻지 않는다. `PULSE` 와 `ACTION_RESULT` 가 이미 실어 온 것을 읽는다.
@@ -82,7 +82,7 @@ def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
             screen=False,
         )
 
-    @tool(description=_diagnostic_description("get_performance", "v34"))
+    @tool(description=_diagnostic_description("get_performance", "v29"))
     async def get_performance(
         step: int,
         thought: str,

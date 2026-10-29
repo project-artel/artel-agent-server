@@ -515,7 +515,7 @@ def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v39-performance"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v35-case-evaluation-no-demonstrations"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -576,8 +576,9 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
     "resume_macro",
     "decline_macro_draft",
     "search_macros",
-    "wait_for_operator",
-    "report_step",
+    "start_test_case",
+    "report_test_case",
+    "ask_user",
     "report_issue",
     "finish_run",
     "reply_to_operator",
@@ -651,19 +652,7 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 # `max_behavior_calls_per_run` (ARTEL-1054) joined `QaArchSpec` and the label moved to
 # `v27-game-functions`. Both axes default to `off`, so the default tool set is unchanged; the
 # digest moved because `arch.model_dump()` gained four keys.
-#
-# And from `7d56243753d1`, when `report_step` gained `performed` and its arguments were
-# reordered to `message`, `performed`, `passed` (ARTEL-1220) and the label moved to
-# `v28-verdict-expected-observed`. The tool names are unchanged; one tool schema moved.
-#
-# And from `2fd1bb6585a3`, when `get_errors` joined the observation tools (ARTEL-1219) and the
-# label moved to `v29-unseen-errors`.
-#
-# v30 and v31 left it where it was: they changed text the model reads, not a tool or a knob.
-#
-# And from `30d40310f4fd`, when `get_performance` joined the observation tools (ARTEL-1223) and
-# the label moved to `v32-performance`.
-_EXPECTED_DEFAULT_FINGERPRINT = "d3a8de56fcd6"
+_EXPECTED_DEFAULT_FINGERPRINT = "906e07cf5eaf"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
@@ -797,5 +786,3 @@ def test_macros_off_withholds_the_macro_skill_from_every_list_of_skills() -> Non
         for one in build_tools(_ThrowawayChannel(), QaRunState(total_steps=0), off, "v19")
     }["load_skill"]
     assert "macro" not in load_skill.description
-
-
