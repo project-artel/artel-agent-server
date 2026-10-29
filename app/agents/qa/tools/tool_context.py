@@ -67,6 +67,12 @@ class ToolContext:
             # 화면이 곧 답인 도구(`observe_scene`)는 앞에 얹을 몸통이 없다.
             body = f"{body}\n\n{view}" if body else view
 
+        # 안 본 예외의 수 한 줄 (ARTEL-1219). 0 이면 줄이 없다. 화면을 안 붙이는 tool 에도 붙인다 —
+        # 예외는 화면과 상관없이 쌓이고, `report_step` 직전에 보는 답이 지식 tool 일 수도 있다.
+        errors_line = channel.game_errors.summary_line()
+        if errors_line is not None:
+            body = f"{body}\n\n{errors_line}" if body else errors_line
+
         # 오퍼레이터의 말이 맨 뒤다. 지금부터 적용되는 지시라 화면보다 나중에 읽혀야 한다.
         return with_operator_messages(body, messages)
 
