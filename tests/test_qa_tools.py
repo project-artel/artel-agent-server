@@ -1030,6 +1030,7 @@ def test_the_agent_is_offered_exactly_these_tools() -> None:
         "finish_run",
         "reply_to_operator",
         "capture_screen",
+        "load_skill",
     }
 
 
