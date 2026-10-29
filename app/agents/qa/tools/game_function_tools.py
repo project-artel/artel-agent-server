@@ -375,7 +375,7 @@ def running_lines(ctx: ToolContext) -> str:
     )
 
 
-async def stop_not_allowed_before(ctx: ToolContext, next_step: int) -> str:
+async def stop_not_allowed_before(ctx: ToolContext, next_step: int, *, starting_case: bool = False) -> str:
     """`next_step` 이 다른 test case 의 첫 step 이면, 그 case 가 허용하지 않는 behavior 를 멈춘다.
 
     `report_step` 이 판정을 적은 뒤에 부른다. 그 다음이 새 test case 의 첫 step 이기 때문이다.
@@ -384,10 +384,10 @@ async def stop_not_allowed_before(ctx: ToolContext, next_step: int) -> str:
     """
     if ctx.arch.behaviors != "on":
         return ""
-    if not 1 < next_step <= ctx.state.total_steps:
+    if not 1 <= next_step <= ctx.state.total_steps:
         return ""
     case_id = ctx.state.case_id_at(next_step)
-    if case_id is None or case_id == ctx.state.case_id_at(next_step - 1):
+    if case_id is None or (not starting_case and (next_step == 1 or case_id == ctx.state.case_id_at(next_step - 1))):
         return ""
     allowed = set(allowed_for_step(ctx, "behavior", next_step))
     lines: list[str] = []

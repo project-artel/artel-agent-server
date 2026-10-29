@@ -75,7 +75,7 @@ def test_error_envelope_uses_camel_case_keys() -> None:
         message="m",
         code="run_incomplete",
         exception_type="TimeoutError",
-        frames=["app.agents.qa.runner:run_with_deadline:880"],
+        frames=["app.qa.evaluation:run_with_active_deadline:880"],
     )
     frame = outbound_envelope(MessageType.ERROR, 7, 1, payload)
     assert frame["payload"] == {
@@ -84,7 +84,7 @@ def test_error_envelope_uses_camel_case_keys() -> None:
         "retryable": False,
         "detail": None,
         "exceptionType": "TimeoutError",
-        "frames": ["app.agents.qa.runner:run_with_deadline:880"],
+        "frames": ["app.qa.evaluation:run_with_active_deadline:880"],
     }
 
 
@@ -110,7 +110,7 @@ def test_runner_records_failure_site_for_timeout(monkeypatch: pytest.MonkeyPatch
     assert state.failure_site.exception_type == "TimeoutError"
     assert state.failure_site.frames
     assert state.failure_site.frames[-1].startswith(
-        "app.agents.qa.runner:run_with_deadline:"
+        "app.qa.evaluation:run_with_active_deadline:"
     )
 
 
@@ -175,4 +175,4 @@ def test_service_emits_error_frame_with_failure_site(monkeypatch: pytest.MonkeyP
     payload = errors[0]["payload"]
     assert payload["code"] == "run_incomplete"
     assert payload["exceptionType"] == "TimeoutError"
-    assert payload["frames"][-1].startswith("app.agents.qa.runner:run_with_deadline:")
+    assert payload["frames"][-1].startswith("app.qa.evaluation:run_with_active_deadline:")

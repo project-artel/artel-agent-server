@@ -12,6 +12,7 @@
 """
 
 import asyncio
+from tests.qa_attempts import configure_attempts
 from typing import Any
 
 import pytest
@@ -232,7 +233,7 @@ def run_and_collect(monkeypatch: pytest.MonkeyPatch, macros: str, scene_context)
         turns=[
             {"tool_calls": [{"name": "observe_scene", "args": {"step": 1, "thought": "본다"}, "id": "1"}]},
             {"tool_calls": [{"name": "observe_scene", "args": {"step": 1, "thought": "또 본다"}, "id": "2"}]},
-            {"tool_calls": [{"name": "report_step", "args": {"step": 1, "passed": True, "message": "ok", "thought": "판정"}, "id": "3"}]},
+            {"tool_calls": [{"name": "report_test_case", "args": {"case_id": 1, "verdict": "PASSED", "message": "ok", "thought": "판정"}, "id": "3"}]},
             {"tool_calls": [{"name": "finish_run", "args": {"passed": True, "summary": "통과", "thought": "끝"}, "id": "4"}]},
             {"content": "done"},
         ]
@@ -244,7 +245,11 @@ def run_and_collect(monkeypatch: pytest.MonkeyPatch, macros: str, scene_context)
     runner = QaRunner(
         resolve_run_config(arch=QaArchSpec(phase_cycle=PhaseCycleMode.off, macros=macros))
     )
-    asyncio.run(runner.run(channel, scenario(), QaRunState(total_steps=1)))
+    state = QaRunState(total_steps=1)
+    configure_attempts(channel, state)
+    asyncio.run(channel.evaluation.start(1))
+    asyncio.run(runner.run(channel, scenario(), state))
+    assert len(state.case_attempt_results) == 1
     return model.received
 
 
@@ -259,8 +264,8 @@ def test_the_opening_message_of_a_real_run_carries_the_list(
     received = run_and_collect(monkeypatch, "on", context(macro("replay_step_3")))
 
     opening = opening_message(received[0])
-    assert "Begin. Observe the screen first." in opening
-    assert opening.index("Begin. Observe") < opening.index("Macros registered by earlier runs")
+    assert "Observe the screen and begin." in opening
+    assert opening.index("Observe the screen and begin.") < opening.index("Macros registered by earlier runs")
     assert "replay_step_3(times: int)" in opening
 
 
