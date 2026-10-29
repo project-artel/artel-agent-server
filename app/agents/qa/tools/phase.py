@@ -117,6 +117,7 @@ _TOOL_PHASE: dict[str, RunPhase] = {
     "expand_knowledge": RunPhase.observe,
     # 다른 phase 에서도 거절하지 않는다(`ANY_PHASE`). 판정 직전, ACT 뒤에 부르는 tool 이다.
     "get_errors": RunPhase.observe,
+    "get_performance": RunPhase.observe,
     # DECIDE — `full` 에만 있는 tool 하나.
     "decide_next_action": RunPhase.decide,
     # ACT — `action_tools.py` 의 16 개 중 게임을 실제로 움직이는 14 개.
@@ -209,7 +210,9 @@ def _answers(tool_name: str, phase: RunPhase) -> bool:
 # `get_errors` 도 같은 자리다 (ARTEL-1219). prompt 는 "안 본 예외가 있으면 판정 전에 본다" 를
 # 시키는데, 그 순간은 ACT 를 마친 뒤다. `OBSERVE` 에만 묶으면 거기서 거절된다. `ALWAYS_ALLOWED`
 # 에 넣지 않는 것은 locked `phase_directive` 가 그 목록을 빠짐없이 적어야 해서다.
-ANY_PHASE = frozenset({"register_macro", "search_knowledge", "get_errors"})
+#
+# `get_performance` 도 같은 이유다 (ARTEL-1223). hitch 를 본 것은 대개 action 결과에서다.
+ANY_PHASE = frozenset({"register_macro", "search_knowledge", "get_errors", "get_performance"})
 
 
 # 두 순서 모두 `REVIEW_DRAFT` 를 `VERIFY` 와 `UPDATE_MEMORY` 사이에 적어 두지만, 그 칸은 런이

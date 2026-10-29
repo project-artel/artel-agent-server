@@ -455,10 +455,20 @@ from app.llm.models import LLMModel, get_model_spec
 # times and only the last line was ever in front of the model. A clean result that carries these
 # lines is wrapped in the macro result markers so `fold_context` folds it once its step is
 # reported. Nothing hashed moves.
+#
+# v32 because the agent can now read the game's frame times (ARTEL-1223). The SDK has sent
+# `PERFORMANCE` every second for a while and orchestration stored it, but nothing in this server
+# read it, so no run could judge a hitch. `get_performance` asks orchestration for one window —
+# `last_seconds` or `since_frame`, the last 10 s by default — and answers with average and p95
+# frame time, lowest fps, hitches, memory growth and CPU. Every tool answer that goes through
+# `ToolContext.answer` also ends with one line counting the hitches of the last 10 s while that
+# count is above 0, re-read at most every 5 s after an action or an `observe_scene`. The same
+# split as `get_errors` (v29): the count rides along, the detail is a tool call, and a problem is
+# a `report_issue`, never a verdict. One tool joined the default set, so the fingerprint moves.
 # #262의 performed 계약 없이 이 단계의 QA 구조를 구분한다.
 # 자동 scene capture와 응답 checklist를 제거한 구조다. 시각 점검 skill은 필요할 때 읽으며
 # 이 view와 tool 구성을 이전 실행과 구분해 기록한다.
-QA_ARCH_LABEL = "v41-macro-text-no-auto-visual"
+QA_ARCH_LABEL = "v42-performance-no-auto-visual"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
