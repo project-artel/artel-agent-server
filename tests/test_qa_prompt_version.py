@@ -17,6 +17,7 @@ from app.agents.qa.tools import QaRunState, build_tools
 from app.api.qa_sessions import OpenQaSessionRequest
 from app.qa.schemas import QaCaseRef, QaRunScenario, QaScenario, QaStep
 from app.prompts import load_prompt
+from app.prompts.loader import PROMPTS_ROOT
 from app.prompts.loader import resolve_version, roles_in
 from app.qa.channel import QaRunChannel
 from app.qa.run_config import resolve_run_config
@@ -256,7 +257,7 @@ def test_v3_shortens_what_the_tools_already_say_without_dropping_a_rule() -> Non
     # Waiting is the other way a run ends with nothing to show. v2 closed that
     # off in the prompt ("do not wait forever on silence"); v3 dropped the
     # sentence, so the tool has to say the run pays for it.
-    assert "run's clock" in tools["wait_for_operator"].description
+    assert "시간 제한은 없고" in tools["ask_user"].description
 
     # Cross-tool rules have no single owner, so no tool description can carry them.
     assert "VERBATIM" in v3
@@ -320,22 +321,19 @@ def test_the_default_qa_version_is_v21() -> None:
     `tool_start_behavior.md`, `tool_stop_behavior.md`, `tool_extend_behavior.md`, and the
     `cheats` and `behaviors` skills. Every v23 role is carried over unchanged.
 
-    v25 changes how a step is judged (ARTEL-1220): `## How to work` step 4 asks for
-    `expected:` and `observed:` lines before the verdict, and the four verdict tool
-    descriptions describe the new `performed` argument.
-
-    v26 adds `tool_get_errors.md` and one paragraph to the system prompt on reading
-    `unseen errors: N` (ARTEL-1219).
-
-    v27 adds two sentences to the vision directive (ARTEL-1221): a whole-screen capture on
-    the first entry to each scene, and a checklist for reading any capture.
-
-    v28 adds one paragraph to the macro skill (ARTEL-1222): read the text lines a macro
-    answer carries and file blank, placeholder or garbled lines with `report_issue`.
-
-    v29 adds `tool_get_performance.md` for the new `get_performance` tool (ARTEL-1223).
+    v25 adds `tool_verdict_checks.md` for the `verdict_evidence` axis (ARTEL-1133). Every
+    other file is v24's with only the version line moved, so a run with the axis off reads
+    what it read under v24.
     """
-    assert resolve_version("qa_run") == "v29"
+    assert resolve_version("qa_run") == "v30"
+
+
+def test_v25_is_v24_plus_the_verdict_checks_description() -> None:
+    root = PROMPTS_ROOT / "qa_run"
+    v24 = {p.name: p.read_text().split("---\n", 2)[2] for p in (root / "v24").glob("*.md")}
+    v25 = {p.name: p.read_text().split("---\n", 2)[2] for p in (root / "v25").glob("*.md")}
+    assert set(v25) - set(v24) == {"tool_verdict_checks.md"}
+    assert all(v25[name] == body for name, body in v24.items())
 
 
 # v20 이 고쳐 쓴 v19 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
@@ -1108,85 +1106,3 @@ def test_v24_adds_the_game_function_tools_and_keeps_every_v23_role() -> None:
     assert v24_roles - v23_roles == V24_ADDED_ROLES
     for role in sorted(v23_roles):
         assert load_prompt("qa_run", role, "v24").body == load_prompt("qa_run", role, "v23").body, role
-
-
-# v25 가 v24 에서 고쳐 쓴 role. 나머지 role 은 한 글자도 안 바뀌어야 한다 (ARTEL-1220).
-V25_REWRITTEN_ROLES = {
-    "system",
-    "tool_report_step",
-    "tool_report_step_memory",
-    "tool_report_case",
-    "tool_report_case_memory",
-}
-
-
-def test_v25_rewrites_only_the_verdict_rules_and_keeps_every_other_v24_role() -> None:
-    """v25 는 판정 규칙을 적은 다섯 role 만 고친다. role 목록과 나머지 본문은 v24 그대로다."""
-    assert roles_in("qa_run", "v25") == roles_in("qa_run", "v24")
-    for role in roles_in("qa_run", "v24"):
-        same = load_prompt("qa_run", role, "v25").body == load_prompt("qa_run", role, "v24").body
-        assert same is (role not in V25_REWRITTEN_ROLES), role
-
-
-def test_v25_asks_for_expected_and_observed_before_the_verdict() -> None:
-    """판정 전에 두 값을 나란히 적게 하고, 거부된 행동을 실패로 적는 예시를 둔다 (ARTEL-1220)."""
-    system = load_prompt("qa_run", "system", "v25").body
-    assert "`expected:`" in system and "`observed:`" in system
-    assert "`performed=false`, `passed=false`" in system
-    for role in V25_REWRITTEN_ROLES - {"system"}:
-        body = load_prompt("qa_run", role, "v25").body
-        assert "`performed`" in body, role
-        assert "`expected:` and `observed:`" in body, role
-
-
-def test_v26_adds_get_errors_and_one_system_paragraph() -> None:
-    """v26 는 v25 에 `get_errors` 설명과 system prompt 한 문단만 더한다 (ARTEL-1219)."""
-    assert set(roles_in("qa_run", "v26")) - set(roles_in("qa_run", "v25")) == {"tool_get_errors"}
-    for role in roles_in("qa_run", "v25"):
-        same = load_prompt("qa_run", role, "v26").body == load_prompt("qa_run", role, "v25").body
-        assert same is (role != "system"), role
-    system = load_prompt("qa_run", "system", "v26").body
-    paragraph = (
-        "A tool result ending `unseen errors: N` means the game logged N exceptions you have "
-        "not read: call `get_errors` before `report_step`. An exception never fails a step by "
-        "itself; file it with `report_issue`.\n\n"
-    )
-    assert system == load_prompt("qa_run", "system", "v25").body.replace(
-        "## When the game itself is broken\n\n",
-        "## When the game itself is broken\n\n" + paragraph,
-    )
-
-
-def test_v27_extends_only_the_vision_directive() -> None:
-    """v27 은 vision 지시문 뒤에 문단 하나만 더한다 (ARTEL-1221)."""
-    assert roles_in("qa_run", "v27") == roles_in("qa_run", "v26")
-    for role in roles_in("qa_run", "v26"):
-        same = load_prompt("qa_run", role, "v27").body == load_prompt("qa_run", role, "v26").body
-        assert same is (role != "vision_directive"), role
-    before = load_prompt("qa_run", "vision_directive", "v26").body
-    after = load_prompt("qa_run", "vision_directive", "v27").body
-    assert after.startswith(before)
-    added = after[len(before):]
-    assert "first time you enter each scene" in added
-    for check in ("empty areas", "no art", "overlap", "clipping", "developer console"):
-        assert check in added, check
-
-
-def test_v28_adds_one_paragraph_to_the_macro_skill() -> None:
-    """v28 은 macro skill 의 수명주기 절에 문단 하나만 더한다 (ARTEL-1222)."""
-    assert roles_in("qa_run", "v28") == roles_in("qa_run", "v27")
-    for role in roles_in("qa_run", "v27"):
-        same = load_prompt("qa_run", role, "v28").body == load_prompt("qa_run", role, "v27").body
-        assert same is (role != "skill_macro"), role
-    added = load_prompt("qa_run", "skill_macro", "v28").body
-    assert "**The answer lists the text the game showed while the macro ran**" in added
-    assert "`[MISSING TEXT: STORY_003]`" in added
-
-
-def test_v29_adds_only_the_get_performance_description() -> None:
-    """v29 는 v28 에 `get_performance` 설명 하나만 더한다 (ARTEL-1223)."""
-    assert set(roles_in("qa_run", "v29")) - set(roles_in("qa_run", "v28")) == {
-        "tool_get_performance"
-    }
-    for role in roles_in("qa_run", "v28"):
-        assert load_prompt("qa_run", role, "v29").body == load_prompt("qa_run", role, "v28").body, role

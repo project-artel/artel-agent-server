@@ -1,5 +1,5 @@
 ---
-version: v26
+version: v30
 note: FREE 시나리오의 report_case description. v24 에 `performed` 와 message 의 expected/observed 두 줄을 더한다 (ARTEL-1220). 500자 이하.
 placeholders: []
 ---

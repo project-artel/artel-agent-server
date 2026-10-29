@@ -30,6 +30,7 @@ from app.logging_config import configure_logging
 from app.observability import configure_langsmith
 from app.prompts import validate_prompts
 from app.qa.service import QaExecutionService
+from app.qa.retired_context import purge_demonstration_context
 from app.qa.store import InMemoryQaSessionStore, QaSessionStore, RedisQaSessionStore
 from app.sessions.redis_store import RedisSessionStore
 from app.sessions.service import SessionService
@@ -62,6 +63,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             encoding="utf-8",
             decode_responses=True,
         )
+        await purge_demonstration_context(redis)
         store = RedisSessionStore(redis, settings.session_ttl_seconds)
         # QA execution sessions share the Redis client (distinct `qa:` namespace).
         qa_store = RedisQaSessionStore(redis, settings.session_ttl_seconds)

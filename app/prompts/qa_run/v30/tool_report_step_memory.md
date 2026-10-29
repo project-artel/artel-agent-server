@@ -1,5 +1,5 @@
 ---
-version: v26
+version: v30
 note: phase_cycle 이 off 가 아닐 때 쓰는 report_step description. v24 에서 `passed` 의 정의를 바꾸고 `performed` 를 더한다 (ARTEL-1220). 500자 이하라 `used_knowledge_ids` 설명을 줄였다.
 placeholders: []
 ---

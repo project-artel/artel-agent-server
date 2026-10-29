@@ -1,5 +1,5 @@
 ---
-version: v26
+version: v30
 note: 새 tool `get_errors` 의 description (ARTEL-1219). tool 결과 끝의 `unseen errors: N` 줄이 세는 항목을 펼쳐 보이고 본 것으로 표시한다. 500자 이하.
 placeholders: []
 ---

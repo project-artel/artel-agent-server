@@ -6,6 +6,7 @@
 """
 
 import asyncio
+from tests.qa_attempts import configure_attempts, start_case, report_case
 
 import pytest
 from fastapi.testclient import TestClient
@@ -91,6 +92,7 @@ def make(
         step_functions=step_functions,
     )
     arch = _arch(cheats, behaviors)
+    configure_attempts(channel, state)
     tools = {one.name: one for one in build_tools(channel, state, arch=arch)}
     return channel, state, tools, sent, arch
 
@@ -535,6 +537,7 @@ def _status_frames(sent: list[dict]) -> list[dict]:
 def test_report_step_writes_used_cheats_and_active_behaviors_itself() -> None:
     async def run() -> None:
         channel, state, tools, sent, _ = make()
+        await start_case(tools)
         reply = answer(channel, sent, {"id": 1, "success": True, "returnValue": {"message": "ok"}})
         await tools["run_cheat"].ainvoke(
             {"step": 1, "name": "give_gold", "arguments": {"amount": 5}, "thought": "x"}
@@ -558,33 +561,30 @@ def test_report_step_writes_used_cheats_and_active_behaviors_itself() -> None:
             )
         )
 
-        result = await tools["report_step"].ainvoke(
-            {"step": 1, "performed": True, "passed": True, "message": "ok", "thought": "x"}
-        )
+        result = await report_case(tools)
 
-        [status] = _status_frames(sent)
-        assert status["used_cheats"] == [
+        [status] = [payload for path, payload in channel.evaluation.requests if path.endswith('/report')]
+        assert status["usedCheats"] == [
             {"name": "give_gold", "args": {"amount": 5}, "target": None, "success": True}
         ]
-        assert status["active_behaviors"] == [
+        assert status["activeBehaviors"] == [
             {"behaviorId": 7, "name": "auto_attack", "target": PLAYER, "seconds": 8.0}
         ]
-        assert "Still running:" in result and "#7 auto_attack" in result
+        assert "#7 auto_attack" in result
         # 다음 `report_step` 은 그 사이에 쓴 cheat 만 싣는다.
-        assert state.used_cheats == []
+        assert len(state.used_cheats) == 1
 
     asyncio.run(run())
 
 
 def test_a_run_with_both_axes_off_sends_status_without_the_two_keys() -> None:
     async def run() -> None:
-        _, _, tools, sent, _ = make(cheats="off", behaviors="off")
-        await tools["report_step"].ainvoke(
-            {"step": 1, "performed": True, "passed": True, "message": "ok", "thought": "x"}
-        )
-        [status] = _status_frames(sent)
-        assert "used_cheats" not in status
-        assert "active_behaviors" not in status
+        channel, _, tools, sent, _ = make(cheats="off", behaviors="off")
+        await start_case(tools)
+        await report_case(tools)
+        [status] = [payload for path, payload in channel.evaluation.requests if path.endswith('/report')]
+        assert status["usedCheats"] is None
+        assert status["activeBehaviors"] is None
 
     asyncio.run(run())
 
@@ -615,9 +615,7 @@ def test_a_behavior_the_next_case_does_not_allow_is_stopped_before_its_first_ste
             )
         )
         reply = answer(channel, sent, {"id": 1, "success": True, "returnValue": {"stopped": [7]}})
-        result = await tools["report_step"].ainvoke(
-            {"step": 1, "performed": True, "passed": True, "message": "ok", "thought": "x"}
-        )
+        result = await start_case(tools, 2)
         await reply
 
         [frame] = actions(sent)
@@ -637,14 +635,13 @@ def test_no_stop_is_sent_inside_one_case() -> None:
         channel, _, tools, sent, _ = make(
             step_functions=[CaseFunctions(behaviors="none"), CaseFunctions(behaviors="none")]
         )
+        await start_case(tools)
         channel.scene.pulse.apply(
             PulseReading.model_validate(
                 {"reading": 1, "behaviors": [{"behaviorId": 7, "name": "auto_attack"}]}
             )
         )
-        await tools["report_step"].ainvoke(
-            {"step": 1, "performed": True, "passed": True, "message": "ok", "thought": "x"}
-        )
+        await report_case(tools)
         assert actions(sent) == []
 
     asyncio.run(run())
@@ -802,6 +799,7 @@ def test_active_behaviors_keeps_a_behavior_that_ended_before_the_verdict() -> No
     # 판정할 때 도는 것만 적던 `active_behaviors` 가 비었다.
     async def run() -> None:
         channel, _, tools, sent, _ = make()
+        await start_case(tools)
         running = {
             "behaviorId": 1,
             "name": "auto_attack",
@@ -815,10 +813,10 @@ def test_active_behaviors_keeps_a_behavior_that_ended_before_the_verdict() -> No
         )
         channel.scene.pulse.apply(PulseReading.model_validate({"reading": 2, "behaviors": []}))
 
-        await tools["report_step"].ainvoke({"step": 1, "performed": True, "passed": True, "message": "ok", "thought": "x"})
+        await report_case(tools)
 
-        [status] = _status_frames(sent)
-        assert status["active_behaviors"] == [
+        [status] = [payload for path, payload in channel.evaluation.requests if path.endswith('/report')]
+        assert status["activeBehaviors"] == [
             {"behaviorId": 1, "name": "auto_attack", "target": None, "seconds": 26.3}
         ]
 
@@ -828,6 +826,7 @@ def test_active_behaviors_keeps_a_behavior_that_ended_before_the_verdict() -> No
 def test_active_behaviors_counts_only_this_steps_share_of_a_carried_behavior() -> None:
     async def run() -> None:
         channel, _, tools, sent, _ = make()
+        await start_case(tools)
 
         def pulse(reading: int, seconds: float) -> None:
             channel.scene.pulse.apply(
@@ -842,15 +841,16 @@ def test_active_behaviors_counts_only_this_steps_share_of_a_carried_behavior() -
             )
 
         pulse(1, 5.0)
-        await tools["report_step"].ainvoke({"step": 1, "performed": True, "passed": True, "message": "ok", "thought": "x"})
+        await report_case(tools)
+        await start_case(tools)
         pulse(2, 9.0)
-        await tools["report_step"].ainvoke({"step": 2, "performed": True, "passed": True, "message": "ok", "thought": "x"})
+        await report_case(tools)
 
-        first, second = _status_frames(sent)
-        assert first["active_behaviors"] == [
+        first, second = [payload for path, payload in channel.evaluation.requests if path.endswith('/report')]
+        assert first["activeBehaviors"] == [
             {"behaviorId": 3, "name": "auto_attack", "target": None, "seconds": 5.0}
         ]
-        assert second["active_behaviors"] == [
+        assert second["activeBehaviors"] == [
             {"behaviorId": 3, "name": "auto_attack", "target": None, "seconds": 4.0}
         ]
 

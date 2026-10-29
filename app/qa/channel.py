@@ -49,6 +49,7 @@ from app.qa.game_functions import BehaviorEndedPayload, GameFunctionCatalog
 from app.qa.pulse import PulseReading
 from app.qa.scene import SceneMemory
 from app.qa.shown_text import ShownTextLog
+from app.qa.evaluation import QaEvaluationClient
 
 if TYPE_CHECKING:
     from app.qa.relevance import PulseRelevanceJudge
@@ -169,6 +170,7 @@ class QaRunChannel:
         search_timeout: float = KNOWLEDGE_SEARCH_TIMEOUT_SECONDS,
     ) -> None:
         self._qa_try_id = qa_try_id
+        self.evaluation = QaEvaluationClient(qa_try_id)
         self._send = send
         self._action_timeout = action_timeout
         # Injectable for the same reason `action_timeout` is: a suite that waited

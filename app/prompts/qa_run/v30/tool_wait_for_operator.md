@@ -1,5 +1,5 @@
 ---
-version: v26
+version: v30
 note: wait_for_operator 도구 description 을 코드에서 옮김. 500자 이하.
 placeholders: []
 ---
