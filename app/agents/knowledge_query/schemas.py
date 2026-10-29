@@ -14,7 +14,8 @@ reading the generated text. Three lowers the odds that all of them miss.
 
 from pydantic import BaseModel, Field
 
-from app.llm.models import DEFAULT_MODEL, LLMModel
+from app.llm.default_model import resolve_default_model
+from app.llm.models import LLMModel
 
 QUESTIONS_PER_ITEM = 3
 
@@ -41,4 +42,4 @@ class KnowledgeItemQueries(BaseModel):
 
 class KnowledgeQueryAgentRequest(BaseModel):
     item: KnowledgeItem
-    model: LLMModel = DEFAULT_MODEL
+    model: LLMModel = Field(default_factory=resolve_default_model)

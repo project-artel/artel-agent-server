@@ -35,6 +35,7 @@ from app.agents.planner_executer.planner import Ask, Planner
 from app.agents.planner_executer.prompts import screen, step_text
 from app.agents.qa.runner import _step_plan
 from app.agents.qa.tools import QaRunState
+from app.agents.scenario import OutputLanguage
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import JsonRpcAction, MessageType, RunResult, StatusPayload, StepStatus
 from app.qa.jev import JevClient
@@ -67,6 +68,9 @@ class PlannerExecuterRunner:
         self._judge = judge
         self._jev = jev
 
+    def _say(self, ko: str, en: str) -> str:
+        return ko if self._config.language == OutputLanguage.ko else en
+
     async def run_with_deadline(
         self, channel: QaRunChannel, scenario: QaScenario
     ) -> tuple[QaRunState, str | None]:
@@ -82,10 +86,14 @@ class PlannerExecuterRunner:
         try:
             await asyncio.wait_for(self._run(channel, scenario, state, jev), timeout=deadline)
         except asyncio.TimeoutError:
+            if self._config.language == OutputLanguage.ko:
+                return state, f"실행 제한 시간 {int(deadline)}초를 초과했습니다."
             return state, f"The run exceeded its {int(deadline)}s limit."
         except QaCancelled:
             return state, None
         except Exception as error:  # noqa: BLE001 - the reason has to reach the timeline
+            if self._config.language == OutputLanguage.ko:
+                return state, f"오류로 실행이 중단됐습니다: {type(error).__name__}: {error}"
             return state, f"The run stopped on an error: {type(error).__name__}: {error}"
         finally:
             if self._jev is None:
@@ -111,8 +119,7 @@ class PlannerExecuterRunner:
                 if written.macros is None:
                     await evaluator.report(
                         channel, state, step, False,
-                        f"PLANNER-REFUSED: the step's macros were still refused after "
-                        f"{self._spec.max_rewrites} rewrites: {written.refusal}",
+                        planner_refused(self._spec.max_rewrites, written.refusal, self._config.language),
                     )
                     continue
                 play = await executer.play(step, step_text(scenario.steps[step - 1]), written.macros)
@@ -125,7 +132,7 @@ class PlannerExecuterRunner:
             StatusPayload(
                 status=StepStatus.COMPLETED,
                 result=RunResult.PASSED if passed else RunResult.FAILED,
-                message=f"{sum(r.passed for r in state.step_results)}/{state.total_steps} steps passed.",
+                message=completion_message(sum(r.passed for r in state.step_results), state.total_steps, self._config.language),
                 summary=state.build_summary(),
             ),
         )
@@ -161,7 +168,9 @@ class PlannerExecuterRunner:
             await note_decision(
                 channel,
                 "free_round",
-                f"FREE round {rounds}: {len(pending)} cases left, starting in {channel.scene.pulse.scene or '?'}",
+                self._say(
+                    f"FREE round {rounds}: case {len(pending)}개가 남았습니다. {channel.scene.pulse.scene or '?'}에서 시작합니다.",
+                    f"FREE round {rounds}: {len(pending)} cases left, starting in {channel.scene.pulse.scene or '?'}"),
                 scene=channel.scene.pulse.scene,
                 round=rounds,
                 resets=resets,
@@ -195,7 +204,9 @@ class PlannerExecuterRunner:
                 await note_decision(
                     channel,
                     "free_end",
-                    f"FREE ends after {resets} resets: {len(left)} cases unreached ("
+                    self._say(
+                        f"reset {resets}회 후 FREE를 종료합니다. case {len(left)}개에 도달하지 못했습니다 (",
+                        f"FREE ends after {resets} resets: {len(left)} cases unreached (")
                     + ", ".join(f"{cause} {count}" for cause, count in sorted(causes.items()))
                     + ")",
                     resets=resets,
@@ -203,16 +214,18 @@ class PlannerExecuterRunner:
                     unreached={str(case.step): case.cause for case in left},
                 )
                 for case in left:
-                    await settle(case.step, False, unreached(case.attempts, resets, case.cause, case.last_reason))
+                    await settle(case.step, False, unreached(case.attempts, resets, case.cause, case.last_reason, self._config.language))
                 return
             await note_decision(
                 channel,
                 "reset",
-                f"Resetting the game after round {rounds}: {len(pending)} cases left",
+                self._say(
+                    f"round {rounds} 후 게임을 다시 시작합니다. case {len(pending)}개가 남았습니다.",
+                    f"Resetting the game after round {rounds}: {len(pending)} cases left"),
                 round=rounds,
                 pending=list(pending),
             )
-            await reset_game(channel)
+            await reset_game(channel, self._config.language)
             resets += 1
 
     async def _play_scene(
@@ -240,12 +253,13 @@ class PlannerExecuterRunner:
                 if same_scene(case.scene, scene):
                     await settle(
                         case.step, False,
-                        f"PLANNER-REFUSED: the scene plan was still refused after {self._spec.max_rewrites} "
-                        f"rewrites: {plan.refusal}",
+                        planner_refused(self._spec.max_rewrites, plan.refusal, self._config.language),
                     )
             return []
         for step, reason in plan.later.items():
             pending[step].last_reason = f"the planner left it for later in {scene or 'an unknown scene'}: {reason}"
+            if self._config.language == OutputLanguage.ko:
+                pending[step].last_reason = f"planner가 {scene or '알 수 없는 scene'}에서 검증을 미뤘습니다: {reason}"
             pending[step].cause = "DEFERRED"
         first_screen = screen(channel.scene.pulse)
         played: list[tuple[int, StepPlay]] = []
@@ -255,6 +269,8 @@ class PlannerExecuterRunner:
                 # A case before it left the scene; this one was planned for the scene it left.
                 unplayed.append(step)
                 pending[step].last_reason = f"play left {scene or 'the scene'} before the case's turn"
+                if self._config.language == OutputLanguage.ko:
+                    pending[step].last_reason = f"이 case를 실행하기 전에 {scene or '기존 scene'}을 벗어났습니다."
                 pending[step].cause = "LEFT_SCENE"
                 continue
             pending[step].attempts += 1
@@ -270,7 +286,7 @@ class PlannerExecuterRunner:
             if passed or reached(play):
                 await settle(step, passed, message)
             elif case.attempts >= self._spec.free_case_attempts:
-                await settle(step, False, unreached(case.attempts, resets, "GOAL_UNREACHED", message))
+                await settle(step, False, unreached(case.attempts, resets, "GOAL_UNREACHED", message, self._config.language))
             else:
                 case.last_reason = message
                 case.cause = "GOAL_UNREACHED"
@@ -289,7 +305,7 @@ class PlannerExecuterRunner:
         scene = target.scene or ""
         origin = channel.scene.pulse.scene
         written = await planner.write_travel(scenario, target.step, scene)
-        stopped = f"the move was still refused after {self._spec.max_rewrites} rewrites: {written.refusal}"
+        stopped = planner_refused(self._spec.max_rewrites, written.refusal, self._config.language)
         if written.macros is not None:
             play = await executer.play(target.step, f"Go to the scene `{scene}`.", written.macros)
             stopped = play.stopped
@@ -299,7 +315,7 @@ class PlannerExecuterRunner:
             await note_decision(
                 channel,
                 "travel",
-                f"Travel {origin or '?'} → {scene}: reached",
+                self._say(f"{origin or '?'} → {scene}: 도달했습니다.", f"Travel {origin or '?'} → {scene}: reached"),
                 target.step,
                 origin=origin,
                 target=scene,
@@ -309,12 +325,17 @@ class PlannerExecuterRunner:
         for case in pending.values():
             if same_scene(case.scene, scene):
                 case.last_reason = f"play could not reach the scene {scene} ({stopped})"
+                if self._config.language == OutputLanguage.ko:
+                    case.last_reason = f"scene {scene}에 도달하지 못했습니다 ({stopped})."
                 case.cause = "SCENE_UNREACHED"
         await note_decision(
             channel,
             "travel",
-            f"Travel {origin or '?'} → {scene}: not reached, ended in {arrived or '?'} ({clip(stopped, 200)}); "
-            f"{len(waiting)} cases of {scene} wait for the next round",
+            self._say(
+                f"{origin or '?'} → {scene}: 도달하지 못했고 {arrived or '?'}에서 멈췄습니다 ({clip(stopped, 200)}). "
+                f"{scene}의 case {len(waiting)}개를 다음 round로 미룹니다.",
+                f"Travel {origin or '?'} → {scene}: not reached, ended in {arrived or '?'} ({clip(stopped, 200)}); "
+                f"{len(waiting)} cases of {scene} wait for the next round"),
             target.step,
             origin=origin,
             target=scene,
@@ -341,17 +362,44 @@ _UNREACHED_SAYS = {
 }
 
 
-def unreached(attempts: int, resets: int, cause: str, last: str) -> str:
+_UNREACHED_SAYS_KO = {
+    "GOAL_UNREACHED": "case의 목표에 도달하지 못했습니다",
+    "SCENE_UNREACHED": "case의 scene에 도달하지 못해 실행하지 못했습니다",
+    "DEFERRED": "planner가 검증을 계속 미뤄 실행하지 못했습니다",
+    "LEFT_SCENE": "case 실행 전에 scene을 벗어나 실행하지 못했습니다",
+    "NOT_PLAYED": "계획에 포함되지 않아 실행하지 못했습니다",
+}
+
+
+def planner_refused(rewrites: int, refusal: str | None, language: OutputLanguage) -> str:
+    if language == OutputLanguage.ko:
+        return f"PLANNER-REFUSED: {rewrites}회 수정 후에도 유효한 macro 계획을 만들지 못했습니다: {refusal}"
+    return f"PLANNER-REFUSED: the macro plan was still refused after {rewrites} rewrites: {refusal}"
+
+
+def completion_message(passed: int, total: int, language: OutputLanguage) -> str:
+    if language == OutputLanguage.ko:
+        return f"전체 {total}개 step 중 {passed}개를 통과했습니다."
+    return f"{passed}/{total} steps passed."
+
+
+def unreached(attempts: int, resets: int, cause: str, last: str, language: OutputLanguage = OutputLanguage.en) -> str:
+    if language == OutputLanguage.ko:
+        return (
+            f"UNREACHED (도달 못함) {cause}: {_UNREACHED_SAYS_KO.get(cause, cause)}. "
+            f"실행 {attempts}회, reset {resets}회. 마지막 사유: {last}"
+        )
     return (
-        f"UNREACHED (도달 못함) {cause}: {_UNREACHED_SAYS.get(cause, cause)} — {attempts} "
+        f"UNREACHED {cause}: {_UNREACHED_SAYS.get(cause, cause)} — {attempts} "
         f"{'play' if attempts == 1 else 'plays'} and {resets} {'reset' if resets == 1 else 'resets'}. "
         f"Last: {last}"
     )
 
 
-async def reset_game(channel: QaRunChannel) -> None:
+async def reset_game(channel: QaRunChannel, language: OutputLanguage = OutputLanguage.en) -> None:
     """Restart the game from its first scene before the next FREE round, and wait for a reading."""
     await channel.dispatch_actions(
-        [JsonRpcAction(id=1, method="reset_game", params=[])], "Resetting the game for the next round"
+        [JsonRpcAction(id=1, method="reset_game", params=[])],
+        "다음 round를 위해 게임을 다시 시작합니다" if language == OutputLanguage.ko else "Resetting the game for the next round"
     )
     await channel.wait_for_reading(RESET_READING_SECONDS)

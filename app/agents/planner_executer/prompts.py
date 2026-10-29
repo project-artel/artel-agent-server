@@ -23,6 +23,8 @@ from collections.abc import Iterable
 from app.agents.planner_executer.developer_macros import UsableDeveloperMacro
 from app.agents.qa.macro.model import MacroDefinition
 from app.agents.qa.macro.reference import GRAMMAR, NUMBER_EQUALITY
+from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
+from app.agents.scenario import OutputLanguage
 from app.prompts import load_prompt, resolve_version, roles_in
 from app.qa.pulse import PulseMemory
 from app.qa.scene_context import SceneCapability, SceneContext
@@ -44,24 +46,32 @@ MAX_CAPABILITIES_PER_SCENE = 15
 MAX_LINE_CHARS = 200
 
 
-def static_pieces(version: str | None) -> tuple[str, dict[str, str]]:
+def static_pieces(version: str | None, language: OutputLanguage = OutputLanguage.ko) -> tuple[str, dict[str, str]]:
     """The resolved prompt version and the hash of every piece a run of it reads."""
     resolved = resolve_version(PROMPT_AGENT, version)
     files = {role: load_prompt(PROMPT_AGENT, role, resolved) for role in roles_in(PROMPT_AGENT, resolved)}
     hashes = {role: prompt.body_sha256 for role, prompt in files.items()}
+    hashes["language"] = hashlib.sha256(language_directive(language).encode()).hexdigest()
     for name in sorted({name for prompt in files.values() for name in prompt.placeholders}):
         hashes[name] = hashlib.sha256(_FILLS[name].encode()).hexdigest()
     return resolved, hashes
 
 
-def prompt_text(role: str, version: str) -> str:
+def language_directive(language: OutputLanguage) -> str:
+    return LANGUAGE_DIRECTIVES[language] + (
+        "\nApply this to explanations, verdict reasons, deferral reasons and macro docstrings. "
+        "Preserve code identifiers, selectors, scene names, game text and comparison literals exactly."
+    )
+
+
+def prompt_text(role: str, version: str, language: OutputLanguage = OutputLanguage.ko) -> str:
     """One prompt file's text, its placeholders filled.
 
     Prompt bodies double their literal braces (`app/prompts/loader.py`); formatting turns them
     back into one.
     """
     prompt = load_prompt(PROMPT_AGENT, role, version)
-    return prompt.body.format(**{name: _FILLS[name] for name in prompt.placeholders})
+    return prompt.body.format(**{name: _FILLS[name] for name in prompt.placeholders}) + "\n\n" + language_directive(language)
 
 
 def screen(pulse: PulseMemory) -> str:

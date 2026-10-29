@@ -28,7 +28,11 @@ from pydantic import BaseModel, ConfigDict, Field
 # 돌고, 판정은 다섯 개씩 묶어 묻는다(`scene_evaluator`). 후보가 한 계획보다 많은 씬은 남은 후보로 다시 계획한다. 다음 씬으로는 planner 가 이동 step 을 쓴다. 미룬 case 는 라운드가
 # 끝나면 `reset_game` 뒤 다시 돌고, 상한(`free_max_resets`, `free_case_attempts`) 뒤 남은 case 는 UNREACHED 로
 # 실패 보고한다. ORDERED 시나리오의 루프는 그대로지만 knob 이 늘어 fingerprint 가 바뀐다.
-PLANNER_EXECUTER_LABEL = "pe2-free"
+# pe3: planner와 evaluator의 모든 요청에 실행 언어를 전달하고 언어 지시문의 hash를 기록한다.
+# pe4는 `planner`와 `evaluator`가 TC의 승인된 시연 절차와 현재 `evidence` 사용 규칙을
+# 함께 읽는다. 실행 한도와 macro 도구는 유지하므로 `fingerprint`는 바뀌지 않는다.
+# pe5는 planner와 evaluator의 시연 절차 참고를 제거한다. 실행 언어와 기존 macro 도구는 유지한다.
+PLANNER_EXECUTER_LABEL = "pe5-language-no-demonstrations"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1

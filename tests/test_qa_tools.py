@@ -986,6 +986,8 @@ def test_the_agent_is_offered_exactly_these_tools() -> None:
     assert set(tools) == {
         "observe_scene",
         "inspect_object",
+        "get_errors",
+        "get_performance",
         "search_knowledge",
         "record_knowledge",
         "update_knowledge",
