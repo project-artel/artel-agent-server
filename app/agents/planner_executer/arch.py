@@ -70,7 +70,13 @@ from pydantic import BaseModel, ConfigDict, Field
 # 조각, `coverage gaps`·`audio playing`, `audio.started`·`error` event. 같은 변경의 reader 수정(이름 해석기 하나,
 # 모호한 이름 거절, holder 별 `read_member`, 입력 뒤 cache 비움)은 macro 가 읽는 값을 바꾸지 모델이 읽는 글은
 # 아니다. knob 은 그대로라 fingerprint 는 움직이지 않고 label 만 움직인다.
-PLANNER_EXECUTER_LABEL = "pe7-pulse-fragments"
+#
+# pe8: Jev 가 action 을 고를 때 읽는 state 에 직전 action turn 들(`RECENT_ACTIONS_SHOWN`, 3)이 든다(ARTEL-1288).
+# 런 153 에서 Jev 는 `prepare_any_spell` 을 11 번 연달아 골랐다 — 조합창이 이미 채워져 macro 가 입력을 하나도
+# 보내지 않았는데, Jev 가 받는 state 는 씬과 live object 만이라 화면이 안 움직인 turn 은 첫 turn 과 같아 보였다.
+# `recent_actions` 는 "turn 11: prepare_any_spell → passed, sent no input to the game" 같은 줄이고, 실패 사유와
+# flag 가 붙는다. 첫 turn 에는 없어 그때의 state 는 pe7 과 같다. 결정 model 이 읽는 글이 바뀌어 label 만 움직인다.
+PLANNER_EXECUTER_LABEL = "pe8-jev-recent-actions"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1

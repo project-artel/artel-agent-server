@@ -250,6 +250,41 @@ def test_the_action_jev_names_is_the_one_that_runs() -> None:
     assert play.stopped == "done"
 
 
+def test_jev_is_told_what_the_last_action_turns_did_when_it_picks_again() -> None:
+    fake = _menu()
+    jev = FakeJev(picks=("look_around", "look_around", "press_start"))
+
+    play = _play(fake, jev)
+
+    first, second, third = jev.asked("choice")
+    # 첫 turn 에는 지난 action 이 없어 state 가 전과 같다.
+    assert "recent_actions" not in first["state"]
+    assert second["state"]["recent_actions"] == ["turn 0: look_around → passed, sent no input to the game"]
+    assert third["state"]["recent_actions"] == [
+        "turn 0: look_around → passed, sent no input to the game",
+        "turn 1: look_around → passed, sent no input to the game",
+    ]
+    assert play.turns[2]["recent_actions"] == third["state"]["recent_actions"]
+    assert play.stopped == "done"
+
+
+def test_recent_action_lines_carry_failures_flags_and_repairs_and_keep_the_last_three() -> None:
+    turns = [
+        {"turn": 0, "picked": "a", "outcome": "passed", "sent": [{"summary": "click(x)"}]},
+        {"turn": 1, "done": True},  # `done()` 만 읽은 turn 은 빠진다
+        {"turn": 2, "picked": "none_fits"},  # action 을 안 돌린 turn 도 빠진다
+        {"turn": 3, "picked": "b", "outcome": "failed", "sent": [], "reason": "WAIT_TIMEOUT at b step 2 of 2"},
+        {"turn": 4, "picked": "c", "outcome": "passed", "sent": [], "flags": [{"place": "c step 2", "message": "no card"}]},
+        {"turn": 5, "picked": "c", "outcome": "passed", "sent": [], "repair": {"action": "c", "attempt": 1, "replaced": False}},
+    ]
+
+    assert executer_module.recent_action_lines(turns) == [
+        "turn 3: b → failed, sent no input to the game (WAIT_TIMEOUT at b step 2 of 2)",
+        "turn 4: c → passed, sent no input to the game; flag: no card",
+        "turn 5: c → passed, sent no input to the game; a rewrite was refused after this",
+    ]
+
+
 def test_nothing_fitting_waits_for_the_screen_and_stops_after_the_grace() -> None:
     fake = _menu()
 
