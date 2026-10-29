@@ -436,8 +436,41 @@ from app.llm.models import LLMModel, get_model_spec
 # alarms in 169 of 170 L1 runs. `get_errors` is in `ANY_PHASE`, since it is called after ACT and
 # before VERIFY. One tool joined the default set, so `arch_fingerprint` moves; the line in every
 # answer does not, which is the fourth item AGENTS.md names.
+#
+# v30 because what the model reads around a screen capture moved (ARTEL-1221). The answer of
+# `capture_screen` now ends with a checklist — empty areas, elements with no art, overlap,
+# clipping, a developer console — to go over after the question the capture was taken for, and
+# the first view of each scene in an `on_demand` run with vision is followed by one line asking
+# for a whole-screen capture there. On 2026-10-22 a title screen with no background was found in
+# 0 of 3 runs (no run captured at step 1), and cards drawn without their art in 0 of 3, although
+# all three captured the hand. Nothing hashed moves: the tool set, the schemas and the middleware
+# list are unchanged, so the label is the only record of this change.
+#
+# v31 because a `run_macro` or `resume_macro` answer now lists the text the game put on screen
+# while the macro ran, one line per text, with a sentence asking for `report_issue` on a blank
+# line, a placeholder or garbled characters (ARTEL-1222). `QaRunChannel.shown_text` records every
+# `text` a `pulse` carries, in arrival order, and grows a line in place while a typewriter effect
+# lengthens it. On 2026-10-22 a build whose opening had one line replaced by
+# `[MISSING TEXT: STORY_003]` was caught in 0 of 3 runs: `advance_story` pressed Return 12 to 22
+# times and only the last line was ever in front of the model. A clean result that carries these
+# lines is wrapped in the macro result markers so `fold_context` folds it once its step is
+# reported. Nothing hashed moves.
+#
+# v32 because the agent can now read the game's frame times (ARTEL-1223). The SDK has sent
+# `PERFORMANCE` every second for a while and orchestration stored it, but nothing in this server
+# read it, so no run could judge a hitch. `get_performance` asks orchestration for one window —
+# `last_seconds` or `since_frame`, the last 10 s by default — and answers with average and p95
+# frame time, lowest fps, hitches, memory growth and CPU. Every tool answer that goes through
+# `ToolContext.answer` also ends with one line counting the hitches of the last 10 s while that
+# count is above 0, re-read at most every 5 s after an action or an `observe_scene`. The same
+# split as `get_errors` (v29): the count rides along, the detail is a tool call, and a problem is
+# a `report_issue`, never a verdict. One tool joined the default set, so the fingerprint moves.
 # #262의 performed 계약 없이 이 단계의 QA 구조를 구분한다.
-QA_ARCH_LABEL = "v36-game-errors"
+# 자동 scene capture와 응답 checklist를 제거한 구조다. 시각 점검 skill은 필요할 때 읽으며
+# 이 view와 tool 구성을 이전 실행과 구분해 기록한다.
+# macro 결과에서 중간 대사 목록을 제거하고 현재 화면을 관찰하는 계약을 명시한다.
+# 모델이 읽는 결과 형식이 바뀌므로 이전 실행과 별도 label로 기록한다.
+QA_ARCH_LABEL = "v45-performance-without-dialogue-history"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

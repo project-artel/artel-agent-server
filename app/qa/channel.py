@@ -770,7 +770,8 @@ class QaRunChannel:
         `on_game_state` 와 달리 풀어 줄 future 가 없다. 판독은 무엇을 물어서 오는 것이
         아니라 게임이 도는 동안 계속 도착하는 관측이고, 도구가 그것을 기다리지 않는다.
         """
-        self.scene.pulse.apply(PulseReading.model_validate(raw.get("payload") or {}))
+        reading = PulseReading.model_validate(raw.get("payload") or {})
+        self.scene.pulse.apply(reading)
         self.game_errors.apply(raw.get("payload"))
         # 새 member 타입이 왔으면 판정을 띄운다. 기다리지 않는다 — 판정이 도착하기 전의 view 는
         # 아무것도 숨기지 않으므로, 늦어도 잃는 것은 줄 몇 개다.
