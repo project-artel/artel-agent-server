@@ -326,8 +326,14 @@ def test_the_default_qa_version_is_v21() -> None:
 
     v26 adds `tool_get_errors.md` and one paragraph to the system prompt on reading
     `unseen errors: N` (ARTEL-1219).
+
+    v27 adds two sentences to the vision directive (ARTEL-1221): a whole-screen capture on
+    the first entry to each scene, and a checklist for reading any capture.
+
+    v28 adds one paragraph to the macro skill (ARTEL-1222): read the text lines a macro
+    answer carries and file blank, placeholder or garbled lines with `report_issue`.
     """
-    assert resolve_version("qa_run") == "v31"
+    assert resolve_version("qa_run") == "v36"
 
 
 # v20 이 고쳐 쓴 v19 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
@@ -1118,6 +1124,10 @@ V25_REWRITTEN_ROLES = {
 
 
 
+
+
+
+
 def test_qa_snapshot_keeps_the_base_step_contract() -> None:
     """중간 QA 기능은 #262의 performed 계약을 요구하지 않는다."""
     version = resolve_version("qa_run")
@@ -1125,3 +1135,5 @@ def test_qa_snapshot_keeps_the_base_step_contract() -> None:
         assert load_prompt("qa_run", role, version).body == load_prompt("qa_run", role, "v24").body
     assert "`performed`" not in load_prompt("qa_run", "system", version).body
     assert "unseen errors: N" in load_prompt("qa_run", "system", version).body
+    assert "first time you enter each scene" not in load_prompt("qa_run", "vision_directive", version).body
+    assert "**The answer lists the text the game showed while the macro ran**" in load_prompt("qa_run", "skill_macro", version).body
