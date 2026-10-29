@@ -541,11 +541,19 @@ def _answer(
     changes = changes or []
     listed = "\n".join(f"- {change.title}" for change in changes)
     asked_label = "질문" if request.locale.value == "ko" else "Question"
+    # 보기도 대화 기록에 남긴다. 사용자는 보기 문구를 그대로 보내 답하고, 다음 턴은 그 말이 이 질문의
+    # 답인지 알아야 한다 — 모르면 "게시판 확인도 넣어 줘" 를 어느 시나리오 얘기냐고 되묻는다(라우터).
+    options_label = "보기" if request.locale.value == "ko" else "Options"
+
+    def asked_line(q: ScenarioQuestion) -> str:
+        labels = [o.label for o in q.options if o.label]
+        return f"{asked_label}: {q.text}" + (f" ({options_label}: {' / '.join(labels)})" if labels else "")
+
     message = "\n".join(
         _spoken(part, found, prefix=True)
         # 물은 줄은 결과 바로 뒤다. 대화 기록은 메시지 하나를 앞에서부터 잘라 담으므로(설정
         # `scenario_history_message_max_chars`), 긴 설명 뒤에 두면 잘려 나가 몇 번 물었는지 못 센다.
-        for part in (result, *(f"{asked_label}: {q.text}" for q in asked), listed, detail) if part
+        for part in (result, *(asked_line(q) for q in asked), listed, detail) if part
     )
     return ScenarioAgentResult(
         message=message,
