@@ -18,7 +18,8 @@ from app.agents import (
     TestCaseListItem,
 )
 from app.llm.catalog import ModelCatalogUnavailableError
-from app.llm.models import DEFAULT_MODEL, EnabledLLMModel, ReasoningConfig, validate_reasoning
+from app.llm.default_model import resolve_default_model
+from app.llm.models import EnabledLLMModel, ReasoningConfig, validate_reasoning
 from app.sessions.channel import ScenarioChannel
 from app.sessions.service import SessionService
 from app.sessions.store import SessionExpired
@@ -47,7 +48,7 @@ class OpenSessionRequest(BaseModel):
     starting_values: dict[str, str] = Field(default_factory=dict)
     user_input: str
     # 관리자가 끈 모델은 422 로 거절한다(`EnabledLLMModel`).
-    model: EnabledLLMModel = DEFAULT_MODEL
+    model: EnabledLLMModel = Field(default_factory=resolve_default_model)
     # 추론 예산. 안 보내면 안 켠다 — 지금까지의 저작이 그랬다. 모델이 그 설정을 못 받으면
     # `validate_reasoning` 이 거절한다(조용히 낮추지 않는다, QA 런과 같은 규칙이다).
     reasoning: ReasoningConfig | None = None

@@ -559,7 +559,7 @@ def test_report_step_writes_used_cheats_and_active_behaviors_itself() -> None:
         )
 
         result = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "ok", "thought": "x"}
+            {"step": 1, "performed": True, "passed": True, "message": "ok", "thought": "x"}
         )
 
         [status] = _status_frames(sent)
@@ -580,7 +580,7 @@ def test_a_run_with_both_axes_off_sends_status_without_the_two_keys() -> None:
     async def run() -> None:
         _, _, tools, sent, _ = make(cheats="off", behaviors="off")
         await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "ok", "thought": "x"}
+            {"step": 1, "performed": True, "passed": True, "message": "ok", "thought": "x"}
         )
         [status] = _status_frames(sent)
         assert "used_cheats" not in status
@@ -616,7 +616,7 @@ def test_a_behavior_the_next_case_does_not_allow_is_stopped_before_its_first_ste
         )
         reply = answer(channel, sent, {"id": 1, "success": True, "returnValue": {"stopped": [7]}})
         result = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "ok", "thought": "x"}
+            {"step": 1, "performed": True, "passed": True, "message": "ok", "thought": "x"}
         )
         await reply
 
@@ -643,7 +643,7 @@ def test_no_stop_is_sent_inside_one_case() -> None:
             )
         )
         await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "ok", "thought": "x"}
+            {"step": 1, "performed": True, "passed": True, "message": "ok", "thought": "x"}
         )
         assert actions(sent) == []
 
@@ -815,7 +815,7 @@ def test_active_behaviors_keeps_a_behavior_that_ended_before_the_verdict() -> No
         )
         channel.scene.pulse.apply(PulseReading.model_validate({"reading": 2, "behaviors": []}))
 
-        await tools["report_step"].ainvoke({"step": 1, "passed": True, "message": "ok", "thought": "x"})
+        await tools["report_step"].ainvoke({"step": 1, "performed": True, "passed": True, "message": "ok", "thought": "x"})
 
         [status] = _status_frames(sent)
         assert status["active_behaviors"] == [
@@ -842,9 +842,9 @@ def test_active_behaviors_counts_only_this_steps_share_of_a_carried_behavior() -
             )
 
         pulse(1, 5.0)
-        await tools["report_step"].ainvoke({"step": 1, "passed": True, "message": "ok", "thought": "x"})
+        await tools["report_step"].ainvoke({"step": 1, "performed": True, "passed": True, "message": "ok", "thought": "x"})
         pulse(2, 9.0)
-        await tools["report_step"].ainvoke({"step": 2, "passed": True, "message": "ok", "thought": "x"})
+        await tools["report_step"].ainvoke({"step": 2, "performed": True, "passed": True, "message": "ok", "thought": "x"})
 
         first, second = _status_frames(sent)
         assert first["active_behaviors"] == [

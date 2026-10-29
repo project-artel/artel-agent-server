@@ -515,7 +515,7 @@ def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v27-game-functions"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v32-performance"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -538,6 +538,8 @@ _PINNED_COMPACTION_KNOBS = {
 _EXPECTED_DEFAULT_TOOL_NAMES = (
     "observe_scene",
     "inspect_object",
+    "get_errors",
+    "get_performance",
     "search_knowledge",
     "record_knowledge",
     "update_knowledge",
@@ -649,7 +651,19 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 # `max_behavior_calls_per_run` (ARTEL-1054) joined `QaArchSpec` and the label moved to
 # `v27-game-functions`. Both axes default to `off`, so the default tool set is unchanged; the
 # digest moved because `arch.model_dump()` gained four keys.
-_EXPECTED_DEFAULT_FINGERPRINT = "7d56243753d1"
+#
+# And from `7d56243753d1`, when `report_step` gained `performed` and its arguments were
+# reordered to `message`, `performed`, `passed` (ARTEL-1220) and the label moved to
+# `v28-verdict-expected-observed`. The tool names are unchanged; one tool schema moved.
+#
+# And from `2fd1bb6585a3`, when `get_errors` joined the observation tools (ARTEL-1219) and the
+# label moved to `v29-unseen-errors`.
+#
+# v30 and v31 left it where it was: they changed text the model reads, not a tool or a knob.
+#
+# And from `30d40310f4fd`, when `get_performance` joined the observation tools (ARTEL-1223) and
+# the label moved to `v32-performance`.
+_EXPECTED_DEFAULT_FINGERPRINT = "04952982dbf6"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
@@ -783,3 +797,16 @@ def test_macros_off_withholds_the_macro_skill_from_every_list_of_skills() -> Non
         for one in build_tools(_ThrowawayChannel(), QaRunState(total_steps=0), off, "v19")
     }["load_skill"]
     assert "macro" not in load_skill.description
+
+
+def test_a_stored_boolean_vision_is_read_as_on_or_off() -> None:
+    """옛 run_config 의 `vision: true` 를 다시 보내도 거절하지 않는다 (ARTEL-1236)."""
+    assert QaArchSpec.model_validate({"vision": True}).vision is VisionMode.on
+    assert QaArchSpec.model_validate({"vision": False}).vision is VisionMode.off
+    assert QaArchSpec.model_validate({"vision": "auto"}).vision is VisionMode.auto
+    # 저장되는 값과 fingerprint 는 문자열로 받은 것과 같다.
+    assert QaArchSpec.model_validate({"vision": True}).model_dump() == QaArchSpec(
+        vision=VisionMode.on
+    ).model_dump()
+    with pytest.raises(ValidationError):
+        QaArchSpec.model_validate({"vision": "sometimes"})

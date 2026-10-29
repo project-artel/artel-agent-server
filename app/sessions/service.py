@@ -17,7 +17,8 @@ from app.agents import (
     SceneEdge,
     TestCaseListItem,
 )
-from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig
+from app.llm.default_model import resolve_default_model
+from app.llm.models import LLMModel, ReasoningConfig
 from app.llm.usage import set_usage_scope
 from app.sessions.channel import ScenarioChannel
 from app.sessions.schemas import HistoryTurn, SessionRecord
@@ -57,7 +58,7 @@ class SessionService:
         entry_scene: str | None = None,
         scene_edges: list[SceneEdge] | None = None,
         starting_values: dict[str, str] | None = None,
-        model: LLMModel = DEFAULT_MODEL,
+        model: LLMModel | None = None,
         reasoning: ReasoningConfig | None = None,
         locale: OutputLanguage = DEFAULT_LANGUAGE,
         test_scenario_id: int | None = None,
@@ -66,6 +67,7 @@ class SessionService:
         app_user_id: int | None = None,
         current_scenarios: list[ScenarioPlan] | None = None,
     ) -> str:
+        model = model or resolve_default_model()
         session_id = uuid.uuid4().hex
         record = SessionRecord(
             unity_context=unity_context,

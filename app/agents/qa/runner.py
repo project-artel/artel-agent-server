@@ -243,10 +243,12 @@ def _step_plan(scenario: QaScenario) -> list[tuple[int | None, bool]]:
 def _plan(scenario: QaScenario) -> str:
     """새 계약(steps[])을 실행 첫 메시지로 변환한다(2단 판정 2026-08-08).
 
-    **모든 스텝을 판정한다**: report_step(step, passed, message)를 전체 스텝(1..S)마다 호출한다.
-    각 스텝은 `do`(행위)를 갖고, TC 구간의 첫 스텝엔 `precondition`, 마지막(검증) 스텝엔 `verify`
-    (기대결과)가 붙는다. `verify`가 있는 스텝의 passed는 **기대결과가 나왔는가**(그게 그 TC의 최종
-    판정), 그 외 스텝의 passed는 **그 행위를 수행/성립했는가**다.
+    **모든 스텝을 판정한다**: report_step(step, message, performed, passed)를 전체 스텝(1..S)마다
+    호출한다. 각 스텝은 `do`(행위)를 갖고, TC 구간의 첫 스텝엔 `precondition`, 마지막(검증) 스텝엔
+    `verify`(기대결과)가 붙는다. `verify`가 있는 스텝의 passed는 **기대결과가 나왔는가**(그게 그
+    TC의 최종 판정), 그 외 스텝의 passed는 **`do` 가 말하는 결과가 일어났는가**다. 행위를 했는지는
+    `performed` 가 따로 받는다(ARTEL-1220) — 종전처럼 passed 가 "행위를 했다" 를 뜻하면 게임이
+    거부한 행위도 "거부를 확인했다" 는 이유로 통과가 됐다.
     """
     if scenario.execution_mode == "FREE":
         return _free_plan(scenario)
@@ -268,11 +270,15 @@ def _plan(scenario: QaScenario) -> str:
         prev_cid = cid
     return (
         f"Scenario: {scenario.title} — {scenario.description}\n\n"
-        "Execute the steps below in order and call report_step(step, passed, message) for EVERY step.\n"
+        "Execute the steps below in order and call report_step(step, message, performed, passed) "
+        "for EVERY step.\n"
         "- A step with `verify` is the TEST CASE's verdict: `passed` = whether that expected result "
         "actually occurred. That verdict is the whole case's verdict.\n"
-        "- Any other step: `passed` = whether you carried the action out (did it happen), not a "
-        "quality judgment.\n"
+        "- Any other step: `passed` = whether the effect its `do` describes actually happened, not "
+        "a quality judgment.\n"
+        "- `performed` = whether you carried the action out. It never decides `passed`: an action "
+        "the game refused is `performed=false`, and `passed` still compares expected with "
+        "observed.\n"
         "- A `precondition` must hold before that case's first step. If you cannot reach it, report "
         "its steps passed=false with a message beginning 'SETUP-FAILED:' and do NOT report_issue "
         "(an unreachable precondition is not a defect).\n"
@@ -315,7 +321,7 @@ def _free_plan(scenario: QaScenario) -> str:
         "Some preconditions only hold before other cases change the game state (an "
         "untouched save, a stage not yet cleared, a node not yet unlocked), so read every "
         "precondition first and verify those cases before the ones that destroy them.\n"
-        "Call report_case(case_id, passed, message) once for EVERY test case, in whatever "
+        "Call report_case(case_id, message, performed, passed) once for EVERY test case, in whatever "
         "order you verify them.\n"
         "- Report a case only after you have carried out its `test_step` with its "
         "`precondition` holding and watched what happened. `passed` = whether the "

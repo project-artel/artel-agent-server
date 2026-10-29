@@ -13,6 +13,11 @@ from app.agents.qa.tools.state import capture_from_action_result
 from app.agents.qa.tools.tool_context import ToolContext
 from app.prompts import load_tool_description
 from app.qa.envelope import JsonRpcAction, LogCategory
+from app.qa.game_errors import render_errors
+from app.qa.performance import PerformanceUnavailable, render_summary, summarize
+
+# `get_performance` 가 창을 안 받았을 때 쓰는 창. tool 결과 끝의 한 줄과 같은 10초다.
+DEFAULT_PERFORMANCE_SECONDS = 10.0
 
 
 def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
@@ -25,6 +30,7 @@ def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
         step: int, thought: str, wait_seconds: float = 0.0, current_scene: bool = False
     ) -> str:
         arrived = await channel.look(wait_seconds)
+        await ctx.performance().refresh_summary()
         messages = channel.drain_operator_messages()
         if not arrived:
             return _answer(
@@ -55,7 +61,61 @@ def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
         messages = channel.drain_operator_messages()
         return _answer(found, messages)
 
-    return [observe_scene, inspect_object]
+    @tool(description=load_tool_description("get_errors").body)
+    async def get_errors(step: int, thought: str, include_seen: bool = False) -> str:
+        # What the agent reads is `qa_run/<version>/tool_get_errors.md`.
+        # 게임에 아무것도 묻지 않는다. `PULSE` 와 `ACTION_RESULT` 가 이미 실어 온 것을 읽는다.
+        # 화면은 안 붙인다 — 화면을 바꾸지 않는 tool 이라 view 를 붙이면 지난 view 를 반복한다.
+        ledger = channel.game_errors
+        items = ledger.take(include_seen)
+        return _answer(
+            render_errors(items, ledger, include_seen),
+            channel.drain_operator_messages(),
+            screen=False,
+        )
+
+    @tool(description=load_tool_description("get_performance").body)
+    async def get_performance(
+        step: int,
+        thought: str,
+        since_frame: int | None = None,
+        last_seconds: float | None = None,
+    ) -> str:
+        # What the agent reads is `qa_run/<version>/tool_get_performance.md`.
+        # 둘 다 없으면 지난 10초다. 둘 다 오면 orchestration 이 둘을 함께 건다.
+        if since_frame is None and last_seconds is None:
+            last_seconds = DEFAULT_PERFORMANCE_SECONDS
+        window = (
+            f"frames since {since_frame}" if since_frame is not None else ""
+        ) + (
+            f"{' and ' if since_frame is not None else ''}the last {last_seconds:g} s"
+            if last_seconds is not None
+            else ""
+        )
+        try:
+            samples = await ctx.performance().fetch(since_frame, last_seconds)
+        except PerformanceUnavailable as error:
+            body = (
+                f"Performance data could not be read — {error}. Judge from what you see, "
+                "and do not ask again in this step."
+            )
+        else:
+            body = render_summary(summarize(samples), window)
+        return _answer(body, channel.drain_operator_messages(), screen=False)
+
+    return [observe_scene, inspect_object, get_errors, get_performance]
+
+
+# capture 답에 붙는 점검 목록 (ARTEL-1221). 2026-10-22 측정에서 agent 는 capture 를 찍은 목적만
+# 답했다 — 카드 그림이 없는 빌드에서 3런 모두 손패를 capture 하고도 그림이 없다는 말이 없었고,
+# 개발자 콘솔이 손패를 가린 capture 두 장도 지나쳤다. 그림이 도착하기 직전에 읽히는 자리라
+# system prompt 보다 여기에 둔다.
+CAPTURE_CHECKLIST = (
+    "Answer what you captured it for, then look once more for: empty or black areas where "
+    "something should be drawn, elements with no art (a card or button that is only text), "
+    "elements overlapping each other, text or images cut off at an edge, and a developer "
+    "console or error text on screen. File each one you see with `report_issue`."
+)
 
 
 def build_capture_tool(ctx: ToolContext) -> BaseTool:
@@ -140,6 +200,6 @@ def build_capture_tool(ctx: ToolContext) -> BaseTool:
         # `payload.step` null (ARTEL-868).
         await channel.note(f"Captured {what}: {capture.url}", LogCategory.OBSERVATION, step)
 
-        return _answer(f"Captured {what}. The image follows.", messages)
+        return _answer(f"Captured {what}. The image follows. {CAPTURE_CHECKLIST}", messages)
 
     return capture_screen

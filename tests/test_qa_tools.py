@@ -881,7 +881,7 @@ def test_every_outbound_frame_carries_the_step_number() -> None:
         await task
 
         await tools["report_step"].ainvoke(
-            {"step": 4, "passed": True, "message": "상점이 열렸다", "thought": "화면이 바뀌었다"}
+            {"step": 4, "performed": True, "passed": True, "message": "상점이 열렸다", "thought": "화면이 바뀌었다"}
         )
         await tools["reply_to_operator"].ainvoke(
             {"step": 4, "message": "상점을 확인했습니다", "thought": "질문에 답한다"}
@@ -904,12 +904,12 @@ def test_reported_steps_accumulate_and_announce_the_last_one() -> None:
         _, state, tools, sent = make(total_steps=2)
 
         first = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "상점이 열렸다", "thought": "골드 표시를 봤다"}
+            {"step": 1, "performed": True, "passed": True, "message": "상점이 열렸다", "thought": "골드 표시를 봤다"}
         )
         assert "1 step(s) left" in first
 
         second = await tools["report_step"].ainvoke(
-            {"step": 2, "passed": False, "message": "골드가 줄지 않았다", "thought": "구매가 안 먹혔다"}
+            {"step": 2, "performed": True, "passed": False, "message": "골드가 줄지 않았다", "thought": "구매가 안 먹혔다"}
         )
         assert "last step" in second
 
@@ -1072,7 +1072,7 @@ def test_a_failed_step_is_told_which_step_comes_next() -> None:
         result = await tools["report_step"].ainvoke(
             {
                 "step": 1,
-                "passed": False,
+                "performed": True, "passed": False,
                 "message": "상점이 열리지 않았다",
                 "thought": "클릭했지만 화면이 그대로다",
             }
@@ -1094,7 +1094,7 @@ def test_closing_over_unreported_steps_is_pushed_back_on_once() -> None:
     async def run() -> None:
         _, state, tools, sent = make(total_steps=3)
         await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "ok", "thought": "통과"}
+            {"step": 1, "performed": True, "passed": True, "message": "ok", "thought": "통과"}
         )
 
         pushback = await tools["finish_run"].ainvoke(
@@ -1121,10 +1121,10 @@ def test_finish_run_reports_the_tally() -> None:
     async def run() -> None:
         _, state, tools, sent = make(total_steps=2)
         await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "ok", "thought": "통과"}
+            {"step": 1, "performed": True, "passed": True, "message": "ok", "thought": "통과"}
         )
         await tools["report_step"].ainvoke(
-            {"step": 2, "passed": False, "message": "no", "thought": "실패"}
+            {"step": 2, "performed": True, "passed": False, "message": "no", "thought": "실패"}
         )
 
         await tools["finish_run"].ainvoke(
@@ -1161,7 +1161,7 @@ def test_two_tier_summary_case_verdict_is_its_verification_step() -> None:
         ]
         for step, passed, message in verdicts:
             await tools["report_step"].ainvoke(
-                {"step": step, "passed": passed, "message": message, "thought": "t"}
+                {"step": step, "performed": True, "passed": passed, "message": message, "thought": "t"}
             )
 
         await tools["finish_run"].ainvoke(
@@ -1196,7 +1196,7 @@ def test_verdict_tools_write_no_thought_row_of_their_own() -> None:
         _, _, tools, sent = make(total_steps=1)
 
         await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "상점이 열렸다", "thought": "화면이 바뀌었다"}
+            {"step": 1, "performed": True, "passed": True, "message": "상점이 열렸다", "thought": "화면이 바뀌었다"}
         )
         await tools["reply_to_operator"].ainvoke(
             {"message": "상점까지 확인했습니다", "thought": "진행 상황을 묻길래 답한다"}
@@ -1231,6 +1231,8 @@ def test_the_agent_is_offered_exactly_these_tools() -> None:
     assert set(tools) == {
         "observe_scene",
         "inspect_object",
+        "get_errors",
+        "get_performance",
         "search_knowledge",
         "record_knowledge",
         "update_knowledge",
@@ -1319,7 +1321,7 @@ def test_a_verdict_without_citations_still_goes_out() -> None:
         _, _, tools, sent = make(total_steps=1)
 
         await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "상점이 열렸다", "thought": "화면이 바뀌었다"}
+            {"step": 1, "performed": True, "passed": True, "message": "상점이 열렸다", "thought": "화면이 바뀌었다"}
         )
 
         payload = [f for f in sent if f["type"] == MessageType.STATUS.value][0]["payload"]
@@ -1337,7 +1339,7 @@ def test_a_verdict_carries_the_knowledge_it_rested_on() -> None:
         await tools["report_step"].ainvoke(
             {
                 "step": 1,
-                "passed": True,
+                "performed": True, "passed": True,
                 "message": "스페이스바로 점프했다",
                 "thought": "지식이 말한 조작이 맞았다",
                 "used_knowledge_ids": ["42"],
@@ -1366,7 +1368,7 @@ def test_an_id_this_run_never_saw_is_dropped_and_counted() -> None:
         result = await tools["report_step"].ainvoke(
             {
                 "step": 1,
-                "passed": True,
+                "performed": True, "passed": True,
                 "message": "됐다",
                 "thought": "판정",
                 "used_knowledge_ids": ["42", "999", "없는-id"],
@@ -1599,7 +1601,7 @@ def test_판정_뒤_턴에도_화면이_있다() -> None:
         _channel, _state, tools, _sent = _with_a_screen()
 
         answered = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "확인함", "thought": "판정"}
+            {"step": 1, "performed": True, "passed": True, "message": "확인함", "thought": "판정"}
         )
 
         assert "Card(Clone)[16]" in answered, answered
@@ -1707,7 +1709,7 @@ def test_마지막_스텝_판정에_지식을_남기라고_말한다() -> None:
         _channel, _state, tools, _sent = make()
 
         answered = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "확인함", "thought": "판정"}
+            {"step": 1, "performed": True, "passed": True, "message": "확인함", "thought": "판정"}
         )
 
         assert "That was the last step" in answered, answered
@@ -1728,7 +1730,7 @@ def test_이미_남긴_런에게는_무엇을_남겼는지_되짚게_한다() ->
         state.knowledge_records_attempted = 1
 
         answered = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "확인함", "thought": "판정"}
+            {"step": 1, "performed": True, "passed": True, "message": "확인함", "thought": "판정"}
         )
 
         assert "That was the last step" in answered
@@ -1751,7 +1753,7 @@ def test_실패한_스텝이_있는데_issue_가_없으면_그것을_짚는다()
         _channel, _state, tools, _sent = make()
 
         answered = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": False, "message": "안 열렸다", "thought": "판정"}
+            {"step": 1, "performed": True, "passed": False, "message": "안 열렸다", "thought": "판정"}
         )
 
         assert "Steps judged failed this run: 1" in answered, answered
@@ -1769,7 +1771,7 @@ def test_실패한_스텝이_없으면_결함은_묻지_않는다() -> None:
         _channel, _state, tools, _sent = make()
 
         answered = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "확인함", "thought": "판정"}
+            {"step": 1, "performed": True, "passed": True, "message": "확인함", "thought": "판정"}
         )
 
         assert "That was the last step" in answered, answered
@@ -1788,7 +1790,7 @@ def test_이미_낸_issue_가_있어도_남은_실패를_되짚게_한다() -> N
         state.issues_attempted = 1
 
         answered = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": False, "message": "안 열렸다", "thought": "판정"}
+            {"step": 1, "performed": True, "passed": False, "message": "안 열렸다", "thought": "판정"}
         )
 
         assert "Steps judged failed this run: 1" in answered, answered
@@ -1806,7 +1808,7 @@ def test_적을_것이_없다는_것도_답이라고_말한다() -> None:
         _channel, _state, tools, _sent = make()
 
         answered = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": False, "message": "안 열렸다", "thought": "판정"}
+            {"step": 1, "performed": True, "passed": False, "message": "안 열렸다", "thought": "판정"}
         )
 
         assert "Nothing to write is an answer" in answered, answered
@@ -1826,7 +1828,7 @@ def test_마지막_판정_후에도_agent_가_finish_run_을_부를_때까지_�
         _channel, state, tools, sent = make()
 
         answered = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": False, "message": "안 열렸다", "thought": "판정"}
+            {"step": 1, "performed": True, "passed": False, "message": "안 열렸다", "thought": "판정"}
         )
 
         assert "does not close the run" in answered
@@ -1867,7 +1869,7 @@ def test_중간_스텝에서는_말하지_않는다() -> None:
         _channel, _state, tools, _sent = make(total_steps=3)
 
         answered = await tools["report_step"].ainvoke(
-            {"step": 1, "passed": False, "message": "안 열렸다", "thought": "판정"}
+            {"step": 1, "performed": True, "passed": False, "message": "안 열렸다", "thought": "판정"}
         )
 
         assert "step(s) left" in answered, answered

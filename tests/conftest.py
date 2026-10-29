@@ -7,6 +7,11 @@ installed at import time rather than in a fixture because some test modules
 build pydantic models that check model ids while they are being collected.
 """
 
+import os
+
+# 로컬 배포의 model 설정이 테스트 fixture보다 우선하지 않게 한다.
+os.environ["DEFAULT_MODEL"] = ""
+
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType

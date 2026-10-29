@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     # Jev 를 OpenRouter 를 거치지 않고 TypeSafe 에서 직접 부를 때의 주소다. TypeSafe key 가
     # 저장돼 있을 때만 쓴다(`app/llm/decision.py`). 경로 `/v1/systemone` 은 코드에 있다.
     typesafe_base_url: str = "https://api.typesafe.ai"
+    # 기본값을 생략한 요청에 적용한다. catalog는 원격이므로 사용할 때 검증한다.
+    default_model: str | None = None
     openrouter_site_url: str | None = None
     openrouter_app_title: str = "Artel Agent Server"
     # Per-request ceiling on a model call, and how many times the client retries.
@@ -105,6 +107,9 @@ class Settings(BaseSettings):
     git_sha: str | None = None
     image_tag: str | None = None
 
+    # `redis` keeps sessions in Redis. `memory` keeps them in this process, with no Redis
+    # connection at all, and loses them on restart (the desktop bundle runs this way).
+    session_store: Literal["redis", "memory"] = "redis"
     redis_url: str = "redis://localhost:6379/0"
     session_ttl_seconds: int = 3600
     history_max_turns: int = 100_000
