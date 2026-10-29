@@ -1,5 +1,6 @@
 {
   "data": {
+    "scenario_router/v10/criteria": "4f0c23a3dc7eb9bbe1c752235a5419645c69b122f6e7216ca7c026b477b3c86f",
     "scenario_router/v7/criteria": "4d39be0a4ba35c40e298afb6d2a5bfe80dce8bbd3218d0560c0599ada07a0759",
     "scenario_router/v8/criteria": "6ec8091679a8b3648a0df36771e0d0a165ea5a19798e1053e2b920c8a8011f3a",
     "scenario_router/v9/criteria": "afcafa09db2105110f8f982e95b36e8f0b7e1c8ad1a54a6d64adb6ca3ebc3b82"
@@ -493,6 +494,7 @@
     "scenario_reply/v1/system": "3a0ca52979f68b681bf56b377fd0e63c51c69d2aedf95d950fbafa82418c4323",
     "scenario_reply/v2/system": "860f73db69fb908e8d964ec67e1393e97d4b3720ecb078d159ed38222afa4f72",
     "scenario_router/v1/system": "bec2f83af140036ff4c3c14f478bbbb4034cabfaf39138e6dacd851c64a6b229",
+    "scenario_router/v10/system": "aa57327860b81c7e431f06b13a1b8f8ed066e550c27ba3ffb47f75db3575a740",
     "scenario_router/v2/system": "5f1f7255485e34cf6558e2ecd2257a28f26080c7a673bcb5a4958d741f5f70ce",
     "scenario_router/v3/system": "4b77053bec23b5d9e25b9a1167a054c051ed187ab57bbc0015dcb36783f9159c",
     "scenario_router/v4/system": "f5f7a5e573fad5c69ccaf211158b3e6f25544ee57df41797afaeb9afdd9ce4c2",
