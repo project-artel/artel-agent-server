@@ -116,6 +116,10 @@ def test_a_requested_structure_comes_back_resolved() -> None:
     assert config["agent_fingerprint"] != open_session()["run_config"]["agent_fingerprint"]
 
 
+
+
+
+
 def test_an_out_of_range_knob_is_refused() -> None:
     response = client.post(
         "/internal/qa-sessions",
