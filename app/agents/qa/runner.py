@@ -29,6 +29,7 @@ from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.tools.game_function_tools import focus
 from app.agents.qa.tools.tool_context import ToolContext
 from app.agents.qa.vision import QaCaptureVisionMiddleware
+from app.config import get_settings
 from app.llm.chat_model import build_chat_model
 from app.llm.models import get_model_spec
 from app.prompts import load_prompt, load_skill, skill_descriptions, skill_names
@@ -38,7 +39,7 @@ from app.qa.failure_site import failure_site_of
 from app.qa.game_functions import render_catalog
 from app.qa.reach import UnreachedJudge
 from app.qa.relevance import PulseRelevanceJudge
-from app.qa.schemas import QaScenario, QaStep
+from app.qa.schemas import QaCaseRef, QaScenario, QaStep
 from app.qa.run_config import (
     COMPACTION_PROMPT_AGENT,
     COMPACTION_ROLE,
@@ -240,102 +241,68 @@ def _step_plan(scenario: QaScenario) -> list[tuple[int | None, bool]]:
     return plan
 
 
-def _plan(scenario: QaScenario) -> str:
-    """새 계약(steps[])을 실행 첫 메시지로 변환한다(2단 판정 2026-08-08).
+# 사람 판정 기록을 읽는 법 (ARTEL-1257). 기록이 있는 계획에만 붙는다 — 없는 run 의 첫 메시지는 종전 그대로다.
+HUMAN_REVIEW_RULE = (
+    "- `human_review` lists earlier verdicts of the same test case that a person reviewed and "
+    "decided after the run: what the agent said (`ai_said`), what the person decided "
+    "(`person_decided`) and why (`note`). Treat it as a warning about how this case was "
+    "misjudged before, not as the answer. Still judge from what you observe in this run; "
+    "the game may have changed.\n"
+)
 
-    **모든 스텝을 판정한다**: report_step(step, passed, message)를 전체 스텝(1..S)마다 호출한다.
-    각 스텝은 `do`(행위)를 갖고, TC 구간의 첫 스텝엔 `precondition`, 마지막(검증) 스텝엔 `verify`
-    (기대결과)가 붙는다. `verify`가 있는 스텝의 passed는 **기대결과가 나왔는가**(그게 그 TC의 최종
-    판정), 그 외 스텝의 passed는 **그 행위를 수행/성립했는가**다.
-    """
-    if scenario.execution_mode == "FREE":
-        return _free_plan(scenario)
-    plan = _step_plan(scenario)
-    items: list[dict] = []
-    prev_cid: int | None = None
-    for idx, step in enumerate(scenario.steps):
-        cid, is_verification = plan[idx]
+
+def _human_review(case: QaCaseRef | None) -> list[dict] | None:
+    """TC 하나의 사람 판정 기록을 계획 항목 모양으로. 없으면 None."""
+    if case is None or not case.reviews or not get_settings().qa_human_review:
+        return None
+    return [
+        {
+            key: value
+            for key, value in {
+                "ai_said": "inconclusive" if review.ai_passed is None else "passed" if review.ai_passed else "failed",
+                "person_decided": "inconclusive" if review.human_passed is None else "passed" if review.human_passed else "failed",
+                "note": review.note,
+                "build": review.game_build_version,
+                "case_version_changed": review.case_version_changed,
+                "reviewed_case_snapshot": review.case_snapshot,
+            }.items()
+            if value is not None
+        }
+        for review in case.reviews
+    ]
+
+
+def _plan(scenario: QaScenario) -> str:
+    """TC 명세와 참고 절차를 전달한다. step을 독립 판정 대상으로 만들지 않는다."""
+    cases: dict[int, dict] = {}
+    references: list[dict] = []
+    for index, step in enumerate(scenario.steps, start=1):
+        references.append({"reference_step": index, "case_id": step.case_id, "suggested_action": _action_line(step)})
         case = step.case
-        item: dict = {"step": idx + 1, "do": _action_line(step)}
-        if cid is not None:
-            item["case_id"] = cid
-            # 구간의 첫 스텝에만 사전조건을 건다(구간 진입 검증).
-            if cid != prev_cid and case and case.precondition:
-                item["precondition"] = case.precondition
-            if is_verification:
-                item["verify"] = case.expected if case else ""
-        items.append(item)
-        prev_cid = cid
+        if step.case_id is not None and step.case_id not in cases:
+            item = {"case_id": step.case_id, "scene": case.scene if case else None,
+                "precondition": case.precondition if case else None,
+                "test_step": case.test_step if case else step.action,
+                "expected": case.expected if case else ""}
+            if (reviews := _human_review(case)) is not None:
+                item["human_review"] = reviews
+            cases[step.case_id] = item
     return (
         f"Scenario: {scenario.title} — {scenario.description}\n\n"
-        "Execute the steps below in order and call report_step(step, passed, message) for EVERY step.\n"
-        "- A step with `verify` is the TEST CASE's verdict: `passed` = whether that expected result "
-        "actually occurred. That verdict is the whole case's verdict.\n"
-        "- Any other step: `passed` = whether you carried the action out (did it happen), not a "
-        "quality judgment.\n"
-        "- A `precondition` must hold before that case's first step. If you cannot reach it, report "
-        "its steps passed=false with a message beginning 'SETUP-FAILED:' and do NOT report_issue "
-        "(an unreachable precondition is not a defect).\n"
-        "- `try:` and `via:` are advisory hints, not required.\n\n"
-        f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
-        "Begin. Observe the screen first."
+        "Verify the test cases. Steps are reference guidance: choose the route and actions from the current screen. "
+        "Do not report individual steps or treat their completion as a quality verdict. "
+        "Call start_test_case(case_id) BEFORE verifying a case, then report_test_case with PASSED, FAILED or INCONCLUSIVE. "
+        "Start a new attempt for each re-verification; earlier attempts remain in history. "
+        "Use INCONCLUSIVE when you cannot establish the actual outcome. Ask the user with ask_user if you do not know how to proceed. "
+        "TC failures create issues automatically. report_issue is only for defects unrelated to a TC.\n"
+        + (HUMAN_REVIEW_RULE if any("human_review" in case for case in cases.values()) else "")
+        + json.dumps({"test_cases": list(cases.values()), "reference_steps": references}, ensure_ascii=False, indent=2)
+        + "\nObserve the screen and begin."
     )
 
 
 def _free_plan(scenario: QaScenario) -> str:
-    """FREE 시나리오(TC 묶음)의 첫 메시지 (ARTEL-1029).
-
-    스텝 하나가 TC 하나다. 실행 순서, scene 사이의 경로, 조작 방법은 agent 가 정하므로
-    `do` 와 `try:`·`via:` 는 싣지 않고 TC 의 네 칸(scene, precondition, test_step, expected)만
-    싣는다. 보고는 `report_case(case_id, ...)` 로 받고, 순서와 상관없다.
-
-    "아직 도달하지 못했다" 를 판정으로 보고하지 말라는 문장과 시간을 아낄 필요가 없다는
-    문장은 2026-10-14 로컬 run(qa_try 3, Claude Haiku 4.5)에서 넣었다. 압축 뒤 agent 가 "time is
-    limited" 라고 스스로 판단하고 TC 5개를 시도하지 않은 채 실패로 보고했다. 그 run 에는
-    마감도 호출 상한도 걸리지 않았다.
-    """
-    items: list[dict] = []
-    for step in scenario.steps:
-        case = step.case
-        item: dict = {"case_id": step.case_id}
-        if case and case.scene:
-            item["scene"] = case.scene
-        if case and case.precondition:
-            item["precondition"] = case.precondition
-        item["test_step"] = (case.test_step if case and case.test_step else step.action).strip()
-        item["expected"] = case.expected if case else ""
-        items.append(item)
-    total = len(items)
-    return (
-        f"Scenario: {scenario.title} — {scenario.description}\n\n"
-        f"This scenario is a set of {total} test cases, not a script. You choose the order "
-        "and the method: which case to verify first, how to move between scenes, and which "
-        "controls to use. Plan a route before you start — verify the cases that share a "
-        "scene or a precondition together, and revisit a scene whenever a case needs it. "
-        "Some preconditions only hold before other cases change the game state (an "
-        "untouched save, a stage not yet cleared, a node not yet unlocked), so read every "
-        "precondition first and verify those cases before the ones that destroy them.\n"
-        "Call report_case(case_id, passed, message) once for EVERY test case, in whatever "
-        "order you verify them.\n"
-        "- Report a case only after you have carried out its `test_step` with its "
-        "`precondition` holding and watched what happened. `passed` = whether the "
-        "`expected` result occurred.\n"
-        "- Not having reached a case yet is NOT a verdict. A battle still in progress, a "
-        "stage not cleared yet, a scene you are not in yet: go there and finish it, then "
-        "report. Never report a case failed because you have not got to it.\n"
-        "- There is no time or token budget for you to save. The run stops you itself if it "
-        "ever has to; until then, keep playing. A compacted conversation is not a sign that "
-        "time is running out.\n"
-        "- If a `precondition` cannot be reached any more — another case already destroyed "
-        "it and the game offers no way back — report the case passed=false with a message "
-        "beginning 'SETUP-FAILED:' and do NOT report_issue (an unreachable precondition is "
-        "not a defect).\n"
-        "- `test_step` says what to check, not how. Find the way through the game yourself.\n"
-        "- If you later see a case behave differently from the verdict you gave it, report "
-        "it again with `overwrite=true`. Each case can be overwritten once.\n\n"
-        f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
-        "Begin. Observe the screen first, then plan your route through the cases."
-    )
+    return _plan(scenario)
 
 
 def fold_kinds_for(arch: ResolvedArch) -> frozenset[FoldKind]:
@@ -639,6 +606,12 @@ class QaRunner:
             arch.skills,
             withheld_skills(arch),
         )
+        system_prompt += (
+            "\nCurrent reporting contract: report_step, report_case and wait_for_operator are unavailable. "
+            "Steps are optional reference guidance, never required verdicts. Use start_test_case before a TC attempt "
+            "and report_test_case after it. Use ask_user to pause for a human answer. "
+            "This contract replaces any step-reporting instructions in the preceding prompt."
+        )
         if arch.macros == "on":
             system_prompt += (
                 "\nCurrent macro contract: intermediate dialogue history is not collected or returned. "
@@ -649,6 +622,13 @@ class QaRunner:
         first_message = (
             _plan(scenario) + _macro_discovery(arch, channel) + _game_functions(arch, channel)
         )
+        # 사람 판정 기록이 첫 메시지에 실제로 실렸는지 남긴다(ARTEL-1257 영향 실측).
+        reviewed = [step.case.id for step in scenario.steps if step.case is not None and step.case.reviews]
+        if reviewed:
+            logger.info(
+                "[qa] human_review cases=%s attached=%s in_message=%s",
+                reviewed, get_settings().qa_human_review, "human_review" in first_message,
+            )
         total_steps = len(scenario.steps)
         tools = build_tools(channel, state, arch, prompt.version)
         # view 의 function 줄을 1번 step 의 TC 기준으로 둔다. 다음부터는 tool 이 옮긴다.
@@ -884,6 +864,8 @@ class QaRunner:
         deadline still carries the verdicts it managed to record.
         """
         step_meta = _step_plan(scenario)
+        channel.evaluation.snapshots = {step.case.id: step.case.model_dump(mode="json", exclude={"reviews"})
+                                        for step in scenario.steps if step.case is not None}
         state = QaRunState(
             total_steps=len(scenario.steps),
             step_meta=step_meta,
@@ -908,7 +890,8 @@ class QaRunner:
             channel.pulse_relevance = PulseRelevanceJudge()
             channel.pulse_relevance.notice(channel.scene.pulse)
         try:
-            await asyncio.wait_for(self.run(channel, scenario, state), timeout=deadline)
+            from app.qa.evaluation import run_with_active_deadline
+            await run_with_active_deadline(self.run(channel, scenario, state), channel.evaluation.clock, deadline)
         except asyncio.TimeoutError as error:
             state.failure_site = failure_site_of(error)
             return state, f"The run exceeded its {int(deadline)}s limit."

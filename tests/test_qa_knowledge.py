@@ -1419,7 +1419,7 @@ def test_the_writes_share_one_budget_and_the_deletion_has_its_own() -> None:
         assert "the entry stands as it was" in corrected
         assert str(MAX_FORGETS_PER_RUN) in forgotten
         # The way out of a spent deletion budget is to report, not to delete.
-        assert "report_step" in forgotten
+        assert "report_test_case" in forgotten
 
     asyncio.run(run())
 
@@ -1679,7 +1679,7 @@ def test_the_record_description_draws_the_line_it_has_to_draw() -> None:
     # This run's own state is not knowledge.
     assert "this run's state" in description
     # A bug is reported, not recorded.
-    assert "report_step" in description
+    assert "report_test_case" in description
 
 
 def test_the_forget_description_sets_the_bar_high_and_points_at_the_repair() -> None:
@@ -1691,7 +1691,7 @@ def test_the_forget_description_sets_the_bar_high_and_points_at_the_repair() -> 
     assert str(MAX_FORGETS_PER_RUN) in description
     # One contradiction is more often a bug than stale documentation.
     assert "One contradiction is more often a bug" in description
-    assert "report_step" in description
+    assert "report_test_case" in description
     # Correcting is `update_knowledge`, not a deletion.
     assert "update_knowledge" in description
     # The long form of the same bar, and the delete-then-record safety net, live
@@ -1722,7 +1722,7 @@ def test_the_update_description_draws_the_line_against_forget_and_against_a_bug(
     # Correct versus delete.
     assert "keeping its id" in description
     # A disagreement may be a bug, and a bug is reported.
-    assert "report_step" in description
+    assert "report_test_case" in description
     # Partial updates, and the id rule.
     assert "Send only the fields that change" in description
     assert "search_knowledge" in description
@@ -1807,10 +1807,10 @@ def test_a_run_searches_knowledge_and_carries_on_to_its_verdict(
             {
                 "tool_calls": [
                     {
-                        "name": "report_step",
+                        "name": "report_test_case",
                         "args": {
                             "step": 1,
-                            "passed": True,
+                            "performed": True, "passed": True,
                             "message": "문서대로 버튼이 비활성이다",
                             "thought": "판정",
                         },
@@ -1986,10 +1986,10 @@ def test_a_run_corrects_an_entry_by_deleting_it_and_recording_the_new_one(
             {
                 "tool_calls": [
                     {
-                        "name": "report_step",
+                        "name": "report_test_case",
                         "args": {
                             "step": 1,
-                            "passed": True,
+                            "performed": True, "passed": True,
                             "message": "구매가 가능했다",
                             "thought": "판정",
                         },
@@ -2113,10 +2113,10 @@ def test_a_run_corrects_an_entry_in_place_with_the_update_tool(
             {
                 "tool_calls": [
                     {
-                        "name": "report_step",
+                        "name": "report_test_case",
                         "args": {
                             "step": 1,
-                            "passed": True,
+                            "performed": True, "passed": True,
                             "message": "구매가 가능했다",
                             "thought": "판정",
                         },

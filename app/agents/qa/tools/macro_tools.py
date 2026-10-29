@@ -524,7 +524,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
     ) -> str:
         # What the agent reads is `qa_run/<version>/tool_register_macro.md`, not this.
         #
-        # 빈 목록 기본값은 `report_step` 의 `used_knowledge_ids` 와 같은 이유로 리터럴로
+        # 빈 목록 기본값은 `report_test_case` 의 `used_knowledge_ids` 와 같은 이유로 리터럴로
         # 적는다 — 모델이 채우는 schema 에서 optional array 는 그냥 빼면 되지만,
         # nullable 은 `null` 을 보내게 하고 그것이 "없다" 인지 "모른다" 인지가 또
         # 문제가 된다. 아래에서 읽기만 하고 고치지 않는다.
@@ -1157,7 +1157,7 @@ def _render_listing(result: MacroRunResult) -> str:
         lines.append(
             f"NEEDS A VERDICT — scenario step {asked.step}, asked at {asked.place}. "
             f"Expected: {asked.expected}.{_observed(asked.observed)} Judge it yourself "
-            "and call `report_step`."
+            "and call `report_test_case`."
         )
     if len(result.verdict_requests) > 1:
         # 반복 안의 `ask_verdict` 는 회마다 선다. 판정할 step 은 하나다 — macro 를 부른
@@ -1165,7 +1165,7 @@ def _render_listing(result: MacroRunResult) -> str:
         lines.append(
             f"These {len(result.verdict_requests)} requests are all about scenario step "
             f"{result.verdict_requests[0].step}: read them together and answer that step "
-            "with one `report_step`."
+            "with one `report_test_case`."
         )
     return "\n".join(line for line in lines if line)
 
