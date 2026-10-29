@@ -3,7 +3,16 @@
 import openai
 from fastapi import APIRouter, HTTPException
 
-from app.agents.case_contract import CaseContractRequest, CaseContractResult, extract_contracts
+from pydantic import BaseModel
+
+from app.agents.case_contract import (
+    CaseContractRequest,
+    CaseContractResult,
+    Patch,
+    StatementRequest,
+    extract_contracts,
+    statement_patches,
+)
 from app.llm.usage import set_usage_scope
 
 router = APIRouter(tags=["scenario"])
@@ -19,5 +28,18 @@ async def case_contracts(payload: CaseContractBody) -> CaseContractResult:
     set_usage_scope("SCENARIO", None)
     try:
         return await extract_contracts(payload)
+    except openai.APIError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+class StatementResponse(BaseModel):
+    patches: list[Patch]
+
+
+@router.post("/case-contracts/statement", response_model=StatementResponse)
+async def case_contract_statement(payload: StatementRequest) -> StatementResponse:
+    set_usage_scope("SCENARIO", None)
+    try:
+        return StatementResponse(patches=await statement_patches(payload))
     except openai.APIError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error

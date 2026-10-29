@@ -203,3 +203,37 @@ async def extract_contracts(request: CaseContractRequest) -> CaseContractResult:
     asked = {c.id for c in request.cases}
     contracts = [to_wire(c) for a in answers for c in a.cases if c.id in asked]
     return CaseContractResult(terms=listed, start_state=start_state(listed), contracts=contracts)
+
+
+class Patch(BaseModel):
+    tc_id: int | None = None
+    op: Literal["needs", "not_needs", "leaves", "start"]
+    name: str
+    value: str
+
+
+class _Patches(BaseModel):
+    patches: list[Patch]
+
+
+class StatementRequest(BaseModel):
+    said: str
+    question: str = ""
+    terms: list[Term] = Field(default_factory=list)
+    start_state: dict[str, str] = Field(default_factory=dict)
+    # 줄마다 `id | 행동 → 기대 || 필요 | 남김`. 오케가 지금 계약으로 만들어 보낸다.
+    cases: list[str] = Field(default_factory=list)
+    model: str = DEFAULT_MODEL
+
+
+async def statement_patches(request: StatementRequest) -> list[Patch]:
+    """사용자 말에서 게임 사실만 계약 수정으로. 사실이 아니면 빈 목록이다."""
+    prompt = load_prompt(PROMPT_AGENT, "statement").body.format(
+        question=request.question or "-",
+        said=request.said,
+        terms="\n".join(f"{t.name} | {t.kind} | {'/'.join(t.options) or '-'} | {t.meaning}" for t in request.terms) or "-",
+        start=", ".join(f"{k}={v}" for k, v in request.start_state.items()) or "-",
+        cases="\n".join(request.cases),
+    )
+    out: _Patches = await structured(request.model, _Patches).ainvoke(prompt)
+    return [p.model_copy(update={"name": _name(p.name), "value": _name(p.value)}) for p in out.patches]
