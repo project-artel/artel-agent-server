@@ -95,3 +95,11 @@ def test_observed_patches_keep_only_leaves_of_known_names(monkeypatch):
     )
     patches = asyncio.run(wf.observed_patches(request))
     assert [(p.tc_id, p.op, p.name, p.value) for p in patches] == [(7, "leaves", "등불", "1")]
+
+
+def test_a_tc_that_moves_to_another_screen_carries_its_arrival() -> None:
+    from app.agents.case_contract.workflow import _CaseStates, to_wire
+
+    moved = to_wire(_CaseStates(id=3, arrives_at=" 광장 "))
+    assert moved.arrives_at == "광장"
+    assert moved.condition is None and moved.state_after == ""
