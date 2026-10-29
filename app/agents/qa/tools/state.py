@@ -203,9 +203,6 @@ class QaRunState:
         # 상한이 필요한 이유가 phase 거절과 같다(`app/agents/qa/tools/phase.py` 의
         # `MAX_CONSECUTIVE_REFUSALS`). 되돌려 보낸 뒤 모델이 또 빠뜨리면 왕복만 탄다.
         self.verdict_memory_refusals = 0
-        # `performed=false` 인데 `passed=true` 라서 한 번 돌려보낸 step (ARTEL-1220). 같은 step 의
-        # 두 번째 보고는 그대로 기록한다 — 기대값이 "거부된다" 인 step 에서는 그 조합이 맞다.
-        self.unperformed_pass_refused: set[int] = set()
         # 이 런에서 view 가 한 번이라도 그려진 scene (ARTEL-1221). 처음 그려지는 tool 결과에 전체
         # screen capture 를 한 장 찍으라는 줄이 붙는다.
         self.scenes_entered: set[str] = set()
