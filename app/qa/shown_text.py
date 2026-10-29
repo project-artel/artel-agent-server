@@ -27,19 +27,24 @@ class ShownText:
     key: str
 
 
+@dataclass
+class _ShownTextEntry(ShownText):
+    revision: int
+
+
 class ShownTextLog:
     """런 하나 동안 `pulse` 가 실어 온 글자. 위치를 표시해 두고 그 뒤의 것만 꺼낸다."""
 
     def __init__(self) -> None:
-        self._entries: list[ShownText] = []
-        # 앞에서 버린 항목 수. `mark` 가 돌려준 위치가 버린 뒤에도 같은 항목을 가리키게 한다.
-        self._dropped = 0
+        self._entries: list[_ShownTextEntry] = []
+        # 기존 줄의 typewriter 변경도 cursor 이후의 도착으로 기록한다.
+        self._revision = 0
         # 객체마다 지금 띄운 글자.
         self._current: dict[str, str] = {}
 
     def mark(self) -> int:
-        """지금까지의 끝 위치. `since` 에 넘긴다."""
-        return self._dropped + len(self._entries)
+        """지금까지의 변경 cursor. `since`에 넘긴다."""
+        return self._revision
 
     def apply(self, reading: PulseReading) -> None:
         for arrived in reading.active:
@@ -51,28 +56,30 @@ class ShownTextLog:
             self._current[key] = obj.text
             if before == obj.text:
                 continue
+            self._revision += 1
             if before and obj.text.startswith(before) and self._extend(key, obj.text):
                 continue
             name = (obj.path or obj.selector or key).rstrip("/").rsplit("/", 1)[-1]
-            self._entries.append(ShownText(source=name, text=obj.text, key=key))
+            self._entries.append(_ShownTextEntry(source=name, text=obj.text, key=key, revision=self._revision))
         if len(self._entries) > MAX_SHOWN_TEXT_ENTRIES:
             cut = len(self._entries) - MAX_SHOWN_TEXT_ENTRIES
             del self._entries[:cut]
-            self._dropped += cut
 
     def _extend(self, key: str, text: str) -> bool:
         """같은 객체의 가장 최근 줄을 늘린다. 그 줄이 없으면(버려졌으면) `False`."""
         for entry in reversed(self._entries):
             if entry.key == key:
                 entry.text = text
+                entry.revision = self._revision
                 return True
         return False
 
     def since(self, mark: int) -> list[ShownText]:
-        """`mark` 뒤에 뜬 줄. 바로 앞 줄과 출처와 글자가 같은 줄은 한 번만 센다."""
-        start = max(mark - self._dropped, 0)
+        """`mark` 뒤에 생성되거나 늘어난 줄. 같은 연속 줄은 한 번만 센다."""
         lines: list[ShownText] = []
-        for entry in self._entries[start:]:
+        for entry in self._entries:
+            if entry.revision <= mark:
+                continue
             if lines and lines[-1].source == entry.source and lines[-1].text == entry.text:
                 continue
             lines.append(ShownText(source=entry.source, text=entry.text, key=entry.key))
