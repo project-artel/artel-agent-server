@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Awaitable, Callable
@@ -75,6 +76,21 @@ def router_model() -> LLMModel:
     return configured
 
 RouterCall = Callable[[str], Awaitable[RouteVerdict]]
+
+
+_OPTIONS = re.compile(r"\((?:보기|Options): ([^)]*)\)")
+
+
+def _plain(text: str) -> str:
+    return re.sub(r"[\s.!~,]+", "", text)
+
+
+def picked_an_option(user_input: str, assistant: str) -> bool:
+    """사용자 말이 직전 Agent 답의 질문 보기 하나와 같은가. 대화 기록의 질문 줄은 `(보기: a / b)` 를 단다."""
+    said = _plain(user_input)
+    if not said:
+        return False
+    return any(said == _plain(option) for group in _OPTIONS.findall(assistant) for option in group.split(" / "))
 
 
 @dataclass(frozen=True)
@@ -236,6 +252,11 @@ class JevScenarioRouter(ScenarioRouter):
             return RouteVerdict(route=Route.AUTHORING)
 
         if picked is Route.MODIFY and target != _ASK_WHEN_TARGET_IS_NOT:
+            # 직전 질문의 보기를 그대로 골랐으면 그 질문이 가리킨 시나리오에 대한 답이다. 대상을 되묻지 않는다 —
+            # 도우미가 방금 "게시판 확인도 넣을까요?" 라고 물었고 사용자가 "게시판 확인도 넣어 줘" 를 골랐다.
+            if previous is not None and picked_an_option(user_input, previous.assistant):
+                logger.info("[scenario] jev routed to modify (target=%s) — an option of the last question", target)
+                return RouteVerdict(route=Route.MODIFY)
             logger.info("[scenario] jev routed to modify but target=%s — asking back", target)
             return RouteVerdict(route=Route.ASK)
         logger.info("[scenario] jev routed to %s (target=%s)", picked.value, target)

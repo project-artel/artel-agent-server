@@ -59,6 +59,24 @@ def test_modify_asks_back_when_the_target_is_not_an_existing_scenario(target: st
     assert verdict.route is Route.ASK
 
 
+def test_picking_an_option_of_the_last_question_edits_without_asking_back() -> None:
+    """도우미가 "게시판 확인도 넣을까요?" 라고 묻고 보기를 냈다. 그 보기를 그대로 보내면 그 시나리오에 대한 답이다.
+
+    실측(MCP 확인, 2026-10-29): 보기를 골랐는데 "고칠지 새로 만들지" 를 되물었다.
+    """
+    from app.agents.scenario.router import PreviousTurn
+
+    previous = PreviousTurn(
+        user="할머니 의뢰를 받아 고양이를 돌려주는 데까지 짜줘",
+        assistant="시나리오를 만들었어요.\n질문: 광장에 있는 게시판 확인도 넣을까요? (보기: 게시판 확인도 넣어 줘 / 지금처럼 둬)",
+    )
+    picked = asyncio.run(_router("modify", "new").route("게시판 확인도 넣어 줘", previous=previous))
+    assert picked.route is Route.MODIFY
+    # 보기가 아닌 말은 지금처럼 되묻는다.
+    other = asyncio.run(_router("modify", "new").route("게임 시작 후 첫 스테이지 전까지만", previous=previous))
+    assert other.route is Route.ASK
+
+
 def test_authoring_on_an_existing_target_is_left_alone() -> None:
     """**반대 방향에는 조건을 걸지 않는다.**
 
