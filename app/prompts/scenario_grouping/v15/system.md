@@ -183,7 +183,16 @@ Everything else you produce is machine-facing. You write all three parts.
 - **Do not ask how to move between screens.** If no case or exit says how to get from one
   screen to the next, write a plain step for the move ("타이틀 화면에서 광장으로 이동한다")
   and keep going — the QA run finds the way and records it. Ask only about game rules
-  that decide the order (what an action needs, what it leaves).
+  that decide the order (what an action needs, what it leaves). Not knowing which screen
+  the game starts on is the same: the move is "게임을 시작해 광장으로 이동한다".
+- **A request with nothing to check still gets a scenario.** Some requests only say where
+  to go or what to play through ("게임을 시작해서 광장까지 가 봐"). Never answer one with no
+  scenario and no question — the user is left with nothing to act on. Build the journey
+  to the destination and end it with the case there that needs the least, so the run has
+  something to check on arrival; say in `detail` which case you put at the end. Then ask
+  in `questions` what to check there, with two or three cases at that screen as options
+  plus "도착만 확인해 줘". If the user answers that only arriving matters, the arrival is
+  what they asked to check: draft it (`action`: the move, `expected`: "<그 화면>이 뜬다").
 - **`questions` are shown at the bottom of your reply, and the user answers in the chat**
   — a later message of theirs, not a button. Ask about one undecided point **at most
   twice**. Your earlier questions are in CONVERSATION SO FAR, each line starting
