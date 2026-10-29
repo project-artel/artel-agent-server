@@ -8,7 +8,10 @@ The planner answers each step with one macro source and nothing else:
     def done() -> bool:          # the step's goal, read from the screen
         ...
 
-Every `-> None` def is an action Jev may pick; its docstring is the option's description. `done`
+Every `-> None` def **without parameters** is an action Jev may pick; its docstring is the option's
+description. A `-> None` def with parameters is a helper the actions call (`fill_spell("Shoot")`) and
+is not offered — the executer calls every action with no arguments, so there is nothing it could
+pass (ARTEL-1288: the editor reuses developer macro sources, which are written that way). `done`
 is a predicate. The text is read by `macro_definition_from_source`, the same parser the tool loop
 uses when a macro is written, once per action with that action as the entry. Imports
 (`from macros import ...`) are resolved against the macros registered for this build, asked for
@@ -195,11 +198,12 @@ async def parse_step(
             "the source needs the step's goal as `def done() -> bool:` with no parameters — a "
             "predicate that returns True once the step's goal is reached on the screen."
         )
-    actions = [node for node in defs if _returns(node, "None")]
+    actions = _action_defs(defs)
     if not actions and not developer_actions:
         raise MacroRejection(
-            "the source needs at least one action: a `def <name>() -> None:` whose docstring says "
-            "what it does and when it is the right move, or a developer macro selected for the step."
+            "the source needs at least one action: a `def <name>() -> None:` with no parameters whose "
+            "docstring says what it does and when it is the right move, or a developer macro selected "
+            "for the step. A `-> None` def with parameters is a helper, not an action."
         )
     reject_unstable_selectors(source)
     parsed = await _parse_actions(actions, source, registered, developer_actions)
@@ -237,7 +241,7 @@ async def parse_scene(
                 "with no parameters — a predicate that returns True once that case's goal is reached "
                 "on the screen."
             )
-    actions = [node for node in defs if _returns(node, "None")]
+    actions = _action_defs(defs)
     if source.strip():
         reject_unstable_selectors(source)
     parsed = await _parse_actions(actions, source, registered, developer_actions)
@@ -271,22 +275,27 @@ def _probe_source(goal: str) -> str:
     return f'\n\ndef {PROBE}() -> None:\n    if {goal}():\n        flag("{PROBE_FLAG}")\n'
 
 
+def _action_defs(defs: list[ast.FunctionDef]) -> list[ast.FunctionDef]:
+    """The `-> None` defs the executer offers Jev: the ones with no parameters.
+
+    A `-> None` def with parameters is a helper. It is parsed with the actions that call it (the macro
+    parser reads the whole source for every entry) and refused there if its grammar is wrong, but it
+    is no option — the executer has nothing to pass it. Before ARTEL-1288 it was refused outright,
+    which stopped the editor from reusing a developer macro's helpers (`fill_spell(word: string)`).
+    """
+    return [node for node in defs if _returns(node, "None") and not node.args.args]
+
+
 async def _parse_actions(
     actions: list[ast.FunctionDef],
     source: str,
     registered: RegisteredMacros,
     developer_actions: Mapping[str, DeveloperAction],
 ) -> dict[str, MacroDefinition]:
-    """Each action parsed with itself as the entry; refused when it takes parameters or has no
-    docstring. The developer macros selected for the step join them under their keys."""
+    """Each action parsed with itself as the entry; refused when it has no docstring. The developer
+    macros selected for the step join them under their keys."""
     parsed: dict[str, MacroDefinition] = {}
     for node in actions:
-        if node.args.args:
-            raise MacroRejection(
-                f"`def {node.name}` takes parameters, and the executer calls every action with "
-                "none. Find what it acts on inside it (`find(...)`, `selector(...)`).",
-                node.lineno,
-            )
         definition = await registered.parse(node.name, source)
         if not definition.entry.docstring:
             raise MacroRejection(

@@ -175,7 +175,13 @@ def test_the_planner_writes_macros_from_the_rules_the_grammar_the_map_and_the_sc
          "`def look_around` has no docstring"),
         (MACROS.replace('wait_until(scene() == "Map", 1,', 'require(scene() == "Map" and exists(start),'),
          "MACRO_NODE_REJECTED"),
-        (MACROS.replace("def look_around() -> None:", "def look_around(times: int) -> None:"), "takes parameters"),
+        # 인자 있는 `-> None` def 는 helper 라 action 이 아니다. 둘 다 helper 가 되면 action 이 없다.
+        (
+            MACROS.replace("def look_around() -> None:", "def look_around(times: int) -> None:").replace(
+                "def press_start() -> None:", "def press_start(times: int) -> None:"
+            ),
+            "at least one action",
+        ),
     ],
 )
 def test_a_refused_answer_goes_back_with_the_refusal_and_the_rewrite_is_used(refused: str, said: str) -> None:
@@ -185,6 +191,25 @@ def test_a_refused_answer_goes_back_with_the_refusal_and_the_rewrite_is_used(ref
 
     assert written.macros is not None
     assert said in asked.calls[1][1] and "The macro parser refused it" in asked.calls[1][1]
+
+
+def test_a_def_with_parameters_is_a_helper_the_actions_call_and_not_an_option() -> None:
+    """developer macro 본문이 그렇게 쓰여 있다(`fill_spell(word: string)`). editor 가 그 본문을 재사용할 수
+    있어야 하므로 helper 는 거절도 선택지도 아니다(ARTEL-1288)."""
+    fake = _menu()
+    with_helper = (
+        MACROS.replace("    click(start)\n", "    press(start)\n")
+        + "\n\ndef press(target: object) -> None:\n    click(target)\n"
+    )
+
+    async def go():
+        fake.push_reading()
+        return await parse_step(with_helper, RegisteredMacros(fake.channel))
+
+    macros = asyncio.run(go())
+
+    assert list(macros.actions) == ["press_start", "look_around"]
+    assert "press" not in macros.actions
 
 
 def test_an_answer_still_refused_after_the_rewrites_is_returned_with_its_refusal() -> None:
