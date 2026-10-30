@@ -345,7 +345,8 @@ def _modify_prompt(request: ScenarioAgentRequest, feedback: str = "") -> tuple[s
     tail = (
         _conversation(request)
         + f"=== CURRENT SCENARIOS ===\n{_render_current(request)}\n\n"
-        f"=== USER REQUEST ===\n{request.user_input}{feedback_tail}\n\nAnswer via the schema."
+        + _declined(request)
+        + f"=== USER REQUEST ===\n{request.user_input}{feedback_tail}\n\nAnswer via the schema."
     )
     return prefix, tail
 
@@ -634,6 +635,22 @@ def _existing_scenarios(request: ScenarioAgentRequest) -> str:
     return "\n".join(lines) if lines else "(none)"
 
 
+def _declined(request: ScenarioAgentRequest) -> str:
+    """사용자가 이미 버린 추천 TC. 같은 것을 다시 추천하지 않게 프롬프트 끝에 싣는다."""
+    if not request.declined_cases:
+        return ""
+    return (
+        "=== TC RECOMMENDATIONS THE USER ALREADY DECLINED (never propose these again, reworded or not;"
+        " if the journey needs one, end before it) ===\n" + "\n".join(f"- {line}" for line in request.declined_cases) + "\n\n"
+    )
+
+
+def _drafts_for(scenario: ScenarioPlan, drafts: list[ProposedCase]) -> list[dict]:
+    """이 시나리오의 스텝이 가리키는 추천 TC. 시나리오와 함께 넘겨 저쪽이 추천으로 남기고 스텝에 잇게 한다."""
+    used = {step.proposed_case for step in scenario.steps if step.proposed_case}
+    return [draft.model_dump() for draft in drafts if draft.ref in used]
+
+
 def _grouping_prompt(
     request: ScenarioAgentRequest, findings: list[str] | None = None
 ) -> tuple[str, str]:
@@ -652,7 +669,8 @@ def _grouping_prompt(
     tail = (
         _conversation(request)
         + f"=== EXISTING SCENARIOS (this run) ===\n{_existing_scenarios(request)}\n\n"
-        f"=== USER REQUEST ===\n{request.user_input}{findings_tail}\n\nAnswer via the schema."
+        + _declined(request)
+        + f"=== USER REQUEST ===\n{request.user_input}{findings_tail}\n\nAnswer via the schema."
     )
     return prefix, tail
 
@@ -977,7 +995,9 @@ async def run_authoring_workflow(
             dropped.append(group.title)
             continue
         scenario = _detach_drafts(scenario, ko, draft_refs, real_ids)
-        answer = await channel.submit_scenario(scenario.model_dump(by_alias=True))
+        answer = await channel.submit_scenario(
+            scenario.model_dump(by_alias=True), proposed_cases=_drafts_for(scenario, plan.proposed_cases)
+        )
         if answer is not None and not answer.accepted and answer.detail:
             # 반려 라우팅: 그 묶음 worker 만 이유를 들고 한 번 다시 쓴다. B 복귀는 없다 —
             # 묶기·순서가 틀렸다는 신호가 아니라 문장·근거의 지적이기 때문이다.
@@ -985,7 +1005,9 @@ async def run_authoring_workflow(
             retried = None if scenario.is_free() else await write(group, feedback=answer.detail)
             if retried is not None:
                 scenario = _detach_drafts(retried, ko, draft_refs, real_ids)
-                answer = await channel.submit_scenario(scenario.model_dump(by_alias=True))
+                answer = await channel.submit_scenario(
+                    scenario.model_dump(by_alias=True), proposed_cases=_drafts_for(scenario, plan.proposed_cases)
+                )
             else:
                 answer = None
         if answer is not None and answer.accepted:
@@ -1259,14 +1281,16 @@ async def run_modify_workflow(
             )
 
     answer = await channel.submit_scenario(
-        to_scenario(plan).model_dump(by_alias=True), absorbed_of(plan)
+        to_scenario(plan).model_dump(by_alias=True), absorbed_of(plan),
+        proposed_cases=_drafts_for(to_scenario(plan), plan.proposed_cases),
     )
     if answer is not None and not answer.accepted and answer.detail:
         retried = await edit(feedback=answer.detail)
         if retried is not None and retried.scenario_id == plan.scenario_id and retried.steps:
             plan = retried
             answer = await channel.submit_scenario(
-                to_scenario(plan).model_dump(by_alias=True), absorbed_of(plan)
+                to_scenario(plan).model_dump(by_alias=True), absorbed_of(plan),
+                proposed_cases=_drafts_for(to_scenario(plan), plan.proposed_cases),
             )
         else:
             answer = None

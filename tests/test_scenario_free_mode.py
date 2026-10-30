@@ -257,7 +257,7 @@ class _SubmitChannel:
     def __init__(self) -> None:
         self.submitted: list[dict] = []
 
-    async def submit_scenario(self, scenario: dict, absorbed_scenario_ids=None):
+    async def submit_scenario(self, scenario: dict, absorbed_scenario_ids=None, proposed_cases=None):
         self.submitted.append(scenario)
         return ScenarioAccepted(accepted=True, written=len(self.submitted))
 

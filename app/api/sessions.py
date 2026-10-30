@@ -45,6 +45,7 @@ class OpenSessionRequest(BaseModel):
     # Empty from an older orchestration; the shape block then adds nothing.
     scene_edges: list[SceneEdge] = Field(default_factory=list)
     starting_values: dict[str, str] = Field(default_factory=dict)
+    declined_cases: list[str] = Field(default_factory=list)
     user_input: str
     # 관리자가 끈 모델은 422 로 거절한다(`EnabledLLMModel`).
     model: EnabledLLMModel = DEFAULT_MODEL
@@ -93,6 +94,7 @@ class TurnMessage(BaseModel):
     # 세션은 그대로 두고 TC 목록과 시작 값만 갈아 끼운다. None 이면 열 때 받은 것을 그대로 쓴다.
     test_case_list: list[TestCaseListItem] | None = None
     starting_values: dict[str, str] | None = None
+    declined_cases: list[str] | None = None
 
 
 def _service(app) -> SessionService:
@@ -140,6 +142,7 @@ async def open_session(
         entry_scene=payload.entry_scene,
         scene_edges=payload.scene_edges,
         starting_values=payload.starting_values,
+        declined_cases=payload.declined_cases,
         user_input=payload.user_input,
         model=payload.model,
         reasoning=payload.reasoning,
@@ -322,6 +325,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                         turn.current_scenarios,
                         turn.test_case_list,
                         turn.starting_values,
+                        turn.declined_cases,
                     )
                 )
                 continue

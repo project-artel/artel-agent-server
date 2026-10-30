@@ -178,7 +178,7 @@ class _FakeChannel:
         self.stages.append(stage)
         self.reports.append((stage, done, total))
 
-    async def submit_scenario(self, scenario: dict, absorbed_scenario_ids=None):
+    async def submit_scenario(self, scenario: dict, absorbed_scenario_ids=None, proposed_cases=None):
         from app.sessions.channel import ScenarioAccepted
         self.submitted.append(scenario)
         self.absorbed.append(list(absorbed_scenario_ids or []))
