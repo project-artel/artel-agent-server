@@ -105,13 +105,16 @@ def _scenario() -> QaScenario:
 
 
 def _config(**knobs):
+    # 엔진의 흐름을 보는 테스트라 Executer 의 state 출처는 `PulseMemory` 로 둔다. orchestration 이 없다.
+    knobs = {"state_source": "pulse_memory", **knobs}
     return resolve_run_config(
         arch=QaArchSpec(engine="planner_executer", planner=PlannerExecuterArchSpec(**knobs))
     )
 
 
 def _play(fake: FakeGame, jev: FakeJev, source: str = MACROS, clock=None, **knobs) -> StepPlay:
-    spec = PlannerExecuterArchSpec(**{"no_action_grace_seconds": 0.2, **knobs})
+    # turn 규칙을 보는 테스트라 state 출처는 `PulseMemory` 로 둔다. `STATE_SET` 출처는 test_state_set.py 가 본다.
+    spec = PlannerExecuterArchSpec(**{"no_action_grace_seconds": 0.2, "state_source": "pulse_memory", **knobs})
 
     async def go() -> StepPlay:
         fake.push_reading()
@@ -368,7 +371,7 @@ class Repairs:
 
 
 def _play_with(fake: FakeGame, jev: FakeJev, repair, source: str, **knobs) -> StepPlay:
-    spec = PlannerExecuterArchSpec(**{"no_action_grace_seconds": 0.2, **knobs})
+    spec = PlannerExecuterArchSpec(**{"no_action_grace_seconds": 0.2, "state_source": "pulse_memory", **knobs})
 
     async def go() -> StepPlay:
         fake.push_reading()
@@ -472,7 +475,7 @@ def test_a_jev_error_stops_play_with_the_error() -> None:
     async def go() -> StepPlay:
         fake.push_reading()
         macros = await parse_step(MACROS, RegisteredMacros(fake.channel))
-        return await Executer(fake.channel, PlannerExecuterArchSpec(), JevClient(post=down)).play(
+        return await Executer(fake.channel, PlannerExecuterArchSpec(state_source="pulse_memory"), JevClient(post=down)).play(
             1, "Press Start.", macros
         )
 
