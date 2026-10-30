@@ -1,6 +1,6 @@
 ---
 version: v9
-note: ARTEL-1273 — TC 를 새로 만들어 달라는 말을 unsupported 에서 꺼내 case 갈래로 보낸다(자연어 TC 로 전환). 그 밖은 v8 그대로다. v8 노트: v7 위에 선택지 정의의 빈자리를 메운다. 아무것도 바꾸지 말라는 말(decline)과 도우미가 할 수 없는 일(unsupported) 갈래를 두고, "왜 그렇게 했어" 는 question, 고치기와 새로 만들기가 섞인 말은 authoring, 범위만 적은 말은 앞에 시나리오가 있어도 authoring 이다. 같은 내용을 criteria.json 이 선택지별 칸으로 옮긴다. 실측(2026-10-07, 217건 × 2회, 결정 전용 모델·직전 턴): 86.6% → 94.9%, 덮어쓰기 위험 16 → 5.
+note: ARTEL-1303 — TC 를 새로 만들어 달라는 말을 unsupported 에서 꺼내 case 갈래로 보낸다(자연어 TC 로 전환). 도우미가 "~도 넣을까요?" 라고 물었는데 아무것도 더하지 않는 쪽을 고른 답("도착만 확인해 줘")을 decline 으로 받는다 — 만들 범위를 적은 말은 decline 이 아니다. 실측(2026-10-29, 217건+새 10건 × 2회, 직전 턴): 그대로 두라는 답 6/12 → 12/12(전체 정답률 변화는 다시 셌을 때 재현되지 않아 적지 않는다). 그 밖은 v8 그대로다. v8 노트: v7 위에 선택지 정의의 빈자리를 메운다. decline · unsupported 갈래를 두고, "왜 그렇게 했어" 는 question, 고치기와 새로 만들기가 섞인 말은 authoring, 범위만 적은 말은 앞에 시나리오가 있어도 authoring 이다. 같은 내용을 criteria.json 이 선택지별 칸으로 옮긴다. 실측(2026-10-07, 217건 × 2회): 86.6% → 94.9%, 덮어쓰기 위험 16 → 5.
 placeholders: [context_hint, user_input]
 ---
 You route one user message for a game-QA scenario authoring assistant.
@@ -18,7 +18,10 @@ Classify it as exactly one of:
   ("취소할게", "이번엔 넘어가자", "나중에 할게"). Write a brief `reply` in the user's language
   acknowledging that nothing will change. Asking to REMOVE, DELETE, or UNDO something in a
   scenario is not decline — that changes a scenario. Agreeing with a proposal ("응 그렇게 해줘")
-  is not decline either.
+  is not decline either. When the assistant's last message asked whether to **add** something
+  and the user picks adding nothing ("도착만 확인해 줘" after "광장에서 확인을 더 넣을까요?"), that
+  is decline too — it reads like a request, but the assistant already said it is done that way.
+  A message naming a range to build ("게임 시작 후 스토리까지만") is never decline.
 - unsupported: tied to this game or project but something this assistant **cannot do** —
   filing an issue or bug ticket, editing or deleting existing test cases (TCs), running
   tests, sending something to another tool ("슬랙에 공유해줘", "빌드 돌려줘"). Write a brief
