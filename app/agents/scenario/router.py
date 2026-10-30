@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Awaitable, Callable
@@ -42,6 +43,8 @@ class Route(str, Enum):
     # 기존 시나리오 수정 — 전용 수정 단계가 받는다. 신규 저작과 갈라 두는 이유:
     # 묶기 단계는 신규 묶기용이라 수정을 태우면 통째 재작성이 된다.
     MODIFY = "modify"
+    # TC 자체를 새로 만들어 달라는 말(ARTEL-1273). 결과물은 시나리오가 아니라 TC 초안이다. 전에는 unsupported 였다.
+    CASE = "case"
     # 어느 쪽인지 **고르지 않고 되묻는다.** 다섯 갈래 밖의 결과이고 결정 모델 라우터만 낸다.
     #
     # 조용히 AUTHORING 으로 내리는 쪽도 안전하지만(그 갈래는 덮어쓰지 않는다) 사용자는 자기가
@@ -73,6 +76,21 @@ def router_model() -> LLMModel:
     return configured
 
 RouterCall = Callable[[str], Awaitable[RouteVerdict]]
+
+
+_OPTIONS = re.compile(r"\((?:보기|Options): ([^)]*)\)")
+
+
+def _plain(text: str) -> str:
+    return re.sub(r"[\s.!~,]+", "", text)
+
+
+def picked_an_option(user_input: str, assistant: str) -> bool:
+    """사용자 말이 직전 Agent 답의 질문 보기 하나와 같은가. 대화 기록의 질문 줄은 `(보기: a / b)` 를 단다."""
+    said = _plain(user_input)
+    if not said:
+        return False
+    return any(said == _plain(option) for group in _OPTIONS.findall(assistant) for option in group.split(" / "))
 
 
 @dataclass(frozen=True)
@@ -234,6 +252,11 @@ class JevScenarioRouter(ScenarioRouter):
             return RouteVerdict(route=Route.AUTHORING)
 
         if picked is Route.MODIFY and target != _ASK_WHEN_TARGET_IS_NOT:
+            # 직전 질문의 보기를 그대로 골랐으면 그 질문이 가리킨 시나리오에 대한 답이다. 대상을 되묻지 않는다 —
+            # 도우미가 방금 "게시판 확인도 넣을까요?" 라고 물었고 사용자가 "게시판 확인도 넣어 줘" 를 골랐다.
+            if previous is not None and picked_an_option(user_input, previous.assistant):
+                logger.info("[scenario] jev routed to modify (target=%s) — an option of the last question", target)
+                return RouteVerdict(route=Route.MODIFY)
             logger.info("[scenario] jev routed to modify but target=%s — asking back", target)
             return RouteVerdict(route=Route.ASK)
         logger.info("[scenario] jev routed to %s (target=%s)", picked.value, target)

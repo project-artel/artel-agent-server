@@ -1,0 +1,57 @@
+"""TC 계약 뽑기. 세션 밖의 한 번짜리 호출이라 저작 세션을 거치지 않는다(/scenario-steps/phrase 와 같은 자리)."""
+
+import openai
+from fastapi import APIRouter, HTTPException
+
+from pydantic import BaseModel
+
+from app.agents.case_contract import (
+    CaseContractRequest,
+    CaseContractResult,
+    ObservedRequest,
+    Patch,
+    StatementRequest,
+    extract_contracts,
+    observed_patches,
+    statement_patches,
+)
+from app.llm.usage import set_usage_scope
+
+router = APIRouter(tags=["scenario"])
+
+
+class CaseContractBody(CaseContractRequest):
+    # 이 호출의 LLM 비용을 어디에 달지. /knowledge-queries 와 같다.
+    project_id: int | None = None
+
+
+@router.post("/case-contracts", response_model=CaseContractResult)
+async def case_contracts(payload: CaseContractBody) -> CaseContractResult:
+    set_usage_scope("SCENARIO", None)
+    try:
+        return await extract_contracts(payload)
+    except openai.APIError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+class StatementResponse(BaseModel):
+    patches: list[Patch]
+
+
+@router.post("/case-contracts/statement", response_model=StatementResponse)
+async def case_contract_statement(payload: StatementRequest) -> StatementResponse:
+    set_usage_scope("SCENARIO", None)
+    try:
+        return StatementResponse(patches=await statement_patches(payload))
+    except openai.APIError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@router.post("/case-contracts/observed", response_model=StatementResponse)
+async def case_contract_observed(payload: ObservedRequest) -> StatementResponse:
+    # QA 가 끝난 뒤 쌓기에서 부른다. 비용은 저작 쪽(SCENARIO)에 단다 — 다음 저작의 재료라서다.
+    set_usage_scope("SCENARIO", None)
+    try:
+        return StatementResponse(patches=await observed_patches(payload))
+    except openai.APIError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error

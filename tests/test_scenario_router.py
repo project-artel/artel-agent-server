@@ -178,7 +178,7 @@ class _FakeChannel:
         self.stages.append(stage)
         self.reports.append((stage, done, total))
 
-    async def submit_scenario(self, scenario: dict, absorbed_scenario_ids=None):
+    async def submit_scenario(self, scenario: dict, absorbed_scenario_ids=None, proposed_cases=None):
         from app.sessions.channel import ScenarioAccepted
         self.submitted.append(scenario)
         self.absorbed.append(list(absorbed_scenario_ids or []))
@@ -711,6 +711,57 @@ def test_authoring_route_enters_the_workflow(monkeypatch) -> None:
     assert out.message == "워크플로" and "request" in hit
 
 
+def _saved_scenario():
+    from app.agents.scenario.schemas import ScenarioPlan
+    return ScenarioPlan(scenario_id=3, title="상점", description="", steps=[])
+
+
+def test_modify_with_no_scenario_in_the_run_goes_to_authoring(monkeypatch) -> None:
+    """런이 비었으면 고칠 것이 없다. 수정 · 되묻기 대신 만드는 갈래로 간다(실측: 저작이 물은 사실에 답했더니 다시 물었다)."""
+    import asyncio as aio
+    import app.agents.scenario.agent as agent_mod
+
+    hit = {}
+
+    async def fake_workflow(request, context, channel):
+        hit["authoring"] = True
+        from app.agents.scenario.schemas import ScenarioAgentResult
+        return ScenarioAgentResult(message="워크플로", scenarios=[])
+
+    monkeypatch.setattr(agent_mod, "run_authoring_workflow", fake_workflow)
+    for route in (Route.MODIFY, Route.ASK):
+        hit.clear()
+        agent = ScenarioAgent(agent_factory=_capturing_factory({}), router=_fixed_router(route))
+        out = aio.run(agent.run(
+            _request(user_input="처음부터 낮이에요", test_case_list=_case_list()), _CTX, _channel(),
+        ))
+        assert out.message == "워크플로" and hit == {"authoring": True}
+
+
+def test_an_answer_to_our_own_question_is_not_asked_back(monkeypatch) -> None:
+    """방금 물은 것에 답했는데 라우터가 대상을 되물으면 만드는 갈래로 간다(실측: 밤이 되는 방법을 답했더니 되물었다)."""
+    import asyncio as aio
+    import app.agents.scenario.agent as agent_mod
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    hit = {}
+
+    async def fake_workflow(request, context, channel):
+        hit["authoring"] = True
+        from app.agents.scenario.schemas import ScenarioAgentResult
+        return ScenarioAgentResult(message="워크플로", scenarios=[])
+
+    monkeypatch.setattr(agent_mod, "run_authoring_workflow", fake_workflow)
+    agent = ScenarioAgent(agent_factory=_capturing_factory({}), router=_fixed_router(Route.ASK))
+    history = [HumanMessage(content="밤에 늑대한테 다가가 줘"), AIMessage(content="숲 입구까지 만들었어요.\n질문: 밤은 어떻게 되나요?")]
+    out = aio.run(agent.run(
+        _request(user_input="여관에서 쉬면 밤이 돼요", test_case_list=_case_list(),
+                 current_scenarios=[_saved_scenario()], history=history),
+        _CTX, _channel(),
+    ))
+    assert out.message == "워크플로" and hit == {"authoring": True}
+
+
 def test_modify_route_enters_the_edit_workflow(monkeypatch) -> None:
     """Step 3: MODIFY 는 이제 E 갈래로 간다 — 루프도, 끊김도 아니다."""
     import asyncio as aio
@@ -737,7 +788,7 @@ def test_modify_route_enters_the_edit_workflow(monkeypatch) -> None:
     )
 
     out = aio.run(agent.run(
-        _request(user_input="3번 시나리오 고쳐줘", test_case_list=_case_list()), _CTX, _channel(),
+        _request(user_input="3번 시나리오 고쳐줘", test_case_list=_case_list(), current_scenarios=[_saved_scenario()]), _CTX, _channel(),
     ))
 
     assert out.message == "수정 갈래" and "request" in hit
@@ -762,7 +813,7 @@ def test_modify_route_falls_back_to_the_loop_when_workflow_is_off(monkeypatch) -
     )
 
     out = aio.run(agent.run(
-        _request(user_input="3번 시나리오 고쳐줘", test_case_list=_case_list()), _CTX, _channel(),
+        _request(user_input="3번 시나리오 고쳐줘", test_case_list=_case_list(), current_scenarios=[_saved_scenario()]), _CTX, _channel(),
     ))
 
     assert "system_prompt" in seen
@@ -791,7 +842,7 @@ def test_loop_disabled_cuts_the_modify_route_and_records(monkeypatch) -> None:
     )
 
     out = aio.run(agent.run(
-        _request(user_input="3번 시나리오 고쳐줘", test_case_list=_case_list()), _CTX, _channel(),
+        _request(user_input="3번 시나리오 고쳐줘", test_case_list=_case_list(), current_scenarios=[_saved_scenario()]), _CTX, _channel(),
     ))
 
     assert "system_prompt" not in seen  # 루프가 아예 안 돌았다 — 전량 프롬프트 0
