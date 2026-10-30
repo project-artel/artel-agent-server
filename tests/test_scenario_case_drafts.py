@@ -53,7 +53,9 @@ def test_a_draft_step_goes_out_without_a_case_id_and_the_draft_is_in_the_answer(
     assert sent["steps"][1]["proposed_case"] == -1
     assert sent["steps"][1]["step_source"] == "UNKNOWN"
     assert out.proposed_cases == [DRAFT]
-    assert "보상 카드가 손에 들어온다" in out.reply.detail
+    # 화면은 카드로 보이므로 설명 칸에는 없고, 카드를 못 그리는 대화 기록(message)에만 표가 있다.
+    assert "보상 카드가 손에 들어온다" not in out.reply.detail
+    assert "보상 카드가 손에 들어온다" in out.message
     # 초안은 "넣을 자리가 없던 TC" 로 되묻지 않는다.
     assert not any("넣을 자리가 없던" in ask.text for ask in out.reply.asks)
     assert out.reviewed.included == [1]

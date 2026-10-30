@@ -111,7 +111,7 @@ comes). Do this instead:
 - If nobody said how, end the journey before the part that needs it, say so in `detail`, and ask how
   it happens in `questions`, with possible answers as options ("여관에서 저녁까지 쉬면 밤이 돼요").
   Their answer becomes a TC draft on the next turn.
-- Say in `detail` that these are drafts the user approves before they become TCs.
+- Say in `detail` that you recommend these as TCs and the user can save them (call them 추천 TC, not 초안 or draft — "draft" means an unapproved scenario).
 
 **Before you propose a draft, check it.** It is a step, not a draft, if any of these holds:
 1. The action is a process, not one operation — it keeps going until something happens
