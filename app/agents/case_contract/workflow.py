@@ -96,6 +96,8 @@ class ContractCase(BaseModel):
 
 class CaseContractRequest(BaseModel):
     cases: list[ContractCase]
+    # 이미 계약이 있는 TC 들이 남기는 이름. 이번에 뽑는 필요가 그중 하나와 같은 상태면 그 이름으로 맞춘다.
+    known_leaves: list[str] = Field(default_factory=list)
     # 이미 있는 용어집. 새 TC 는 이 이름을 다시 쓰고, 없는 것만 더한다.
     terms: list[Term] = Field(default_factory=list)
     about: str = ""
@@ -206,7 +208,69 @@ async def extract_contracts(request: CaseContractRequest) -> CaseContractResult:
     ))
     asked = {c.id for c in request.cases}
     contracts = [to_wire(c) for a in answers for c in a.cases if c.id in asked]
+    contracts = await _reconcile_names(request, listed, contracts)
     return CaseContractResult(terms=listed, start_state=start_state(listed), contracts=contracts)
+
+
+class _Same(BaseModel):
+    name: str
+    same_as: str = ""
+
+
+class _Mapping(BaseModel):
+    names: list[_Same]
+
+
+def _tests(node: dict | None) -> list[dict]:
+    if not node:
+        return []
+    if node.get("kind") == "test":
+        return [node]
+    return [t for part in node.get("parts", []) for t in _tests(part)]
+
+
+def _renamed(node: dict | None, rename: dict[str, str]) -> dict | None:
+    if not node:
+        return node
+    if node.get("kind") == "test":
+        return {**node, "left": rename.get(node["left"], node["left"])}
+    return {**node, "parts": [_renamed(part, rename) for part in node.get("parts", [])]}
+
+
+async def _reconcile_names(request: CaseContractRequest, terms: list[Term], contracts: list[CaseContract]) -> list[CaseContract]:
+    """**아무 TC 도 남기지 않는 필요를 남기는 이름에 맞춘다.**
+
+    같은 TC 들을 뽑을 때마다 이름이 갈렸다 — 한 판은 늑대에 `검` 이 필요하다고 쓰고 다른 판은 `검_장착` 이라 써서,
+    `검` 을 남기는 TC 와 연결이 끊겼다(연결 재현율 70~84%). 다 뽑은 뒤에 남는 이름이 다 보이므로, 그때 한 번
+    맞춘다. 시작 값이 있는 이름과 '없어야 한다' 는 요구는 남기는 TC 가 없어도 정상이라 묻지 않는다.
+    """
+    made = set(request.known_leaves)
+    for c in contracts:
+        made |= {pair.split("=", 1)[0].strip() for pair in c.state_after.split(";") if "=" in pair}
+    known_start = start_state(terms)
+    dangling: dict[str, int] = {}
+    for c in contracts:
+        for t in _tests(c.condition):
+            left, op, right = t["left"], t["operator"], str(t["right"])
+            if left in made or left in known_start or (op == "==" and right == "0") or op in ("!=", "<"):
+                continue
+            dangling.setdefault(left, c.id)
+    if not dangling or not made:
+        return contracts
+    by_id = {case.id: case for case in request.cases}
+    meaning = {_name(t.name): t.meaning for t in terms}
+    prompt = load_prompt(PROMPT_AGENT, "reconcile").body.format(
+        dangling="\n".join(f"{n} | {by_id[i].step if i in by_id else '-'}" for n, i in dangling.items()),
+        made="\n".join(f"{n} | {meaning.get(n, '-')}" for n in sorted(made)),
+    )
+    try:
+        out: _Mapping = await structured(request.model, _Mapping).ainvoke(prompt)
+    except Exception:  # noqa: BLE001 — 맞추기는 덤이다. 실패해도 뽑은 계약은 그대로 낸다
+        return contracts
+    rename = {m.name: m.same_as for m in out.names if m.name in dangling and m.same_as in made and m.same_as != m.name}
+    if not rename:
+        return contracts
+    return [c.model_copy(update={"condition": _renamed(c.condition, rename)}) for c in contracts]
 
 
 class Patch(BaseModel):

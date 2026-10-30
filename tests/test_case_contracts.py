@@ -103,3 +103,26 @@ def test_a_tc_that_moves_to_another_screen_carries_its_arrival() -> None:
     moved = to_wire(_CaseStates(id=3, arrives_at=" 광장 "))
     assert moved.arrives_at == "광장"
     assert moved.condition is None and moved.state_after == ""
+
+
+def test_a_requirement_no_case_leaves_is_renamed_to_the_name_a_case_leaves(monkeypatch) -> None:
+    import asyncio
+    from app.agents.case_contract import workflow as wf
+
+    contracts = [
+        wf.CaseContract(id=1, state_after="검=1"),
+        wf.CaseContract(id=2, condition={"kind": "every", "parts": [
+            {"kind": "test", "left": "검_장착", "operator": "==", "right": "1"},
+            {"kind": "test", "left": "시간대", "operator": "==", "right": "밤"},
+        ]}, state_after="늑대_처치=1"),
+    ]
+
+    class _Fake:
+        async def ainvoke(self, prompt):
+            assert "검_장착 | 늑대를 공격한다." in prompt and "시간대" in prompt
+            return wf._Mapping(names=[wf._Same(name="검_장착", same_as="검"), wf._Same(name="시간대", same_as="")])
+
+    monkeypatch.setattr(wf, "structured", lambda model, schema: _Fake())
+    request = wf.CaseContractRequest(cases=[wf.ContractCase(id=2, step="늑대를 공격한다.")])
+    out = asyncio.run(wf._reconcile_names(request, [], contracts))
+    assert [t["left"] for t in wf._tests(out[1].condition)] == ["검", "시간대"]
