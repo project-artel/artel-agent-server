@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import dataclasses
 import gzip
 import json
 from pathlib import Path
@@ -214,3 +215,140 @@ def test_play_stops_when_the_state_set_cannot_be_read_and_does_not_fall_back() -
 
     assert play.stopped == "STATE-SET-ERROR: STATE_SET read failed: connection refused"
     assert jev.bodies == []
+
+
+# ── C: planner 가 정하는 범위, EXPAND_STATE, REPLAN (ARTEL-1295) ─────────────────
+
+
+from app.agents.planner_executer.executer import EXPAND_STATE, REPLAN  # noqa: E402
+from app.agents.planner_executer.macros import StepObserve  # noqa: E402
+from app.agents.planner_executer.planner import read_observe, split_observe_block  # noqa: E402
+from app.agents.qa.macro.errors import MacroRejection  # noqa: E402
+from app.qa.state_set import StateView  # noqa: E402
+
+BATTLE = StateSnapshot.model_validate(CHECKPOINTS[-1]["snapshot"])
+
+
+def test_the_observe_block_is_read_and_a_bad_one_is_refused() -> None:
+    rest, text = split_observe_block('```python\npass\n```\n```observe\n{"paths": ["Card(Clone)"], "members": ["Card.cardType"]}\n```')
+    assert "observe" not in rest
+    assert read_observe(text) == StepObserve(paths=("Card(Clone)",), members=("Card.cardType",))
+    assert read_observe(None) is None
+    assert read_observe('{"members": ["Player.Hp"]}') == StepObserve(paths=None, members=("Player.Hp",))
+    for bad in ("[1]", '{"paths": "Card"}', '{"paths": [""]}', '{"scopes": []}', "{nope"):
+        with pytest.raises(MacroRejection):
+            read_observe(bad)
+
+
+def test_in_battle_the_whole_state_puts_the_tutorial_first_and_cuts_every_battle_object() -> None:
+    """pe9 의 순서(`씬/selector`)로는 DontDestroyOnLoad 가 앞에 서서 전투 객체가 하나도 남지 않는다. 이 변경의 이유다."""
+    state, clipped = render_jev_state(BATTLE)
+    kept = [entry["path"] for entry in state["objects"]]
+    assert clipped == 25
+    assert not any(path.startswith(("Card(Clone)", "RangedCat", "Word[", "CombineSystem")) for path in kept)
+
+    # 활성 씬을 앞에 세우면 같은 상한 안에 전투 객체가 들어온다. 그래도 다 들지는 않는다 — 범위를 정하는 것은 planner 다.
+    first, clipped_first = render_jev_state(BATTLE, view=StateView(active_scene_first=True))
+    kept_first = [entry["path"] for entry in first["objects"]]
+    assert clipped_first > 0
+    assert any(path.startswith("Card(Clone)") for path in kept_first)
+    assert not any(path.startswith("TutorialController") for path in kept_first)
+
+
+def test_a_planned_view_fits_the_battle_objects_under_the_limit() -> None:
+    view = StateView(
+        paths=("Card(Clone)", "RangedCat(Clone)", "Word", "CombineSystem/CombineButton", "DebugCanvas/TurnEndButton"),
+        members=("Card.cardType", "Card.Name", "MagicEnemy.Hp", "Player.Hp", "CombineButton.activateButton", "Ghost.thing"),
+        active_scene_first=True,
+    )
+
+    state, clipped = render_jev_state(BATTLE, view=view)
+    paths = [entry["path"] for entry in state["objects"]]
+
+    assert clipped == 0
+    assert any(path.startswith("Card(Clone)") for path in paths)
+    assert any(path.startswith("RangedCat(Clone)") for path in paths)
+    assert any(path.startswith("DebugCanvas[14]/TurnEndButton") for path in paths)
+    assert not any(path.startswith(("TutorialController", "SettingsMenu", "Shoot")) for path in paths)
+    assert "Ghost.thing" in state["unknown_members"]
+    enemy = next(entry for entry in state["objects"] if entry["path"] == "RangedCat(Clone)[19]")
+    assert set(enemy["members"]) <= {"MagicEnemy.Hp"}
+
+
+class FakeBigStateSet(FakeStateSet):
+    """메뉴 객체에 덧붙여 상한을 넘길 만큼 큰 DontDestroyOnLoad 객체를 낸다."""
+
+    async def __call__(self, qa_try_id: int, spec: dict) -> StateSnapshot:
+        snapshot = await super().__call__(qa_try_id, spec)
+        filler = [
+            {"entityId": f"s1:big{index}", "scope": "persistent", "path": f"Tutorial/Part{index}", "active": True,
+             "status": "KNOWN", "fragments": {"text": {"status": "KNOWN", "value": "x" * 70}},
+             "members": {f"Tutorial.Step::value{n}#0": {"status": "KNOWN", "value": "y" * 70} for n in range(12)}}
+            for index in range(10)
+        ]
+        extra = StateSnapshot.model_validate({"stateVersion": 0, "sync": "SYNCED", "entities": filler}).entities
+        return snapshot.model_copy(update={"entities": [*snapshot.entities, *extra]})
+
+
+def _play_planned(fake: FakeGame, jev: FakeJev, state, observe: StepObserve | None, can_replan: bool = False, **knobs) -> StepPlay:
+    spec = PlannerExecuterArchSpec(**{"no_action_grace_seconds": 0.2, **knobs})
+
+    async def go() -> StepPlay:
+        fake.push_reading()
+        macros = await parse_step(MACROS, RegisteredMacros(fake.channel))
+        macros = dataclasses.replace(macros, observe=observe)
+        executer = Executer(fake.channel, spec, JevClient(post=jev), state_reader=state)
+        return await executer.play(1, "Press Start.", macros, None, can_replan)
+
+    return asyncio.run(go())
+
+
+def test_over_the_limit_the_state_says_how_many_objects_it_left_out_and_offers_expand() -> None:
+    fake = _menu()
+    jev = FakeJev(picks=("press_start",), goal=(0.9,))
+
+    play = _play_planned(fake, jev, FakeBigStateSet(fake), None)
+
+    first = jev.asked("choice")[0]
+    assert first["state"]["objects"][0]["path"] == "Root/Start"  # 활성 씬이 먼저다
+    assert first["state"]["omitted_objects"] > 0
+    assert EXPAND_STATE in first["questions"]["answer"]["criteria"]
+    assert REPLAN not in first["questions"]["answer"]["criteria"]
+    assert play.turns[0]["omitted_objects"] > 0 and play.stopped == "done"
+
+
+def test_expand_state_widens_the_view_one_step_at_a_time() -> None:
+    fake = _menu()
+    jev = FakeJev(picks=(EXPAND_STATE, EXPAND_STATE, "press_start"), goal=(0.9,))
+    observe = StepObserve(paths=("Nowhere",), members=("Player.hp",))
+
+    play = _play_planned(fake, jev, FakeStateSet(fake), observe)
+
+    states = [body["state"] for body in jev.asked("choice")]
+    assert states[0]["objects"] == []  # 범위 밖이라 아무것도 없다
+    assert states[1]["objects"] == [{"path": "Root/Start", "text": "Start", "members": {}}]  # path 를 풀었다
+    assert EXPAND_STATE not in jev.asked("choice")[2]["questions"]["answer"]["criteria"]  # 다 넓혔다
+    assert [turn.get("expanded_to") for turn in play.turns[:2]] == [1, 2]
+    assert play.stopped == "done"
+
+
+def test_replan_stops_play_for_the_runner_and_is_offered_only_when_allowed() -> None:
+    fake = _menu()
+    jev = FakeJev(picks=(REPLAN,), goal=(0.9,))
+
+    play = _play_planned(fake, jev, FakeStateSet(fake), None, can_replan=True)
+
+    assert REPLAN in jev.asked("choice")[0]["questions"]["answer"]["criteria"]
+    assert play.replan_requested and play.stopped.startswith("REPLAN:")
+    assert play.played()["end_state_version"] == 1
+
+
+def test_the_whole_view_of_pe9_is_kept_with_observation_all() -> None:
+    fake = _menu()
+    jev = FakeJev(picks=("press_start",), goal=(0.9,))
+
+    _play_planned(fake, jev, FakeBigStateSet(fake), StepObserve(paths=("Nowhere",)), can_replan=True, observation="all")
+
+    first = jev.asked("choice")[0]
+    assert "omitted_objects" not in first["state"]
+    assert set(first["questions"]["answer"]["criteria"]) == {"press_start", "look_around", "none_fits"}

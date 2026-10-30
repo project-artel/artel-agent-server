@@ -134,7 +134,9 @@ def test_a_failed_step_is_analysed_and_the_analysis_rides_the_status() -> None:
     assert fake.frames("ISSUE") == []
     # The frames and the clock the play ran between, for the recording to be cut by.
     played = verdict["played"]
-    assert set(played) == {"start_frame", "end_frame", "started_at", "ended_at", "seconds", "stopped"}
+    assert set(played) == {
+        "start_frame", "end_frame", "started_at", "ended_at", "seconds", "stopped", "end_state_version"
+    }
     assert played["start_frame"] <= played["end_frame"] and played["stopped"] == "done"
     assert played["started_at"].endswith("Z") and played["ended_at"] >= played["started_at"]
     # The analysis read the verdict, the numbered inputs with their on-screen text, and the directive.

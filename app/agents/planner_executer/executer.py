@@ -39,7 +39,7 @@ from pydantic import BaseModel, Field
 
 from app.agents.planner_executer.arch import PlannerExecuterArchSpec
 from app.agents.planner_executer.macro_host import ASK_FALSE_MEANS, ASK_TRUE_MEANS, ChannelMacroHost
-from app.agents.planner_executer.macros import PROBE_FLAG, StepMacros
+from app.agents.planner_executer.macros import PROBE_FLAG, StepMacros, StepObserve
 from app.agents.planner_executer.prompts import screen
 from app.agents.qa.macro.binding import MacroMemories, MacroScope
 from app.agents.qa.macro.context import build_context_state
@@ -49,7 +49,15 @@ from app.agents.qa.macro.runner import run_macro
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory, LogPayload, MessageType
 from app.qa.jev import JevClient, JevError
-from app.qa.state_set import EXECUTER_SPEC, StateSetUnavailable, StateSnapshot, read_state, render_jev_state
+from app.qa.state_set import (
+    EVERYTHING,
+    EXECUTER_SPEC,
+    StateSetUnavailable,
+    StateSnapshot,
+    StateView,
+    read_state,
+    render_jev_state,
+)
 
 # What the executer calls to read the game's state from Orchestration: `(qa_try_id, spec)` → snapshot.
 StateReader = Callable[[int, dict[str, Any]], Awaitable[StateSnapshot]]
@@ -59,6 +67,20 @@ StateReader = Callable[[int, dict[str, Any]], Awaitable[StateSnapshot]]
 Repair = Callable[[StepMacros, str, list[dict]], Awaitable[StepMacros | None]]
 
 GOAL_QUESTION = "Has this step's goal been reached?"
+
+# Jev 가 action 대신 고를 수 있는 둘(ARTEL-1295 C). 서로, 그리고 `none_fits` 와 겹치지 않게 쓴다: `none_fits` 는 "지금은
+# 맞는 것이 없으니 화면이 바뀌길 기다린다", `EXPAND_STATE` 는 "고르려면 보이는 것이 모자란다", `REPLAN` 은 "이 action
+# 들로는 이 화면에서 나아갈 수 없다".
+EXPAND_STATE = "EXPAND_STATE"
+EXPAND_STATE_DESCRIPTION = (
+    "Show more of the game state before choosing: the objects or values needed to pick an action are not in "
+    "the state shown."
+)
+REPLAN = "REPLAN"
+REPLAN_DESCRIPTION = (
+    "Give up these actions and plan the step again: the state shows enough, but no listed action can make "
+    "progress from this screen."
+)
 PICK_QUESTION = "Which of these should the player do now to progress this step?"
 
 # How long the executer waits for a reading when nothing fits, before it asks again.
@@ -121,6 +143,10 @@ class StepPlay:
     end_frame: int | None = None
     started_at: str = ""
     ended_at: str = ""
+    # Jev 가 `REPLAN` 을 골라 멈췄다(ARTEL-1295 C). runner 가 planner 를 다시 부른다.
+    replan_requested: bool = False
+    # play 가 멈출 때 Jev 가 마지막으로 읽은 `STATE_SET` 의 `stateVersion`. 판정의 근거를 Orchestration 상태에 잇는다.
+    end_state_version: int | None = None
 
     def played(self) -> dict:
         """step `STATUS` 의 `played`: 영상 구간을 자를 기준. `docs/evaluator-analysis-frames.md`."""
@@ -131,6 +157,7 @@ class StepPlay:
             "ended_at": self.ended_at,
             "seconds": self.seconds,
             "stopped": self.stopped,
+            "end_state_version": self.end_state_version,
         }
 
     def reached_goal(self) -> bool:
@@ -171,16 +198,24 @@ class Executer:
         self._state_reader = state_reader
         # 마지막으로 Jev 에게 보낸 state 의 `stateVersion`. turn 기록에 남겨 어느 상태로 골랐는지 잇는다.
         self._state_version: int | None = None
+        # 지금 play 의 범위: planner 의 ```observe 와 `EXPAND_STATE` 로 넓힌 단계(0–2). `play` 가 매번 정한다.
+        self._observe: StepObserve | None = None
+        self._expansions = 0
+        # 상한에 걸려 Jev 의 state 에서 빠진 객체 수. turn 기록에 남긴다.
+        self._omitted = 0
 
     async def play(
-        self, step: int, action: str, macros: StepMacros, repair: Repair | None = None
+        self, step: int, action: str, macros: StepMacros, repair: Repair | None = None, can_replan: bool = False
     ) -> StepPlay:
         """Play step `step` (`action` is its text) with `macros` until it stops.
 
         `repair` is the editor for this step, or `None` when the play has none (a FREE case's play:
         its macros are a scene plan shared by several cases, which the editor does not rewrite).
+        `can_replan` offers Jev `REPLAN`; the runner passes it while the step has replans left.
         """
         channel, spec, clock = self._channel, self._spec, self._clock
+        self._observe = getattr(macros, "observe", None)
+        self._expansions = 0
         await self._settle()
         play = StepPlay(
             "turn limit",
@@ -220,15 +255,33 @@ class Executer:
                             "did not see the goal reached"
                         )
                         break
+                # state 를 먼저 읽는다. 상한에 걸려 빠진 것이 있는지가 선택지(`EXPAND_STATE`)를 정한다.
+                state = await self._state()
                 options = {name: macros.description(name) for name in macros.actions}
+                if self._narrows() and self._expansions < spec.max_expansions_per_step:
+                    options[EXPAND_STATE] = EXPAND_STATE_DESCRIPTION
+                if can_replan and self._planned():
+                    options[REPLAN] = REPLAN_DESCRIPTION
                 record["question"] = f"{PICK_QUESTION} The step: {action}"
                 record["options"] = list(options)
                 recent = recent_action_lines(play.turns[:-1])
                 if recent:
                     record["recent_actions"] = recent
-                record["picked"] = picked = await self._pick(record["question"], options, recent)
+                record["picked"] = picked = await self._pick(record["question"], options, recent, state)
                 if self._state_version is not None:
                     record["state_version"] = self._state_version
+                if self._omitted:
+                    record["omitted_objects"] = self._omitted
+                if picked == EXPAND_STATE:
+                    self._expansions += 1
+                    record["expanded_to"] = self._expansions
+                    await self._send(record)
+                    continue
+                if picked == REPLAN:
+                    await self._send(record)
+                    play.stopped = "REPLAN: the decision model found no listed action that can progress from this screen"
+                    play.replan_requested = True
+                    break
                 if picked == NONE_FITS:
                     await self._send(record)
                     none_since = none_since or now
@@ -288,6 +341,7 @@ class Executer:
                 await self._send(play.turns[-1])
         play.end_screen = screen(channel.scene.pulse)
         play.end_frame = channel.scene.pulse.frame
+        play.end_state_version = self._state_version
         play.ended_at = _now()
         play.seconds = round(clock() - started, 1)
         return play
@@ -327,8 +381,35 @@ class Executer:
         self._state_version = snapshot.state_version
         pulse = self._channel.scene.pulse
         memories = MacroMemories(scene=self._channel.scene)
-        state, _clipped = render_jev_state(snapshot, pulse.is_cosmetic, scene=memories.scene_name)
+        state, clipped = render_jev_state(snapshot, pulse.is_cosmetic, scene=memories.scene_name, view=self._view())
+        self._omitted = clipped if self._spec.observation == "planner" else 0
+        if self._omitted:
+            # 조용히 자르지 않는다. Jev 가 무엇을 못 보고 고르는지 알아야 `EXPAND_STATE`·`REPLAN` 을 고를 수 있다.
+            state["omitted_objects"] = self._omitted
         return state
+
+    def _planned(self) -> bool:
+        """planner 가 범위를 정하는 런인가. `PulseMemory` 출처는 범위를 좁히지 않는다."""
+        return self._spec.observation == "planner" and self._spec.state_source == "state_set"
+
+    def _view(self) -> StateView:
+        """지금 Jev 에게 보일 범위. 단계 0 은 planner 의 ```observe, 1 은 path 를 풀고, 2 는 전부다."""
+        if not self._planned():
+            return EVERYTHING
+        observe = self._observe or StepObserve()
+        if self._expansions == 0:
+            return StateView(paths=observe.paths, members=observe.members, active_scene_first=True)
+        if self._expansions == 1:
+            return StateView(members=observe.members, active_scene_first=True)
+        return StateView(active_scene_first=True)
+
+    def _narrows(self) -> bool:
+        """지금 범위보다 넓힐 것이 있는가. 범위를 좁혔거나 상한에 걸려 빠진 것이 있을 때다."""
+        if not self._planned() or self._expansions >= 2:
+            return False
+        observe = self._observe
+        narrowed = observe is not None and (observe.paths is not None or observe.members is not None)
+        return narrowed or self._omitted > 0
 
     async def _ask_goal(self, action: str) -> float:
         try:
@@ -341,11 +422,17 @@ class Executer:
         except JevError as error:
             raise JevStopped(str(error)) from error
 
-    async def _pick(self, question: str, options: dict[str, str], recent: list[str] | None = None) -> str:
+    async def _pick(
+        self,
+        question: str,
+        options: dict[str, str],
+        recent: list[str] | None = None,
+        state: dict[str, Any] | None = None,
+    ) -> str:
         """Jev 가 고른 action. `recent` 가 있으면 state 에 `recent_actions` 로 함께 간다 — 화면이 안 움직인
         turn 은 화면만으로는 첫 turn 과 같아, 방금 무엇을 했고 그것이 입력을 보냈는지를 Jev 가 알아야
         같은 수를 되풀이하지 않는다(ARTEL-1288, 런 153)."""
-        state = await self._state()
+        state = dict(state) if state is not None else await self._state()
         if recent:
             state["recent_actions"] = recent
         try:

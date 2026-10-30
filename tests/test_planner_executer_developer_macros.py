@@ -242,9 +242,11 @@ def test_the_planner_sees_each_developer_macro_with_its_build() -> None:
     (system, user), = asked.calls
     assert "select the ones this step needs in the ```developer block" in user
     assert "from macros import" not in user
-    # 기본 planner prompt 의 rules 는 v2 와 같은 본문이고, 목록과 같은 말을 하는 reuse-first 규칙을 담는다.
-    assert _config().prompt_version == "v5"
-    assert system == prompt_text(RULES_ROLE, "v4") == prompt_text(RULES_ROLE, "v2")
+    # 기본 planner prompt 는 v6 이다. v6 의 rules 는 v5(= v4 = v2)에 ```observe 블록을 더한 것이고(ARTEL-1295 C),
+    # 목록과 같은 말을 하는 reuse-first 규칙은 그대로 담는다.
+    assert _config().prompt_version == "v6"
+    assert system == prompt_text(RULES_ROLE, "v6")
+    assert prompt_text(RULES_ROLE, "v5") == prompt_text(RULES_ROLE, "v4") == prompt_text(RULES_ROLE, "v2")
     assert "- Reuse first. Before you write an action, read the developer macros the request lists." in system
     assert (
         "- `tap_start()` — written against build 1.2.0 (beta)\n"

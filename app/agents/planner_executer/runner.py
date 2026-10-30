@@ -39,7 +39,7 @@ from app.agents.evaluator import (
 )
 from app.agents.planner_executer.decisions import MAX_REFUSAL_CHARS, clip, note_decision
 from app.agents.planner_executer.developer_macros import NO_DEVELOPER_MACROS, LoadedDeveloperMacros
-from app.agents.planner_executer.executer import Executer, StepPlay
+from app.agents.planner_executer.executer import Executer, StepPlay, recent_action_lines
 from app.agents.planner_executer.free import FreeCase, candidates, free_cases, next_scene, same_scene
 from app.agents.planner_executer.macros import RegisteredMacros
 from app.agents.planner_executer.observe import watch
@@ -140,9 +140,14 @@ class PlannerExecuterRunner:
                     )
                     await self._send_verdict(channel, state, scenario, step, False, message, self._engine_error(message))
                     continue
-                play = await executer.play(
-                    step, step_text(scenario.steps[step - 1]), written.macros, self._repair(scenario, step)
-                )
+                play = await self._play_with_replans(scenario, step, planner, executer, written.macros)
+                if play is None:
+                    message = (
+                        "PLANNER-REFUSED: the replanned macros were still refused after "
+                        f"{self._spec.max_rewrites} rewrites"
+                    )
+                    await self._send_verdict(channel, state, scenario, step, False, message, self._engine_error(message))
+                    continue
                 passed, message = await judge.judge(scenario, step, play)
                 analysis = None if passed else await self._analyse(scenario, step, play, message)
                 await self._send_verdict(channel, state, scenario, step, passed, message, analysis, play)
@@ -193,6 +198,28 @@ class PlannerExecuterRunner:
         await send_verdict(
             channel, state, step, passed, message, analysis=analysis, played=play.played() if play else None
         )
+
+    async def _play_with_replans(
+        self, scenario: QaScenario, step: int, planner: Planner, executer: Executer, macros
+    ) -> StepPlay | None:
+        """Play the step, and while Jev asks for `REPLAN` and the step has replans left, have the planner
+        write it again and play the new macros (ARTEL-1295 C). `None` when a replan was refused to the end.
+
+        The evaluator judges the last play. Earlier plays went out as turn `LOG`s and a `replan` decision.
+        """
+        replans = 0
+        while True:
+            can_replan = replans < self._spec.max_replans_per_step
+            play = await executer.play(
+                step, step_text(scenario.steps[step - 1]), macros, self._repair(scenario, step), can_replan
+            )
+            if not play.replan_requested:
+                return play
+            replans += 1
+            written = await planner.replan(scenario, step, play.stopped, recent_action_lines(play.turns))
+            if written.macros is None:
+                return None
+            macros = written.macros
 
     def _repair(self, scenario: QaScenario, step: int):
         """The editor for one step's play, or `None` when the run does not edit."""
