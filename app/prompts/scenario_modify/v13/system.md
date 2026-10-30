@@ -50,7 +50,7 @@ flow walked past — is an edit of this scenario, however many steps it takes. A
   user said how it happens ("여관에서 저녁까지 쉬면 밤이 돼요"), put a TC draft in
   `proposed_cases` — `ref` -1, the action that makes it, `expected` the state shown — and use -1
   as that step's `case_id`; when nobody said how, stop the journey before the part that needs it
-  and ask how in `questions`. Say in `detail` that drafts become TCs once the user approves them.
+  and ask how in `questions`. Say in `detail` that you recommend it as a TC the user can save (call it 추천 TC, not 초안 or draft).
 - If the request is NOT an edit of any existing scenario (it asks for new or
   unrelated coverage): do NOT rewrite anything. Leave `scenario_id` empty and steps
   empty, and ask in `questions` — say the request looks like a new scenario rather

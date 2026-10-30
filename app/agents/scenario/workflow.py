@@ -530,9 +530,9 @@ def _answer(
     """
     found: dict[tuple[str, int], Ref] = {}
     result = _checked(result, request, found)
-    # TC 초안은 오케가 아직 모르는 칸이라, 그동안 설명 칸에 표로도 보인다(ARTEL-1273).
-    if drafts:
-        detail = "\n\n".join(part for part in (detail, _drafts_table(drafts, request.locale.value == "ko")) if part)
+    # 추천 TC 는 화면이 답 말풍선 안의 카드로 보인다(proposed_cases). 화면이 읽는 설명 칸에는 싣지 않는다 — 같은 것이
+    # 두 번 보인다. 카드를 못 그리는 대화 기록 · MCP 를 위해 `message` 에만 표를 남긴다(아래).
+    recommended = _drafts_table(drafts, request.locale.value == "ko") if drafts else ""
     detail = _checked(_linked_titles(detail, request), request, found)
     asked = [
         question.model_copy(update={
@@ -563,7 +563,7 @@ def _answer(
         _spoken(part, found, prefix=True)
         # 물은 줄은 결과 바로 뒤다. 대화 기록은 메시지 하나를 앞에서부터 잘라 담으므로(설정
         # `scenario_history_message_max_chars`), 긴 설명 뒤에 두면 잘려 나가 몇 번 물었는지 못 센다.
-        for part in (result, *(asked_line(q) for q in asked), listed, detail) if part
+        for part in (result, *(asked_line(q) for q in asked), listed, detail, recommended) if part
     )
     return ScenarioAgentResult(
         message=message,
@@ -582,9 +582,9 @@ def _cell(text: str) -> str:
 def _drafts_table(drafts: list[ProposedCase], ko: bool) -> str:
     """TC 초안을 사용자가 읽는 표로. 승인 전이라는 것을 머리에 밝힌다."""
     head = (
-        "**TC 초안** (아직 저장하지 않았어요. 승인하면 TC 로 저장돼요)\n\n| 화면 | 사전조건 | 행동 | 기대 결과 |\n| --- | --- | --- | --- |"
+        "**추천 TC** (아직 저장하지 않았어요. 저장하면 TC 가 돼요)\n\n| 화면 | 사전조건 | 행동 | 기대 결과 |\n| --- | --- | --- | --- |"
         if ko else
-        "**TC drafts** (not saved yet; they become TCs once approved)\n\n| Screen | Precondition | Action | Expected |\n| --- | --- | --- | --- |"
+        "**Recommended TCs** (not saved yet; they become TCs once saved)\n\n| Screen | Precondition | Action | Expected |\n| --- | --- | --- | --- |"
     )
     rows = [
         f"| {_cell(d.scene)} | {_cell(d.precondition)} | {_cell(d.action)} | {_cell(d.expected)} |" for d in drafts
