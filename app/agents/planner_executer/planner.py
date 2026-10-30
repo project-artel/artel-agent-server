@@ -14,7 +14,7 @@ and its usage reaches Orchestration under the run's scope.
 import json
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -32,7 +32,14 @@ from app.agents.planner_executer.developer_macros import (
     bind_developer_calls,
     split_developer_block,
 )
-from app.agents.planner_executer.macros import RegisteredMacros, SceneMacros, StepMacros, parse_scene, parse_step
+from app.agents.planner_executer.macros import (
+    RegisteredMacros,
+    SceneMacros,
+    StepMacros,
+    StepObserve,
+    parse_scene,
+    parse_step,
+)
 from app.agents.planner_executer.prompts import (
     RULES_ROLE,
     SCENE_RULES_ROLE,
@@ -53,6 +60,9 @@ from app.qa.schemas import QaScenario
 
 _FENCE = re.compile(r"```(?:python)?\s*\n(.*?)```", re.DOTALL)
 _PLAN_BLOCK = re.compile(r"```plan\s*\n(.*?)```", re.DOTALL)
+_OBSERVE_BLOCK = re.compile(r"```observe\s*\n(.*?)```", re.DOTALL)
+# observe 블록 하나에 받는 이름 수. 범위를 좁히는 것이 블록의 쓸모라 넉넉하게만 막는다.
+MAX_OBSERVE_NAMES = 60
 
 # Sends the system and user text and returns the model's answer. Tests replace it.
 Ask = Callable[[str, str], Awaitable[str]]
@@ -94,6 +104,43 @@ def split_plan_block(answer: str) -> tuple[str, str | None]:
     if match is None:
         return answer, None
     return answer[: match.start()] + answer[match.end() :], match.group(1)
+
+
+def split_observe_block(answer: str) -> tuple[str, str | None]:
+    """The answer without its ```observe block, and the block's text (ARTEL-1295 C). Taken out first for
+    the reason `split_plan_block` gives."""
+    match = _OBSERVE_BLOCK.search(answer)
+    if match is None:
+        return answer, None
+    return answer[: match.start()] + answer[match.end() :], match.group(1)
+
+
+def read_observe(text: str | None) -> StepObserve | None:
+    """The ```observe block as a `StepObserve`, `None` when there is none, or `MacroRejection`.
+
+    `{"paths": ["<object path as the screen spells it>", ...], "members": ["Type.member", ...]}`. Either key
+    may be left out; a left-out key does not narrow.
+    """
+    if text is None or not text.strip():
+        return None
+    try:
+        block = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise MacroRejection(f"the ```observe block is not JSON — {error.msg}.") from None
+    if not isinstance(block, dict) or set(block) - {"paths", "members"}:
+        raise MacroRejection('the ```observe block must be an object with only "paths" and "members" lists.')
+    picked: dict[str, tuple[str, ...] | None] = {}
+    for key in ("paths", "members"):
+        names = block.get(key)
+        if names is None:
+            picked[key] = None
+            continue
+        if not isinstance(names, list) or not all(isinstance(name, str) and name.strip() for name in names):
+            raise MacroRejection(f'"{key}" in the ```observe block must be a list of non-empty strings.')
+        if len(names) > MAX_OBSERVE_NAMES:
+            raise MacroRejection(f'"{key}" in the ```observe block lists {len(names)} names; keep it to {MAX_OBSERVE_NAMES}.')
+        picked[key] = tuple(name.strip() for name in names)
+    return StepObserve(paths=picked["paths"], members=picked["members"])
 
 
 def read_plan(text: str | None, candidates: list[int]) -> tuple[list[int], dict[int, str]]:
@@ -159,6 +206,23 @@ class Planner:
     async def write(self, scenario: QaScenario, step: int) -> Written:
         """Step `step`'s macros; rewritten while the parser refuses them, up to `max_rewrites`."""
         return await self._write(scenario, step, this_step(scenario, step), f"Step {step}", "step")
+
+    async def replan(self, scenario: QaScenario, step: int, reason: str, turns: list[str]) -> Written:
+        """Step `step` written again because the decision model chose `REPLAN` (ARTEL-1295 C).
+
+        `reason` is why play stopped, `turns` the last action turns as `recent_action_lines` writes them. The
+        planner sees both above the current screen; the rest of the request is `write`'s.
+        """
+        lines = "\n".join(f"  {line}" for line in turns) or "  (no action ran)"
+        feedback = (
+            "Your previous macros for this step were played and the decision model asked for a new plan:\n"
+            f"  {reason}\n"
+            f"The last turns:\n{lines}\n"
+            "Write the step again for the screen as it is now."
+        )
+        return await self._write(
+            scenario, step, this_step(scenario, step), f"Step {step} (replan)", "replan", feedback
+        )
 
     async def write_travel(self, scenario: QaScenario, step: int, scene: str) -> Written:
         """A FREE scenario's move to `scene`, written as an ordinary step (`done()` is that scene).
@@ -242,10 +306,11 @@ class Planner:
             + (f"\n{feedback}\n" if feedback else "")
         )
 
-    async def _write(self, scenario: QaScenario, step: int, shown: str, label: str, kind: str) -> Written:
+    async def _write(
+        self, scenario: QaScenario, step: int, shown: str, label: str, kind: str, feedback: str = ""
+    ) -> Written:
         """`label` heads the notes ("Step 3", "Travel to `X` (for step 3)"); `kind` names the decision
-        in the log (`step`, `travel`)."""
-        feedback = ""
+        in the log (`step`, `travel`, `replan`). `feedback` opens the first request (a replan's reason)."""
         written = Written("", None, "nothing was written")
         for attempt in range(self._spec.max_rewrites + 1):
             await self._channel.note(
@@ -256,11 +321,14 @@ class Planner:
                 step,
             )
             answer = await self._ask(self._system, self._request(scenario, step, shown, feedback))
-            rest, calls = split_developer_block(answer)
+            rest, observe_text = split_observe_block(answer)
+            rest, calls = split_developer_block(rest)
             source = extract_code(rest)
             try:
+                observe = read_observe(observe_text)
                 developer_actions = await bind_developer_calls(calls, self._developer)
-                written = Written(source, await parse_step(source, self._registered, developer_actions))
+                macros = await parse_step(source, self._registered, developer_actions)
+                written = Written(source, replace(macros, observe=observe))
             except MacroRejection as rejection:
                 written = Written(source, None, rejection.render())
                 await note_decision(
@@ -280,6 +348,7 @@ class Planner:
                 )
                 continue
             actions = list(written.macros.actions)
+            observe = written.macros.observe
             await note_decision(
                 self._channel,
                 f"{kind}_macros",
@@ -287,6 +356,7 @@ class Planner:
                 step,
                 actions=actions,
                 source=clip(source, MAX_SOURCE_CHARS),
+                observe=None if observe is None else {"paths": observe.paths, "members": observe.members},
             )
             break
         return written

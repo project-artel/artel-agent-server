@@ -44,6 +44,14 @@ GOAL_PREFIX = "done_"
 
 
 @dataclass(frozen=True)
+class StepObserve:
+    """Jev 가 이 step 에서 읽을 범위. planner 가 화면에서 읽은 글자 그대로다(`app/qa/state_set.StateView`)."""
+
+    paths: tuple[str, ...] | None = None
+    members: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
 class StepMacros:
     """One step's macros, parsed: the actions in the order written, and the `done` probe.
 
@@ -55,6 +63,9 @@ class StepMacros:
     actions: dict[str, MacroDefinition]
     probe: MacroDefinition
     descriptions: dict[str, str] = field(default_factory=dict)
+    # planner 의 ```observe 블록: Jev 에게 보일 path 접두어와 `Type.member` 이름(ARTEL-1295 C). 블록이 없으면 `None`
+    # 이고, executer 는 live object 전부를 보인다.
+    observe: "StepObserve | None" = None
 
     def description(self, action: str) -> str:
         if action in self.descriptions:

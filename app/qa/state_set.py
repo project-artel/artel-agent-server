@@ -14,6 +14,8 @@ Orchestration 은 SDK 의 `pulse` 를 Agent 에 중계하기 전에 게임 인�
 """
 
 import logging
+import re
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import httpx
@@ -120,29 +122,91 @@ async def read_state(
         raise StateSetUnavailable(f"STATE_SET read failed: {error}") from error
 
 
+@dataclass(frozen=True)
+class StateView:
+    """Jev 에게 보일 범위(ARTEL-1295 C). Planner 의 ```observe 블록에서 오고, `EXPAND_STATE` 가 넓힌다.
+
+    `paths` 는 객체 경로 접두어, `members` 는 `Type.member` 짧은 이름이다. Planner 가 화면에서 읽은 글자 그대로라
+    selector 의 `[n]` 이 붙었든 안 붙었든 맞춘다. `None` 은 그 축으로 거르지 않는다는 뜻이다.
+    `active_scene_first` 는 활성 씬의 객체를 DontDestroyOnLoad 객체보다 앞에 세운다 — 상한에 걸릴 때 지금 화면의
+    객체가 먼저 남는다. `False` 는 pe9 의 `씬/selector` 순서다.
+    """
+
+    paths: tuple[str, ...] | None = None
+    members: tuple[str, ...] | None = None
+    active_scene_first: bool = False
+
+
+EVERYTHING = StateView()
+_INDEX = re.compile(r"\[\d+\]")
+
+
+def _plain(path: str) -> str:
+    return _INDEX.sub("", path).strip("/")
+
+
+def _under(entity: "StateEntity", prefixes: tuple[str, ...]) -> bool:
+    candidates = {_plain(entity.selector or ""), _plain(entity.path or "")} - {""}
+    for prefix in (_plain(raw) for raw in prefixes):
+        if any(name == prefix or name.startswith(prefix + "/") for name in candidates):
+            return True
+    return False
+
+
 def render_jev_state(
     snapshot: StateSnapshot,
     is_cosmetic: Any = lambda _type_key: False,
     scene: str | None = None,
+    view: StateView = EVERYTHING,
 ) -> tuple[dict[str, Any], int]:
     """`(state, clipped)`. `build_context_state(..., context=())` 와 같은 모양이다.
 
     `is_cosmetic` 은 `PulseMemory.is_cosmetic` 이다. relevance 판정은 Agent 가 내린 것이라 Agent 쪽에 있다.
+    `view` 가 범위를 좁히면 고른 멤버 중 어디에도 없던 이름을 `unknown_members` 로 적는다 — 없는 값이 아니라
+    이 상태에 실린 적 없는 값이다.
     """
     live = [entity for entity in snapshot.entities if entity.active and entity.status == "KNOWN"]
-    objects = [_render_entity(entity, is_cosmetic) for entity in sorted(live, key=lambda e: e.address)]
-    state: dict[str, Any] = {"scene": (scene or snapshot.scene or "").strip(), DEFAULT_OBJECTS_KEY: objects}
+    if view.paths is not None:
+        live = [entity for entity in live if _under(entity, view.paths)]
+    active = (scene or snapshot.scene or "").strip()
+    if view.active_scene_first:
+        order = lambda entity: (entity.scene != active, entity.address)  # noqa: E731
+    else:
+        order = lambda entity: entity.address  # noqa: E731
+    wanted = set(view.members) if view.members is not None else None
+    seen: set[str] = set()
+    objects = [_render_entity(entity, is_cosmetic, wanted, seen) for entity in sorted(live, key=order)]
+    state: dict[str, Any] = {"scene": active, DEFAULT_OBJECTS_KEY: objects}
+    if wanted:
+        unknown = sorted(name for name in wanted if name not in seen)
+        if unknown:
+            state["unknown_members"] = unknown
     clipped = fit_state(state)
     return state, clipped
 
 
-def _render_entity(entity: StateEntity, is_cosmetic: Any) -> dict[str, Any]:
-    """`context.render_object` 와 같은 규칙: 짧은 멤버 이름, 겹치면 `#among`, cosmetic 은 뺀다."""
+def _render_entity(
+    entity: StateEntity, is_cosmetic: Any, wanted: set[str] | None = None, seen: set[str] | None = None
+) -> dict[str, Any]:
+    """`context.render_object` 와 같은 규칙: 짧은 멤버 이름, 겹치면 `#among`, cosmetic 은 뺀다.
+
+    `wanted` 가 있으면 그 짧은 이름(`Type.member`)이나 `Type::member` 전체 이름에 맞는 멤버만 남기고, 맞은 이름을
+    `seen` 에 적는다.
+    """
     shown = [
         (member_id, observation)
         for member_id, observation in entity.members.items()
         if observation.status in ("KNOWN", "UNREAD") and not is_cosmetic(member_id.rsplit("#", 1)[0])
     ]
+    if wanted is not None:
+        kept = []
+        for member_id, observation in shown:
+            names = {_short_name(member_id), member_id.rsplit("#", 1)[0]} & wanted
+            if names:
+                kept.append((member_id, observation))
+                if seen is not None:
+                    seen.update(names)
+        shown = kept
     short_names = [_short_name(member_id) for member_id, _ in shown]
     members: dict[str, Any] = {}
     for (member_id, observation), short in zip(shown, short_names):

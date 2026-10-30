@@ -82,7 +82,15 @@ from pydantic import BaseModel, ConfigDict, Field
 # 마지막 whole 에 다시 안 실린 객체·멤버(`STALE`)는 빠지고, 동기화 전에는 Jev 를 부르지 않는다. knob
 # `state_source` 하나가 늘어 fingerprint 가 움직인다. `state_source="pulse_memory"` 는 pe8 의 frame 이다. planner·
 # evaluator·editor 가 읽는 화면(`prompts.screen`)과 macro 의 읽기는 그대로 `PulseMemory` 다.
-PLANNER_EXECUTER_LABEL = "pe9-jev-state-set"
+#
+# pe10: planner 가 step 마다 Jev 가 읽을 범위를 정한다(ARTEL-1295 C). prompt v6 의 ```observe 블록 — 객체 path 접두어와
+# `Type.member` 이름 — 로 executer 가 `STATE_SET` 을 좁혀 보인다. pe9 에서 전투 씬의 live 객체 35개 중 25개가 6000자
+# 상한에 잘렸고, `씬/selector` 순서라 DontDestroyOnLoad 의 튜토리얼 객체가 앞에 서서 카드·적·조합 버튼이 전부 빠졌다.
+# 그래서 활성 씬의 객체를 앞에 세우고, 상한에 걸려 빠진 수를 state 의 `omitted_objects` 로 알린다. Jev 의 선택지에 둘이
+# 는다: `EXPAND_STATE`(범위를 한 단계 넓힌다 — path 를 풀고, 다음엔 멤버도 푼다, step 마다 `max_expansions_per_step`)와
+# `REPLAN`(이 action 들로는 안 된다 — planner 가 이유와 최근 turn 을 읽고 step 을 다시 쓴다, `max_replans_per_step`).
+# knob 셋과 prompt v6 이 늘어 fingerprint 와 label 이 함께 움직인다. `observation="all"` 은 pe9 의 frame 이다.
+PLANNER_EXECUTER_LABEL = "pe10-observation-spec"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1
@@ -127,6 +135,13 @@ class PlannerExecuterArchSpec(BaseModel):
     # Executer 가 Jev 에게 보내는 state 의 출처(ARTEL-1297). `state_set` 은 Orchestration 의 `STATE_SET`,
     # `pulse_memory` 는 Agent 가 합친 `PulseMemory`(pe8). 둘을 같은 빌드에서 비교하려고 knob 으로 둔다.
     state_source: Literal["state_set", "pulse_memory"] = "state_set"
+    # Jev 가 읽을 범위를 planner 가 정한다(ARTEL-1295 C). `all` 은 live object 전부(pe9). `planner` 는 `state_set` 일 때만
+    # 뜻이 있다 — `PulseMemory` 출처는 범위를 좁히지 않는다.
+    observation: Literal["planner", "all"] = "planner"
+    # Jev 가 `EXPAND_STATE` 를 고를 수 있는 횟수(step 마다). 단계가 둘이라 2 를 넘어도 더 넓어지지 않는다.
+    max_expansions_per_step: int = Field(default=2, ge=0, le=2)
+    # Jev 가 `REPLAN` 을 골라 planner 가 step 을 다시 쓰는 횟수(step 마다). 0 이면 선택지에 없다.
+    max_replans_per_step: int = Field(default=1, ge=0, le=5)
 
 
 def planner_executer_fingerprint(spec: PlannerExecuterArchSpec, functions: tuple[str, ...]) -> str:
