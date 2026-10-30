@@ -76,7 +76,13 @@ from pydantic import BaseModel, ConfigDict, Field
 # 보내지 않았는데, Jev 가 받는 state 는 씬과 live object 만이라 화면이 안 움직인 turn 은 첫 turn 과 같아 보였다.
 # `recent_actions` 는 "turn 11: prepare_any_spell → passed, sent no input to the game" 같은 줄이고, 실패 사유와
 # flag 가 붙는다. 첫 turn 에는 없어 그때의 state 는 pe7 과 같다. 결정 model 이 읽는 글이 바뀌어 label 만 움직인다.
-PLANNER_EXECUTER_LABEL = "pe8-jev-recent-actions"
+#
+# pe9: Executer 가 Jev 에게 보내는 state(`decide`·`ask` 의 기본 state)를 Orchestration 의 `STATE_SET` 에서 읽는다
+# (ARTEL-1297). 전에는 Agent 의 `PulseMemory` 가 합친 live object 였다. 객체 모양과 상한은 같고 출처만 바뀐다 —
+# 마지막 whole 에 다시 안 실린 객체·멤버(`STALE`)는 빠지고, 동기화 전에는 Jev 를 부르지 않는다. knob
+# `state_source` 하나가 늘어 fingerprint 가 움직인다. `state_source="pulse_memory"` 는 pe8 의 frame 이다. planner·
+# evaluator·editor 가 읽는 화면(`prompts.screen`)과 macro 의 읽기는 그대로 `PulseMemory` 다.
+PLANNER_EXECUTER_LABEL = "pe9-jev-state-set"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1
@@ -118,6 +124,9 @@ class PlannerExecuterArchSpec(BaseModel):
     max_repairs_per_step: int = Field(default=2, ge=0, le=10)
     # action 이 돌았는데 게임에 입력을 하나도 보내지 않은 turn 이 이만큼 이어지면 play 를 멈춘다. 어느 action 이든 센다.
     max_idle_turns_in_a_row: int = Field(default=10, ge=1, le=1_000)
+    # Executer 가 Jev 에게 보내는 state 의 출처(ARTEL-1297). `state_set` 은 Orchestration 의 `STATE_SET`,
+    # `pulse_memory` 는 Agent 가 합친 `PulseMemory`(pe8). 둘을 같은 빌드에서 비교하려고 knob 으로 둔다.
+    state_source: Literal["state_set", "pulse_memory"] = "state_set"
 
 
 def planner_executer_fingerprint(spec: PlannerExecuterArchSpec, functions: tuple[str, ...]) -> str:

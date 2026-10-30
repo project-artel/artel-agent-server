@@ -20,7 +20,8 @@ Each turn:
 6. record the turn and send it as a `LOG`.
 
 Jev 에 묻는 두 질문은 macro 의 `ask`·`decide` 와 같은 모양이다: state 는 keyword 없는 `ask`·`decide`
-가 보내는 것(`build_context_state`: scene 과 화면의 live object 전부)이고, 선택지 끝에는
+가 보내는 것(scene 과 화면의 live object 전부)이고 — 출처는 `state_source` 가 고른다: Orchestration 의
+`STATE_SET`(`app/qa/state_set.py`, ARTEL-1297) 이나 Agent 의 `PulseMemory`(`build_context_state`) — 선택지 끝에는
 `none_fits` 가 붙고, `ask` 는 `ASK_TRUE_AT` 이상이면 참이다. 질문을 만드는 것은 이 모듈이고, 보내는
 것은 macro runner 의 host 가 쓰는 `app/qa/jev.py` 의 `JevClient` 다. Jev 가 답하지 못하면 그 step 의
 play 를 그 오류로 멈춘다 — 대신 아무거나 고르면 무엇을 잰 것인지 알 수 없게 된다.
@@ -48,6 +49,10 @@ from app.agents.qa.macro.runner import run_macro
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory, LogPayload, MessageType
 from app.qa.jev import JevClient, JevError
+from app.qa.state_set import EXECUTER_SPEC, StateSetUnavailable, StateSnapshot, read_state, render_jev_state
+
+# What the executer calls to read the game's state from Orchestration: `(qa_try_id, spec)` → snapshot.
+StateReader = Callable[[int, dict[str, Any]], Awaitable[StateSnapshot]]
 
 # What the executer calls to have a stuck action's macros rewritten: `(macros, action, its turn
 # records)` → the rewrite, or `None` when it was refused to the end (`app.agents.editor.Repair`).
@@ -69,6 +74,10 @@ SETTLE_ROUNDS = 8
 
 # A failure reason as kept in the turn record.
 MAX_REASON_CHARS = 400
+# `STATE_SET` 이 동기화되지 않았을 때(`AWAITING_WHOLE`) Jev 를 부르지 않고 기다리는 시간. 새 stream 의 첫 whole
+# `pulse` 는 연결 직후나 씬이 바뀔 때 온다.
+STATE_SYNC_WAIT_SECONDS = 10.0
+
 # Largest turn record sent as one `LOG`. Orchestration's socket closes on frames over 64 KiB.
 MAX_TURN_LOG_BYTES = 48_000
 
@@ -137,6 +146,13 @@ class JevStopped(Exception):
     """Jev did not answer; the step's play stops with this."""
 
 
+class StateStopped(Exception):
+    """The state Jev would read could not be had from `STATE_SET`; the step's play stops with this.
+
+    `PulseMemory` 로 되돌아가지 않는다. 몰래 바꾸면 그 turn 이 어느 출처로 골랐는지 기록에서 사라진다.
+    """
+
+
 class Executer:
     """Plays one scenario's steps, one at a time, over the run's channel."""
 
@@ -146,11 +162,15 @@ class Executer:
         spec: PlannerExecuterArchSpec,
         jev: JevClient,
         clock: Callable[[], float] = time.monotonic,
+        state_reader: StateReader = read_state,
     ) -> None:
         self._channel = channel
         self._spec = spec
         self._jev = jev
         self._clock = clock
+        self._state_reader = state_reader
+        # 마지막으로 Jev 에게 보낸 state 의 `stateVersion`. turn 기록에 남겨 어느 상태로 골랐는지 잇는다.
+        self._state_version: int | None = None
 
     async def play(
         self, step: int, action: str, macros: StepMacros, repair: Repair | None = None
@@ -207,6 +227,8 @@ class Executer:
                 if recent:
                     record["recent_actions"] = recent
                 record["picked"] = picked = await self._pick(record["question"], options, recent)
+                if self._state_version is not None:
+                    record["state_version"] = self._state_version
                 if picked == NONE_FITS:
                     await self._send(record)
                     none_since = none_since or now
@@ -259,6 +281,11 @@ class Executer:
             if play.turns:
                 play.turns[-1]["jev_error"] = str(error)
                 await self._send(play.turns[-1])
+        except StateStopped as error:
+            play.stopped = f"STATE-SET-ERROR: {error}"
+            if play.turns:
+                play.turns[-1]["state_error"] = str(error)
+                await self._send(play.turns[-1])
         play.end_screen = screen(channel.scene.pulse)
         play.end_frame = channel.scene.pulse.frame
         play.ended_at = _now()
@@ -273,16 +300,41 @@ class Executer:
             return False, f"{result.failure.code}: {result.failure.reason}"[:MAX_REASON_CHARS]
         return any(flagged.message == PROBE_FLAG for flagged in result.flags), None
 
-    def _state(self) -> dict[str, Any]:
-        """What a keyword-less macro `ask`/`decide` sends Jev: the scene and every live object."""
-        state, _clipped = build_context_state(MacroMemories(scene=self._channel.scene), MacroScope(), ())
+    async def _state(self) -> dict[str, Any]:
+        """What a keyword-less macro `ask`/`decide` sends Jev: the scene and every live object.
+
+        `state_source="state_set"` 이면 Orchestration 의 `STATE_SET` 에서 그린다. 동기화 전이면 reading 을
+        기다리며 다시 묻고, `STATE_SYNC_WAIT_SECONDS` 안에 동기화되지 않거나 읽기가 실패하면 `StateStopped` 다.
+        """
+        if self._spec.state_source == "pulse_memory":
+            state, _clipped = build_context_state(MacroMemories(scene=self._channel.scene), MacroScope(), ())
+            return state
+        waited = 0.0
+        while True:
+            try:
+                snapshot = await self._state_reader(self._channel.qa_try_id, EXECUTER_SPEC)
+            except StateSetUnavailable as error:
+                raise StateStopped(str(error)) from error
+            if snapshot.synced:
+                break
+            if waited >= STATE_SYNC_WAIT_SECONDS:
+                raise StateStopped(
+                    f"STATE_SET not synced after {STATE_SYNC_WAIT_SECONDS:g}s "
+                    f"(stream {snapshot.stream_id}, waiting for a whole pulse)"
+                )
+            await self._channel.wait_for_reading(IDLE_LOOK_SECONDS)
+            waited += IDLE_LOOK_SECONDS
+        self._state_version = snapshot.state_version
+        pulse = self._channel.scene.pulse
+        memories = MacroMemories(scene=self._channel.scene)
+        state, _clipped = render_jev_state(snapshot, pulse.is_cosmetic, scene=memories.scene_name)
         return state
 
     async def _ask_goal(self, action: str) -> float:
         try:
             return await self._jev.probability(
                 f"{GOAL_QUESTION} The step: {action}",
-                self._state(),
+                await self._state(),
                 true_means=ASK_TRUE_MEANS,
                 false_means=ASK_FALSE_MEANS,
             )
@@ -293,7 +345,7 @@ class Executer:
         """Jev 가 고른 action. `recent` 가 있으면 state 에 `recent_actions` 로 함께 간다 — 화면이 안 움직인
         turn 은 화면만으로는 첫 turn 과 같아, 방금 무엇을 했고 그것이 입력을 보냈는지를 Jev 가 알아야
         같은 수를 되풀이하지 않는다(ARTEL-1288, 런 153)."""
-        state = self._state()
+        state = await self._state()
         if recent:
             state["recent_actions"] = recent
         try:
