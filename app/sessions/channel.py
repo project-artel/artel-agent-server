@@ -245,7 +245,10 @@ class ScenarioChannel:
             self._resource_waiters.pop(message_id, None)
 
     async def submit_scenario(
-        self, scenario: dict, absorbed_scenario_ids: list[int] | None = None
+        self,
+        scenario: dict,
+        absorbed_scenario_ids: list[int] | None = None,
+        proposed_cases: list[dict] | None = None,
     ) -> ScenarioAccepted | None:
         """시나리오 하나를 넘긴다. 아무도 답하지 않으면 `None`.
 
@@ -274,6 +277,8 @@ class ScenarioChannel:
                 "messageId": message_id,
                 "scenario": scenario,
                 "absorbedScenarioIds": absorbed_scenario_ids or [],
+                # 이 시나리오의 스텝이 가리키는 추천 TC(음수 ref). 저쪽이 추천으로 남기고 스텝에 잇는다.
+                "proposedCases": proposed_cases or [],
             })
             try:
                 return await asyncio.wait_for(waiter, timeout=self._search_timeout)

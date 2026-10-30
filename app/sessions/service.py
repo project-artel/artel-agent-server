@@ -57,6 +57,7 @@ class SessionService:
         entry_scene: str | None = None,
         scene_edges: list[SceneEdge] | None = None,
         starting_values: dict[str, str] | None = None,
+        declined_cases: list[str] | None = None,
         model: LLMModel = DEFAULT_MODEL,
         reasoning: ReasoningConfig | None = None,
         locale: OutputLanguage = DEFAULT_LANGUAGE,
@@ -75,6 +76,7 @@ class SessionService:
             entry_scene=entry_scene,
             scene_edges=scene_edges or [],
             starting_values=starting_values or {},
+            declined_cases=declined_cases or [],
             pending_user_input=user_input,
             model=model,
             reasoning=reasoning,
@@ -114,6 +116,7 @@ class SessionService:
         current_scenarios: list[ScenarioPlan] | None = None,
         test_case_list: list | None = None,
         starting_values: dict[str, str] | None = None,
+        declined_cases: list[str] | None = None,
     ) -> ScenarioAgentResult:
         record = await self._load(session_id)
         # 계약이 바뀐 턴에만 온다. 기억(history)은 그대로 두고 TC 목록만 갈아 끼운다.
@@ -121,6 +124,8 @@ class SessionService:
             record.test_case_list = test_case_list
         if starting_values is not None:
             record.starting_values = starting_values
+        if declined_cases is not None:
+            record.declined_cases = declined_cases
         if model is not None:
             record.model = model
         if locale is not None:
@@ -179,6 +184,7 @@ class SessionService:
             entry_scene=record.entry_scene,
             scene_edges=record.scene_edges,
             starting_values=record.starting_values,
+            declined_cases=record.declined_cases,
             history=self._replay_messages(record),
             history_truncated=record.history_dropped > 0,
             draft=draft,

@@ -237,6 +237,8 @@ class ScenarioAgentRequest(BaseModel):
     # off nothing carried it, and the model could not even tell whether the
     # first case of a scenario is placeable.
     starting_values: dict[str, str] = Field(default_factory=dict)
+    # 사용자가 이미 버린 추천 TC(줄마다 `화면 · 행동 → 기대`). 같은 것을 다시 추천하지 않는다.
+    declined_cases: list[str] = Field(default_factory=list)
 
 
 class AuthoredFlow(BaseModel):
