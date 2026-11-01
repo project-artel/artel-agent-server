@@ -160,6 +160,9 @@ class TestCaseListItem(BaseModel):
     # 이것을 답했는데, 실측해 보니 넷 중 목록에 없던 것은 이것뿐이었다. 한 칸을 옮기니
     # 왕복이 사라졌다.
     input: str = ""
+    # `EXCEPTION` 이면 예외 TC 다(ARTEL-1307) — 조건이 안 맞을 때 막히는지, 되풀이를 막는지 본다.
+    # 기능 TC 는 이 칸이 오지 않는다(orchestration 이 예외에만 싣는다).
+    kind: str | None = None
 
 
 class ScenarioAgentRequest(BaseModel):
