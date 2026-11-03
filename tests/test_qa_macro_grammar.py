@@ -252,6 +252,7 @@ def test_the_macro_table_names_exactly_the_tools_a_macro_may_call() -> None:
         not in {
             "observe_scene",
             "inspect_object",
+            "get_errors",
             "capture_screen",
             "compact_context",
             "search_knowledge",
