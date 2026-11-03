@@ -496,7 +496,9 @@ from app.llm.models import LLMModel, get_model_spec
 # 입력 뒤 관찰이 거절돼 판정에 필요한 값을 다시 읽지 못하던 제한을 없앤다.
 # v49는 이 phase gate 변경에 TC snapshot 조회와 고정 TC ledger를 함께 적용한다.
 # 명세가 큰 run은 상세를 필요할 때 읽고, compaction 이후 전체 ID와 진행 상태를 복원한다.
-QA_ARCH_LABEL = "v49-tc-snapshot-context-act-observation"
+# v50은 동일 TC의 이전 검증 과정과 사람 설명을 읽는 도구를 추가한다.
+# 기록은 출처와 함께 참고로 읽으며 현재 실행의 판정을 대체하지 않는다.
+QA_ARCH_LABEL = "v50-tc-history"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
