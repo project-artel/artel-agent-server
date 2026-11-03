@@ -1,0 +1,101 @@
+{
+  "note": "대상 계약의 경계 사례. replay 는 런 로그의 값을 그대로 옮긴 것, synthetic 은 값을 바꿔 만든 것이다. 값 이름은 WordVenture 의 것이다.",
+  "declarations": [
+    {"name": "StageDataSingleton.stagePosition", "kind": "ordinal", "base": 0, "meaning": "The stage the player entered most recently and is fighting now.", "changes_when": "set when a stage is entered", "identifies": "stage", "role": "current"},
+    {"name": "MapMove.StagePosition", "kind": "ordinal", "base": 0, "meaning": "Progress, not location: the number of the next stage to clear.", "changes_when": "+1 on the first clear of a stage", "identifies": "stage", "role": "progress"},
+    {"name": "StageDataSingleton.isFirstClear", "kind": "flag", "base": null, "meaning": "Whether the battle just won was the first clear of that stage.", "changes_when": "set when a battle is won", "identifies": "stage", "role": "other"},
+    {"name": "MapMove.position", "kind": "ordinal", "base": 0, "meaning": "Which point of the map chapter the character stands on.", "changes_when": "when the character moves on the map", "identifies": "map point", "role": "current"}
+  ],
+  "cases": [
+    {
+      "name": "overshoot: the clear screen of stage 2 is not stage 1's",
+      "source": "replay: run 229, try 279, step 5",
+      "intent": {"target": "stage 1, the one cleared in step 4", "kind": "stage", "index": 0},
+      "start": {"(active scene)": "MapScene", "@persistent/GameObject[5] StageDataSingleton.stagePosition": 0, "static MapMove.StagePosition": 1},
+      "last": {"(active scene)": "GameClearScene", "@persistent/GameObject[5] StageDataSingleton.stagePosition": 1, "static MapMove.StagePosition": 2},
+      "evaluator_passed": true,
+      "expect": {"status": "bound", "identity": [["StageDataSingleton.stagePosition", 0]], "passed": false, "state": "mismatch"}
+    },
+    {
+      "name": "stage 2 entered as written",
+      "source": "replay: run 239, try 289, step 6",
+      "intent": {"target": "stage 2, the next node after the stage cleared in step 4", "kind": "stage", "index": 1},
+      "start": {"(active scene)": "GameClearScene", "@persistent/GameObject[5] StageDataSingleton.stagePosition": 0, "static MapMove.StagePosition": 1},
+      "last": {"(active scene)": "TurnBattleScene", "@persistent/GameObject[5] StageDataSingleton.stagePosition": 1, "static MapMove.StagePosition": 1},
+      "evaluator_passed": true,
+      "expect": {"status": "bound", "identity": [["StageDataSingleton.stagePosition", 1]], "passed": true, "state": "match"}
+    },
+    {
+      "name": "stage 1 entered again where stage 2 was asked: the progress value stays 1 either way",
+      "source": "synthetic: run 239 step 6 with the player re-entering stage 1",
+      "intent": {"target": "stage 2, the next node after the stage cleared in step 4", "kind": "stage", "index": 1},
+      "start": {"(active scene)": "GameClearScene", "@persistent/GameObject[5] StageDataSingleton.stagePosition": 0, "static MapMove.StagePosition": 1},
+      "last": {"(active scene)": "TurnBattleScene", "@persistent/GameObject[5] StageDataSingleton.stagePosition": 0, "static MapMove.StagePosition": 1},
+      "evaluator_passed": true,
+      "expect": {"status": "bound", "identity": [["StageDataSingleton.stagePosition", 1]], "passed": false, "state": "mismatch"}
+    },
+    {
+      "name": "the current value need not exist yet when the step starts",
+      "source": "replay: run 239, try 289, step 3 (the end value is step 4's start)",
+      "intent": {"target": "stage 1, the first node", "kind": "stage", "index": 0},
+      "start": {"(active scene)": "MapScene", "static MapMove.StagePosition": 0},
+      "last": {"(active scene)": "TurnBattleScene", "@persistent/GameObject[5] StageDataSingleton.stagePosition": 0, "static MapMove.StagePosition": 0},
+      "evaluator_passed": true,
+      "expect": {"status": "bound", "identity": [["StageDataSingleton.stagePosition", 0]], "passed": true, "state": "match"}
+    },
+    {
+      "name": "stage 1 cleared, progress moves as predicted",
+      "source": "replay: run 239, try 289, step 4",
+      "intent": {"target": "stage 1", "kind": "stage", "index": 0, "changes": [["MapMove.StagePosition", "plus_one"]]},
+      "start": {"(active scene)": "TurnBattleScene", "@persistent/GameObject[5] StageDataSingleton.stagePosition": 0, "static MapMove.StagePosition": 0},
+      "last": {"(active scene)": "GameClearScene", "@persistent/GameObject[5] StageDataSingleton.stagePosition": 0, "static MapMove.StagePosition": 1},
+      "evaluator_passed": true,
+      "expect": {"status": "bound", "identity": [["StageDataSingleton.stagePosition", 0]], "passed": true, "state": "match", "consistent": true}
+    },
+    {
+      "name": "stage 2 cleared",
+      "source": "replay: run 239, try 289, step 7",
+      "intent": {"target": "stage 2, the one entered in step 6", "kind": "stage", "index": 1, "changes": [["MapMove.StagePosition", "plus_one"]]},
+      "start": {"(active scene)": "TurnBattleScene", "@persistent/GameObject[5] StageDataSingleton.stagePosition": 1, "static MapMove.StagePosition": 1},
+      "last": {"(active scene)": "GameClearScene", "@persistent/GameObject[5] StageDataSingleton.stagePosition": 1, "static MapMove.StagePosition": 2},
+      "evaluator_passed": true,
+      "expect": {"status": "bound", "identity": [["StageDataSingleton.stagePosition", 1]], "passed": true, "state": "match", "consistent": true}
+    },
+    {
+      "name": "re-entering a cleared stage passes although progress is ahead",
+      "source": "synthetic: a save with two stages cleared, stage 1 entered again",
+      "intent": {"target": "stage 1, the first node", "kind": "stage", "index": 0},
+      "start": {"(active scene)": "MapScene", "@persistent/GameObject[5] StageDataSingleton.stagePosition": 1, "static MapMove.StagePosition": 2},
+      "last": {"(active scene)": "TurnBattleScene", "@persistent/GameObject[5] StageDataSingleton.stagePosition": 0, "static MapMove.StagePosition": 2},
+      "evaluator_passed": true,
+      "expect": {"status": "bound", "identity": [["StageDataSingleton.stagePosition", 0]], "passed": true, "state": "match"}
+    },
+    {
+      "name": "the current value is missing at the end",
+      "source": "synthetic: run 239 step 6 with the stage value not read at the end",
+      "intent": {"target": "stage 2", "kind": "stage", "index": 1},
+      "start": {"(active scene)": "GameClearScene", "@persistent/GameObject[5] StageDataSingleton.stagePosition": 0, "static MapMove.StagePosition": 1},
+      "last": {"(active scene)": "TurnBattleScene", "static MapMove.StagePosition": 1},
+      "evaluator_passed": true,
+      "expect": {"status": "bound", "identity": [["StageDataSingleton.stagePosition", 1]], "passed": false, "state": "unknown"}
+    },
+    {
+      "name": "a stale reading is not a value",
+      "source": "synthetic: run 239 step 6 with a stale stage value at the end",
+      "intent": {"target": "stage 2", "kind": "stage", "index": 1},
+      "start": {"(active scene)": "GameClearScene", "@persistent/GameObject[5] StageDataSingleton.stagePosition": 0, "static MapMove.StagePosition": 1},
+      "last": {"(active scene)": "TurnBattleScene", "@persistent/GameObject[5] StageDataSingleton.stagePosition": "(stale)", "static MapMove.StagePosition": 1},
+      "evaluator_passed": true,
+      "expect": {"status": "bound", "identity": [["StageDataSingleton.stagePosition", 1]], "passed": false, "state": "unknown"}
+    },
+    {
+      "name": "a current value that lives in one scene cannot confirm the target",
+      "source": "synthetic: run 231's map-only value declared as current",
+      "intent": {"target": "the second point of the map", "kind": "map point", "index": 1},
+      "start": {"(active scene)": "MapScene", "MapMove[0] MapMove.position": 0},
+      "last": {"(active scene)": "TurnBattleScene"},
+      "evaluator_passed": true,
+      "expect": {"status": "unknown", "passed": false, "state": "unknown"}
+    }
+  ]
+}
