@@ -48,7 +48,8 @@ from pydantic import BaseModel, ConfigDict, Field
 # - evaluator: 판정을 `app/agents/evaluator/` 로 뗐다. ```check 값, play 전후의 전체 변화, 화면 사진을 읽고 판정과 game_insight
 #   를 낸다. 실패 step 은 원인을 가르고(knob `analysis`) 런 리뷰를 쓴다.
 # prompt 는 qa_planner v4 를 읽는다.
-PLANNER_EXECUTER_LABEL = "pe3-state-set-guidance"
+# pe4는 editor 복구에서 행동 계약을 보존하고 PulseMemory 판정에 시작·끝 관측값을 전달한다.
+PLANNER_EXECUTER_LABEL = "pe4-editor-contract-pulse-evidence"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1

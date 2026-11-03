@@ -384,6 +384,60 @@ def test_looking_again_mid_action_does_not_send_the_phase_backwards() -> None:
     assert cycle.phase is RunPhase.act
 
 
+@pytest.mark.parametrize("mode", [PhaseCycleMode.lite, PhaseCycleMode.full])
+def test_act_관찰_후_추가_입력과_판정_허용(mode) -> None:
+    cycle = build_phase_cycle(mode)
+    if mode is PhaseCycleMode.full:
+        cycle.advance("decide_next_action")
+    cycle.advance("press_key")
+
+    for name in ("capture_screen", "inspect_object", "observe_scene", "press_key") * 3:
+        assert cycle.refusal_for(name) is None
+        cycle.advance(name)
+        assert cycle.phase is RunPhase.act
+
+    assert cycle.refusals == 0
+    assert cycle.forced_passes == 0
+    assert cycle.refusal_for("report_test_case") is None
+    cycle.advance("report_test_case")
+    assert cycle.phase is RunPhase.update_memory
+    for name in ("capture_screen", "inspect_object"):
+        assert cycle.refusal_for(name) is not None
+
+
+@pytest.mark.parametrize("name", ["capture_screen", "inspect_object"])
+@pytest.mark.parametrize("phase", [RunPhase.decide, RunPhase.verify, RunPhase.review_draft])
+def test_관찰_도구가_필수_phase_응답을_대신하지_않음(name, phase) -> None:
+    cycle = build_phase_cycle(PhaseCycleMode.full)
+    cycle.phase = phase
+    assert cycle.refusal_for(name) is not None
+    assert cycle.phase is phase
+
+
+@pytest.mark.parametrize("mode", [PhaseCycleMode.lite, PhaseCycleMode.full])
+def test_act에서_관찰_도구_본문_실행(mode) -> None:
+    async def run() -> None:
+        channel, state, tools, sent = make(mode)
+        standing_on(channel, "StoryScene")
+        state.phase_cycle.phase = RunPhase.act
+
+        result = await tools["inspect_object"].ainvoke(
+            {"step": 1, "selector": "StoryText", "thought": "대사 값을 확인한다"}
+        )
+        assert "Out of phase" not in result
+        assert state.phase_cycle.phase is RunPhase.act
+
+        await tools["capture_screen"].ainvoke(
+            {"step": 1, "thought": "입력 이후 화면을 확인한다"}
+        )
+        assert state.captures_attempted == 1
+        assert any(frame["type"] == "ACTION" for frame in sent)
+        assert state.phase_cycle.phase is RunPhase.act
+        assert state.phase_cycle.refusals == 0
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("name", sorted(ALWAYS_ALLOWED))
 def test_the_always_allowed_tools_are_allowed_in_every_phase(name) -> None:
     """Without this list the run is trapped, so it is checked against every phase
