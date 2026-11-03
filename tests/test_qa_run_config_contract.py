@@ -72,6 +72,19 @@ def test_the_prompt_hash_is_the_body_that_was_loaded() -> None:
     assert config["prompt_hashes"]["system"] == load_prompt("qa_run", "system", "v1").body_sha256
 
 
+def test_history_prompt_hashes_follow_the_tools_and_phase_directive() -> None:
+    config = open_session()["run_config"]
+    assert "read_test_case_history" in config["tools"]
+    assert config["prompt_hashes"]["qa_history_tool"] == load_prompt(
+        "qa_history", "tool_read_test_case_history", "v1"
+    ).body_sha256
+    assert config["prompt_hashes"]["qa_history_phase_directive"] == load_prompt(
+        "qa_history", "phase_directive", "v1"
+    ).body_sha256
+    unphased = open_session(arch={"phase_cycle": "off"})["run_config"]
+    assert "qa_history_phase_directive" not in unphased["prompt_hashes"]
+
+
 def test_a_model_without_reasoning_says_so_rather_than_going_quiet() -> None:
     """`reasoning: null` alone has two meanings — not asked for, and not
     offered. A comparison that cannot tell them apart reads a model's missing

@@ -1025,7 +1025,7 @@ def test_the_agent_is_offered_exactly_these_tools() -> None:
         "decline_macro_draft",
         "search_macros",
         "ask_user",
-        "start_test_case", "report_test_case", "get_test_case",
+        "start_test_case", "report_test_case", "get_test_case", "read_test_case_history",
         "report_issue",
         "finish_run",
         "reply_to_operator",

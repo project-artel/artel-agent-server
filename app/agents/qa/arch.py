@@ -492,10 +492,10 @@ from app.llm.models import LLMModel, get_model_spec
 # 이 view와 tool 구성을 이전 실행과 구분해 기록한다.
 # macro 결과에서 중간 대사 목록을 제거하고 현재 화면을 관찰하는 계약을 명시한다.
 # 모델이 읽는 결과 형식이 바뀌므로 이전 실행과 별도 label로 기록한다.
-# v50은 TC snapshot context·ACT 관찰 허용에 PULSE events와 adapter 조각을 함께 적용한다.
-# member count, unread 이유, holder별 static, coverage gap과 audio 상태가 모델 입력에 추가된다.
-# tool schema만으로 구분되지 않는 view 변경이므로 이전 실행과 다른 label을 사용한다.
-QA_ARCH_LABEL = "v50-pulse-events-tc-context"
+# v50은 TC snapshot context와 ACT 관찰 허용에 PULSE events·adapter 조각을 함께 적용한다.
+# v51은 같은 TC의 이전 검증 과정과 사람 설명을 조회하는 도구를 추가한다.
+# 과거 기록은 출처와 함께 참고로 읽으며 현재 실행의 판정을 대체하지 않는다.
+QA_ARCH_LABEL = "v51-pulse-tc-history"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

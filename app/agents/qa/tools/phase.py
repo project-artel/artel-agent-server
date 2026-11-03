@@ -80,6 +80,7 @@ ALWAYS_ALLOWED = frozenset(
         "edit_macro",
         "read_macro",
         "search_macros",
+        "read_test_case_history",
         "observe_scene",
         "reply_to_operator",
         "start_test_case",
