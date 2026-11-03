@@ -786,3 +786,5 @@ def test_macros_off_withholds_the_macro_skill_from_every_list_of_skills() -> Non
         for one in build_tools(_ThrowawayChannel(), QaRunState(total_steps=0), off, "v19")
     }["load_skill"]
     assert "macro" not in load_skill.description
+
+
