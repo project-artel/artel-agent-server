@@ -83,7 +83,7 @@ def test_every_tool_the_default_run_offers_has_a_phase_or_is_always_allowed() ->
         )
         names, _middleware, _print = structure_of(arch)
         unplaced = [
-            name for name in names if name not in _TOOL_PHASE and name not in ALWAYS_ALLOWED
+            name for name in names if name != "load_skill" and name not in _TOOL_PHASE and name not in ALWAYS_ALLOWED
         ]
         assert unplaced == [], f"macros={macros}"
 

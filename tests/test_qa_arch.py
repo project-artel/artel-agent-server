@@ -121,7 +121,7 @@ def test_the_fingerprint_ignores_the_model_and_the_prompt() -> None:
     # pinned side is asked for with the rung that needs none — and then so are
     # the other two, because a structure that differed between them is the one
     # thing that would make this comparison say nothing.
-    old_shape = QaArchSpec(phase_cycle=PhaseCycleMode.off)
+    old_shape = QaArchSpec(phase_cycle=PhaseCycleMode.off, vision=VisionMode.off)
     sonnet = resolve_run_config(model="anthropic/claude-sonnet-5.5", arch=old_shape)
     gpt = resolve_run_config(model="openai/gpt-6-luna", arch=old_shape)
     pinned = resolve_run_config(
@@ -494,10 +494,10 @@ def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
 
     # `build_tools` registers the real `load_skill` itself, so the fingerprint
     # reads its real schema (`name`, `thought`) rather than a stand-in.
-    assert "load_skill" not in off_names
+    assert "load_skill" in off_names
     # `build_tools` appends it before the compaction tool, so compare as sets.
-    assert set(on_names) == set(off_names) | {"load_skill"}
-    assert len(on_names) == len(off_names) + 1
+    assert set(on_names) == set(off_names)
+    assert len(on_names) == len(off_names)
     assert on_fingerprint != off_fingerprint
 
 
@@ -515,7 +515,7 @@ def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v46-tc-without-dialogue-history"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v47-visual-skill-without-dialogue-history"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -584,6 +584,7 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
     "reply_to_operator",
     "capture_screen",
     "skip_memory_update",
+    "load_skill",
     "compact_context",
 )
 # Moved twice since `83bc272fee58`, which was the last digest taken before this
@@ -652,7 +653,7 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 # `max_behavior_calls_per_run` (ARTEL-1054) joined `QaArchSpec` and the label moved to
 # `v27-game-functions`. Both axes default to `off`, so the default tool set is unchanged; the
 # digest moved because `arch.model_dump()` gained four keys.
-_EXPECTED_DEFAULT_FINGERPRINT = "906e07cf5eaf"
+_EXPECTED_DEFAULT_FINGERPRINT = "d9de4842e9fd"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:

@@ -26,7 +26,7 @@ def test_tc_plan_keeps_human_feedback_without_demonstration(mode):
 
 
 def test_combined_prompt_keeps_tc_verdict_and_diagnostics_instructions():
-    assert resolve_version("qa_run") == "v41"
+    assert resolve_version("qa_run") == "v42"
     system = load_prompt("qa_run", "system").body
     assert "Steps are optional guidance" in system
     for name in ("start_test_case", "report_test_case", "ask_user", "get_errors", "get_performance"):

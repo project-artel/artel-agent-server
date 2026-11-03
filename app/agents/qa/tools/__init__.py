@@ -81,8 +81,7 @@ def build_tools(
     # and order it had before the axis existed, whatever `phase_cycle` says.
     # `load_skill` is in neither of `phase.py`'s tables, so the gate below wraps it
     # but never refuses it.
-    if ctx.arch.skills == "on_demand":
-        tools.extend(build_skill_tools(ctx, prompt_version))
+    tools.extend(build_skill_tools(ctx, prompt_version))
 
     # 게임이 등록한 function 의 tool (ARTEL-1054). 맨 뒤라서 두 축이 꺼진 run 은 목록도 순서도
     # 종전 그대로다. `run_cheat` 와 `start_behavior` 는 게임을 움직이므로 `phase.py` 표에서 `ACT`

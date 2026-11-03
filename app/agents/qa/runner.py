@@ -105,7 +105,7 @@ def system_prompt_with_skills(
         return system_prompt
     sections = [system_prompt.rstrip()]
     for name in skill_names(prompt_version):
-        if name in withheld:
+        if name in withheld or name == "visual_inspection":
             continue
         sections.append(_as_section(name, load_skill(name, prompt_version).body.strip()))
     return "\n\n".join(sections) + "\n"
@@ -139,7 +139,8 @@ def _skills_directive(
 ) -> str:
     """The system prompt's Skills section, present only when the agent can load skills.
 
-    With `skills="off"` every skill body is already inlined, and the tool
+    visual_inspection은 skills=off에서도 inline하지 않고 요청할 때 읽는다.
+    With `skills="off"` the other skill bodies are already inlined, and the tool
     descriptions say "the X skill" without naming a tool, so a section telling the
     agent to call `load_skill` would send it looking for a tool it was not given.
 
@@ -149,13 +150,15 @@ def _skills_directive(
     cannot drift away from the skill it advertises.
     """
     match = _VERSION_NUMBER.match(prompt_version)
-    if skills != "on_demand" or match is None or int(match.group(1)) < _FIRST_SKILL_VERSION:
+    if match is None or int(match.group(1)) < _FIRST_SKILL_VERSION:
         return ""
     skill_list = "\n".join(
         f"- `{name}` — {description}"
         for name, description in skill_descriptions(prompt_version).items()
-        if name not in withheld
+        if name not in withheld and (skills == "on_demand" or name == "visual_inspection")
     )
+    if not skill_list:
+        return ""
     return load_prompt(PROMPT_AGENT, "skills_directive", prompt_version).body.format(
         skill_list=skill_list
     )

@@ -17,7 +17,8 @@ neither. `tests/test_qa_skill_tools.py` pins both directions. Compaction can sti
 summarise a loaded skill away, which is one more reason the description says to
 load a skill again when its rules are no longer in front of the agent.
 
-The tool is offered only when `arch.skills == "on_demand"`. With `off`,
+visual_inspection은 vision이 켜진 새 prompt 실행에서 항상 요청할 때 읽는다.
+그 밖의 skill은 `arch.skills == "on_demand"`일 때 이 tool로 읽는다. With `off`,
 `runner.system_prompt_with_skills` puts every skill body in the system prompt
 instead, so there is nothing to load.
 """
@@ -59,6 +60,11 @@ def build_skill_tools(ctx: ToolContext, prompt_version: str | None = None) -> li
     # 부르면 유효한 이름 목록이 돌아오고 거기에도 없다.
     withheld = withheld_skills(ctx.arch)
     names = tuple(name for name in skill_names(prompt_version) if name not in withheld)
+    # 시각 점검은 다른 skill이 inline인 실행에서도 요청할 때만 읽는다.
+    if ctx.arch.skills != "on_demand":
+        names = tuple(name for name in names if name == "visual_inspection")
+    if not names:
+        return []
     # Per run, because `build_tools` is called once per run. Kept here rather than
     # on `QaRunState`, since nothing outside this tool reads it.
     loaded: set[str] = set()
