@@ -150,14 +150,16 @@ def test_claude_api_rows_parse_with_effort_reasoning_and_pricing() -> None:
 
 
 
-def test_gpt_rows_copy_their_openrouter_rows_but_the_id_and_label() -> None:
+def test_gpt_모델은_호출_경로별_이름과_단가를_사용한다() -> None:
     rows = {row["id"]: row for row in fixture_rows()}
 
     for model_id in GPT_IDS:
         gpt_row = rows[model_id]
         openrouter_row = rows[model_id.replace("gpt/", "openai/", 1)]
         differing = {key for key in gpt_row if gpt_row[key] != openrouter_row[key]}
-        assert differing == {"id", "label", "sortOrder"}
+        assert differing == {"id", "label", "sortOrder", "pricing"}
+        assert gpt_row["pricing"] is not None
+        assert openrouter_row["pricing"] is None
         assert gpt_row["label"] == f"{openrouter_row['label']} (OpenAI API)"
 
 def test_parsing_builds_specs_with_id_enabled_reasoning_and_pricing() -> None:

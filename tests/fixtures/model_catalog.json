@@ -586,7 +586,19 @@
       "step": null,
       "defaultTokens": null
     },
-    "pricing": null,
+    "pricing": {
+      "inputPerMtok": 2.0,
+      "outputPerMtok": 10.0,
+      "cacheWritePerMtok": 2.5,
+      "cacheReadPerMtok": 0.1,
+      "asOf": "2026-11-03",
+      "source": "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
+      "longContextThresholdTokens": 272000,
+      "longContextInputPerMtok": 4.0,
+      "longContextOutputPerMtok": 15.0,
+      "longContextCacheWritePerMtok": 5.0,
+      "longContextCacheReadPerMtok": 0.2
+    },
     "enabled": true,
     "sortOrder": 200
   },
@@ -615,7 +627,19 @@
       "step": null,
       "defaultTokens": null
     },
-    "pricing": null,
+    "pricing": {
+      "inputPerMtok": 10.0,
+      "outputPerMtok": 50.0,
+      "cacheWritePerMtok": 12.5,
+      "cacheReadPerMtok": 1.0,
+      "asOf": "2026-11-03",
+      "source": "https://developers.openai.com/api/docs/models/gpt-6-astra",
+      "longContextThresholdTokens": 272000,
+      "longContextInputPerMtok": 20.0,
+      "longContextOutputPerMtok": 75.0,
+      "longContextCacheWritePerMtok": 25.0,
+      "longContextCacheReadPerMtok": 2.0
+    },
     "enabled": true,
     "sortOrder": 210
   },
@@ -644,7 +668,19 @@
       "step": null,
       "defaultTokens": null
     },
-    "pricing": null,
+    "pricing": {
+      "inputPerMtok": 0.1,
+      "outputPerMtok": 0.5,
+      "cacheWritePerMtok": 0.125,
+      "cacheReadPerMtok": 0.01,
+      "asOf": "2026-11-03",
+      "source": "https://developers.openai.com/api/docs/models/gpt-6-luna",
+      "longContextThresholdTokens": 272000,
+      "longContextInputPerMtok": 0.2,
+      "longContextOutputPerMtok": 0.75,
+      "longContextCacheWritePerMtok": 0.25,
+      "longContextCacheReadPerMtok": 0.02
+    },
     "enabled": true,
     "sortOrder": 220
   },
@@ -673,7 +709,19 @@
       "step": null,
       "defaultTokens": null
     },
-    "pricing": null,
+    "pricing": {
+      "inputPerMtok": 2.0,
+      "outputPerMtok": 12.0,
+      "cacheWritePerMtok": 2.5,
+      "cacheReadPerMtok": 0.2,
+      "asOf": "2026-11-03",
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
+      "longContextThresholdTokens": 272000,
+      "longContextInputPerMtok": 4.0,
+      "longContextOutputPerMtok": 18.0,
+      "longContextCacheWritePerMtok": 5.0,
+      "longContextCacheReadPerMtok": 0.4
+    },
     "enabled": true,
     "sortOrder": 230
   }
