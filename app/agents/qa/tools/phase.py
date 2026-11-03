@@ -83,6 +83,7 @@ ALWAYS_ALLOWED = frozenset(
         "observe_scene",
         "reply_to_operator",
         "start_test_case",
+        "get_test_case",
         "ask_user",
         "report_issue",
         "finish_run",

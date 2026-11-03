@@ -16,6 +16,7 @@ from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from app.agents.qa.compaction import QaCompactionMiddleware, render_progress_ledger
+from app.agents.qa.case_context import render_case_ledger
 from app.agents.qa.tools import QaRunState
 from app.prompts import load_prompt
 from app.qa.channel import QaRunChannel
@@ -290,8 +291,8 @@ def test_the_ledger_restates_what_the_summary_is_told_not_to_carry() -> None:
 
     assert "TC 1, attempt a: PASSED — 시작 화면이 떴다" in ledger
     assert "TC 2, attempt b: FAILED — 설정 버튼이 없다" in ledger
-    assert "3, 4" in ledger
-    assert "Choose what to verify next" in ledger
+    assert '"without_report_ids": [\n    3,\n    4' in render_case_ledger(state, channel)
+    assert "separate authoritative TC ledger" in ledger
     assert "느리게 진행해줘" in ledger
     assert "소리는 끄고" in ledger
     # The same wording the tools use, so an instruction reads on re-entry exactly

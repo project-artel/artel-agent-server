@@ -492,7 +492,9 @@ from app.llm.models import LLMModel, get_model_spec
 # 이 view와 tool 구성을 이전 실행과 구분해 기록한다.
 # macro 결과에서 중간 대사 목록을 제거하고 현재 화면을 관찰하는 계약을 명시한다.
 # 모델이 읽는 결과 형식이 바뀌므로 이전 실행과 별도 label로 기록한다.
-QA_ARCH_LABEL = "v47-visual-skill-without-dialogue-history"
+# v48: TC snapshot 조회와 고정 TC ledger를 추가한다. 명세가 큰 run은 상세를 필요할 때
+# 읽고, compaction 이후 전체 ID와 검증 진행 상태는 run 데이터에서 복원한다.
+QA_ARCH_LABEL = "v48-tc-snapshot-context"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
