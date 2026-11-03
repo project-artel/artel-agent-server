@@ -18,7 +18,6 @@ class SpecRow(BaseModel):
     precondition: str
     test_step: str
     expected_result: str
-    status: Literal["ready", "candidate", "review", "unsupported"]
     scene: str
     ui_text: str
     ui_sprite: str
@@ -39,9 +38,7 @@ class SpecGenerationSummary(BaseModel):
     contracts: int
     connected_scenarios: int
     ready_specs: int
-    candidate_specs: int
     review_specs: int
-    unsupported_specs: int
 
 
 class SpecGenerationResponse(BaseModel):
@@ -73,15 +70,11 @@ async def generate_specs_v2(
     return SpecGenerationResponse.model_validate(payload)
 
 
-SpecStatus = Literal["ready", "candidate", "review", "unsupported"]
-
-
 class TestCaseSpec(BaseModel):
     scene: str
     precondition: str
     step: str
     expected_value: str
-    status: SpecStatus
 
 
 class TestCaseSource(BaseModel):
@@ -113,19 +106,11 @@ class TestCase(BaseModel):
     metadata: TestCaseMetadata
 
 
-class TestCaseCounts(BaseModel):
-    ready: int
-    candidate: int
-    review: int
-    unsupported: int
-
-
 class TestCaseResponse(BaseModel):
     schema_version: Literal["test-case.v1"]
     artifact: str
     capture: str
     build_evidence: str | None
-    counts: TestCaseCounts
     test_cases: list[TestCase]
 
 
@@ -142,7 +127,7 @@ async def generate_test_cases_v2(
     """Every discovered spec as a `test-case.v1` record, runnable or not.
 
     Review and unsupported rows are included on purpose. A spec that cannot be
-    run is still a fact about the game; `spec.status` says which is which and
+    run is still a fact about the game.
     `metadata.source.evidence_gaps` says what stopped it.
     """
 
