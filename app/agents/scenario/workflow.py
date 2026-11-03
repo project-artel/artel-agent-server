@@ -54,11 +54,13 @@ from app.agents.scenario.schemas import (
     QuestionOption,
     Ref,
     ReviewedCases,
+    ProposedCase,
     ScenarioAgentRequest,
     ScenarioAgentResult,
     ScenarioChange,
     ScenarioPlan,
     ScenarioQuestion,
+    TestCaseListItem,
     free_steps,
 )
 from app.llm.chat_model import build_chat_model
@@ -156,9 +158,19 @@ _QUESTIONS_DESCRIPTION = (
 )
 
 
+_RESULT_DESCRIPTION = (
+    "The first line the user reads, one sentence in their language: what this answer does —"
+    " the scenario(s) you are writing and their scope, or why you are writing none. No ids,"
+    " no step counts. In Korean, 해요체."
+)
+
+
 class GroupingPlan(BaseModel):
     """B 의 출력 — 묶기·순서·범위 해석까지. 문장은 C 의 일이다."""
 
+    # 답의 첫 줄(ARTEL-1273). 전에는 코드가 저장한 것을 세어 썼는데, 0건일 때 이유를 몰라 "TC 를 못 찾아서" 로
+    # 단정했다(설정만 말한 턴에서도). 이제 모델이 쓰고, 저장이 계획과 다르면 코드가 센 줄로 바꾼다.
+    result: str = Field(default="", description=_RESULT_DESCRIPTION)
     groups: list[Group] = Field(default_factory=list)
     # 답의 설명 칸에 그대로 실린다(ARTEL-927). 코드가 쓰는 결과 칸은 사실(몇 개를 몇
     # 스텝으로 저장)만 말할 수 있고, "왜 그렇게 나눴는지"는 판단한 쪽만 답할 수 있다.
@@ -169,6 +181,32 @@ class GroupingPlan(BaseModel):
     # 범위가 정말 갈릴 때는 groups 를 비우고 이것만 채운다. 저장하면서 물을 수도 있다 —
     # 확실한 부분은 쓰고 갈리는 부분만 묻는 것이 사용자의 시간을 덜 쓴다.
     questions: list[Ask] = Field(default_factory=list, description=_QUESTIONS_DESCRIPTION)
+    # 사용자가 확인하라고 했는데 덮는 TC 가 없을 때 낸 TC 초안(ARTEL-1273). `ref` 를 묶음의 case_ids 에 넣는다.
+    proposed_cases: list[ProposedCase] = Field(
+        default_factory=list,
+        description=(
+            "TC drafts for results the user asked to check that no listed case covers."
+            " Give each a ref of -1, -2, … and put the ref in the journey's case_ids where it"
+            " runs. Never a draft for a way between two TCs — that is a step."
+        ),
+    )
+
+
+class CasePlan(BaseModel):
+    """TC 만들기 갈래의 출력(ARTEL-1273) — TC 초안만. 시나리오는 건드리지 않는다."""
+
+    result: str = Field(default="", description=_RESULT_DESCRIPTION)
+    cases: list[ProposedCase] = Field(default_factory=list)
+    detail: str = Field(default="", description=_DETAIL_DESCRIPTION)
+    questions: list[Ask] = Field(default_factory=list, description=_QUESTIONS_DESCRIPTION)
+
+
+class SplitPart(BaseModel):
+    """나누기로 떼어 낸 시나리오 하나. 새 시나리오로 저장된다."""
+
+    title: str
+    description: str = ""
+    steps: list[AuthoredStep] = Field(default_factory=list)
 
 
 class ModifyPlan(BaseModel):
@@ -192,6 +230,24 @@ class ModifyPlan(BaseModel):
         description=(
             "Empty keeps the scenario's current mode. Set it only when the user explicitly"
             " asks to convert: FREE (fill `case_ids`) or ORDERED (write full `steps`)."
+        ),
+    )
+    # 수정하며 필요해진 상태 변화를 만드는 TC 가 없고 사용자가 그 방법을 말했으면 TC 초안으로 낸다(묶기의 것과 같다).
+    # 없으면 스텝이 그 변화를 지어낸다 — "여관에서 저녁까지 쉰다" 를 근거 없는 스텝으로 적었다(MCP 확인, 2026-10-29).
+    proposed_cases: list[ProposedCase] = Field(
+        default_factory=list,
+        description=(
+            "TC drafts for a state change the edited journey needs that no listed case makes, when the user"
+            " said how it happens. Give each a ref of -1, -2, … and put the ref as the case_id of its step."
+        ),
+    )
+    # **나누기의 나머지 절반.** 칸이 시나리오 하나뿐이던 동안 "2개로 나눠 줘" 는 한쪽만 남기고 다른
+    # 쪽을 "새로 만들까요?" 로 되물었다 — 사용자가 이미 나누라고 한 것을 다시 물은 것이다.
+    split_off: list["SplitPart"] = Field(
+        default_factory=list,
+        description=(
+            "Only when the user asks to split this scenario: every part that leaves it, each a complete"
+            " scenario runnable from a fresh start. Empty for any other request."
         ),
     )
     # **합치기의 나머지 절반.** 칸이 `scenario_id` 하나뿐이던 동안, "이 둘을 합쳐 줘" 는 한쪽에
@@ -289,7 +345,8 @@ def _modify_prompt(request: ScenarioAgentRequest, feedback: str = "") -> tuple[s
     tail = (
         _conversation(request)
         + f"=== CURRENT SCENARIOS ===\n{_render_current(request)}\n\n"
-        f"=== USER REQUEST ===\n{request.user_input}{feedback_tail}\n\nAnswer via the schema."
+        + _declined(request)
+        + f"=== USER REQUEST ===\n{request.user_input}{feedback_tail}\n\nAnswer via the schema."
     )
     return prefix, tail
 
@@ -459,6 +516,7 @@ def _answer(
     questions: list[ScenarioQuestion] | None = None,
     reviewed: ReviewedCases | None = None,
     changes: list[ScenarioChange] | None = None,
+    drafts: list[ProposedCase] | None = None,
 ) -> ScenarioAgentResult:
     """세 칸 답을 만든다. 질문은 답의 세 번째 칸([AgentReply.asks])에 담긴다(ARTEL-1116).
 
@@ -472,6 +530,9 @@ def _answer(
     """
     found: dict[tuple[str, int], Ref] = {}
     result = _checked(result, request, found)
+    # 추천 TC 는 화면이 답 말풍선 안의 카드로 보인다(proposed_cases). 화면이 읽는 설명 칸에는 싣지 않는다 — 같은 것이
+    # 두 번 보인다. 카드를 못 그리는 대화 기록 · MCP 를 위해 `message` 에만 표를 남긴다(아래).
+    recommended = _drafts_table(drafts, request.locale.value == "ko") if drafts else ""
     detail = _checked(_linked_titles(detail, request), request, found)
     asked = [
         question.model_copy(update={
@@ -490,11 +551,19 @@ def _answer(
     changes = changes or []
     listed = "\n".join(f"- {change.title}" for change in changes)
     asked_label = "질문" if request.locale.value == "ko" else "Question"
+    # 보기도 대화 기록에 남긴다. 사용자는 보기 문구를 그대로 보내 답하고, 다음 턴은 그 말이 이 질문의
+    # 답인지 알아야 한다 — 모르면 "게시판 확인도 넣어 줘" 를 어느 시나리오 얘기냐고 되묻는다(라우터).
+    options_label = "보기" if request.locale.value == "ko" else "Options"
+
+    def asked_line(q: ScenarioQuestion) -> str:
+        labels = [o.label for o in q.options if o.label]
+        return f"{asked_label}: {q.text}" + (f" ({options_label}: {' / '.join(labels)})" if labels else "")
+
     message = "\n".join(
         _spoken(part, found, prefix=True)
         # 물은 줄은 결과 바로 뒤다. 대화 기록은 메시지 하나를 앞에서부터 잘라 담으므로(설정
         # `scenario_history_message_max_chars`), 긴 설명 뒤에 두면 잘려 나가 몇 번 물었는지 못 센다.
-        for part in (result, *(f"{asked_label}: {q.text}" for q in asked), listed, detail) if part
+        for part in (result, *(asked_line(q) for q in asked), listed, detail, recommended) if part
     )
     return ScenarioAgentResult(
         message=message,
@@ -502,7 +571,54 @@ def _answer(
         reviewed=reviewed,
         reply=AgentReply(result=result, detail=detail, changes=changes, asks=asked),
         refs=list(found.values()),
+        proposed_cases=list(drafts or []),
     )
+
+
+def _cell(text: str) -> str:
+    return " ".join(text.split()).replace("|", "/") or "—"
+
+
+def _drafts_table(drafts: list[ProposedCase], ko: bool) -> str:
+    """TC 초안을 사용자가 읽는 표로. 승인 전이라는 것을 머리에 밝힌다."""
+    head = (
+        "**추천 TC** (아직 저장하지 않았어요. 저장하면 TC 가 돼요)\n\n| 화면 | 사전조건 | 행동 | 기대 결과 |\n| --- | --- | --- | --- |"
+        if ko else
+        "**Recommended TCs** (not saved yet; they become TCs once saved)\n\n| Screen | Precondition | Action | Expected |\n| --- | --- | --- | --- |"
+    )
+    rows = [
+        f"| {_cell(d.scene)} | {_cell(d.precondition)} | {_cell(d.action)} | {_cell(d.expected)} |" for d in drafts
+    ]
+    return "\n".join([head, *rows])
+
+
+def _detach_drafts(scenario: ScenarioPlan, ko: bool, refs: set[int] | None = None, known: set[int] | None = None) -> ScenarioPlan:
+    """TC 초안을 가리키는 스텝을 저장 계약에 맞춘다(ARTEL-1273).
+
+    초안은 아직 TC 가 아니라 `case_id` 에 음수를 둘 수 없다 — 오케가 없는 번호로 막는다. 번호를 `proposed_case`
+    로 옮기고, 판정 없는 스텝으로 둔다. 오케가 승인 때 TC 를 만들고 이 번호를 진짜 id 로 바꾼다.
+    """
+    if not any(step.case_id is not None and step.case_id < 0 for step in scenario.steps):
+        return scenario
+    refs = refs or set()
+    known = known or set()
+    reason = "승인 전 TC 초안을 확인하는 스텝이에요" if ko else "Checks a TC draft that is not approved yet"
+
+    def fixed(step: AuthoredStep) -> AuthoredStep:
+        if step.case_id is None or step.case_id >= 0:
+            return step
+        if step.case_id in refs:
+            return step.model_copy(update={
+                "proposed_case": step.case_id, "case_id": None,
+                "step_source": "UNKNOWN", "step_unknown_reason": reason,
+            })
+        # **초안이 아닌 음수는 모델이 진짜 id 에 부호를 붙인 것이다.** 실측(294건, 긴 여정): 모든 TC 의 검증 상태가
+        # DRAFT 라 "초안" 과 헷갈려 21스텝 전부가 -id 로 나왔고, 그대로 초안으로 떼어져 TC 연결이 다 사라졌다.
+        if -step.case_id in known:
+            return step.model_copy(update={"case_id": -step.case_id})
+        return step.model_copy(update={"case_id": None})
+
+    return scenario.model_copy(update={"steps": [fixed(step) for step in scenario.steps]})
 
 
 def _existing_scenarios(request: ScenarioAgentRequest) -> str:
@@ -517,6 +633,22 @@ def _existing_scenarios(request: ScenarioAgentRequest) -> str:
         if s.scenario_id is not None
     ]
     return "\n".join(lines) if lines else "(none)"
+
+
+def _declined(request: ScenarioAgentRequest) -> str:
+    """사용자가 이미 버린 추천 TC. 같은 것을 다시 추천하지 않게 프롬프트 끝에 싣는다."""
+    if not request.declined_cases:
+        return ""
+    return (
+        "=== TC RECOMMENDATIONS THE USER ALREADY DECLINED (never propose these again, reworded or not;"
+        " if the journey needs one, end before it) ===\n" + "\n".join(f"- {line}" for line in request.declined_cases) + "\n\n"
+    )
+
+
+def _drafts_for(scenario: ScenarioPlan, drafts: list[ProposedCase]) -> list[dict]:
+    """이 시나리오의 스텝이 가리키는 추천 TC. 시나리오와 함께 넘겨 저쪽이 추천으로 남기고 스텝에 잇게 한다."""
+    used = {step.proposed_case for step in scenario.steps if step.proposed_case}
+    return [draft.model_dump() for draft in drafts if draft.ref in used]
 
 
 def _grouping_prompt(
@@ -537,18 +669,34 @@ def _grouping_prompt(
     tail = (
         _conversation(request)
         + f"=== EXISTING SCENARIOS (this run) ===\n{_existing_scenarios(request)}\n\n"
-        f"=== USER REQUEST ===\n{request.user_input}{findings_tail}\n\nAnswer via the schema."
+        + _declined(request)
+        + f"=== USER REQUEST ===\n{request.user_input}{findings_tail}\n\nAnswer via the schema."
     )
     return prefix, tail
 
 
-def _writer_prompt(request: ScenarioAgentRequest, group: Group, feedback: str = "") -> tuple[str, str]:
+def _as_case(draft: ProposedCase) -> TestCaseListItem:
+    """TC 초안을 문장 쓰기 단계가 읽는 케이스 모양으로(ARTEL-1273). 번호는 음수 그대로다."""
+    return TestCaseListItem(
+        id=draft.ref,
+        scene=draft.scene,
+        step=draft.action or "(no action — observe)",
+        precondition=draft.precondition or None,
+        expected_value=draft.expected,
+        verification_status="PROPOSED (not a TC yet)",
+    )
+
+
+def _writer_prompt(
+    request: ScenarioAgentRequest, group: Group, feedback: str = "", drafts: list[ProposedCase] | None = None
+) -> tuple[str, str]:
     # **공통 prefix 를 앞에, 묶음을 뒤에.** 규칙과 게임 모양은 worker 끼리 같아서 캐시가
     # 한 번 쓰고 나머지가 읽는다. 묶음 상세가 그 뒤에 온다.
     shape = render_game_shape(
         request.test_case_list, request.entry_scene, request.scene_edges, request.starting_values
     )
     by_id = {case.id: case for case in request.test_case_list}
+    by_id.update({draft.ref: _as_case(draft) for draft in drafts or []})
     picked = [by_id[i] for i in group.case_ids if i in by_id]
     cases = render_test_case_list(picked)
     feedback_tail = f"\n\n=== REVIEWER FEEDBACK (fix exactly this) ===\n{feedback}" if feedback else ""
@@ -631,7 +779,10 @@ def _groups_of(plan: GroupingPlan, request: ScenarioAgentRequest) -> list[Group]
     모드를 비워 둔 묶음은 가리킨 기존 시나리오의 모드를 잇는다. FREE 시나리오를 같은 범위로
     다시 짜 달라는 요청이 말없이 ORDERED 로 바뀌면 안 된다.
     """
-    known_ids = {case.id for case in request.test_case_list}
+    # TC 초안의 임시 번호도 묶음에 들어갈 수 있다(ARTEL-1273). 초안에 없는 음수는 유령이다.
+    known_ids = {case.id for case in request.test_case_list} | {
+        draft.ref for draft in plan.proposed_cases if draft.ref < 0
+    }
     current_modes = {
         s.scenario_id: s.mode() for s in request.current_scenarios if s.scenario_id is not None
     }
@@ -642,7 +793,9 @@ def _groups_of(plan: GroupingPlan, request: ScenarioAgentRequest) -> list[Group]
         case_ids = [i for i in group.case_ids if i in known_ids]
         if mode == "FREE":
             case_ids = list(dict.fromkeys(case_ids))
-        if case_ids:
+        # 처음부터 TC 가 없는 ORDERED 묶음은 이동만 하는 시나리오다("광장까지 가 봐"). 지어낸 번호가 걸러져
+        # 빈 묶음과는 다르다 — 그것은 버리고, 이것은 스텝만으로 쓴다.
+        if case_ids or (mode == "ORDERED" and not group.case_ids):
             groups.append(group.model_copy(update={
                 "case_ids": case_ids, "scenario_id": scenario_id, "execution_mode": mode,
             }))
@@ -701,15 +854,19 @@ async def run_authoring_workflow(
     if plan.questions and not groups:
         return _answer(
             request,
-            "먼저 확인할 게 있어서 아직 저장하지 않았어요."
-            if ko else "Nothing saved yet — I need to check something first.",
+            plan.result.strip() or (
+                "먼저 확인할 게 있어서 아직 저장하지 않았어요."
+                if ko else "Nothing saved yet — I need to check something first."
+            ),
             plan.detail, _questions(plan.questions),
         )
     if not groups:
         return _answer(
             request,
-            "요청에 맞는 TC를 찾지 못해서 아무것도 저장하지 않았어요."
-            if ko else "No test case matched the request, so nothing was saved.",
+            plan.result.strip() or (
+                "이번에는 시나리오를 만들지 않았어요."
+                if ko else "No scenario was written this time."
+            ),
             plan.detail,
         )
 
@@ -760,7 +917,8 @@ async def run_authoring_workflow(
         await channel.report(WRITING, done=done, total=writing_total)
         try:
             out: _Writer = await _call(
-                request.model, request.reasoning, _Writer, _writer_prompt(request, group, feedback)
+                request.model, request.reasoning, _Writer,
+                _writer_prompt(request, group, feedback, plan.proposed_cases),
             )
         except Exception as error:  # noqa: BLE001 — worker 하나가 판을 죽이면 안 된다
             logger.warning("[scenario] writer failed for %s: %s", group.title, error)
@@ -830,19 +988,26 @@ async def run_authoring_workflow(
     changes: list[ScenarioChange] = []
     dropped: list[str] = []
     accepted_plans: list[ScenarioPlan] = []
+    draft_refs = {draft.ref for draft in plan.proposed_cases if draft.ref < 0}
+    real_ids = {case.id for case in request.test_case_list}
     for group, scenario in zip(groups, written):
         if scenario is None:
             dropped.append(group.title)
             continue
-        answer = await channel.submit_scenario(scenario.model_dump(by_alias=True))
+        scenario = _detach_drafts(scenario, ko, draft_refs, real_ids)
+        answer = await channel.submit_scenario(
+            scenario.model_dump(by_alias=True), proposed_cases=_drafts_for(scenario, plan.proposed_cases)
+        )
         if answer is not None and not answer.accepted and answer.detail:
             # 반려 라우팅: 그 묶음 worker 만 이유를 들고 한 번 다시 쓴다. B 복귀는 없다 —
             # 묶기·순서가 틀렸다는 신호가 아니라 문장·근거의 지적이기 때문이다.
             # FREE 묶음은 다시 써도 같은 스텝이 나오므로 재시도 없이 버린다.
             retried = None if scenario.is_free() else await write(group, feedback=answer.detail)
             if retried is not None:
-                scenario = retried
-                answer = await channel.submit_scenario(retried.model_dump(by_alias=True))
+                scenario = _detach_drafts(retried, ko, draft_refs, real_ids)
+                answer = await channel.submit_scenario(
+                    scenario.model_dump(by_alias=True), proposed_cases=_drafts_for(scenario, plan.proposed_cases)
+                )
             else:
                 answer = None
         if answer is not None and answer.accepted:
@@ -870,7 +1035,7 @@ async def run_authoring_workflow(
         for step in scenario.steps
         if step.case_id is not None and step.case_id in known_ids
     }
-    grouped = {i for g in groups for i in g.case_ids}
+    grouped = {i for g in groups for i in g.case_ids if i > 0}
     unplaced = sorted(grouped - covered)
     reviewed = ReviewedCases(
         included=sorted(covered), excluded=sorted(known_ids - covered)
@@ -879,7 +1044,10 @@ async def run_authoring_workflow(
     # ARTEL-936), **설명은 판단한 모델이**(`plan.detail`), **질문은 고를 수 있게.** 코드가 아는
     # 미반영분(저장 못 한 시나리오, 자리를 못 찾은 TC)도 설명에 사과문으로 섞지 않고 질문으로
     # 낸다 — 사용자가 정할 일이기 때문이다. 어느 칸에도 번호는 없다.
-    result = _summary(changes, ko)
+    # 계획대로 다 저장됐으면 모델의 첫 줄을 쓴다. 하나라도 빠졌으면 모델의 말이 사실과 달라지므로 코드가 센 줄이다.
+    # 묶음을 냈는데 하나도 저장되지 않았으면 "만들었어요" 는 거짓이다 — 그때도 코드가 센 줄이다.
+    told = plan.result.strip() and not dropped and (changes or not plan.groups)
+    result = plan.result.strip() if told else _summary(changes, ko)
 
     asks = list(plan.questions)
     if dropped:
@@ -907,7 +1075,9 @@ async def run_authoring_workflow(
         ))
     # scenarios 는 비운다 — 하나씩 제출 계약에서 저장은 이미 끝났고, 결과 봉투에 다시
     # 실으면 두 벌이 된다(런 12 의 그 사고). 턴끝 검수는 reviewed 로 커버리지만 본다.
-    return _answer(request, result, plan.detail, _questions(asks), reviewed, changes)
+    used = {step.proposed_case for scenario in accepted_plans for step in scenario.steps if step.proposed_case}
+    drafts = [draft for draft in plan.proposed_cases if draft.ref in used]
+    return _answer(request, result, plan.detail, _questions(asks), reviewed, changes, drafts)
 
 
 async def run_modify_workflow(
@@ -1017,13 +1187,14 @@ async def run_modify_workflow(
         return p.title or original.title
 
     def to_scenario(p: ModifyPlan) -> ScenarioPlan:
-        return ScenarioPlan(
+        # 초안을 가리키는 스텝은 저장 계약에 맞춘다 — 음수 case_id 는 오케가 없는 번호로 막는다.
+        return _detach_drafts(ScenarioPlan(
             scenario_id=p.scenario_id,
             title=p.title or original.title,
             description=p.description or original.description,
             steps=p.steps,
             execution_mode=p.execution_mode,
-        )
+        ), ko, {d.ref for d in p.proposed_cases if d.ref < 0}, known_case_ids)
 
     # 합치기에서 걷어낼 것들. 대상 자신과 모르는 번호는 뺀다 — 지우는 일에 유령 번호가
     # 닿으면 안 된다. 실제로 지울지는 오케가 한 번 더 센다.
@@ -1057,8 +1228,8 @@ async def run_modify_workflow(
         프롬프트로는 막을 수 없다. 안 고치고도 고쳤다고 말하는 것을 막는 유일한 방법은
         **낸 것과 원본을 코드가 비교하는 것**이다. 같으면 성공이라 말하지 않는다.
         """
-        if absorbed_of(p):
-            return False  # 걷어낼 것을 지목했으면 이 턴이 한 일이 있다
+        if absorbed_of(p) or p.split_off:
+            return False  # 걷어낼 것이나 떼어 낼 것을 지목했으면 이 턴이 한 일이 있다
         if (p.title or original.title) != original.title:
             return False
         if (p.description or original.description) != original.description:
@@ -1110,14 +1281,16 @@ async def run_modify_workflow(
             )
 
     answer = await channel.submit_scenario(
-        to_scenario(plan).model_dump(by_alias=True), absorbed_of(plan)
+        to_scenario(plan).model_dump(by_alias=True), absorbed_of(plan),
+        proposed_cases=_drafts_for(to_scenario(plan), plan.proposed_cases),
     )
     if answer is not None and not answer.accepted and answer.detail:
         retried = await edit(feedback=answer.detail)
         if retried is not None and retried.scenario_id == plan.scenario_id and retried.steps:
             plan = retried
             answer = await channel.submit_scenario(
-                to_scenario(plan).model_dump(by_alias=True), absorbed_of(plan)
+                to_scenario(plan).model_dump(by_alias=True), absorbed_of(plan),
+                proposed_cases=_drafts_for(to_scenario(plan), plan.proposed_cases),
             )
         else:
             answer = None
@@ -1138,10 +1311,39 @@ async def run_modify_workflow(
             for one in answer.saved
         ] or [_change_of("updated", title, plan.scenario_id)]
         changes += [_change_of("removed", gone) for gone in answer.absorbed]
+        # 떼어 낸 쪽은 새 시나리오로 하나씩 낸다. 못 들어간 것은 사실대로 묻는다 — 사라진 채 넘어가지 않게.
+        lost: list[str] = []
+        for part in plan.split_off:
+            if not part.steps:
+                continue
+            piece = ScenarioPlan(
+                scenario_id=None, title=part.title, description=part.description,
+                steps=part.steps, execution_mode=plan.execution_mode,
+            )
+            got = await channel.submit_scenario(piece.model_dump(by_alias=True), [])
+            if got is not None and got.accepted:
+                changes += [
+                    _change_of("created" if one.created else "updated", one.title, one.scenario_id)
+                    for one in got.saved
+                ] or [_change_of("created", part.title)]
+            else:
+                lost.append(part.title)
+        if plan.split_off:
+            trace.record(run_id, "워크플로 E — 나누기", f"떼어 낸 것 {len(plan.split_off)} · 못 넣음 {len(lost)}")
         result = _summary(changes, ko)
+        if lost:
+            plan = plan.model_copy(update={"questions": [*plan.questions, Ask(
+                text=(
+                    f"나눈 시나리오 중 {_bold(lost)} 는 실행 확인을 통과하지 못해 저장하지 못했어요. 다시 써 볼까요?"
+                    if ko else f"{_bold(lost)} did not pass the run check and was not saved. Try again?"
+                ),
+                options=["다시 써 줘", "그냥 둬"] if ko else ["Write it again", "Leave it out"],
+            )]})
         # 남긴 이유는 저쪽 문장을 그대로 옮긴다 — 왜 못 지웠는지는 센 쪽만 안다.
         detail = "\n".join(part for part in (plan.detail.strip(), *answer.kept) if part)
-        return _answer(request, result, detail, _questions(plan.questions), changes=changes)
+        used = {step.proposed_case for step in to_scenario(plan).steps if step.proposed_case}
+        drafts = [draft for draft in plan.proposed_cases if draft.ref in used]
+        return _answer(request, result, detail, _questions(plan.questions), changes=changes, drafts=drafts)
     # 저장되지 않은 수정의 설명은 싣지 않는다 — 일어나지 않은 변경을 설명하게 된다.
     return _answer(
         request,
@@ -1153,3 +1355,44 @@ async def run_modify_workflow(
             options=["다시 고쳐 줘", "그냥 둬"] if ko else ["Try again", "Leave it"],
         )]),
     )
+
+
+async def run_case_workflow(
+    request: ScenarioAgentRequest,
+    context: AgentContext,
+    channel: "ScenarioChannel",
+) -> ScenarioAgentResult:
+    """TC 만들기 갈래(ARTEL-1273): 사용자가 TC 를 새로 만들어 달라고 할 때 TC 초안만 낸다.
+
+    시나리오는 건드리지 않는다. 있는 TC 로 덮이는 것은 초안을 만들지 않고 설명에서 그 TC 를 가리킨다. 초안은
+    사용자가 승인해야 TC 가 된다 — 그전까지는 답의 `proposed_cases` 와 설명 칸의 표에만 있다.
+    """
+    await channel.report(THINKING)
+    shape = render_game_shape(
+        request.test_case_list, request.entry_scene, request.scene_edges, request.starting_values
+    )
+    cases = render_test_case_list(request.test_case_list)
+    prefix = f"{_rules('scenario_case')}\n\n=== GAME SHAPE ===\n{shape}\n\n=== CASES ===\n{cases}"
+    tail = _conversation(request) + f"=== USER REQUEST ===\n{request.user_input}\n\nAnswer via the schema."
+    plan: CasePlan = await _call(request.model, request.reasoning, CasePlan, (prefix, tail))
+    # 번호는 코드가 다시 붙인다 — 모델이 겹치게 쓰거나 양수를 쓰면 나중에 스텝이 엉뚱한 초안을 가리킨다.
+    drafts = [
+        draft.model_copy(update={"ref": -(index + 1)})
+        for index, draft in enumerate(d for d in plan.cases if d.expected.strip())
+    ]
+    trace.record(
+        request.run_id, "TC 만들기",
+        f"초안 {len(drafts)}개" + "".join(f"\n  · {d.scene} | {d.action} → {d.expected}" for d in drafts),
+    )
+    ko = request.locale.value == "ko"
+    if plan.result.strip():
+        result = plan.result.strip()
+    elif drafts:
+        result = (
+            f"TC 초안 {len(drafts)}개를 만들었어요." if ko else f"Drafted {len(drafts)} test case(s)."
+        )
+    elif plan.questions:
+        result = "먼저 확인할 게 있어서 아직 만들지 않았어요." if ko else "Nothing drafted yet — I need to check something first."
+    else:
+        result = "새로 만들 TC가 없어요." if ko else "No new test case to draft."
+    return _answer(request, result, plan.detail, _questions(plan.questions), drafts=drafts)
