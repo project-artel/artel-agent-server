@@ -328,6 +328,11 @@ def _tools_that_end(phase: RunPhase, offered: frozenset[str] | None = None) -> s
     return ", ".join(f"`{name}`" for name in names)
 
 
+# ACT 중 결과를 다시 읽어도 조작이나 판정을 완료한 것은 아니다.
+# OBSERVE 소속은 유지해 UPDATE_MEMORY와 REVIEW_DRAFT의 필수 응답을 건너뛰지 않는다.
+ACT_OBSERVATION_TOOLS = frozenset({"capture_screen", "inspect_object"})
+
+
 class PhaseCycle:
     """한 런의 phase 와 거절 수. `lite`·`full` 에서만 만들어진다.
 
@@ -477,6 +482,8 @@ class PhaseCycle:
         가고 런은 그대로 간다 — 거절로 런을 실패시키지 않는다.
         """
         self._draft_expected = False
+        if self.phase is RunPhase.act and tool_name in ACT_OBSERVATION_TOOLS:
+            return None
         if tool_name in ALWAYS_ALLOWED:
             # 거절 연속 카운터를 건드리지 않는다. 이 tool 들은 어느 phase 에서 불려도 옳으
             # 므로, 사이에 하나 끼었다고 모델이 자리를 고친 것은 아니다.

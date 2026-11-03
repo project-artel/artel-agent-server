@@ -165,3 +165,25 @@ def test_real_graph_restores_ids_and_current_spec_after_repeated_lossy_compactio
         assert ledger_document(last_ledger.content)["reported_ids"] == [17]
         assert any("original expected 22" in str(message.content) for message in captured[-1])
     asyncio.run(run())
+
+
+def test_TC_상세와_ledger가_크면_자동_compaction_실행():
+    from test_qa_compaction import conversation
+
+    async def run():
+        for is_ledger in (False, True):
+            channel, state, _tools = setup()
+            large = "large TC specification " * 3000
+            message = HumanMessage(
+                id=TC_LEDGER_ID if is_ledger else "large-detail",
+                content=large if is_ledger else detail_block(17, large),
+            )
+            messages = [message, *conversation(6)]
+            model = FakeSummarizer()
+            middleware = build_middleware(state, channel, model, max_input_tokens=2000,
+                                          keep_messages=2, min_new_messages=0)
+            update = await middleware.abefore_model({"messages": messages}, None)
+            assert update is not None
+            assert model.calls == 1
+            assert "large TC specification" in message.content
+    asyncio.run(run())

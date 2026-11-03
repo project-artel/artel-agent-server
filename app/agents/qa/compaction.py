@@ -310,6 +310,10 @@ class QaCompactionMiddleware(SummarizationMiddleware):
             return True
         return super()._should_summarize(messages, total_tokens)
 
+    async def _acreate_summary(self, messages_to_summarize: list[AnyMessage]) -> str:
+        # TC 상세와 ledger는 원본 데이터로 복원하므로 요약 입력에서만 제외한다.
+        return await super()._acreate_summary(fold_case_details(messages_to_summarize, for_summary=True))
+
     async def _decline_compaction(self) -> None:
         """런이 계속 커지고 있음을 오퍼레이터에게 알리고, 그대로 둔다.
 
@@ -341,7 +345,7 @@ class QaCompactionMiddleware(SummarizationMiddleware):
         # 폴딩만 밖에 있다. `_folded_token_counter`가 base class 안에서 다시 폴딩하고,
         # 그 호출은 아래 핸들러 아래에 있다.
         folded = fold_every_stale_block(state["messages"], [FoldKind.scene_view])
-        folded = fold_case_details(folded, for_summary=True)
+        folded = fold_case_details(folded, self._state.current_case_id)
 
         try:
             update = await super().abefore_model({**state, "messages": folded}, runtime)
