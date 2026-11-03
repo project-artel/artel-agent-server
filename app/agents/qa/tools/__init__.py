@@ -21,6 +21,7 @@ from langchain_core.tools import BaseTool
 from app.agents.qa.arch import ResolvedArch, default_resolved_arch
 from app.agents.qa.tools.action_tools import build_action_tools
 from app.agents.qa.tools.capability_tools import build_capability_tools
+from app.agents.qa.tools.history_tools import build_history_tools
 from app.agents.qa.tools.game_function_tools import (
     build_behavior_tools,
     build_cheat_tools,
@@ -53,6 +54,7 @@ def build_tools(
     # 저장되는 값과 모델이 보는 목록이 함께 바뀐다.
     tools: list[BaseTool] = [
         *build_observation_tools(ctx),
+        *build_history_tools(ctx),
         *build_knowledge_tools(ctx),
         *build_screen_selector_tools(ctx),
         *build_capability_tools(ctx),

@@ -229,6 +229,9 @@ def resolve_run_config(
     prompt = load_prompt(PROMPT_AGENT, SYSTEM_ROLE, prompt_version)
     tools, _middleware, fingerprint = structure_of(resolved_arch, execution_mode, prompt.version)
     hashes = {SYSTEM_ROLE: prompt.body_sha256}
+    hashes["qa_history_tool"] = load_prompt(
+        "qa_history", "tool_read_test_case_history", "v1"
+    ).body_sha256
     if resolved_arch.vision:
         # Pinned to the version just resolved, not to the caller's alias: the two
         # halves of one prompt have to come from the same version.
@@ -238,6 +241,9 @@ def resolve_run_config(
     asked_by = f"phase_cycle={resolved_arch.phase_cycle.value}"
     if resolved_arch.phase_cycle.gates_phases:
         hashes[PHASE_ROLE] = _conditional_hash(PHASE_ROLE, prompt.version, asked_by)
+        hashes["qa_history_phase_directive"] = load_prompt(
+            "qa_history", "phase_directive", "v1"
+        ).body_sha256
     if resolved_arch.phase_cycle.decides_in_its_own_turn:
         hashes[DECIDE_ROLE] = _conditional_hash(DECIDE_ROLE, prompt.version, asked_by)
     if resolved_arch.phase_cycle.remembers_in_verdict:

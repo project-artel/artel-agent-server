@@ -133,7 +133,7 @@ def phase_directive_for(arch: ResolvedArch, prompt_version: str) -> str:
             + "\n\n"
             + load_prompt(PROMPT_AGENT, MACRO_MEMORY_ROLE, prompt_version).body
         )
-    return directive
+    return directive.rstrip() + "\n\n" + load_prompt("qa_history", "phase_directive", "v1").body
 
 
 def _skills_directive(
