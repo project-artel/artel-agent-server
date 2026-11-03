@@ -40,3 +40,7 @@ SDK, 게임 치트 구현, behavior 정책, tool schema, phase gate, run/TC 허�
 ## Review
 
 FAST REVIEW: PASS, MEDIUM REVIEW: PASS, HEAVY REVIEW: PASS. Pair review의 판정 문구 finding을 반영해 PASSED/FAILED/INCONCLUSIVE 조건을 구분했고 재검토에서 VERDICT: PASS를 받았다. v42 대비 73개 역할 중 본문이 달라진 것은 skill_cheats와 tool_run_cheat뿐이며, 과거 lock 항목은 유지됐다.
+
+## CI 수정
+
+PR #303의 첫 Jenkins 실행은 3,005개 중 `test_qa_bundle_contract.py:29`의 기본 판본 assertion 한 개만 실패했다. 기대값 v42를 v43으로 갱신했다. 수정 후 `python -X utf8 -m pytest tests/test_qa_bundle_contract.py tests/test_qa_prompt_version.py -q`는 43 passed였다. 전체 검증은 Jenkins의 새 commit 실행에서 확인한다.
