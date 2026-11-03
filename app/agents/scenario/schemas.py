@@ -2,7 +2,7 @@ from enum import StrEnum
 from typing import Literal
 
 from langchain_core.messages import BaseMessage
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
 
 from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig
 
@@ -65,6 +65,10 @@ class CaseGuard(BaseModel):
     # "drop by and come back" — measured (run 203), authoring entered the battle screen
     # and never wrote the step that wins it. The map knew winning was required.
     moves: list["ValueMove"] = Field(default_factory=list)
+    # Why this requirement is not confirmed, or None. Read from plain-language cases,
+    # some of these are wrong and some only go by another name; dropping them lost the
+    # right ones too, so they come marked and the case text decides.
+    unconfirmed: str | None = None
 
 
 class ValueMove(BaseModel):
@@ -141,6 +145,9 @@ class TestCaseListItem(BaseModel):
     # so pydantic discarded them while the prompt went on telling the agent to
     # order by them. Ordering silently fell back to re-reading the sentence.
     state_before: list[CaseGuard] = Field(default_factory=list)
+    # Any one of these is enough. `state_before` keeps only what every branch shares,
+    # so a "one of two ways" requirement arrives there empty and lives here instead.
+    state_before_any: list[list[CaseGuard]] = Field(default_factory=list)
     state_after: dict[str, str] = Field(default_factory=dict)
     # Where this screen leads in one step, and what to press to get there.
     # The map has known this all along; it was never sent.
@@ -230,6 +237,8 @@ class ScenarioAgentRequest(BaseModel):
     # off nothing carried it, and the model could not even tell whether the
     # first case of a scenario is placeable.
     starting_values: dict[str, str] = Field(default_factory=dict)
+    # 사용자가 이미 버린 추천 TC(줄마다 `화면 · 행동 → 기대`). 같은 것을 다시 추천하지 않는다.
+    declined_cases: list[str] = Field(default_factory=list)
 
 
 class AuthoredFlow(BaseModel):
@@ -317,6 +326,33 @@ class AuthoredStep(BaseModel):
     )
     step_source_capability_id: int | None = None
     step_unknown_reason: str | None = None
+    # 이 스텝이 확인하는 **승인 전 TC 초안**의 임시 번호(-1, -2, …, ARTEL-1273). 초안은 아직 TC 가 아니라
+    # `case_id` 에 둘 수 없다. 오케가 승인 때 TC 를 만들고 이 번호를 진짜 id 로 바꾼다. 그 전까지 오케는
+    # 이 칸을 모르고 지나가므로 스텝은 판정 없는 스텝으로 저장된다.
+    proposed_case: int | None = None
+
+    @model_serializer(mode="wrap")
+    def _without_empty_draft(self, handler):
+        # 초안이 없는 스텝은 예전과 같은 모양으로 나간다 — 칸을 모르는 쪽이 받는 값이 바뀌지 않게.
+        data = handler(self)
+        if isinstance(data, dict) and data.get("proposed_case") is None:
+            data.pop("proposed_case", None)
+        return data
+
+
+class ProposedCase(BaseModel):
+    """저작이 제안한 TC 초안 하나(ARTEL-1273). 사용자가 승인하면 사용자 TC 가 된다.
+
+    TC 정의(게임 무관): 사전조건(선택) · 행동 · 기대 결과. 행동이 기대 결과를 직접 일으키거나, 행동이 없으면
+    관측할 대상이 있어야 한다. 둘 다 아니면 TC 가 아니라 스텝이다.
+    """
+
+    ref: int = Field(description="Temporary id: -1, -2, … Unique within the answer.")
+    scene: str = Field(default="", description="Screen the action happens on, as the cases name screens. Empty if unknown.")
+    precondition: str = Field(default="", description="State that must hold before the action. Empty if none.")
+    action: str = Field(default="", description="One thing the player does. Empty for a TC that only observes.")
+    expected: str = Field(description="The result to check.")
+    why: str = Field(default="", description="One short sentence: what this TC checks, for the user.")
 
 
 class ScenarioPlan(BaseModel):
@@ -488,6 +524,9 @@ class ScenarioAgentResult(BaseModel):
     # What every `[[tc:N]]`/`[[ts:N]]` marker in `reply` (its asks included) points at
     # (ARTEL-931). Only markers that resolved are listed; the rest were removed.
     refs: list[Ref] = Field(default_factory=list)
+    # 이 턴이 제안한 TC 초안(ARTEL-1273). 스텝의 `proposed_case` 가 이 `ref` 를 가리킨다. 오케가 아직
+    # 모르는 칸이라 그동안은 답의 설명 칸에 표로도 싣는다.
+    proposed_cases: list[ProposedCase] = Field(default_factory=list)
 
 
 # ScenarioAgentRequest references ScenarioPlan (defined after it) via a forward
