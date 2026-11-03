@@ -14,7 +14,7 @@ from langchain_core.runnables import RunnableLambda
 from app.agents.scenario.agent import ScenarioAgent
 from app.agents.scenario.cases import NO_TEST_CASE_LIST_NOTICE
 from app.agents.scenario.router import Route, RouteVerdict, ScenarioRouter
-from app.agents.scenario.schemas import TestCaseListItem
+from app.agents.scenario.schemas import ScenarioAgentResult, TestCaseListItem
 from tests.test_agents_scenario import _CTX, _channel, _request, _result
 
 
@@ -84,19 +84,28 @@ def test_offtopic_gets_a_polite_decline() -> None:
     assert out.message == "날씨는 제가 도와드리기 어려워요."
 
 
-def test_question_reenters_slim_on_the_search_fallback() -> None:
-    """질문 갈래는 새 기계가 아니다 — 전량을 비우면 검색 폴백(ARTEL-319 롤백 경로)이
-    켜진다. 소형 프롬프트 + 검색 도구가 그 증거다."""
+def test_question_goes_to_the_question_node_not_the_loop(monkeypatch) -> None:
+    """질문은 질문 노드가 답한다(ARTEL-1272). 예전 루프(목록을 비우고 검색만 붙인 소형 턴)로 떨어지지 않는다."""
+    import app.agents.scenario.question as question_mod
+
+    answered: list[str] = []
+
+    async def fake_question(request, context, channel):
+        answered.append(request.user_input)
+        return ScenarioAgentResult(message="답", scenarios=[])
+
+    monkeypatch.setattr(question_mod, "run_question_workflow", fake_question)
     seen: dict = {}
     agent = ScenarioAgent(
         agent_factory=_capturing_factory(seen),
         router=_fixed_router(Route.QUESTION),
     )
 
-    asyncio.run(agent.run(_request(user_input="결제 케이스 있어?"), _CTX, _channel()))
+    result = asyncio.run(agent.run(_request(user_input="결제 케이스 있어?"), _CTX, _channel()))
 
-    assert NO_TEST_CASE_LIST_NOTICE.splitlines()[0] in seen["system_prompt"]
-    assert "search_test_cases" in seen["tools"]
+    assert answered == ["결제 케이스 있어?"]
+    assert result.message == "답"
+    assert seen == {}
 
 
 def test_workflow_off_falls_back_to_the_loop_with_full_context(monkeypatch) -> None:
