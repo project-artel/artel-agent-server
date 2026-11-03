@@ -40,6 +40,8 @@ class SessionRecord(BaseModel):
     # (flows-off experiment). Frozen with the rest — same map read, same reason.
     scene_edges: list[SceneEdge] = Field(default_factory=list)
     starting_values: dict[str, str] = Field(default_factory=dict)
+    # 사용자가 이미 버린 추천 TC(줄마다 `화면 · 행동 → 기대`). 같은 것을 다시 추천하지 않는다.
+    declined_cases: list[str] = Field(default_factory=list)
     # Full conversation turns; windowed for prompt reconstruction by the service.
     history: list[HistoryTurn] = Field(default_factory=list)
     # 창을 넘어 잘라 낸 메시지 수(ARTEL-942). 0 이 아니면 이 세션의 앞 대화가 기억에 없다.

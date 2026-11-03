@@ -164,6 +164,11 @@ def _previous_turn(request: ScenarioAgentRequest) -> PreviousTurn | None:
     return None
 
 
+def _asked(assistant: str) -> bool:
+    """직전 Agent 답이 사용자에게 무언가를 물었나. 대화 기록의 질문 줄은 `질문:` / `Question:` 으로 시작한다."""
+    return any(line.startswith(("질문:", "Question:")) for line in assistant.splitlines())
+
+
 def _hint(request: ScenarioAgentRequest) -> str:
     """라우터에게 주는 문맥 — 직전 턴(마지막 사용자·Agent 발화)을 **자르지 않고** (ARTEL-942).
 
@@ -240,6 +245,21 @@ class ScenarioAgent:
             verdict = await self._router.route(
                 request.user_input, context_hint=_hint(request), previous=_previous_turn(request)
             )
+            if verdict.route in (Route.MODIFY, Route.ASK) and not any(
+                scenario.scenario_id is not None for scenario in request.current_scenarios
+            ):
+                # **고칠 시나리오가 없으면 고치는 갈래는 성립하지 않는다.** 런이 비었는데 수정으로 보내면 E 가
+                # "새 시나리오로 만들까요?" 를 되묻는다 — 실측(MCP 확인, 2026-10-29): 저작이 물은 게임 사실에
+                # 답했더니("처음부터 낮이에요") 그 답이 수정으로 가서 한 번 더 물었다. 만드는 갈래로 보낸다.
+                logger.info("[scenario] %s with no scenario to change — authoring instead", verdict.route.value)
+                verdict = verdict.model_copy(update={"route": Route.AUTHORING})
+            previous = _previous_turn(request)
+            if verdict.route is Route.ASK and previous is not None and _asked(previous.assistant):
+                # **방금 물은 것의 답이면 대상을 되묻지 않는다.** 저작이 "밤은 어떻게 되나요?" 라고 묻고 사용자가
+                # "여관에서 저녁까지 쉬면 밤이 돼요" 라고 답했는데 "고칠지 새로 만들지" 를 되물었다(MCP 확인,
+                # 2026-10-29). 만드는 갈래로 보낸다 — 대화를 보고 방금 쓴 시나리오를 이어 채운다. 덮어쓰지 않는 쪽이다.
+                logger.info("[scenario] ask right after our own question — authoring instead")
+                verdict = verdict.model_copy(update={"route": Route.AUTHORING})
             if verdict.route is Route.ASK:
                 # **되묻는다.** 결정 모델 라우터가 갈래와 대상이 어긋났다고 말한 자리다.
                 # 모델을 부르지 않는다 — 물어볼 것이 언제나 같은 하나다.
@@ -258,6 +278,11 @@ class ScenarioAgent:
                 # **E 수정 갈래**(Step 3): 오케가 실어 준 current_scenarios 에서 대상을
                 # 가리키고, scenario_id 교체 저장으로 되돌린다. 모델 1회 + 반려 시 1회.
                 return await run_modify_workflow(request, context, channel)
+            if verdict.route is Route.CASE:
+                # **TC 를 새로 만든다**(ARTEL-1273): TC 초안만 내고 시나리오는 건드리지 않는다.
+                from app.agents.scenario.workflow import run_case_workflow
+
+                return await run_case_workflow(request, context, channel)
             if verdict.route is Route.QUESTION:
                 # **질문은 질문 노드가 답한다**(ARTEL-1086, ARTEL-1272): 케이스 · 버전 · 판정 · 시나리오 · TR ·
                 # QA 실행을 리소스 도구로 따라간다. 예전에는 케이스 목록을 비우고 검색 도구만 붙여 저작 루프로

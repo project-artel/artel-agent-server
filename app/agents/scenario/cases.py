@@ -295,6 +295,11 @@ def render_test_case_list(entries: list[TestCaseListItem]) -> str:
         # than from the sentence above. Ordering by these is why they are here.
         for guard in entry.state_before:
             needs = f"    needs: {guard.variable} {guard.operator} {guard.value}"
+            if guard.unconfirmed:
+                needs = (
+                    f"    maybe needs: {guard.variable} {guard.operator} {guard.value}"
+                    f"  (unconfirmed — {guard.unconfirmed}; check it against the case text)"
+                )
             # Where that value moves — the screen names only. **How it moves is in the
             # game's shape block, written once** (ARTEL-670). It used to be repeated
             # under every requirement: measured on a real project, 676 such lines
@@ -303,6 +308,14 @@ def render_test_case_list(entries: list[TestCaseListItem]) -> str:
             if guard.raised_in:
                 needs += f"  ← moves in {', '.join(guard.raised_in)}"
             lines.append(needs)
+        if entry.state_before_any:
+            either = " | ".join(
+                "(" + ", ".join(
+                    f"{g.variable} {g.operator} {g.value}" + ("?" if g.unconfirmed else "") for g in branch
+                ) + ")"
+                for branch in entry.state_before_any
+            )
+            lines.append(f"    needs one of: {either}")
         if entry.state_after:
             leaves = ", ".join(f"{k} {v}" for k, v in entry.state_after.items())
             lines.append(f"    leaves: {leaves}")
