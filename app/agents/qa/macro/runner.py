@@ -54,6 +54,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, runtime_checkable
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from app.agents.qa.macro.binding import (
     FoundObject,
     LateSelector,
@@ -68,6 +70,8 @@ from app.agents.qa.macro.binding import (
     resolve_find,
     resolve_find_all,
     resolve_target,
+    sdk_member_name,
+    unknown_member_names,
 )
 from app.agents.qa.macro.context import build_context_state
 from app.agents.qa.macro.errors import (
@@ -119,6 +123,9 @@ from app.agents.qa.macro.model import (
     MacroReadValue,
     MacroParameter,
     MacroPredicateCondition,
+    MacroReaderCall,
+    MacroReaderCondition,
+    MacroReaderOperand,
     MacroRequireStatement,
     MacroReturnStatement,
     MacroSelectorValue,
@@ -127,8 +134,8 @@ from app.agents.qa.macro.model import (
     MacroWaitUntilStatement,
 )
 from app.qa.acting import ActionOutcome, PressLanding, ScreenChange
-from app.qa.envelope import JsonRpcAction
-from app.qa.pulse import PulseMemory
+from app.qa.envelope import ActionResultItem, JsonRpcAction
+from app.qa.pulse import PulseMemory, holder_key
 
 # 화면이 연달아 이만큼 그대로면 멈춘다.
 #
@@ -265,6 +272,94 @@ class StepStartValues(Protocol):
     def pulse_at_step_start(self) -> PulseMemory | None: ...
 
 
+class ReadMemberValue(BaseModel):
+    """`read_member` 가 instance 하나에 대해 낸 것. `value` 가 있거나, `count` 만 있거나, `unread` 다.
+
+    `value` 가 `None` 으로 온 것과 없는 것을 가르려면 `model_fields_set` 을 본다 — 게임이 `null` 을
+    읽은 것도 읽은 값이다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    value: Any = None
+    count: int | None = None
+    unread: str | None = None
+    # 이 값을 쥔 component 의 scene path. static 이나 heap holder 면 없다(ARTEL-1289).
+    path: str | None = None
+    # 그 component 의 객체: pulse 기록과 같은 id·selector 와 켜짐 여부. path 는 같은 이름의 holder 들이 나눠
+    # 가지므로(만들어진 적 둘이 `RangedCat(Clone)` 하나) 어느 객체의 값인지는 이것으로 가린다. 옛 SDK 는 보내지 않는다.
+    id: int | None = None
+    selector: str | None = None
+    active: bool | None = None
+
+    @property
+    def read(self) -> bool:
+        return "value" in self.model_fields_set
+
+
+class ReadMemberResolved(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    name: str | None = None
+    kind: str | None = None
+    holders: int | None = None
+    declaring: str | None = None
+    member: str | None = None
+
+
+class ReadMemberUnresolvable(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    name: str | None = None
+    reason: str | None = None
+
+
+class ReadMemberAnswer(BaseModel):
+    """SDK action `read_member` 의 `returnValue`(ARTEL-1285). `watch` 의 답과 같은 꼴에 `values` 가 붙는다.
+
+    `values` 는 instance 마다 하나이고 `static` 인 member 는 정확히 하나다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    resolved: list[ReadMemberResolved] = Field(default_factory=list)
+    unresolvable: list[ReadMemberUnresolvable] = Field(default_factory=list)
+    values: list[ReadMemberValue] = Field(default_factory=list)
+
+    @classmethod
+    def from_result(
+        cls, item: ActionResultItem | None, name: str
+    ) -> "ReadMemberAnswer | None":
+        """`ACTION_RESULT` 의 항목 하나를 답으로. 답이 없으면 `None`, SDK 가 거절했으면 그 이유를 `unresolvable` 로.
+
+        `read_member` 를 모르는 SDK 는 action 을 거절한다. 그것을 `None` 으로 삼키면 reader 가 종전과
+        같은 문장으로 거절해 agent 가 SDK 쪽 사정을 모른다. 이유를 실어야 다음 손이 어디인지 보인다.
+        """
+        if item is None:
+            return None
+        if not item.success:
+            reason = item.error or "the game refused `read_member` without a reason"
+            return cls(unresolvable=[ReadMemberUnresolvable(name=name, reason=reason)])
+        returned = item.returnValue if isinstance(item.returnValue, dict) else {}
+        return cls.model_validate(returned)
+
+
+@runtime_checkable
+class MemberReader(Protocol):
+    """host 가 **골라서** 더하는 capability 둘째(ARTEL-1285). `static()`·`member()` 의 보강이다.
+
+    `pulse` 가 감시하지 않는 이름을 macro 가 읽으려 하면 runner 가 그 statement 앞에서 이것으로 게임에
+    한 번 묻고, 받은 값을 `PulseMemory.learn_member` 로 넣어 동기 reader 가 찾게 한다. reader 평가는
+    동기이고 host 를 모르므로 묻는 자리는 runner 의 statement 경계다.
+
+    `StepStartValues` 와 같은 이유로 `MacroHost` 에 넣지 않는다 — 가짜 host 로 도는 테스트가 이것을
+    구현할 이유가 없고, 없으면 종전과 같이 reader 가 거절한다. `name` 은 SDK 꼴 `Type::member` 다.
+    `None` 은 게임이 답하지 않은 것이다.
+    """
+
+    async def read_member(self, name: str) -> ReadMemberAnswer | None: ...
+
+
 @dataclass(frozen=True)
 class MacroPlace:
     """`def` 이름과 그 안의 statement 번호. 세 목록과 두 거둠이 전부 이것을 든다.
@@ -355,6 +450,71 @@ class MacroRunResult:
 
 
 # --- 번호 ---------------------------------------------------------------------
+
+
+def _apply_read_member(
+    pulse: PulseMemory, sdk_name: str, answer: ReadMemberAnswer
+) -> None:
+    """`read_member` 의 답 하나를 `PulseMemory` 에 적는다.
+
+    macro 에 적힌 이름(`Game.Score` → `Game::Score`)으로 적는다. SDK 가 `resolved.declaring` 에 더 긴
+    이름을 돌려줘도 reader 가 맞추는 글자는 macro 의 것이라, 그 글자로 적어야 다음 평가가 찾는다.
+
+    holder 마다 `path` 가 온 값은 그 path 아래에 적어 그 객체를 겨눈 `member()` 만 읽는다(ARTEL-1289).
+    못 읽은 holder 는 그 path 의 거절로 남긴다. holder 를 가리지 않는 값(`static()` 과 path 없는 `member()`
+    가 읽는 것)은 읽힌 값 전부가 같을 때만 적는다 — 하나를 고르면 그 조건이 다른 객체의 값으로 판정될 수
+    있다. 컬렉션은 `count` 가 값이다: SDK 는 컬렉션의 내용물을 보내지 않고 개수만 보낸다.
+
+    path 하나를 holder 여럿이 나눠 가질 수 있다(같은 이름으로 만들어진 객체, 꺼진 채 남은 객체). SDK 가 holder 의
+    `id` 를 보내면 값을 그 객체 아래(`holder_key`)에 적는다. path 아래에는 그 path 의 holder 가 하나일 때만 적고,
+    둘 이상이면 거절로 남긴다 — 전에는 나중 값이 앞 값을 덮어, 살아 있는 적이 쓰러진 적의 HP 로 판정됐다(런 221).
+    """
+    declaring, member = sdk_name.split("::", 1)
+    pulse.forget_member(declaring, member)
+    refused = next((one for one in answer.unresolvable if one.reason or one.name), None)
+    if refused is not None:
+        pulse.refuse_member(declaring, member, refused.reason or "no reason given")
+        return
+    sharing: dict[str, int] = {}
+    for one in answer.values:
+        if one.path:
+            sharing[one.path] = sharing.get(one.path, 0) + 1
+    for one in answer.values:
+        if not one.path:
+            continue
+        places = [holder_key(one.id)] if one.id is not None else []
+        if sharing[one.path] == 1:
+            places.append(one.path)
+        else:
+            pulse.refuse_member(
+                declaring,
+                member,
+                f"{sharing[one.path]} objects share the path {one.path}; the value is read per object",
+                path=one.path,
+            )
+        for place in places:
+            if one.read:
+                pulse.learn_member(declaring, member, one.value, path=place)
+            elif one.count is not None:
+                pulse.learn_member(declaring, member, None, count=one.count, path=place)
+            elif one.unread:
+                pulse.refuse_member(declaring, member, one.unread, path=place)
+    read = [one.value for one in answer.values if one.read]
+    counted = [one.count for one in answer.values if not one.read and one.count is not None]
+    unread = next((one.unread for one in answer.values if one.unread), None)
+    if unread is None and read and not counted and all(one == read[0] for one in read):
+        pulse.learn_member(declaring, member, read[0])
+        return
+    if unread is None and counted and not read and all(one == counted[0] for one in counted):
+        pulse.learn_member(declaring, member, None, count=counted[0])
+        return
+    if unread is not None and (read or counted):
+        reason = f"{len(answer.values)} instances hold this member and one could not be read: {unread}"
+    elif read or counted:
+        reason = f"{len(read) + len(counted)} instances hold this member with different values"
+    else:
+        reason = unread or "the game returned no value"
+    pulse.refuse_member(declaring, member, reason)
 
 
 def numbered(statements: tuple[MacroStatement, ...], start: int = 1) -> list[tuple[int, MacroStatement]]:
@@ -514,6 +674,8 @@ class _Runner:
         # 모르는 batch 는 세지도 지우지도 않는다 — 까닭은 `_went_wrong` 에 있다.
         self.still_screens = 0
         self.waited_this_call = 0.0
+        # 입력이나 새 pulse 이후에는 비운다. 같은 상태를 읽는 동안만 이름별 조회를 재사용한다.
+        self.read_members_asked: set[str] = set()
 
     # -- 바깥 --
 
@@ -613,6 +775,7 @@ class _Runner:
                     "really ends.",
                     {"executed": MAX_EXECUTED_STATEMENTS},
                 )
+            await self._read_unknown_members(frame, statement)
             if isinstance(statement, MacroForStatement):
                 return await self._for(frame, place, statement)
             if isinstance(statement, MacroWhileStatement):
@@ -658,6 +821,103 @@ class _Runner:
         except MacroFailure as failure:
             self.stop(failure, place)
             return False
+
+    async def _read_unknown_members(
+        self, frame: _Frame, statement: MacroStatement
+    ) -> None:
+        """statement가 실제로 읽을 이름을 해당 scope에서 준비한다."""
+        if not isinstance(self.host, MemberReader):
+            return
+        if isinstance(statement, MacroAssignStatement):
+            if isinstance(statement.value, MacroReadValue):
+                await self._read_member_calls(frame, [statement.value.call])
+            elif isinstance(statement.value, MacroComputeValue):
+                await self._prepare_operand(frame, statement.value.expression)
+        elif isinstance(
+            statement,
+            (MacroRequireStatement, MacroIfStatement, MacroWhileStatement, MacroWaitUntilStatement),
+        ):
+            await self._prepare_condition(frame, statement.condition)
+        elif isinstance(statement, MacroReturnStatement):
+            if statement.condition is not None:
+                await self._prepare_condition(frame, statement.condition)
+            elif statement.expression is not None:
+                await self._prepare_operand(frame, statement.expression)
+
+    async def _read_member_calls(self, frame: _Frame, calls: list[MacroReaderCall]) -> None:
+        if not isinstance(self.host, MemberReader):
+            return
+        memories = self.memories()
+        for name in unknown_member_names(memories, frame.scope, calls):
+            sdk_name = sdk_member_name(name, memories.pulse)
+            if sdk_name is None or sdk_name in self.read_members_asked:
+                continue
+            self.read_members_asked.add(sdk_name)
+            declaring, member = sdk_name.split("::", 1)
+            # timeout이나 응답 누락 시에도 이전 holder의 값으로 판정하지 않는다.
+            memories.pulse.forget_member(declaring, member)
+            answer = await self.host.read_member(sdk_name)
+            if answer is not None:
+                _apply_read_member(memories.pulse, sdk_name, answer)
+
+    async def _prepare_condition(self, frame: _Frame, condition: MacroCondition) -> None:
+        if isinstance(condition, MacroReaderCondition):
+            await self._read_member_calls(frame, [condition.call])
+        elif isinstance(condition, MacroComparisonCondition):
+            await self._prepare_operand(frame, condition.left)
+            await self._prepare_operand(frame, condition.right)
+        elif isinstance(condition, MacroPredicateCondition):
+            await self._prepare_function(frame, condition)
+
+    async def _prepare_operand(self, frame: _Frame, operand: MacroOperand) -> None:
+        if isinstance(operand, MacroReaderOperand):
+            await self._read_member_calls(frame, [operand.call])
+        elif isinstance(operand, MacroNumberCallOperand):
+            await self._prepare_function(frame, operand)
+        elif isinstance(operand, MacroArithmeticOperand):
+            await self._prepare_operand(frame, operand.left)
+            await self._prepare_operand(frame, operand.right)
+        elif isinstance(operand, MacroExtremumOperand):
+            for value in operand.operands:
+                await self._prepare_operand(frame, value)
+
+    async def _prepare_function(
+        self, caller: _Frame, call: MacroPredicateCondition | MacroNumberCallOperand
+    ) -> None:
+        function = caller.definition.function(call.callee)
+        if function is None:
+            return
+        arguments = {
+            parameter.name: value
+            for parameter, value in _helper_arguments(function, call, caller, self)
+        }
+        frame = _Frame(function, MacroScope(arguments), caller.definition)
+
+        async def walk(statements: tuple[MacroStatement, ...]) -> bool:
+            for statement in statements:
+                frame.at = frame.number_of(statement)
+                await self._read_unknown_members(frame, statement)
+                if isinstance(statement, MacroAssignStatement):
+                    # 이름이 parameter나 앞서 읽은 값에 의존할 수 있어 실제 실행 순서로 bind한다.
+                    self._assign(frame, statement)
+                elif isinstance(statement, MacroIfStatement):
+                    selected = (
+                        statement.body
+                        if self._evaluate(frame, statement.condition, {})
+                        else statement.orelse
+                    )
+                    if await walk(selected):
+                        return True
+                elif isinstance(statement, MacroReturnStatement):
+                    return True
+            return False
+
+        try:
+            await walk(function.statements)
+        except MacroFailure as failure:
+            where = "predicate" if function.returns == "bool" else "number_def"
+            failure.payload.setdefault(where, f"{function.name} step {frame.at}")
+            raise
 
     def _assign(
         self,
@@ -863,6 +1123,11 @@ class _Runner:
                     statement, observed, waited_here, readings, evaluations, cap
                 )
             readings += arrived.pulses
+            # 새 reading 이 왔으면 `read_member` 로 받아 둔 값도 낡았을 수 있다. 다시 물은 뒤 조건을 읽는다 —
+            # `pulse` 가 감시하지 않는 값은 reading 이 갱신하지 않으므로, 여기서 안 물으면 `wait_until` 이
+            # 그 값을 statement 앞에 받은 옛 값으로만 평가해 끝까지 거짓이다(런 154 의 `turn_back(before)`).
+            self.read_members_asked.clear()
+            await self._read_unknown_members(frame, statement)
             if condition_is_true():
                 self.result.waits.append(
                     f"{place}: `{statement.source}` was true after {waited_here:.1f}s "
@@ -1016,6 +1281,7 @@ class _Runner:
                 observed: dict[str, Any] = {}
                 if guard is not None:
                     try:
+                        await self._read_unknown_members(frame, guard)
                         if not await self._condition(
                             frame, frame.place(loop_number), guard.condition, observed
                         ):
@@ -1226,6 +1492,10 @@ class _Runner:
         # 글자가 아니게 되고, 자기가 쓴 줄을 못 알아보는 것이 제일 비싼 혼선이다.
         outcome = await self.host.run(actions, statement.source, self.step)
         self.result.outcomes.append(outcome.text)
+        # 게임에 입력이 나갔으면 전에 물어 받은 값은 그 입력 전의 값이다. 다음 statement 가 다시 묻게
+        # 비운다(ARTEL-1289) — 전에는 macro 하나가 도는 동안 한 번만 물어, 입력 뒤의 `require` 가 옛
+        # 값으로 판정됐다.
+        self.read_members_asked.clear()
 
         # **돌아온 값을 본다.** 종전에는 여기서 무조건 `True` 였고, 그래서 클릭이 허공에
         # 떨어져도 사람이 마우스를 쥐어도 macro 가 끝까지 갔다 — 저자가 `require` 로 미리

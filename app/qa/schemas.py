@@ -37,6 +37,10 @@ class QaCaseRef(BaseModel):
     functions: CaseFunctions | None = None
     # 사람이 이 TC 의 판정을 정한 최근 기록 (ARTEL-1257). 없으면 계획 글이 종전과 같다.
     reviews: list[CaseReview] | None = None
+    # 이 TC 가 묻는 값의 이름(ARTEL-1279). SDK 의 `watch` 가 푸는 `Type::member` 문법이고, 런이
+    # 시작할 때 시나리오의 이름을 모아 한 번 보낸다. orchestration 은 `test_case.metadata.observe`
+    # 를 그대로 싣고 해석하지 않는다. 없으면 분석이 구운 watch list 만으로 읽는다.
+    observe: list[str] | None = None
 
 
 class QaStep(BaseModel):

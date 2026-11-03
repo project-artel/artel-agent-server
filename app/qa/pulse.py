@@ -22,6 +22,7 @@ put a second opinion between the game and the step that judges it.
 """
 
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -75,6 +76,16 @@ MAX_SCREEN_TEXT = 30
 # 꺼지는데, 그때 필요한 것은 명단이 아니라 "많이 꺼졌다" 는 사실이다.
 MAX_NAMED_OFF = 12
 
+# `PULSE.events` 를 몇 개까지 쥐나(ARTEL-1285). 한 reading 이 싣는 것은 직전 reading 뒤에 일어난
+# 것만이라, 쥐지 않으면 view 가 그 reading 한 번 동안만 그것을 말할 수 있다. 오래된 것부터 버린다.
+MAX_EVENTS_KEPT = 40
+# `what happened` 절이 한 번에 적는 event 줄의 상한. 전투 한 턴에 `anim.*` 이 수십 개 오는데, 읽는
+# 쪽에 필요한 것은 어떤 종류가 몇 번인지이고 같은 종류는 SDK 가 이미 `count` 로 접어 보낸다.
+MAX_EVENTS_SHOWN = 15
+# 지난번 그린 뒤 새 event 가 없을 때 대신 적는 마지막 event 수. 비워 두면 "아무 일도 없었다" 와
+# "이 SDK 는 event 를 안 보낸다" 가 구분되지 않는다.
+MAX_EVENTS_EARLIER = 5
+
 # 게임 상태일 확률이 이 값보다 낮다고 판정된 member type 은 view 에서 숨긴다.
 #
 # 0.5 가 아닌 이유: ARTEL-944 가 같은 입력을 네 번 물었을 때 판정 모델의 확률이 최대 0.100
@@ -84,6 +95,125 @@ COSMETIC_BELOW = 0.3
 
 # `LiveState` 가 member key 앞에 붙이는 `among` 접두사. ordinal 0 은 없고 그 외에는 `2#` 꼴이다.
 _AMONG_PREFIX = re.compile(r"^\d+#")
+# static 의 `changed` key 끝에 SDK 가 holder 번호를 붙인다(`Declaring::Member#1`). type 의 정체에는 들지 않는다.
+_INSTANCE_SUFFIX = re.compile(r"#\d+$")
+
+
+@dataclass(frozen=True)
+class UnreadValue:
+    """SDK 가 멤버를 읽지 못했다고 보낸 것(`unread`: `no-holder`, getter 예외 이름 …)(ARTEL-1289).
+
+    `None` 과 다르다. `None` 은 게임이 읽은 값이 null 이라는 말이고, 이것은 읽지 못했다는 말이다.
+    reader 는 이것을 만나면 이유를 달아 거절하고, view 는 `(unread: …)` 로 그린다.
+    """
+
+    reason: str
+
+
+@dataclass(frozen=True)
+class AmbiguousValue:
+    """한 이름이 값이 다른 멤버 둘 이상을 가리킨다(ARTEL-1289).
+
+    같은 type 의 component 가 한 객체에 둘(`among`), heap holder 가 여럿인 static(`instance`),
+    namespace 만 다른 두 type 의 짧은 이름이 그렇다. 처음 것이나 마지막 것을 고르면 조건이 어느
+    객체의 값으로 판정됐는지 알 수 없으므로, 어느 이름을 쓰면 하나로 좁혀지는지를 들고 거절한다.
+    """
+
+    name: str
+    candidates: tuple[str, ...]
+
+
+def member_aliases(declaring: str | None, member: str | None, suffix: str = "") -> tuple[str, ...]:
+    """macro 가 멤버 하나를 가리켜 쓸 수 있는 이름 전부. 좁은 것이 앞이다(ARTEL-1289).
+
+    `Declaring::member`, `Declaring.member`, `Short.member`, `member` 의 네 꼴이고, `suffix`
+    (`#among`·`@instance`)가 있으면 그것을 붙인 꼴이 먼저 선다 — 붙인 이름은 하나만 가리키므로
+    모호해질 수 없다. reader·Jev context·`read_member` cache 가 전부 이 하나를 쓴다. 전에는 셋이
+    각자 이름을 만들어 같은 글자가 한쪽에서만 맞았다.
+    """
+    declaring = declaring or ""
+    member = member or ""
+    short = declaring.split(".")[-1]
+    plain = tuple(dict.fromkeys((f"{declaring}::{member}", f"{declaring}.{member}", f"{short}.{member}", member)))
+    if not suffix:
+        return plain
+    return tuple(f"{name}{suffix}" for name in plain) + plain
+
+
+class AliasTable:
+    """이름 → 값 사전을 alias 로 채운다. 같은 이름에 다른 값이 오면 그 이름은 `AmbiguousValue` 가 된다.
+
+    `exact` 는 그 값만 가리키는 이름(`Declaring::member#1`)이고, 모호해진 이름의 후보로 적힌다.
+    """
+
+    def __init__(self) -> None:
+        self.named: dict[str, Any] = {}
+        self._exact: dict[str, str] = {}
+
+    def add(self, aliases: tuple[str, ...], value: Any, exact: str) -> None:
+        for alias in aliases:
+            if alias not in self.named:
+                self.named[alias] = value
+                self._exact[alias] = exact
+                continue
+            held = self.named[alias]
+            if isinstance(held, AmbiguousValue):
+                if exact not in held.candidates:
+                    self.named[alias] = AmbiguousValue(alias, held.candidates + (exact,))
+            elif self._exact[alias] != exact and held != value:
+                self.named[alias] = AmbiguousValue(alias, (self._exact[alias], exact))
+
+
+def flatten_fragment(prefix: str, value: Any) -> dict[str, Any]:
+    """`ui`·`engine` 조각을 `ui.interactable`·`engine.audio.playing` 같은 점 이름으로 편다.
+
+    `uitk` 는 element 목록이라 `uitk.<name>.<field>` 로 편다. 이름이 없는 element 는 들지 않는다.
+    """
+    flat: dict[str, Any] = {}
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            flat.update(flatten_fragment(f"{prefix}.{key}", inner))
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict) and item.get("name"):
+                for key, inner in item.items():
+                    if key != "name":
+                        flat.update(flatten_fragment(f"{prefix}.{item['name']}.{key}", inner))
+    else:
+        flat[prefix] = value
+    return flat
+
+
+def observed_text(value: Any) -> str:
+    """view 가 멤버 값 하나를 적는 글자. `UnreadValue` 는 이유를 단다."""
+    if isinstance(value, UnreadValue):
+        return f"(unread: {value.reason})"
+    return repr(value)
+
+
+# `uitk` element 를 한 줄에 몇 개까지 적나. 문서 하나가 120 개까지 오고, 그것을 다 적으면 객체 블록이 화면이 된다.
+MAX_UITK_SHOWN = 8
+
+
+def fragment_text(fragment: Any) -> str:
+    """조각 하나를 한 줄로. `ui`·`engine` 은 `key=value` 를 점 이름으로 펴서, `uitk` 는 element 마다 `name(type) 'text'`."""
+    if isinstance(fragment, list):
+        parts = []
+        for item in fragment[:MAX_UITK_SHOWN]:
+            if not isinstance(item, dict):
+                continue
+            part = f"{item.get('name') or '?'}({item.get('type') or '?'})"
+            if item.get("text"):
+                part += f" {item['text']!r}"
+            states = [flag for flag in ("enabled", "visible") if item.get(flag) is False]
+            if states:
+                part += " not " + "/".join(states)
+            parts.append(part)
+        if len(fragment) > MAX_UITK_SHOWN:
+            parts.append(f"(+{len(fragment) - MAX_UITK_SHOWN} more)")
+        return ", ".join(parts) or "(empty)"
+    flat = flatten_fragment("", fragment)
+    return " ".join(f"{key.lstrip('.')}={value!r}" for key, value in sorted(flat.items())) or repr(fragment)
 
 
 def changed_type_key(changed: str) -> str | None:
@@ -96,7 +226,7 @@ def changed_type_key(changed: str) -> str | None:
     tail = changed.rsplit("|", 1)[-1]
     if "::" not in tail:
         return None
-    return _AMONG_PREFIX.sub("", tail, count=1)
+    return _INSTANCE_SUFFIX.sub("", _AMONG_PREFIX.sub("", tail, count=1))
 
 
 PULSE_VIEW_START = "<<pulse>>"
@@ -124,6 +254,11 @@ class PulseMember(BaseModel):
     # it the second overwrites the first.
     among: int | None = None
     value: Any = None
+    # SDK 는 멤버 하나에 `value`·`count`·`unread` 가운데 하나를 싣는다(ARTEL-1289). 컬렉션은 개수만
+    # 온다(`count`) — 내용물은 게임 자신의 데이터다. 읽지 못한 멤버는 `unread` 에 이유가 온다.
+    # 셋을 `value` 하나로 접으면 "개수 44" 와 "null" 과 "못 읽었다" 가 전부 `None` 이 된다.
+    count: int | None = None
+    unread: str | None = None
     # False when the reading read it because it could, rather than because the
     # evidence named it. The distinction is the whole point of carrying it: a
     # condition written against a named member means more than one that happens
@@ -133,6 +268,11 @@ class PulseMember(BaseModel):
     @property
     def key(self) -> str:
         return f"{self.on or ''}::{self.member or ''}#{self.among or 0}"
+
+    @property
+    def observed(self) -> Any:
+        """reader 와 view 가 읽는 값 하나. 컬렉션은 개수이고, 못 읽은 멤버는 `UnreadValue` 다."""
+        return observed_of(self)
 
     @property
     def type_key(self) -> str:
@@ -153,10 +293,38 @@ class PulseStatic(BaseModel):
     member: str | None = None
     type: str | None = None
     value: Any = None
+    # `PulseMember` 와 같은 세 모양(ARTEL-1289).
+    count: int | None = None
+    unread: str | None = None
+    # heap·ScriptableObject holder 가 여럿인 멤버는 holder 마다 한 항목이고 SDK 가 번호를 단다. 번호가
+    # key 에 들지 않으면 둘째 holder 가 첫째를 덮고, 그 뒤 어느 holder 의 델타가 왔는지에 따라 같은
+    # 이름이 다른 객체의 값을 뜻한다.
+    instance: int | None = None
+    # `read_member` 로 받은 값에만 있다: 그 값을 쥔 component 의 scene path. `read_members` 가 쓴다.
+    path: str | None = None
 
     @property
     def key(self) -> str:
-        return f"{self.declaring or ''}::{self.member or ''}"
+        key = f"{self.declaring or ''}::{self.member or ''}"
+        return f"{key}@{self.instance}" if self.instance is not None else key
+
+    @property
+    def suffix(self) -> str:
+        """alias 에 붙는 꼴. `@1` 이거나 빈 문자열."""
+        return f"@{self.instance}" if self.instance is not None else ""
+
+    @property
+    def observed(self) -> Any:
+        return observed_of(self)
+
+
+def observed_of(entry: "PulseMember | PulseStatic") -> Any:
+    """`value`·`count`·`unread` 가운데 온 것을 값 하나로. 셋 다 없으면 `None`(게임이 null 을 읽었다)."""
+    if entry.unread is not None:
+        return UnreadValue(entry.unread)
+    if entry.count is not None and "value" not in entry.model_fields_set:
+        return entry.count
+    return entry.value
 
 
 class PulseObject(BaseModel):
@@ -184,6 +352,11 @@ class PulseObject(BaseModel):
     # 왔다는 사실 자체가 "이번에 바뀌었다" 이고, 아래 `text_at` 이 그것을 적는다.
     text: str | None = None
     offers: dict[str, Any] | None = None
+    # uGUI·엔진 컴포넌트·UI Toolkit 의 상태. 어느 멤버에도 없는 값이라 SDK 의 adapter 가 읽어 객체
+    # 항목에 조각으로 싣는다(ARTEL-1282). 조각은 바뀔 때 통째로 다시 온다.
+    ui: dict[str, Any] | None = None
+    engine: dict[str, Any] | None = None
+    uitk: list[dict[str, Any]] | None = None
     members: list[PulseMember] = Field(default_factory=list)
     # 컴포넌트별로 묶인 멤버. `on` 을 멤버마다 되풀이하지 않으려고 SDK 가 이렇게 낸다
     # (ARTEL-540) — 한 문서에서 `on` 316개 중 295개가 같은 값이었다.
@@ -220,6 +393,49 @@ class PulseComponent(BaseModel):
     m: list[PulseMember] = Field(default_factory=list)
 
 
+class PulseEvent(BaseModel):
+    """게임이 직전 reading 뒤에 한 호출 하나(`PULSE.events`, schema 3, ARTEL-1285).
+
+    `kind` 는 `audio.play`·`anim.trigger`·`scene.load`·`prefs.set`·`spawn` 같은 SDK 의 이름이고,
+    `target` 은 그 호출을 받은 객체의 scene path(`scene.load`·`prefs.*` 같은 static 호출은 `None`),
+    `detail` 은 clip·trigger·parameter·scene·prefab·key 이름, `value` 는 인자가 있을 때 그 값이다.
+    같은 kind+target+detail+value 는 SDK 가 `count` 로 접어 보내고 `frame` 은 그중 첫 번째다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    kind: str
+    target: str | None = None
+    detail: str | None = None
+    value: str | int | float | bool | None = None
+    frame: int | None = None
+    count: int = 1
+
+    def line(self) -> str:
+        """view 의 한 줄. `audio.play Pixel 10 on BackgroundMusic (x3)` 꼴."""
+        text = self.kind
+        if self.detail:
+            text += f" {self.detail}"
+        if self.value is not None:
+            text += f"={self.value!r}"
+        if self.target:
+            # scene path 의 마지막 마디만. 객체 블록의 머리줄이 selector 를 쓰므로 그 이름으로
+            # 찾아지면 되고, 경로 전체는 한 줄을 화면 너비만큼 늘린다.
+            text += f" on {self.target.rsplit('/', 1)[-1]}"
+        if self.count > 1:
+            text += f" (x{self.count})"
+        return text
+
+
+class RecordedEvent(BaseModel):
+    """`PulseMemory` 가 쥔 event 하나와 그것이 실려 온 `reading` 번호. 창을 가르는 자다."""
+
+    model_config = ConfigDict(extra="allow")
+
+    reading: int
+    event: PulseEvent
+
+
 class PulseReading(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -253,6 +469,12 @@ class PulseReading(BaseModel):
     # 지금 도는 behavior 전부. 하나라도 도는 동안 매 `PULSE` 에 실리고, 다 끝나면 `[]` 이다.
     # 없으면(`None`) 아무것도 안 돌았거나 이 기능이 없는 SDK 다.
     behaviors: list[RunningBehavior] | None = None
+    # 직전 reading 뒤에 게임이 한 호출(ARTEL-1285, schema 3). 없으면 schema 2 이하의 SDK 다.
+    events: list[PulseEvent] = Field(default_factory=list)
+    # `PULSE.audio`: 재생 중인 AudioSource 수와 직전 reading 뒤 재생을 시작한 clip. `PULSE.errors`:
+    # 직전 reading 뒤 새로 생기거나 늘어난 예외·Error 로그 묶음(ARTEL-1289). 둘 다 event 로 접힌다.
+    audio: dict[str, Any] | None = None
+    errors: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ReadingLog(BaseModel):
@@ -315,6 +537,22 @@ class _HeldObject(BaseModel):
     # True when the object last arrived under `active`.
     live: bool = True
     members: dict[str, PulseMember] = Field(default_factory=dict)
+    # SDK adapter 의 조각(ARTEL-1289). `PulseObject` 에서 그대로 옮긴다 — 전에는 이 객체를 다시
+    # 만들 때 빠져서 세 adapter 의 상태가 모델에도 macro 에도 닿지 않았다.
+    ui: dict[str, Any] | None = None
+    engine: dict[str, Any] | None = None
+    uitk: list[dict[str, Any]] | None = None
+    # 조각마다 마지막으로 도착한 판독 번호와 마지막으로 그린 판독 번호. 멤버의 `at`·`shown` 과 같다.
+    fragments_at: dict[str, int] = Field(default_factory=dict)
+    fragments_shown: dict[str, int] = Field(default_factory=dict)
+
+    def fragments(self) -> dict[str, Any]:
+        """있는 조각만, 이름 → 조각."""
+        return {
+            name: value
+            for name, value in (("ui", self.ui), ("engine", self.engine), ("uitk", self.uitk))
+            if value is not None
+        }
     # 멤버마다 그 값이 마지막으로 도착한 판독 번호. 델타만 그리려면 "언제 온 것인가"가
     # 필요한데, 값 자체는 그것을 말하지 않는다 — 같은 값이 두 번 오면 구분이 안 된다.
     #
@@ -338,6 +576,11 @@ class _HeldObject(BaseModel):
     # 짝이던 `text_shown`(마지막으로 **그린** 판독 번호)은 없앴다. 화면의 글자 절이 창을 안
     # 타고 매번 전부 그리므로 "언제 말했나" 를 물을 자리가 없다(ARTEL-690).
     text_at: int = 0
+
+
+def holder_key(object_id: int) -> str:
+    """`read_member` 값을 그 객체 아래에 적는 자리(`read_members` 의 `path` 칸). pulse 기록의 `id` 와 같은 숫자다."""
+    return f"#{object_id}"
 
 
 class PulseMemory(BaseModel):
@@ -414,6 +657,55 @@ class PulseMemory(BaseModel):
     # tool 이 지금 step 을 옮길 때 고친다(`app/agents/qa/tools/game_function_tools.py` 의 `focus`).
     allowed_cheats: list[str] | None = None
     allowed_behaviors: list[str] | None = None
+    # `PULSE.events` 를 도착한 순서대로, 오래된 것이 앞(ARTEL-1285). `MAX_EVENTS_KEPT` 를 넘으면
+    # 앞에서 버린다. `whole` reading 에도 비우지 않는다 — scene 이 바뀐 것 자체가 `scene.load`
+    # event 로 여기 적히고, 그 앞의 일은 그 scene 으로 온 까닭이다.
+    events: list[RecordedEvent] = Field(default_factory=list)
+    # macro runner 가 `read_member` 로 게임에 물어 받은 값(ARTEL-1285). key 는 `Declaring::Member`.
+    # `statics` 와 따로 두는 이유: `pulse` 가 감시하는 값이 아니라 다음 reading 이 갱신하지 않으므로,
+    # `statics:` 절에 그리면 안 움직이는 값이 사실처럼 남는다. macro 의 `static()`·`member()` 만 읽는다.
+    read_members: dict[str, PulseStatic] = Field(default_factory=dict)
+    # `read_member` 가 못 읽은 이름과 SDK 가 말한 이유. reader 의 거절 문장이 이것을 덧붙인다.
+    # key 는 `Declaring::Member`, 또는 holder 하나의 것이면 `<path>|Declaring::Member`.
+    unreadable_members: dict[str, str] = Field(default_factory=dict)
+    # SDK 가 이 reading 을 자르며 남긴 표시(`holder-limit:8` …)(ARTEL-1289). 비어 있지 않으면 보이지
+    # 않는 객체가 있을 수 있어, `absent()` 가 부재를 확정하지 못하고 view 가 그 사실을 적는다.
+    gaps: list[str] = Field(default_factory=list)
+    # `PULSE.audio.playing`: 지금 재생 중인 AudioSource 수. 마지막으로 온 값과 그 reading 번호.
+    audio_playing: int | None = None
+    audio_at: int = 0
+
+    def learn_member(
+        self, declaring: str, member: str, value: Any, *, count: int | None = None, path: str | None = None
+    ) -> None:
+        """`read_member` 가 돌려준 값 하나를 `static()`·`member()` 가 찾는 자리에 둔다.
+
+        `path` 가 있으면 그 holder 의 값이고, 그 path 의 객체를 겨눈 `member()` 만 읽는다. 없으면 어느
+        객체를 겨눴든 같은 값(static 이거나 holder 전부가 같은 값)이다.
+        """
+        if count is not None:
+            entry = PulseStatic(declaring=declaring, member=member, count=count, path=path)
+        else:
+            entry = PulseStatic(declaring=declaring, member=member, value=value, path=path)
+        key = f"{path}|{entry.key}" if path else entry.key
+        self.read_members[key] = entry
+        self.unreadable_members.pop(key, None)
+
+    def forget_member(self, declaring: str, member: str) -> None:
+        """`Declaring::Member` 로 받아 둔 값과 거절을 holder 것까지 모두 지운다. 새 `read_member` 답을 적기 전에 부른다 —
+        답 하나가 그 멤버의 지금 전부이고, 앞 답의 holder 값이 남으면 그 holder 를 이번에 못 읽었어도 옛 값으로 읽힌다."""
+        key = f"{declaring}::{member}"
+        for table in (self.read_members, self.unreadable_members):
+            for stored in [stored for stored in table if stored == key or stored.endswith(f"|{key}")]:
+                del table[stored]
+
+    def refuse_member(self, declaring: str, member: str, reason: str, *, path: str | None = None) -> None:
+        """`read_member` 가 그 이름을 못 읽었다. 거절 이유를 reader 가 쓸 수 있게 남긴다."""
+        key = f"{declaring}::{member}"
+        if path:
+            key = f"{path}|{key}"
+        self.unreadable_members[key] = reason
+        self.read_members.pop(key, None)
 
     def apply_functions(self, update: PulseFunctions) -> None:
         """`PULSE.functions` 를 합친다. `whole` 이면 쥔 것을 통째로 바꾼다."""
@@ -553,9 +845,33 @@ class PulseMemory(BaseModel):
             value = getattr(reading, field)
             if value is not None:
                 setattr(self, field, value)
+        # 잘렸다는 표시는 이 reading 의 것이다. 전량이면 새 목록이고, 델타는 실려 왔을 때만 바꾼다.
+        if reading.whole or "gaps" in reading.model_fields_set:
+            self.gaps = list(reading.gaps)
 
         # 이 `reading` 의 번호. 값에 찍는 것과 `window` 를 재는 것이 같은 자를 쓰게 한다.
         now = self.clock()
+
+        # 소리와 예외는 event 로 접는다(ARTEL-1289). 둘 다 "직전 reading 뒤에 일어난 일" 이라 event 의
+        # 창과 같은 창을 탄다. 재생 중인 수는 상태라 따로 쥔다.
+        if reading.audio is not None:
+            playing = reading.audio.get("playing")
+            if playing is not None:
+                self.audio_playing = playing
+                self.audio_at = now
+            for started in reading.audio.get("started") or []:
+                reading.events.append(
+                    PulseEvent(kind="audio.started", detail=started.get("clip"), frame=started.get("frame"))
+                )
+        for error in reading.errors:
+            reading.events.append(
+                PulseEvent(
+                    kind="error",
+                    detail=f"{error.get('type') or 'Error'}: {error.get('message') or ''}".rstrip(": "),
+                    frame=error.get("lastFrame") or error.get("firstFrame"),
+                    count=error.get("count") or 1,
+                )
+            )
 
         for key in reading.changed:
             self.moves[key] = self.moves.get(key, 0) + 1
@@ -586,6 +902,13 @@ class PulseMemory(BaseModel):
             self.statics[entry.key] = entry
             self.static_at[entry.key] = now
 
+        # event 는 이 reading 의 번호를 달고 뒤에 붙는다. 같은 번호가 창을 가르는 자(`clock`)라
+        # `render` 가 "지난번 그린 뒤" 를 값과 같은 자로 잰다.
+        for event in reading.events:
+            self.events.append(RecordedEvent(reading=now, event=event))
+        if len(self.events) > MAX_EVENTS_KEPT:
+            del self.events[: len(self.events) - MAX_EVENTS_KEPT]
+
         # Which list an object arrives in is what says whether it is on. It is
         # not a field on the object, so it cannot disagree with itself.
         for live, arrived in ((True, reading.active), (False, reading.deactive)):
@@ -610,6 +933,16 @@ class PulseMemory(BaseModel):
                 # 실려 왔다는 것이 곧 바뀌었다는 뜻이다 — SDK 가 장부에 얹어 보내므로
                 # 안 바뀐 글자는 델타에 없다. 안 실려 왔으면 옛 시각을 그대로 이어받는다.
                 held.text_at = now if obj.text is not None else (was.text_at if was else 0)
+                # adapter 조각도 같은 규칙이다: 실려 온 조각은 통째로 바뀐 것이고, 안 온 조각은 옛것이다.
+                held.fragments_at = dict(was.fragments_at) if was else {}
+                held.fragments_shown = dict(was.fragments_shown) if was else {}
+                for name in ("ui", "engine", "uitk"):
+                    arrived_fragment = getattr(obj, name)
+                    if arrived_fragment is not None:
+                        setattr(held, name, arrived_fragment)
+                        held.fragments_at[name] = now
+                    elif was is not None:
+                        setattr(held, name, getattr(was, name))
                 # 말한 기록도 이어받는다. 여기서 잃으면 이미 말한 값을 매 턴 다시 말한다.
                 held.shown = dict(was.shown) if was else {}
                 for member in obj.members:
@@ -706,6 +1039,13 @@ class PulseMemory(BaseModel):
         if self.unwatchable:
             # Said out loud so "nothing moved" is not read as "nothing is there".
             lines.append(f"could not read: {self.unwatchable}")
+        if self.gaps:
+            # 잘린 reading 은 "없다" 를 말할 수 없다. 읽는 쪽이 그것을 알아야 부재를 추론하지 않는다.
+            lines.append(
+                "coverage gaps: " + ", ".join(self.gaps) + " — objects beyond the limit are not in this view"
+            )
+        if self.audio_playing is not None:
+            lines.append(f"audio playing: {self.audio_playing}")
         # cheat 와 behavior 줄(ARTEL-1054). 창을 안 타고 매번 그린다 — `statics` 와 같이, 안
         # 변하는 동안에도 지금 무엇을 부를 수 있는지를 정한다. 축이 꺼진 run 에는 줄이 없다.
         lines.extend(self.function_lines())
@@ -743,6 +1083,12 @@ class PulseMemory(BaseModel):
                 for entry in window:
                     lines.append(f"  {entry.reading} ({self._log_line(entry)})")
             lines.append("")
+
+        # 게임이 한 호출(`PULSE.events`, ARTEL-1285). 로그 바로 다음이다 — 로그가 "무엇이 움직였나"
+        # 이고 이것이 "게임이 무엇을 했나" 라 둘이 같은 창을 보며 한 사실의 두 면을 말한다.
+        # `<<scene context>>` 블록보다 앞이기도 하다. `MAX_LOGGED_CHARS` 가 tool 결과의 꼬리를
+        # 자르므로(ARTEL-824) 뒤에 두면 잘릴 때 이것이 먼저 없어진다.
+        lines.extend(self._event_lines(since))
 
         # 사라진 것을 말한다. 창을 타므로 한 번 말하고 만다.
         #
@@ -856,7 +1202,7 @@ class PulseMemory(BaseModel):
                 # 마지막으로 본 뒤 바뀐 것만 표시한다. 전부 그리면서 표시까지 없으면 읽는 쪽이
                 # 무엇이 소식인지 스스로 찾아야 하고, 그것이 창이 하라고 있는 일이다.
                 news = "  (changed)" if self.static_at.get(key, 0) > news_since else ""
-                lines.append(f"  {name} = {entry.value!r}{news}{self._moved(key)}")
+                lines.append(f"  {name} = {observed_text(entry.observed)}{news}{self._moved(key)}")
         if hidden_statics:
             names = ", ".join(self._static_name(self.statics[key]) for key in hidden_statics)
             lines.append(
@@ -882,7 +1228,7 @@ class PulseMemory(BaseModel):
             #
             # 글자만 든 라벨은 여기서 걸러도 된다. 위의 화면의 글자 절이 그 글자와 주소를
             # 이미 싣고, 여기서 블록을 하나 더 만들면 같은 주소가 두 번 나온다(ARTEL-690).
-            if not obj.members and not obj.offers and obj.id is None:
+            if not obj.members and not obj.offers and obj.id is None and not obj.fragments():
                 continue
 
             # cosmetic 으로 판정된 member 는 fresh/owed 에서 뺀다. 그리지 않았으므로 `shown` 도
@@ -900,6 +1246,14 @@ class PulseMemory(BaseModel):
                 if k not in fresh_all and obj.at.get(k, 0) > obj.shown.get(k, 0)
             ]
             owed = [k for k in owed_all if k not in cosmetic_keys]
+            # adapter 조각도 멤버와 같은 창을 탄다(ARTEL-1289).
+            fragments = obj.fragments()
+            fresh_fragments = [n for n in fragments if obj.fragments_at.get(n, 0) > since]
+            owed_fragments = [
+                n
+                for n in fragments
+                if n not in fresh_fragments and obj.fragments_at.get(n, 0) > obj.fragments_shown.get(n, 0)
+            ]
             hidden_here = len(fresh_all) - len(fresh) + len(owed_all) - len(owed)
             if hidden_here:
                 hidden_values += hidden_here
@@ -916,7 +1270,7 @@ class PulseMemory(BaseModel):
             #
             # 글자는 이 판단에 안 든다. 화면의 글자 절이 창과 무관하게 전부 그리므로,
             # 글자만 든 객체는 여기서 블록을 안 만드는 것이 맞다(ARTEL-690).
-            if not fresh and not owed and not actionable:
+            if not fresh and not owed and not fresh_fragments and not owed_fragments and not actionable:
                 continue
 
             where = obj.selector or obj.path or key
@@ -938,9 +1292,15 @@ class PulseMemory(BaseModel):
                 # 창 밖에서 변한 값은 표를 단다. 창의 뜻이 "이 행위가 만든 것" 이므로, 옛
                 # 값을 표 없이 섞으면 읽는 쪽이 그것을 방금 일어난 일로 읽는다.
                 earlier = "  (changed earlier)" if member_key in owed else ""
-                lines.append(f"  {name} = {member.value!r}{asked}{news}{earlier}{moved}")
+                lines.append(f"  {name} = {observed_text(member.observed)}{asked}{news}{earlier}{moved}")
                 if advance:
                     obj.shown[member_key] = self.clock()
+            for name in fresh_fragments + owed_fragments:
+                news = "  (changed)" if marking and obj.fragments_at.get(name, 0) > news_since else ""
+                earlier = "  (changed earlier)" if name in owed_fragments else ""
+                lines.append(f"  {name}: {fragment_text(fragments[name])}{news}{earlier}")
+                if advance:
+                    obj.fragments_shown[name] = self.clock()
 
         if hidden_values:
             lines.append(
@@ -983,7 +1343,7 @@ class PulseMemory(BaseModel):
             )
 
         lines = [
-            f"static {self._static_name(entry)} = {entry.value!r}  (judged cosmetic)"
+            f"static {self._static_name(entry)} = {observed_text(entry.observed)}  (judged cosmetic)"
             for entry in statics
         ]
         for key, obj in hits[:MAX_INSPECTED]:
@@ -1004,7 +1364,9 @@ class PulseMemory(BaseModel):
                 name = f"{(member.on or '').split('.')[-1]}.{member.member}"
                 asked = "" if member.asked is not False else " (unasked)"
                 judged = "  (judged cosmetic)" if self.is_cosmetic(member.type_key) else ""
-                lines.append(f"  {name} = {member.value!r}{asked}{judged}")
+                lines.append(f"  {name} = {observed_text(member.observed)}{asked}{judged}")
+            for name, fragment in obj.fragments().items():
+                lines.append(f"  {name}: {fragment_text(fragment)}")
         if len(hits) > MAX_INSPECTED:
             # 잘랐다는 것을 말한다. 조용히 자르면 독자가 이것을 전부로 읽는다.
             lines.append(f"({len(hits) - MAX_INSPECTED} more objects match; name one more exactly)")
@@ -1185,10 +1547,36 @@ class PulseMemory(BaseModel):
             parts.append("pointer: " + ", ".join(str(p) for p in pointers))
         return "can do — " + " · ".join(parts) if parts else ""
 
+    def _event_lines(self, since: int) -> list[str]:
+        """`what happened` 절. event 가 하나도 없으면 빈 목록이라 schema 2 의 view 와 같다.
+
+        창은 값과 같다 — `since` 보다 뒤의 reading 에 실려 온 것만. 창에 든 것이 없으면 마지막
+        `MAX_EVENTS_EARLIER` 개를 "earlier" 로 적는다. 창이 비었다고 절을 빼면 "게임이 아무 호출도
+        안 했다" 와 "이 SDK 는 event 를 안 보낸다" 가 같은 침묵이 된다.
+
+        `MAX_EVENTS_SHOWN` 을 넘으면 **최신**을 남기고 앞을 센다. 읽는 쪽이 찾는 것은 행위 직후에
+        게임이 무엇을 했나이고, 그것이 창의 끝이다.
+        """
+        if not self.events:
+            return []
+        fresh = [one for one in self.events if one.reading > since]
+        if fresh:
+            head = "what happened since the last reading:"
+        else:
+            fresh = self.events[-MAX_EVENTS_EARLIER:]
+            head = f"what happened earlier (nothing new since the last reading, last {len(fresh)}):"
+        dropped = max(len(fresh) - MAX_EVENTS_SHOWN, 0)
+        lines = [head]
+        if dropped:
+            lines.append(f"  (+{dropped} earlier events not listed)")
+        lines.extend(f"  {one.event.line()}" for one in fresh[dropped:])
+        lines.append("")
+        return lines
+
     @staticmethod
     def _static_name(entry: "PulseStatic") -> str:
-        """`statics:` 절에 적히는 이름. `TurnBattleSystem.Instance` 꼴."""
-        return f"{(entry.declaring or '').split('.')[-1]}.{entry.member}"
+        """`statics:` 절에 적히는 이름. `TurnBattleSystem.Instance` 꼴. holder 가 여럿이면 `State.hp@1`."""
+        return f"{(entry.declaring or '').split('.')[-1]}.{entry.member}{entry.suffix}"
 
     @staticmethod
     def _log_line(entry: ReadingLog) -> str:

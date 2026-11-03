@@ -492,13 +492,10 @@ from app.llm.models import LLMModel, get_model_spec
 # 이 view와 tool 구성을 이전 실행과 구분해 기록한다.
 # macro 결과에서 중간 대사 목록을 제거하고 현재 화면을 관찰하는 계약을 명시한다.
 # 모델이 읽는 결과 형식이 바뀌므로 이전 실행과 별도 label로 기록한다.
-# v48은 ACT에서도 `capture_screen`과 `inspect_object`를 허용한다.
-# 입력 뒤 관찰이 거절돼 판정에 필요한 값을 다시 읽지 못하던 제한을 없앤다.
-# v49는 이 phase gate 변경에 TC snapshot 조회와 고정 TC ledger를 함께 적용한다.
-# 명세가 큰 run은 상세를 필요할 때 읽고, compaction 이후 전체 ID와 진행 상태를 복원한다.
-# v50은 동일 TC의 이전 검증 과정과 사람 설명을 읽는 도구를 추가한다.
-# 기록은 출처와 함께 참고로 읽으며 현재 실행의 판정을 대체하지 않는다.
-QA_ARCH_LABEL = "v50-tc-history"
+# v50은 TC snapshot context와 ACT 관찰 허용에 PULSE events·adapter 조각을 함께 적용한다.
+# v51은 같은 TC의 이전 검증 과정과 사람 설명을 조회하는 도구를 추가한다.
+# 과거 기록은 출처와 함께 참고로 읽으며 현재 실행의 판정을 대체하지 않는다.
+QA_ARCH_LABEL = "v51-pulse-tc-history"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
