@@ -30,8 +30,9 @@ from pydantic import BaseModel, ConfigDict, Field
 # 끝나면 `reset_game` 뒤 다시 돌고, 상한(`free_max_resets`, `free_case_attempts`) 뒤 남은 case 는 UNREACHED 로
 # 실패 보고한다. ORDERED 시나리오의 루프는 그대로지만 knob 이 늘어 fingerprint 가 바뀐다.
 #
-# STATE_SET 을 읽는 executer, 행동 지침만 내는 planner, 실패를 가르는 evaluator 로 엔진을 다시 짰다. 새 동작은 모두
-# knob 뒤에 있고 기본값은 pe2 와 같은 쪽이다(`actions="legacy"`, `target_contract`·`facts` off, `repair="editor"`).
+# pe3: STATE_SET 을 읽는 executer, 행동 지침만 내는 planner, 실패를 가르는 evaluator 로 엔진을 다시 짰다. 기본으로 켜지는
+# 것은 STATE_SET(`state_source`), 실패 분석(`analysis`), editor(`editor`), 화면 사진(`screen_images`)이다. 행동의 모양
+# (`actions`, 기본 `legacy`), 대상 고정(`target_contract`)과 fact(`facts`)는 기본으로 꺼져 있고, 복구는 기본이 editor 다.
 # - executer: Jev 가 읽는 state 를 Orchestration `STATE_SET` 에서 읽는다(knob `state_source`, `app/qa/state_set.py`). planner 가
 #   step 마다 ```observe 로 Jev 가 볼 범위를 정하고, Jev 는 EXPAND_STATE(범위를 넓힘)·REPLAN(계획을 다시 씀)을 고를 수 있으며
 #   직전 action turn 들(`RECENT_ACTIONS_SHOWN`)을 함께 읽는다. 행동은 효과를 본 것만 성공으로 친다. 헛도는 action·같은 action
