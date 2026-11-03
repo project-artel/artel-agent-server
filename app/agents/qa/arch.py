@@ -492,7 +492,24 @@ from app.llm.models import LLMModel, get_model_spec
 # 이 view와 tool 구성을 이전 실행과 구분해 기록한다.
 # macro 결과에서 중간 대사 목록을 제거하고 현재 화면을 관찰하는 계약을 명시한다.
 # 모델이 읽는 결과 형식이 바뀌므로 이전 실행과 별도 label로 기록한다.
-QA_ARCH_LABEL = "v47-visual-skill-without-dialogue-history"
+#
+# v48 because the pulse view now says what the game did and carries what the SDK had been sending and
+# the agent had been dropping (ARTEL-1285, ARTEL-1289). An SDK at `PULSE` schema 3 sends `events`, one
+# entry per call the game made since the previous reading — `audio.play`, `anim.trigger`, `scene.load`,
+# `spawn`, `prefs.set` and the rest — and `PulseMemory.render` draws them as a `what happened since the
+# last reading:` block after the readings log, with `audio.started` and `error` lines; when nothing new
+# arrived it lists the last few as `earlier`. A member that is a collection shows its `count`; a member
+# the game could not read shows `(unread: <reason>)` instead of `None`; a static held by several heap
+# objects shows one line per holder (`State.hp@1`); each object block ends with its adapter fragments —
+# `ui: interactable=True fill=1`, `engine: audio.playing=False`, `uitk: Name(type) 'text'`; the header
+# says `coverage gaps:` when the SDK truncated the reading and `audio playing: N`. A reading that carries
+# none of these renders byte for byte as v47. The tool set and every argument schema are unchanged, so
+# `arch_fingerprint` does not move; the label moves because what the model reads after every action
+# moved. The reader changes in the same PR — the `read_member` fallback for `static()` and `member()`,
+# one name resolver (`member_aliases`), ambiguous names refused, `read_member` answers kept per holder,
+# the fetched-value cache cleared after an input — change what a macro reads, not what the model reads,
+# and are not the reason for the bump.
+QA_ARCH_LABEL = "v48-pulse-events-and-fragments"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

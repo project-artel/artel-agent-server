@@ -515,7 +515,11 @@ def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v47-visual-skill-without-dialogue-history"
+#
+# `v48-pulse-events-and-fragments` (ARTEL-1285, ARTEL-1289) moved the label alone: `PulseMemory.render`
+# gained the `what happened since the last reading:` block, member counts, unread reasons, per-holder
+# statics, adapter fragments, coverage gaps and audio lines, none of which the fingerprint hashes.
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v48-pulse-events-and-fragments"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,

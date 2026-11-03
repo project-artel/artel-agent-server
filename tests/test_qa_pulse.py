@@ -1520,3 +1520,121 @@ def test_물으면_이미_말한_글자도_답한다():
     memory.render(since=0, advance=True)
 
     assert "says '이미 말한 대사'" in memory.inspect("Dialogue")
+
+
+# --- `PULSE.events` (ARTEL-1285) --------------------------------------------------
+
+
+def event(
+    kind: str, detail: str | None = None, target: str | None = None, **over
+) -> dict:
+    base = {
+        "kind": kind,
+        "target": target,
+        "detail": detail,
+        "value": None,
+        "frame": 99,
+        "count": 1,
+    }
+    base.update(over)
+    return base
+
+
+EVENTS = [
+    event("scene.load", "Map_scene"),
+    event("audio.play", "Pixel 10", "Root/BackgroundMusic", count=3),
+    event("anim.trigger", "Attack", "Root/Player"),
+    event("anim.bool", "IsRunning", "Root/Player", value=True),
+]
+
+
+def test_schema_3_reading_의_events_가_what_happened_절로_그려진다():
+    memory = fold(reading(schema=3, active=[obj()], events=EVENTS))
+
+    view = memory.render()
+
+    block = view[view.index("what happened since the last reading:") :].split("\n\n")[0]
+    assert block.split("\n") == [
+        "what happened since the last reading:",
+        "  scene.load Map_scene",
+        "  audio.play Pixel 10 on BackgroundMusic (x3)",
+        "  anim.trigger Attack on Player",
+        "  anim.bool IsRunning=True on Player",
+    ]
+    # `<<scene context>>` 가 view 뒤에 붙으므로, 그보다 앞에 두려면 객체 블록보다도 앞이어야 한다.
+    assert view.index("what happened") < view.index("Canvas[2]/continue[1]")
+
+
+def test_events_가_없는_reading_은_그_절을_만들지_않는다():
+    """schema 2 의 SDK 는 종전 view 와 byte 단위로 같아야 한다."""
+    memory = fold(reading(active=[obj()]))
+
+    assert "what happened" not in memory.render()
+    assert memory.events == []
+
+
+def test_events_도_값과_같은_창을_탄다():
+    memory = fold(reading(schema=3, active=[obj()], events=EVENTS[:2]))
+    memory.render()
+    memory.apply(
+        PulseReading.model_validate(
+            reading(
+                schema=3,
+                reading=2,
+                whole=False,
+                events=[event("destroy", target="Root/Slime[3]")],
+            )
+        )
+    )
+
+    view = memory.render()
+
+    assert "destroy on Slime[3]" in view
+    assert "audio.play" not in view
+
+
+def test_새_event_가_없으면_마지막_몇_개를_earlier_로_적는다():
+    """빈 창을 침묵으로 두면 "게임이 아무것도 안 했다" 와 "이 SDK 는 event 를 안 보낸다" 가 같아진다."""
+    memory = fold(reading(schema=3, active=[obj()], events=EVENTS))
+    memory.render()
+
+    view = memory.render()
+
+    assert "what happened earlier (nothing new since the last reading, last 4):" in view
+    assert "  anim.bool IsRunning=True on Player" in view
+
+
+def test_events_는_상한까지만_쥐고_그릴_때는_최신을_남긴다():
+    from app.qa.pulse import MAX_EVENTS_KEPT, MAX_EVENTS_SHOWN
+
+    docs = [
+        reading(
+            schema=3,
+            active=[obj()],
+            events=[event("spawn", f"Slime{n}") for n in range(30)],
+        )
+    ]
+    docs.append(
+        reading(
+            schema=3,
+            reading=2,
+            whole=False,
+            events=[event("spawn", f"Bat{n}") for n in range(30)],
+        )
+    )
+    memory = fold(*docs)
+
+    view = memory.render()
+
+    assert len(memory.events) == MAX_EVENTS_KEPT
+    assert f"(+{MAX_EVENTS_KEPT - MAX_EVENTS_SHOWN} earlier events not listed)" in view
+    assert "spawn Bat29" in view
+    assert "spawn Slime0" not in view
+
+
+def test_planner_가_읽는_screen_도_같은_render_라_events_가_실린다():
+    from app.agents.planner_executer.prompts import screen
+
+    memory = fold(reading(schema=3, active=[obj()], events=EVENTS[:1]))
+
+    assert "  scene.load Map_scene" in screen(memory)
