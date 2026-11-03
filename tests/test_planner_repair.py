@@ -58,7 +58,7 @@ def test_play_stops_with_a_repair_request_when_the_planner_may_be_asked() -> Non
     assert play.stopped.startswith("REPAIR: `press_start` failed 2 times in this step")
     reason, lines = repair_brief(play)
     assert "The action `press_start` failed 2 times in this step" in reason and "Its first failure: turn 0" in reason
-    assert "Game values" in reason and lines and lines[-1].startswith("turn 1: press_start → failed")
+    assert "Game observations from PulseMemory" in reason and lines and lines[-1].startswith("turn 1: press_start → failed")
 
 
 def test_the_runner_has_the_planner_rewrite_the_step_and_the_evaluator_reads_both_plans() -> None:
@@ -126,6 +126,19 @@ def test_merged_plays_keep_every_turn_and_reading_with_its_plan() -> None:
     assert [entry["at"] for entry in merged.evidence] == ["plan 1 · start", "plan 1 · end", "plan 2 · start", "plan 2 · end"]
     assert merged.stopped == "done" and merged.seconds == 15.0
     assert merged.start_screen == "s1" and merged.end_screen == "e2" and merged.evidence_unknown == ["X.y"]
+
+
+def test_재계획을_합친_PulseMemory_관측도_판정에_전달() -> None:
+    from app.agents.evaluator.verdict import evidence_text
+
+    first = StepPlay("REPAIR: x", start_screen="hp: 30", end_screen="hp: 15", state_source="pulse_memory")
+    last = StepPlay("done", start_screen="hp: 15", end_screen="hp: 0", state_source="pulse_memory")
+
+    text = evidence_text(merge_plays([first, last]))
+
+    assert "Game observations from PulseMemory" in text
+    assert "Screen before play began:\nhp: 30" in text
+    assert "Screen when play stopped:\nhp: 0" in text
     assert merge_plays([first]) is first
 
 

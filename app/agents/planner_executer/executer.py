@@ -36,7 +36,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -286,6 +286,8 @@ class StepPlay:
     changes_left_out: int = 0
     # 이 step 의 고정된 대상(`target.py`). 계약이 없는 런이면 `None` 이다. 그 값은 근거 기록에 함께 읽힌다.
     target: StepTarget | None = None
+    # 판정 근거의 출처. PulseMemory run은 별도의 STATE_SET evidence 대신 시작·끝 관측값을 전달한다.
+    state_source: Literal["state_set", "pulse_memory"] = "state_set"
 
     def played(self) -> dict:
         """step `STATUS` 의 `played`: 영상 구간을 자를 기준. `docs/evaluator-analysis-frames.md`."""
@@ -394,6 +396,7 @@ class Executer:
             started_at=_now(),
             check=getattr(macros, "check", None),
             target=target,
+            state_source=spec.state_source,
         )
         await self._read_evidence(play, "start")
         started = clock()
@@ -1310,6 +1313,7 @@ def merge_plays(plays: list[StepPlay]) -> StepPlay:
         changes=changes,
         changes_left_out=sum(play.changes_left_out for play in plays),
         target=last.target,
+        state_source=last.state_source,
     )
 
 

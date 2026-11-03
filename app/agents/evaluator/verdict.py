@@ -305,6 +305,12 @@ def request(scenario: QaScenario, step: int, play: StepPlay, earlier: list[str] 
 def evidence_text(play: StepPlay) -> str:
     """The active scene and the ```check values as the Evaluator's prompts draw them: each name once, with the
     readings where it changed. The first and the last reading are always shown, so a value that held still says so."""
+    if play.state_source == "pulse_memory":
+        return (
+            "Game observations from PulseMemory (the SDK readings, not the executer's verdict):\n"
+            f"Screen before play began:\n{play.start_screen or '(no reading available)'}\n\n"
+            f"Screen when play stopped:\n{play.end_screen or '(no reading available)'}"
+        )
     check = play.check
     named = []
     if check is not None and check.paths:

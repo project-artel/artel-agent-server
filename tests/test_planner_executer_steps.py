@@ -583,6 +583,22 @@ def test_the_evaluator_reads_the_step_the_turns_and_the_check_values_not_the_scr
     assert "the plan named no values (no ```check block)" in user
 
 
+def test_pulse_memory_판정에는_이미지_없이도_시작과_끝_관측값_전달() -> None:
+    play = _play(_menu(), FakeJev())
+    judge, seen = _judge({"passed": True, "reason": "The map opened.", "state_detail": "", "insight": ""})
+
+    verdict = asyncio.run(Evaluator(_config(screen_images="off"), judge).judge(_scenario(), 1, play))
+
+    assert verdict.passed and play.state_source == "pulse_memory"
+    assert play.evidence == [] and play.changes == []
+    user = seen[0][1]
+    assert "Game observations from PulseMemory" in user
+    assert f"Screen before play began:\n{play.start_screen}" in user
+    assert f"Screen when play stopped:\n{play.end_screen}" in user
+    assert "Root/Start" in play.start_screen and "Map" in play.end_screen
+    assert "(no reading succeeded)" not in user
+
+
 def test_a_failed_verdict_names_why_play_stopped() -> None:
     judge, _ = _judge('{"passed": false, "reason": "The menu is still shown.", "state_detail": "", "insight": ""}')
     stopped = StepPlay("no action fit for 3s", start_screen="a", end_screen="b")
@@ -645,7 +661,8 @@ def test_one_step_is_written_played_judged_and_reported() -> None:
     assert verdict["case_id"] == 5 and verdict["is_verification"] is True
     closing = fake.frames("STATUS")[-1]["payload"]
     assert closing["result"] == "PASSED" and closing["summary"]["steps"]["passed"] == 1
-    assert "Screen when play stopped:" not in seen[0][1]
+    assert "Game observations from PulseMemory" in seen[0][1]
+    assert "Screen when play stopped:" in seen[0][1]
     assert verdict["verdict"] == {"state_detail": "", "insight": "", "evidence_sufficient": True}
     (action,) = fake.frames("ACTION")
     assert action["payload"]["message"] == "click(start)"
