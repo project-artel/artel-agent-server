@@ -35,14 +35,8 @@ def generate_spec_payload(report: dict[str, Any]) -> dict[str, Any]:
             "graph_edges": result.graph_stats["edges"],
             "contracts": result.coverage["contracts"],
             "connected_scenarios": result.coverage["connected_scenarios"],
-            "ready_specs": sum(row["status"] == "ready" for row in ready_rows),
-            "candidate_specs": sum(
-                row["status"] == "candidate" for row in ready_rows
-            ),
-            "review_specs": sum(row["status"] == "review" for row in review_rows),
-            "unsupported_specs": sum(
-                row["status"] == "unsupported" for row in review_rows
-            ),
+            "ready_specs": len(ready_rows),
+            "review_specs": len(review_rows),
         },
         "ready_specs": ready_rows,
         "review_specs": review_rows,
@@ -58,7 +52,7 @@ def generate_test_cases(report: dict[str, Any]) -> dict[str, Any]:
 
     Review and unsupported specs are included. A row that cannot be run is still
     a fact about the game, and dropping it here would hide it from whoever
-    decides what to do about it — the status says which is which.
+    decides what to do about it.
     """
 
     result = discover(graph_from_report(report, source="internal-request"))
@@ -77,9 +71,5 @@ def generate_test_cases(report: dict[str, Any]) -> dict[str, Any]:
         "artifact": artifact_label(result),
         "capture": result.capture,
         "build_evidence": str(raw_evidence) if raw_evidence is not None else None,
-        "counts": {
-            status: sum(case["spec"]["status"] == status for case in cases)
-            for status in ("ready", "candidate", "review", "unsupported")
-        },
         "test_cases": cases,
     }

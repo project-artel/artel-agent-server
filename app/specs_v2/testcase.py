@@ -72,7 +72,6 @@ def test_case(
             "precondition": row["precondition"],
             "step": row["test_step"],
             "expected_value": row["expected_result"],
-            "status": row["status"],
         },
         "metadata": {
             "source": {
