@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 
 from pydantic import ValidationError
 
+from app.agents.planner_executer.facts import GameFacts, resolve_game_facts
 from app.agents.planner_executer.identities import GameIdentity, fetch_game_identities
 from app.agents.planner_executer.developer_macros import (
     NO_DEVELOPER_MACROS,
@@ -43,11 +44,15 @@ Send = Callable[[dict], Awaitable[None]]
 
 
 def _build_runner(
-    *, config: RunConfig, developer: LoadedDeveloperMacros = NO_DEVELOPER_MACROS, identities: tuple[GameIdentity, ...] = ()
+    *,
+    config: RunConfig,
+    developer: LoadedDeveloperMacros = NO_DEVELOPER_MACROS,
+    identities: tuple[GameIdentity, ...] = (),
+    facts: GameFacts | None = None,
 ) -> QaRunner | PlannerExecuterRunner:
     """The runner for the engine the run asked for (`QaArchSpec.engine`)."""
     if config.arch.engine == "planner_executer":
-        return PlannerExecuterRunner(config, developer=developer, identities=identities)
+        return PlannerExecuterRunner(config, developer=developer, identities=identities, facts=facts)
     return QaRunner(config)
 
 
@@ -230,6 +235,9 @@ class QaExecutionService:
         # 대상 계약의 해석이 읽는 게임 값의 뜻. 계약을 켠 런만 읽는다.
         if arch.engine == "planner_executer" and arch.planner is not None and arch.planner.target_contract == "on":
             runner_options["identities"] = await fetch_game_identities(record.project_id)
+        # 개발자가 선언한 fact·rule. `facts` 를 켠 런만 읽는다(orchestration, 또는 `qa_facts_dir` 의 로컬 덮어쓰기).
+        if arch.engine == "planner_executer" and arch.planner is not None and arch.planner.facts == "on":
+            runner_options["facts"] = await resolve_game_facts(record.project_id)
 
         for index, item in enumerate(record.scenarios):
             # Every model call inherits this label; the contextvar rides the task.
