@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 from langchain_openai import ChatOpenAI
+from langchain_openai.chat_models.base import _create_usage_metadata_responses
 from pydantic import BaseModel
 
 from app.llm import chat_model
@@ -306,6 +307,7 @@ def test_gpt_keeps_nothing_on_openai_and_asks_for_reasoning_it_can_send_back() -
 
     assert payload["store"] is False
     assert payload["include"] == ["reasoning.encrypted_content"]
+    assert payload["service_tier"] == "default"
 
 
 def test_gpt_sends_the_previous_turns_encrypted_reasoning_back() -> None:
@@ -404,6 +406,84 @@ def test_gpt_usage_is_recorded_under_the_catalog_id_as_the_users() -> None:
     assert record["model"] == GPT_MODEL
     assert record["provider"] == "gpt"
     assert record["keySource"] == "user"
+
+
+@pytest.mark.parametrize(
+    "model_id,input_rate,cache_read_rate,cache_write_rate,output_rate",
+    [
+        ("gpt/gpt-6.1-sol", 2.0, 0.1, 2.5, 10.0),
+        ("gpt/gpt-6-astra", 10.0, 1.0, 12.5, 50.0),
+        ("gpt/gpt-6-luna", 0.1, 0.01, 0.125, 0.5),
+        ("gpt/gpt-5.6-terra", 2.0, 0.2, 2.5, 12.0),
+    ],
+)
+@pytest.mark.parametrize(
+    "input_tokens,cached_tokens,cache_write_tokens",
+    [
+        (12_000, 0, 0),
+        (12_000, 10_000, 0),
+        (12_000, 0, 12_000),
+        (15_000, 12_000, 3_000),
+        (12_000, 12_000, 0),
+        (272_000, 200_000, 20_000),
+        (272_001, 200_000, 20_001),
+    ],
+)
+def test_gpt_캐시와_장문_사용량으로_추정_비용_기록(
+    model_id, input_rate, cache_read_rate, cache_write_rate, output_rate,
+    input_tokens, cached_tokens, cache_write_tokens,
+) -> None:
+    bind_llm_key(USER_OPENAI)
+    callback = _usage_callback(build_chat_model(model_id))
+    sent: list[dict] = []
+
+    async def send(payload: dict) -> None:
+        sent.append(payload)
+
+    callback._buffer = UsageBuffer(base_url="http://orchestration.test", send=send, flush_size=1)
+    # 실제 Responses usage를 SDK가 변환하게 해 cache_creation 매핑도 검증한다.
+    usage = _create_usage_metadata_responses({
+        "input_tokens": input_tokens,
+        "output_tokens": 1_000,
+        "total_tokens": input_tokens + 1_000,
+        "input_tokens_details": {
+            "cached_tokens": cached_tokens,
+            "cache_write_tokens": cache_write_tokens,
+        },
+        "output_tokens_details": {"reasoning_tokens": 600},
+    })
+    result = LLMResult(
+        generations=[[ChatGeneration(message=AIMessage("done", usage_metadata=usage))]],
+        llm_output={"model_name": model_id.removeprefix("gpt/")},
+    )
+
+    async def scenario() -> None:
+        set_usage_scope("QA_RUN", 3)
+        run_id = uuid4()
+        await callback.on_chat_model_start({}, [], run_id=run_id)
+        await callback.on_llm_end(result, run_id=run_id)
+
+    asyncio.run(scenario())
+
+    (record,) = sent[0]["records"]
+    assert record["model"] == model_id
+    assert record["keySource"] == "user"
+    assert record["inputTokens"] == input_tokens - cache_write_tokens
+    assert record["cachedInputTokens"] == cached_tokens
+    assert record["cacheWriteTokens"] == cache_write_tokens
+    assert record["outputTokens"] == 1_000
+    assert record["reasoningTokens"] == 600
+    # reasoning은 output_tokens에 이미 포함되므로 다시 더하지 않는다.
+    input_multiplier = 2 if input_tokens > 272_000 else 1
+    output_multiplier = 1.5 if input_tokens > 272_000 else 1
+    expected = (
+        (input_tokens - cached_tokens - cache_write_tokens) * input_rate * input_multiplier
+        + cached_tokens * cache_read_rate * input_multiplier
+        + cache_write_tokens * cache_write_rate * input_multiplier
+        + 1_000 * output_rate * output_multiplier
+    ) / 1_000_000
+    assert record["costUsd"] == pytest.approx(expected)
+    assert record["costEstimated"] is True
 
 
 # --- usage `keySource` -------------------------------------------------------------------
