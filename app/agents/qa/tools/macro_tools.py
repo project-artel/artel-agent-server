@@ -78,7 +78,6 @@ from app.qa.envelope import (
     MacroSearchResultPayload,
 )
 from app.qa.scene_context import render_macro, scene_labels
-from app.qa.shown_text import ShownText
 
 # `search_macros` 의 `limit` 범위와 `query` 길이. `MACRO_SEARCH` 계약이 정한 값이고,
 # 벗어난 요청은 저쪽도 `ERROR` 로 거절하므로 보내기 전에 여기서 문장으로 돌려준다.
@@ -196,13 +195,8 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
         """
         result, paused = await session.settle()
         state.paused_macro = session if paused else None
-        shown = channel.shown_text.since(session.text_mark)
-        session.text_mark = channel.shown_text.mark()
         macro_part = _render(
-            result,
-            _standing_scene(),
-            fold_stale=ctx.arch.fold_stale_macro_results,
-            shown=render_shown_text(shown),
+            result, _standing_scene(), fold_stale=ctx.arch.fold_stale_macro_results
         )
         return ctx.answer(macro_part, channel.drain_operator_messages())
 
@@ -530,7 +524,7 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
     ) -> str:
         # What the agent reads is `qa_run/<version>/tool_register_macro.md`, not this.
         #
-        # 빈 목록 기본값은 `report_step` 의 `used_knowledge_ids` 와 같은 이유로 리터럴로
+        # 빈 목록 기본값은 `report_test_case` 의 `used_knowledge_ids` 와 같은 이유로 리터럴로
         # 적는다 — 모델이 채우는 schema 에서 optional array 는 그냥 빼면 되지만,
         # nullable 은 `null` 을 보내게 하고 그것이 "없다" 인지 "모른다" 인지가 또
         # 문제가 된다. 아래에서 읽기만 하고 고치지 않는다.
@@ -652,7 +646,6 @@ def build_macro_tools(ctx: ToolContext) -> list[BaseTool]:
             return problem
 
         session = MacroSession(macro_name, step)
-        session.text_mark = channel.shown_text.mark()
         session.start(execute_macro(_Host(session), definition, bound, step))
         return await _drive(session)
 
@@ -987,46 +980,8 @@ MACRO_RESULT_START_SUFFIX = ">>"
 MACRO_RESULT_END = "<<end macro result>>"
 
 
-# macro 답 하나에 싣는 글자 줄 수와 한 줄의 길이 상한 (ARTEL-1222). WordVenture 오프닝은 Return
-# 12~22회라 40 줄이면 한 번에 다 든다. 넘치면 앞의 줄을 남기고 몇 줄을 뺐는지 적는다.
-MAX_SHOWN_LINES = 40
-MAX_SHOWN_LINE_CHARS = 200
-
-
-def render_shown_text(lines: list[ShownText]) -> str:
-    """macro 가 도는 동안 게임이 띄운 글자. 없으면 빈 문자열.
-
-    agent 가 이 줄을 읽게 하는 문장을 함께 싣는다. system prompt 는 자리가 없고(8,000자 상한에
-    76자 남았다), 줄 바로 아래가 그것을 읽는 순간이다.
-    """
-    if not lines:
-        return ""
-    shown = lines[:MAX_SHOWN_LINES]
-    rows = [f"Text the game showed while the macro ran ({len(lines)} line(s), oldest first):"]
-    for line in shown:
-        text = line.text.strip()
-        if not text:
-            rendered = "(blank)"
-        elif len(text) > MAX_SHOWN_LINE_CHARS:
-            rendered = json.dumps(text[:MAX_SHOWN_LINE_CHARS], ensure_ascii=False) + "…"
-        else:
-            rendered = json.dumps(text, ensure_ascii=False)
-        rows.append(f"  {line.source}: {rendered}")
-    if len(lines) > len(shown):
-        rows.append(f"  ({len(lines) - len(shown)} later line(s) not listed)")
-    rows.append(
-        "Read every line: a blank line, a placeholder (`[MISSING`, `TODO`, a raw key name "
-        "such as `STORY_003`) or garbled characters is a defect to file with `report_issue`."
-    )
-    return "\n".join(rows)
-
-
 def _render(
-    result: MacroRunResult,
-    scene_after: str = "",
-    *,
-    fold_stale: bool = False,
-    shown: str = "",
+    result: MacroRunResult, scene_after: str = "", *, fold_stale: bool = False
 ) -> str:
     """`run_macro` 와 `resume_macro` 가 모델에 돌려주는 macro 부분.
 
@@ -1038,16 +993,11 @@ def _render(
       시작 marker 의 한 줄로 바꾼다.
     """
     if not fold_stale:
-        listing = _render_listing(result)
-        return f"{listing}\n\n{shown}" if shown else listing
+        return _render_listing(result)
     line = one_line_result(result, scene_after)
-    if _is_plain_success(result) and not shown:
+    if _is_plain_success(result):
         return line
-    # 글자 줄이 붙은 결과는 끝까지 갔어도 marker 로 감싼다. step 이 보고된 뒤 `fold` 가 줄째로
-    # 한 줄로 바꾼다 — 안 감싸면 오프닝 대사 스무 줄이 런 끝까지 context 에 남는다.
-    listing = line if _is_plain_success(result) else _render_listing(result)
-    if shown:
-        listing = f"{listing}\n\n{shown}"
+    listing = _render_listing(result)
     return (
         f"{MACRO_RESULT_START_PREFIX}{line.replace('>>', '> >')}{MACRO_RESULT_START_SUFFIX}\n"
         f"{listing}\n{MACRO_RESULT_END}"
@@ -1207,7 +1157,7 @@ def _render_listing(result: MacroRunResult) -> str:
         lines.append(
             f"NEEDS A VERDICT — scenario step {asked.step}, asked at {asked.place}. "
             f"Expected: {asked.expected}.{_observed(asked.observed)} Judge it yourself "
-            "and call `report_step`."
+            "and call `report_test_case`."
         )
     if len(result.verdict_requests) > 1:
         # 반복 안의 `ask_verdict` 는 회마다 선다. 판정할 step 은 하나다 — macro 를 부른
@@ -1215,7 +1165,7 @@ def _render_listing(result: MacroRunResult) -> str:
         lines.append(
             f"These {len(result.verdict_requests)} requests are all about scenario step "
             f"{result.verdict_requests[0].step}: read them together and answer that step "
-            "with one `report_step`."
+            "with one `report_test_case`."
         )
     return "\n".join(line for line in lines if line)
 

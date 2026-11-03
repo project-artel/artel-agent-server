@@ -7,6 +7,8 @@ SDK 쪽(ARTEL-1218, artel-sdk PR #154)은 따로 들어간다. 여기 fixture �
 """
 
 import asyncio
+from unittest.mock import AsyncMock
+from uuid import uuid4
 
 from app.agents.qa.arch import PhaseCycleMode, QaArchSpec, VisionMode, resolve_arch
 from app.agents.qa.tools import QaRunState, build_tools
@@ -191,16 +193,12 @@ def test_get_errors_is_not_refused_between_act_and_verify() -> None:
         await tools["press_key"].ainvoke({"step": 1, "key_code": "Return", "duration_seconds": 0.1, "thought": "advance"})
         answer = await tools["get_errors"].ainvoke({"step": 1, "thought": "check"})
         assert answer.startswith("1 unseen error(s)")
-        verdict = await tools["report_step"].ainvoke(
-            {
-                "step": 1,
-                "message": "expected: x\nobserved: x",
-                "performed": True,
-                "passed": True,
-                "thought": "ok",
-                "learned": "",
-            }
+        channel.evaluation.attempts[31] = uuid4()
+        channel.evaluation.report = AsyncMock()
+        verdict = await tools["report_test_case"].ainvoke(
+            {"case_id": 31, "message": "expected: x\nobserved: x", "verdict": "PASSED", "thought": "ok"}
         )
+        channel.evaluation.report.assert_awaited_once()
         assert not verdict.startswith("Not now")
 
     asyncio.run(run())

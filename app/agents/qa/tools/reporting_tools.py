@@ -1,179 +1,46 @@
-"""판정을 내고 런을 닫는 도구, 그리고 오퍼레이터와 주고받는 도구.
+"""TC 검증 시도별 판정과 사용자 질문을 기록한다. step은 참고 절차다."""
 
-`report_step` 은 스텝 하나의 판정을, `report_issue` 는 게임의 결함을, `finish_run` 은 런
-전체의 판정을 낸다. `wait_for_operator` 와 `reply_to_operator` 는 사람과의 왕복이다.
-"""
+from typing import Literal
+from dataclasses import replace
+import httpx
 
 from langchain_core.tools import BaseTool, tool
 
-from app.agents.qa.macro.for_step import macros_for_step, render_step_macro_hint
-from app.agents.qa.macro.lift import draft_for_step, offer
-from app.agents.qa.tools.game_function_tools import (
-    active_behaviors,
-    focus,
-    running_lines,
-    stop_not_allowed_before,
-)
-from app.agents.qa.tools.phase import MAX_CONSECUTIVE_REFUSALS
-from app.agents.qa.tools.state import QaRunState
 from app.agents.qa.tools.tool_context import ToolContext
+from app.agents.qa.tools.state import QaRunState
+from app.agents.qa.tools.game_function_tools import focus, stop_not_allowed_before, active_behaviors
+from app.agents.qa.macro.lift import draft_for_step, offer
 from app.prompts import load_tool_description
-from app.qa.channel import bounded_operator_wait
-from app.qa.envelope import (
-    IssuePayload,
-    IssueSeverity,
-    MessageType,
-    RunResult,
-    StatusPayload,
-    StepStatus,
-)
-from app.qa.reach import MAX_UNREACHED_REFUSALS, UNREACHED_THRESHOLD
-from app.qa.schemas import QaStepResult
+from app.qa.envelope import IssuePayload, IssueSeverity, MessageType, RunResult, StatusPayload, StepStatus
+from app.qa.schemas import QaCaseAttemptResult
+from app.qa.verdict_evidence import VerdictCheck, cite, contradiction
 
 
 def render_closing_asks(state: QaRunState) -> str:
-    """마지막 스텝을 판정한 자리에서, 이 런이 무엇을 남기고 닫을지 묻는 문구.
-
-    런 전체가 아직 앞에 있고 판정은 끝나서, 무엇이 값진 앎이었고 무엇이 결함이었는지
-    되짚을 수 있는 마지막 순간이다.
-
-    도구는 있는데 안 쓴다 — 실측으로 83턴 성공 런에서 `record_knowledge` 0회,
-    `report_issue` 0회였다. 시스템 프롬프트가 시키는데도 그렇다. 기록은 이번 런의 판정에
-    아무것도 안 보태므로(`report_step` 도 `finish_run` 도 그것 없이 통과한다) 비용만 있고
-    돌아오는 것이 없는 행동이고, 무엇보다 **적을 순간이 흐름 안에 없었다**.
-
-    되돌려 보내지 않는다. `finish_run` 에서 한 번 물리는 것도 해 봤는데, 런을 닫는 테스트
-    열여덟 개가 걸렸다 — 앞으로 만드는 모든 런 테스트가 그 왕복을 치러야 한다는 뜻이고, 그
-    값은 이 문구가 하는 일보다 크다(ARTEL-667).
-
-    무엇을 어디에 적을지는 안 정해 준다. `record_knowledge` 가 anchor 를 부르는 쪽에
-    맡기는 이유가 그대로 걸린다 — 어디서나 참인 규칙을 지금 서 있는 화면 아래 넣으면 다음
-    화면의 런이 그것을 못 찾는다.
-
-    결함을 묻는 근거는 **이 런이 실패로 판정한 스텝**이다. 실패한 스텝이 하나도 없으면
-    결함은 묻지 않는다 — 근거 없이 물으면 agent 가 무엇에 대해 답할지 모르고, 그래도
-    답하려고 아무거나 적으면 다음 런에 도움이 안 되는 줄만 쌓인다. 같은 이유로 마지막 줄이
-    적을 것이 없다는 것도 답이라고 말한다.
-
-    이미 시도한 런에게도 말한다. 한 번 시도한 것과 그 런이 알아낸 것을 다 적은 것은
-    다르다. 대신 문구가 다르다 — 시키는 대신 지금까지 몇 번 시도했는지 세어 주고
-    각 시도의 성공 여부와 나머지를 되짚게 한다. 이 counter 둘은 성공 건수가 아니다.
-    """
-    asks: list[str] = []
-    failed = [result.step for result in state.step_results if not result.passed]
-    if failed:
-        steps = ", ".join(str(step) for step in failed)
-        if not state.issues_attempted:
-            asks.append(
-                f"Steps judged failed this run: {steps}. Issue reports sent: none, so "
-                "what failed and why is nowhere but this transcript. A failure "
-                "that is a defect in the game goes in with `report_issue`; a step "
-                "that failed because the scenario asked for the wrong thing, or "
-                "because the run itself went wrong, is not one."
-            )
-        else:
-            asks.append(
-                f"Steps judged failed this run: {steps}. Issue reports sent: "
-                f"{state.issues_attempted}. If a failure that is a defect in the "
-                "game is not among them, `report_issue` still takes it."
-            )
-    if not state.knowledge_records_attempted:
-        asks.append(
-            "If this run worked anything out that a later run would otherwise "
-            "work out again — how an input is read, what a control actually does, "
-            "what a rule costs — write it down with `record_knowledge`."
-        )
-    else:
-        asks.append(
-            f"Knowledge recording attempts this run: {state.knowledge_records_attempted}. "
-            "Check whether each one succeeded. An attempt is not the same as "
-            "everything this run worked out. Read back over the rest of it: what "
-            "else would a later run otherwise work out again? That goes in with "
-            "`record_knowledge` too."
-        )
-    listed = "\n".join(f"- {ask}" for ask in asks)
-    closer = (
-        "Nothing to write is an answer. If there is nothing a later run would "
-        "use, write nothing and close the run."
-    )
-    return f"\n{listed}\n{closer}"
+    return "TC 판정은 기록됐습니다. TC와 무관한 결함만 report_issue로 보고하세요. 다음 QA에 도움이 될 발견은 record_knowledge로 남길 수 있습니다."
 
 
 def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
-    # 아래 tool 이 closure 로 잡는 것. 되묶는 이유는 `tool_context.py` 에 있다.
     channel, state, arch = ctx.channel, ctx.state, ctx.arch
     _answer = ctx.answer
+    state.cites_captures = arch.verdict_evidence == "on"
+    dispatch_starts: dict[int, int] = {}
+    cheat_starts: dict[int, int] = {}
+    pending_reports: dict[int, tuple] = {}
 
-    @tool(description=load_tool_description("wait_for_operator").body)
-    async def wait_for_operator(
-        thought: str, timeout_seconds: float = 60.0, step: int | None = None
-    ) -> str:
-        waited = bounded_operator_wait(timeout_seconds)
-        messages = await channel.wait_for_operator(timeout_seconds)
-        if not messages:
-            return (
-                f"The operator said nothing within {waited:g}s. Decide for "
-                "yourself whether to wait again, carry on with what you have, or "
-                "judge the step failed."
-            )
-        return _answer("The operator answered.", messages)
-
-    def _capability_key_problem(capability_key: str) -> str | None:
-        """이 런이 이 키를 받은 적이 있나. 없으면 무엇이 잘못됐는지 한 줄.
-
-        보는 곳이 둘이다 — `list_scene_capabilities` 가 찍어 준 줄(`state`), 그리고 지금 서
-        있는 씬의 맥락 block 이 찍은 줄. `used_knowledge_ids` 가 `state.knows_of` 로 하는 것과
-        같은 검사이고, 이유도 같다: 지어낸 키도 저쪽에서는 진짜 행을 가리키고, 저쪽은 그것이
-        이 런이 본 행인지 알 방법이 없다.
-
-        서 있지 않은 씬의 키는 여기서 통과하지 못한다. `record_capability_verdict` 가 이미
-        같은 선을 긋고 있고(저쪽이 서 있지 않은 씬의 verdict 를 거절한다), 서 있지 않은 씬은
-        이 런이 지금 보고 있지 않은 씬이다.
-        """
-        if state.was_shown_capability_key(capability_key):
-            return None
-        context = channel.scene.scene_context
-        scene = (channel.scene.scene or channel.scene.pulse.scene or "").strip()
-        entry = context.entry_for(scene) if context is not None else None
-        printed = entry.printed_capabilities() if entry is not None else []
-        if any(item.capability_key == capability_key for item in printed):
-            return None
-        return (
-            f"`capability_key` {capability_key!r} is not a row this run has been shown, "
-            "so it was not recorded against this step. The verdict stands. Keys come "
-            "from the square brackets on a capability line in your scene context block "
-            "or in a `list_scene_capabilities` result — call that tool to find the row "
-            "you mean."
-        )
-
-    def _macro_draft(step: int, passed: bool) -> str:
-        """이 step 에 손으로 보낸 것을 macro 초안으로 만들어 내민다. macro 를 켠 런에만.
-
-        판정이 받아들여진 응답에 붙는다. 초안은 `MacroBook` 에 써 두므로 agent 가 할 일은
-        `register_macro` 한 번이다. 만들지 못했으면 아무 말도 안 붙인다
-        (`app/agents/qa/macro/lift.py`).
-
-        phase 를 강제하는 런이면 `expect_draft_review` 로 알린다. 이 함수는 `report_step` 본문
-        안에서 돌고 gate 의 `advance` 는 본문이 돌아온 뒤에 돌므로, 같은 호출의 `advance` 가
-        `UPDATE_MEMORY` 대신 `REVIEW_DRAFT` 로 보낸다. 초안을 못 만든 판정은 알리지 않으므로
-        그 step 은 종전대로 `UPDATE_MEMORY` 로 간다.
-
-        **통과한 판정에만 붙는다.** 실패한 step 에 보낸 것은 게임이 받아 주지 않은 순서라
-        macro 가 되면 안 된다. 실패 판정은 `drafted_steps` 에도 올리지 않는다 — 같은 step 을
-        나중에 통과로 다시 판정하면 그때 초안을 낼 수 있어야 한다.
-
-        내민 초안은 읽은 것으로 친다. 초안 원문이 응답에 그대로 실렸으므로 `edit_macro` 가
-        `read_macro` 를 또 요구하면 고쳐서 등록할 길이 막힌다.
-        """
-        if arch.macros != "on" or not passed or step in state.drafted_steps:
+    def draft_for_attempt(case_id: int, start: int) -> str:
+        step = state.step_of_case(case_id)
+        if arch.macros != "on" or step is None:
             return ""
-        state.drafted_steps.add(step)
+        records = [replace(record, step=step) for record in state.dispatches[start:]
+                   if record.step is None or state.case_id_at(record.step) == case_id]
         taken = set(state.macros.drafts) | set(state.macros.registrations)
-        # 시나리오 밖의 번호(모델이 지어낸 step)는 문장이 없다. 범위를 보고 빈 문자열로 둔다.
-        in_range = 1 <= step <= len(state.step_texts)
-        draft, _why = draft_for_step(
-            state.dispatches, step, taken, state.step_texts[step - 1] if in_range else ""
+        snapshot = channel.evaluation.snapshots.get(case_id, {})
+        description = snapshot.get("test_step") or "; ".join(
+            text for index, text in enumerate(state.step_texts, start=1)
+            if state.case_id_at(index) == case_id
         )
+        draft, _ = draft_for_step(records, step, taken, description)
         if draft is None:
             return ""
         state.macros.write(draft.name, draft.source)
@@ -183,415 +50,92 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             state.phase_cycle.expect_draft_review()
         return offer(draft)
 
-    def _next_step_macro(next_step: int) -> str:
-        """다음 step 에 맞는 등록된 macro 이름을 대는 문장. macro 를 켠 런에만.
-
-        목록은 첫 메시지에 한 번 실리고 멀어지므로, 다음 step 번호가 적히는 이 답에서 한 번 더
-        말한다. 이 런의 등록을 지난 런의 것보다 앞에 둔다(`macro/for_step.py`).
-        """
-        if arch.macros != "on":
-            return ""
-        context = channel.scene.scene_context
-        scene_macros = context.macros if context is not None else []
-        found = macros_for_step(next_step, state.macros.registrations, scene_macros)
-        return render_step_macro_hint(next_step, found)
-
-    async def _record_verdict(
-        step: int,
-        passed: bool,
-        message: str,
-        used_knowledge_ids: list[str],
-        capability_key: str | None = None,
-        learned: str | None = None,
-        asks_memory: bool = False,
-        replaces: bool = False,
-    ) -> str:
-        """두 `report_step` 모양과 FREE 의 `report_case` 가 함께 쓰는 몸통.
-
-        `replaces` 는 `report_case(overwrite=True)` 가 이 스텝의 앞선 판정을 지우고 새 판정으로
-        바꿀 때다. 지우지 않고 쌓으면 `build_summary` 가 같은 TC 를 두 번 센다.
-
-        `asks_memory` 는 `phase_cycle` 이 `in_verdict` 이상인가다. `off` 에서는 아래 두 인자가
-        schema 에 아예 없으므로 이 갈래는 한 줄도 안 돈다 — 기존 런 테스트가 왕복을 한 번도
-        더 치르지 않아야 한다는 것이 이 축의 조건이다(ARTEL-667).
-        """
-        notes: list[str] = []
-
-        # `learned` 를 안 받았으면 되돌려 보낸다. 판정을 적기 **전**이다 — 뒤에 두면 다시
-        # 부른 호출이 같은 스텝의 판정을 두 번 쌓는다.
-        #
-        # 되돌려 보내는 것은 인자를 진짜 질문으로 만드는 유일한 방법이다. 빠뜨린 것을 말만
-        # 하고 지나가면 v16 이 문장으로 부탁하고 0 을 받은 그 실패를 그대로 재현한다. 대신
-        # 연속 상한을 둔다 — phase 거절과 같은 산수이고(`phase.py` 의
-        # `MAX_CONSECUTIVE_REFUSALS`), 상한에 닿으면 통과시키고 답이 없었다고 적는다.
-        if asks_memory and learned is None:
-            if state.verdict_memory_refusals < MAX_CONSECUTIVE_REFUSALS:
-                state.verdict_memory_refusals += 1
-                # `lite`·`full` 에서는 이 호출로 `VERIFY` 가 끝나면 안 된다. 판정이 하나도
-                # 안 적혔는데 다음 phase 로 가면 `UPDATE_MEMORY` 가 없는 판정을 두고 묻는다.
-                if state.phase_cycle is not None:
-                    state.phase_cycle.hold()
-                # FREE run 에는 `report_step` 이 없다 — 다시 부를 tool 이름을 run 이 가진 것으로 댄다.
-                verdict_tool_name = (
-                    "report_case" if state.execution_mode == "FREE" else "report_step"
-                )
-                return (
-                    "Nothing was recorded — this report has no `learned`. Call "
-                    f"`{verdict_tool_name}` again with the same verdict and add it: one line a "
-                    'later run would otherwise work out again, or `learned: ""` to say '
-                    "this step left nothing worth keeping. The empty string is a real "
-                    "answer; leaving the argument out is not."
-                )
-            state.verdict_memory_refusals = 0
-            notes.append(
-                f"You have now left `learned` out {MAX_CONSECUTIVE_REFUSALS} times in a "
-                "row, so this verdict was recorded without it and the run is going on. "
-                "It stands on the record as unanswered, which is not the same as "
-                "nothing to write."
-            )
-        else:
-            state.verdict_memory_refusals = 0
-
-        key = (capability_key or "").strip()
-        if asks_memory and key:
-            problem = _capability_key_problem(key)
-            if problem is not None:
-                notes.append(problem)
-
-        # The empty list default is never mutated — the ids are read once, below.
-        # It is spelled as a literal rather than as `None` because this is a tool
-        # schema the model fills in: an optional array is something it can simply
-        # omit, while a nullable one invites it to send `null` and then wonder
-        # whether that meant "none" or "unknown".
-        # `knows_of`, NOT `knowledge_seen`. An entry shown only as a one-line
-        # neighbour can still be what a verdict rested on, and citing it destroys
-        # nothing. `knowledge_seen` is the bar for `update_knowledge` and
-        # `forget_knowledge` because those DO destroy something, and a 120-character
-        # line is not having read the entry — that boundary is deliberate and this
-        # tool sits on the other side of it.
-        #
-        # Duplicates are folded first: citing one entry twice is one citation, and
-        # counting it twice would make "how much knowledge this verdict used" a
-        # function of how the model happened to phrase the list.
-        cited: list[str] = []
-        rejected: list[str] = []
-        for entry in dict.fromkeys(used_knowledge_ids):
-            (cited if state.knows_of(entry) else rejected).append(entry)
-        # 이 스텝이 어느 TC에 속하고 그 구간의 검증 스텝인지를 판정에 붙인다(2단 판정). step_meta가
-        # 없으면(구식 호출자) 미상으로 둔다.
-        case_id, is_verification = (
-            state.step_meta[step - 1] if 0 <= step - 1 < len(state.step_meta) else (None, False)
-        )
-        if replaces:
-            state.step_results = [result for result in state.step_results if result.step != step]
-        state.step_results.append(
-            QaStepResult(
-                step=step,
-                passed=passed,
-                message=message,
-                case_id=case_id,
-                is_verification=is_verification,
-            )
-        )
-        # The verdict frame stays a PER-STEP one: `result` is left null, so
-        # Orchestration's routeStatus logs it and the run goes on. Citations ride
-        # along here rather than in a frame of their own precisely so they cannot
-        # change that — a second frame type would be a second thing to get wrong
-        # about ending the run.
-        #
-        # `capability_key` 와 `learned` 도 같은 이유로 프레임에 안 실린다. 둘은 모델이 쓴
-        # 인자 그대로 `qa_log` 의 tool 호출 행에 남고, 파일럿이 세는 자리가 거기다.
-        await channel.emit(
-            MessageType.STATUS,
-            StatusPayload(
-                status=StepStatus.COMPLETED if passed else StepStatus.FAILED,
-                step=step,
-                case_id=case_id,
-                is_verification=is_verification,
-                message=message,
-                used_knowledge_ids=cited,
-                rejected_knowledge_id_count=len(rejected),
-                # 모델이 아니라 이쪽이 채운다(ARTEL-1054). 축이 꺼지면 `None` 이고 frame 에서
-                # key 가 빠진다.
-                used_cheats=list(state.used_cheats) if arch.cheats == "on" else None,
-                active_behaviors=active_behaviors(ctx) if arch.behaviors == "on" else None,
-            ),
-        )
-        state.used_cheats = []
-        remaining = state.total_steps - len(state.step_results)
-        # Said out loud, not dropped. The verdict itself is already recorded, so
-        # this is not a refusal — but an agent told nothing would carry on
-        # believing the entry was credited, and the ids it invents are exactly
-        # what nobody would otherwise notice.
-        if rejected:
-            notes.append(
-                f"{len(rejected)} of the ids you cited are not entries this run "
-                f"has been shown, so they were not recorded: {rejected}. The verdict "
-                "stands. Cite only ids printed to you by a search or a neighbour line."
-            )
-        note = "".join(f"\n\n{line}" for line in notes) + _macro_draft(step, passed)
-        if state.execution_mode == "FREE":
-            # FREE run 은 TC 를 순서 없이 보고하므로 "다음 step" 이 없다. 그래서 다음 TC 기준으로
-            # behavior 를 멈추거나 view 를 옮기지 않고, 실행 중인 behavior 목록만 적는다.
-            if arch.behaviors == "on":
-                note += running_lines(ctx)
-            return _free_verdict_answer(passed, note)
-        if arch.behaviors == "on":
-            # 다음 step 이 새 TC 의 첫 step 이고 그 TC 가 허용하지 않는 behavior 가 돌면, 그 step
-            # 전에 멈춘다. 남은 것은 다음 step 으로 넘어가므로 그 목록을 적는다.
-            note += await stop_not_allowed_before(ctx, step + 1) + running_lines(ctx)
-        if arch.cheats == "on" or arch.behaviors == "on":
-            # view 의 function 줄이 다음 step 의 TC 기준으로 그려지게 한다.
-            focus(ctx, min(step + 1, max(state.total_steps, 1)))
-        if remaining <= 0:
-            # 무엇을 남길지 묻는 자리이자 이유는 `render_closing_asks` 가 들고 있다. 여기서
-            # 말하는 것은 그 자리가 여기라는 것뿐이다 — 매 스텝마다 붙이면 표가 뜻을 잃고,
-            # `finish_run` 은 이미 닫는 쪽으로 기운 뒤다.
-            return _verdict_answer(
-                "Recorded. This step report does not close the run. That was the "
-                "last step — when you are done with the follow-up work below, "
-                f"call `finish_run` yourself:{render_closing_asks(state)}{note}"
-            )
-        # The verdict is recorded either way; what differs is the pull to keep
-        # going. A failure is where the loop is most tempted to call it a day, so
-        # that is where the next move has to be spelled out rather than implied.
-        body = f"Recorded. {remaining} step(s) left — continue with step {step + 1}."
-        if not passed:
-            body = f"{body} A failed step is not a reason to stop."
-        return _verdict_answer(f"{body}{note}{_next_step_macro(step + 1)}")
-
-    def _free_verdict_answer(passed: bool, note: str) -> str:
-        """FREE 시나리오에서 `report_step` 의 답 (ARTEL-1029).
-
-        TC 를 어떤 순서로 보고해도 되므로 "다음 스텝" 이 없다. 그래서 남은 수를 보고 수로 빼지
-        않고 `unreported_steps` 로 센다 — 같은 TC 를 다시 보고하면 빼기는 하나를 더 뺀다. 다음
-        스텝 번호로 macro 를 찾아 붙이는 hint 도 같은 이유로 붙이지 않는다.
-        """
-        unreported = state.unreported_steps()
-        if not unreported:
-            return _verdict_answer(
-                "Recorded. This report does not close the run. Every test case now has "
-                "a verdict — when you are done with the follow-up work below, call "
-                f"`finish_run` yourself:{render_closing_asks(state)}{note}"
-            )
-        listed = ", ".join(str(state.case_of_step(number)) for number in unreported)
-        body = (
-            f"Recorded. {len(unreported)} test case(s) still without a verdict "
-            f"(case_id): {listed}. Choose which one to verify next."
-        )
-        if not passed:
-            body = (
-                f"{body} A failed test case is not a reason to stop. If it failed only "
-                "because you had not reached it yet, that was not a verdict: get there, "
-                "carry out its test_step, and correct it with `overwrite=true`."
-            )
-        return _verdict_answer(f"{body}{note}")
-
-    def _verdict_answer(body: str) -> str:
-        """`report_step` 의 답. `report_step_view` 가 꺼져 있으면 view 대신 한 줄을 붙인다(ARTEL-960).
-
-        `report_step` 은 게임을 조작하지 않고 답은 판정 뒤에 온다. 여기 실리는 view 는 그
-        판정에 쓰일 수 없고, 그 사이 움직인 것은 다음 action 결과가 이어서 싣는다.
-        """
-        messages = channel.drain_operator_messages()
-        if arch.report_step_view:
-            return _answer(body, messages)
-        deferred = channel.scene.pulse.defer_view()
-        if deferred:
-            body = f"{body}\n\n{deferred}"
-        return _answer(body, messages, screen=False)
-
-    # 두 모양을 `if` 로 가른다. 인자 하나를 `None` 기본값으로 늘 달아 두는 길도 있지만, 그러면
-    # `off` 런의 tool schema 가 움직이고 `arch_fingerprint` 가 그것을 tool 의 `args` 로 잡는다
-    # — 아무것도 안 켠 런이 다른 구조로 기록되는 것이 이 축이 피해야 할 첫 번째 일이다.
-    if arch.phase_cycle.remembers_in_verdict:
-
-        @tool(description=load_tool_description("report_step_memory").body)
-        async def report_step(
-            step: int,
-            passed: bool,
-            message: str,
-            thought: str,
-            used_knowledge_ids: list[str] = [],
-            capability_key: str | None = None,
-            learned: str | None = None,
-        ) -> str:
-            # What the agent reads is `qa_run/<version>/tool_report_step_memory.md`.
-            return await _record_verdict(
-                step,
-                passed,
-                message,
-                used_knowledge_ids,
-                capability_key=capability_key,
-                learned=learned,
-                asks_memory=True,
-            )
-
-    else:
-
-        @tool(description=load_tool_description("report_step").body)
-        async def report_step(
-            step: int,
-            passed: bool,
-            message: str,
-            thought: str,
-            used_knowledge_ids: list[str] = [],
-        ) -> str:
-            # What the agent reads is `qa_run/<version>/tool_report_step.md`.
-            return await _record_verdict(step, passed, message, used_knowledge_ids)
-
-
-    async def _unreached_refusal(
-        step: int, case_id: int, passed: bool, message: str
-    ) -> str | None:
-        """실패 판정이 "아직 도달하지 못했다" 이면 기록하지 않고 돌려보낼 답. 아니면 None.
-
-        Jev 가 판단하지 못하면 기록한다(fail open). 같은 TC 를 `MAX_UNREACHED_REFUSALS` 번
-        돌려보냈으면 다음 보고는 기록한다 — 정말 갈 수 없는 TC 에서 런이 멈추면 안 된다.
-        """
-        judge = state.unreached_judge
-        if passed or judge is None:
-            return None
-        if state.unreached_refusals.get(step, 0) >= MAX_UNREACHED_REFUSALS:
-            return None
-        test_step = state.step_texts[step - 1] if step - 1 < len(state.step_texts) else ""
-        expected = state.step_expected[step - 1] if step - 1 < len(state.step_expected) else ""
-        probability = await judge.unreached_probability(test_step, expected, message)
-        if probability is None or probability < UNREACHED_THRESHOLD:
-            return None
-        state.unreached_refusals[step] = state.unreached_refusals.get(step, 0) + 1
-        if state.phase_cycle is not None:
-            state.phase_cycle.hold()
-        return (
-            f"Nothing was recorded — this reads as case {case_id} not reached or not finished "
-            "yet, and that is not a verdict. Go there, carry out its test_step to the end, "
-            "watch the result, then report it. There is no time or token budget to save. "
-            "If the precondition truly cannot be reached any more, say why in a message "
-            "beginning 'SETUP-FAILED:'."
-        )
-
-    async def _report_case(
-        case_id: int,
-        passed: bool,
-        message: str,
-        used_knowledge_ids: list[str],
-        overwrite: bool,
-        **memory: object,
-    ) -> str:
-        """FREE 시나리오의 판정 (ARTEL-1029). `case_id` 를 스텝 번호로 바꿔 `_record_verdict` 로 보낸다.
-
-        이미 판정한 TC 를 다시 보고하면 두 번 부르게 한다. 첫 호출은 아무것도 적지 않고 앞선
-        판정을 보여 주는 경고를 돌려주고, `overwrite=true` 로 다시 불러야 바꾼다. 같은 TC 를
-        실수로 두 번 보고해 판정이 조용히 뒤집히는 일을 막기 위해서다. 한 TC 는 한 번만 바꾼다.
-        """
+    @tool(description="TC 검증 전에 호출한다. case_id는 시나리오의 TC ID다. 같은 TC를 재검증할 때도 새 시도를 시작한다. step은 참고 절차이며 각 step을 보고할 의무는 없다.")
+    async def start_test_case(case_id: int, thought: str) -> str:
         step = state.step_of_case(case_id)
         if step is None:
-            known = ", ".join(
-                str(cid) for cid, _ in state.step_meta if cid is not None
-            )
+            return "이 시나리오에 없는 TC입니다."
+        stopped = await stop_not_allowed_before(ctx, step, starting_case=True)
+        try:
+            attempt = await channel.evaluation.start(case_id)
+        except httpx.HTTPError:
+            return "TC 검증 시작을 저장하지 못했습니다. 같은 start_test_case 호출로 재시도하세요."
+        dispatch_starts.setdefault(case_id, len(state.dispatches))
+        cheat_starts.setdefault(case_id, len(state.used_cheats))
+        if arch.cheats == "on" or arch.behaviors == "on":
+            focus(ctx, step)
+        return _answer(f"TC {case_id} 검증 시도를 시작했습니다: {attempt.id}. 검증 후 report_test_case를 호출하세요." + stopped, channel.drain_operator_messages())
+
+    @tool(description="시작한 TC 검증 시도의 결과를 PASSED/FAILED/INCONCLUSIVE로 보고한다. step별 판정은 하지 않는다. 반복 검증은 새 시도로 보존한다. TC 실패 issue는 자동 생성된다. 판단할 증거가 부족하면 INCONCLUSIVE를 사용한다.")
+    async def report_test_case(case_id: int, verdict: Literal["PASSED", "FAILED", "INCONCLUSIVE"],
+        message: str, thought: str, checks: list[VerdictCheck] = [], used_knowledge_ids: list[str] = []) -> str:
+        attempt_id = channel.evaluation.attempts.get(case_id)
+        if attempt_id is None:
             if state.phase_cycle is not None:
                 state.phase_cycle.hold()
-            return (
-                f"Nothing was recorded — case_id {case_id} is not in this scenario. "
-                f"Use one of: {known}."
-            )
-        previous = state.verdict_of(step)
-        if previous is not None:
-            before = "passed" if previous.passed else "failed"
-            if step in state.overwritten_steps:
+            return "먼저 이 TC에 대해 start_test_case를 호출하세요."
+        pending = pending_reports.get(case_id)
+        if pending is not None and pending[1] != verdict:
+            if state.phase_cycle is not None:
+                state.phase_cycle.hold()
+            return f"저장 응답을 기다리는 {pending[1]} 판정이 있습니다. 같은 결과로 재시도하세요."
+        if verdict != "INCONCLUSIVE" and arch.verdict_evidence == "on":
+            problem = "기대 결과와 관측 결과를 checks에 작성하세요." if not checks else contradiction(verdict == "PASSED", checks)
+            if problem:
                 if state.phase_cycle is not None:
                     state.phase_cycle.hold()
-                return (
-                    f"Nothing was recorded — case {case_id} was already overwritten once "
-                    f"and its verdict ({before}) stands. A case can be overwritten only once."
-                )
-            if not overwrite:
-                if state.phase_cycle is not None:
-                    state.phase_cycle.hold()
-                return (
-                    f"WARNING: nothing was recorded. Case {case_id} already has a verdict: "
-                    f"{before} — {previous.message}\n"
-                    "Reporting it again replaces that verdict. Do so only if you have now "
-                    "carried out its test_step and saw a different result than before. If "
-                    "so, call `report_case` again with the same case_id and `overwrite=true`. "
-                    "A case can be overwritten only once. Otherwise leave it and verify "
-                    "another case."
-                )
-        refusal = await _unreached_refusal(step, case_id, passed, message)
-        if refusal is not None:
-            return refusal
-        answer = await _record_verdict(
-            step,
-            passed,
-            message,
-            used_knowledge_ids,
-            replaces=previous is not None,
-            **memory,  # type: ignore[arg-type]
-        )
-        if previous is not None and state.verdict_of(step) is not previous:
-            state.overwritten_steps.add(step)
-            before = "passed" if previous.passed else "failed"
-            after = "passed" if passed else "failed"
-            answer = f"Overwrote case {case_id}: {before} → {after}. {answer}"
-        return answer
+                return f"판정을 기록하지 않았습니다. {problem}"
+        cited_checks, evidence = None, None
+        if checks:
+            pulse = channel.scene.pulse
+            cited_checks, evidence = cite(checks, pulse, state.shown_captures, pulse.scene or channel.scene.scene)
+        citations = [entry for entry in dict.fromkeys(used_knowledge_ids) if state.knows_of(entry)]
+        rejected_citations = len(set(used_knowledge_ids) - set(citations))
+        if pending is None:
+            used_cheats = [entry.model_dump(mode="json") for entry in state.used_cheats[cheat_starts.get(case_id, 0):]] if arch.cheats == "on" else None
+            behaviors = [entry.model_dump(mode="json") for entry in active_behaviors(ctx)] if arch.behaviors == "on" else None
+            pending = pending_reports[case_id] = (case_id, verdict, message, thought, cited_checks, evidence, citations, used_cheats, behaviors, rejected_citations)
+        try:
+            await channel.evaluation.report(*pending)
+        except httpx.HTTPError:
+            if state.phase_cycle is not None:
+                state.phase_cycle.hold()
+            return "TC 판정 저장 응답을 확인하지 못했습니다. 같은 결과로 report_test_case를 재시도하세요."
+        pending_reports.pop(case_id, None)
+        state.case_attempt_results.append(QaCaseAttemptResult(attempt_id=str(attempt_id), case_id=case_id,
+            verdict=verdict, message=pending[2]))
+        start = dispatch_starts.pop(case_id, len(state.dispatches))
+        cheat_starts.pop(case_id, None)
+        draft = draft_for_attempt(case_id, start) if verdict == "PASSED" else ""
+        body = f"TC {case_id} 검증 시도를 {verdict}로 기록했습니다. " + render_closing_asks(state) + draft
+        if pending[9]:
+            body += f"\n\n{pending[9]} of the ids you cited are not entries this run has been shown, so they were not recorded. The verdict stands. Cite only ids printed by a search or a neighbour line."
+        if not arch.report_step_view:
+            deferred = channel.scene.pulse.defer_view()
+            if deferred:
+                body += f"\n\n{deferred}"
+        return _answer(body, channel.drain_operator_messages(), screen=arch.report_step_view)
 
-    verdict_tool = report_step
-    if state.execution_mode == "FREE" and arch.phase_cycle.remembers_in_verdict:
-
-        @tool(description=load_tool_description("report_case_memory").body)
-        async def report_case(
-            case_id: int,
-            passed: bool,
-            message: str,
-            thought: str,
-            used_knowledge_ids: list[str] = [],
-            capability_key: str | None = None,
-            learned: str | None = None,
-            overwrite: bool = False,
-        ) -> str:
-            # What the agent reads is `qa_run/<version>/tool_report_case_memory.md`.
-            return await _report_case(
-                case_id,
-                passed,
-                message,
-                used_knowledge_ids,
-                overwrite,
-                capability_key=capability_key,
-                learned=learned,
-                asks_memory=True,
-            )
-
-        verdict_tool = report_case
-    elif state.execution_mode == "FREE":
-
-        @tool(description=load_tool_description("report_case").body)
-        async def report_case(
-            case_id: int,
-            passed: bool,
-            message: str,
-            thought: str,
-            used_knowledge_ids: list[str] = [],
-            overwrite: bool = False,
-        ) -> str:
-            # What the agent reads is `qa_run/<version>/tool_report_case.md`.
-            return await _report_case(case_id, passed, message, used_knowledge_ids, overwrite)
-
-        verdict_tool = report_case
+    @tool(description="진행 방법을 모르면 사용자에게 질문한다. 첫 답변까지 QA 전체를 일시 정지한다. 대기 시간 제한은 없고 사용자가 QA를 종료할 수 있다.")
+    async def ask_user(question: str, thought: str) -> str:
+        answer = await channel.evaluation.ask(question, lambda: channel.cancelled)
+        channel.operator_instructions.append(answer)
+        return _answer("사용자가 답변했습니다.", [answer])
 
     @tool(
-        description=load_tool_description("report_issue").body.format(
+        description="TC와 관련 없는 별도 결함만 보고한다. TC 실패 issue는 자동 생성된다. " + load_tool_description("report_issue").body.format(
             severities="/".join(s.value for s in IssueSeverity),
             limit=arch.max_issues_per_run,
         )
     )
     async def report_issue(
-        step: int,
         severity: str,
         title: str,
         expected: str,
         actual: str,
         reproduction: list[str],
         thought: str,
+        step: int | None = None,
     ) -> str:
         if state.issues_attempted >= arch.max_issues_per_run:
             return (
@@ -634,53 +178,16 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             channel.drain_operator_messages(),
         )
 
-    @tool(description=load_tool_description("finish_run").body)
+    @tool(description="QA 실행을 종료한다. TC 판정은 report_test_case로 기록한다. 참고 step의 완료 여부는 검사하지 않는다. 아직 판단하지 못한 TC와 그 이유는 summary에 설명한다.")
     async def finish_run(passed: bool, summary: str, thought: str) -> str:
-        state.finish_attempts += 1
-
-        # A step the agent never attempted is the failure this whole change is
-        # about, so closing over one costs a round trip. Only the first, though:
-        # the second call closes whatever the state, because a run the game has
-        # abandoned still has to be able to end.
-        unreported = state.unreported_steps()
-        if unreported and state.finish_attempts == 1 and state.execution_mode == "FREE":
-            listed = ", ".join(str(state.case_of_step(step)) for step in unreported)
-            return (
-                f"{len(unreported)} test case(s) still have no verdict (case_id): {listed}. "
-                "Go verify them — a case you have not tried may still pass. If the game "
-                "truly cannot reach one, report it failed with the reason, then call "
-                "`finish_run` again."
-            )
-        if unreported and state.finish_attempts == 1:
-            listed = ", ".join(str(step) for step in unreported)
-            return (
-                f"{len(unreported)} step(s) still have no verdict: {listed}. Go "
-                "attempt them — a step you have not tried may still pass. If the "
-                "game truly cannot go on, report them failed with the reason, then "
-                "call `finish_run` again."
-            )
-
         state.finished = True
-        await channel.emit(
-            MessageType.STATUS,
-            StatusPayload(
-                status=StepStatus.COMPLETED,
-                result=RunResult.PASSED if passed else RunResult.FAILED,
-                message=summary,
-                summary=state.build_summary(),
-            ),
-        )
-        return "The run is closed."
+        await channel.emit(MessageType.STATUS, StatusPayload(status=StepStatus.COMPLETED,
+            result=RunResult.PASSED if passed else RunResult.FAILED, message=summary, summary=state.build_summary()))
+        return "QA 실행을 종료했습니다."
 
     @tool(description=load_tool_description("reply_to_operator").body)
     async def reply_to_operator(message: str, thought: str, step: int | None = None) -> str:
         await channel.say(message, step)
-        return _answer("Sent.", channel.drain_operator_messages())
+        return _answer("전송했습니다.", channel.drain_operator_messages())
 
-    return [
-        wait_for_operator,
-        verdict_tool,
-        report_issue,
-        finish_run,
-        reply_to_operator,
-    ]
+    return [start_test_case, report_test_case, ask_user, report_issue, finish_run, reply_to_operator]

@@ -48,7 +48,7 @@ from app.qa.game_errors import GameErrorLedger
 from app.qa.game_functions import BehaviorEndedPayload, GameFunctionCatalog
 from app.qa.pulse import PulseReading
 from app.qa.scene import SceneMemory
-from app.qa.shown_text import ShownTextLog
+from app.qa.evaluation import QaEvaluationClient
 
 if TYPE_CHECKING:
     from app.qa.relevance import PulseRelevanceJudge
@@ -169,6 +169,7 @@ class QaRunChannel:
         search_timeout: float = KNOWLEDGE_SEARCH_TIMEOUT_SECONDS,
     ) -> None:
         self._qa_try_id = qa_try_id
+        self.evaluation = QaEvaluationClient(qa_try_id)
         self._send = send
         self._action_timeout = action_timeout
         # Injectable for the same reason `action_timeout` is: a suite that waited
@@ -251,9 +252,6 @@ class QaRunChannel:
         # 게임이 `PULSE` 와 `ACTION_RESULT` 에 실어 보낸 예외 (ARTEL-1219). tool 결과마다 안 본
         # 항목 수가 한 줄로 붙고(`ToolContext.answer`), `get_errors` 가 펼쳐 보인다.
         self.game_errors = GameErrorLedger()
-        # `pulse` 가 실어 온 글자를 도착 순서대로 (ARTEL-1222). macro 답이 그 macro 가 도는 동안 뜬
-        # 줄을 여기서 꺼낸다 — `PulseMemory` 는 객체마다 마지막 글자만 쥔다.
-        self.shown_text = ShownTextLog()
 
     @property
     def qa_try_id(self) -> int:
@@ -776,7 +774,6 @@ class QaRunChannel:
         """
         reading = PulseReading.model_validate(raw.get("payload") or {})
         self.scene.pulse.apply(reading)
-        self.shown_text.apply(reading)
         self.game_errors.apply(raw.get("payload"))
         # 새 member 타입이 왔으면 판정을 띄운다. 기다리지 않는다 — 판정이 도착하기 전의 view 는
         # 아무것도 숨기지 않으므로, 늦어도 잃는 것은 줄 몇 개다.

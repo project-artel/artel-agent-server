@@ -464,6 +464,10 @@ FIND_REQUIRED_KEYWORDS: tuple[str, ...] = ("label", "name")
 
 # macro 문법에 없는 이름 중, 거절 문장이 왜 없는지 말해 줘야 하는 것들.
 REPORTING_NAMES: dict[str, str] = {
+    "report_test_case": (
+        "`report_test_case` is not part of the macro grammar. The agent judges the TC "
+        "from its expected result and observed evidence after the macro returns"
+    ),
     "report_step": (
         "`report_step` is not part of the macro grammar. A verdict needs the scenario, "
         "the earlier steps, what the operator said and the knowledge this run read, and a "
@@ -471,8 +475,7 @@ REPORTING_NAMES: dict[str, str] = {
         "needs judging, and judge it yourself"
     ),
     "report_case": (
-        "`report_case` is not part of the macro grammar: a test case's verdict is derived "
-        "from its steps' verdicts, so there is nothing for a macro to report"
+        "`report_case` is unavailable. Use the agent's `report_test_case` after the macro returns"
     ),
     "report_issue": (
         "`report_issue` is not part of the macro grammar. File the defect yourself after "

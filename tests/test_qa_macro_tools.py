@@ -828,7 +828,7 @@ def test_a_step_a_macro_asked_about_still_has_to_be_reported() -> None:
     assert "NEEDS A VERDICT" in answer
     # 부른 step 을 묻는다. macro 원문에는 step 이 없다.
     assert "scenario step 2" in answer
-    assert "report_step" in answer
+    assert "report_test_case" in answer
     # 그 step 은 아직 판정이 없다. `finish_run` 이 첫 시도를 되민다.
     assert 2 in state.unreported_steps()
     pushed_back = asyncio.run(
@@ -836,7 +836,8 @@ def test_a_step_a_macro_asked_about_still_has_to_be_reported() -> None:
             {"passed": True, "summary": "done", "thought": "t"}
         )
     )
-    assert "no verdict" in pushed_back
+    assert state.finished
+    assert state.case_attempt_results == []
 
 
 def test_a_flag_only_macro_does_not_add_a_step_to_report() -> None:
@@ -871,7 +872,7 @@ def test_the_macro_tools_sit_beside_the_action_tools_in_the_offered_list() -> No
     channel, state, _, _ = make()
     names = [one.name for one in build_tools(channel, state, default_resolved_arch())]
 
-    assert names[names.index("reset_game") + 1 : names.index("wait_for_operator")] == [
+    assert names[names.index("reset_game") + 1 : names.index("start_test_case")] == [
         "write_macro",
         "edit_macro",
         "read_macro",
@@ -1026,7 +1027,12 @@ def test_every_macro_tool_body_is_guarded_against_a_leaking_exception() -> None:
         "resume_macro",
         "decline_macro_draft",
     ):
-        assert tools[name].coroutine.__code__.co_name == "answering", name
+        body = tools[name].coroutine
+        wrappers = []
+        while body is not None:
+            wrappers.append(body.__code__.co_name)
+            body = getattr(body, '__wrapped__', None)
+        assert 'answering' in wrappers, name
         assert tools[name].name == name
 
 

@@ -375,10 +375,24 @@ def _reported_macro_calls(messages: list[BaseMessage]) -> frozenset[str]:
     step_of_call: dict[str, int] = {}
     reported_at: dict[int, int] = {}
     position_of_call: dict[str, int] = {}
+    active_case: int | None = None
+    pending_case_calls: list[str] = []
+    reported_case_calls: set[str] = set()
     for position, message in enumerate(messages):
         if not isinstance(message, AIMessage):
             continue
         for tool_call in message.tool_calls:
+            name = tool_call["name"]
+            case_id = tool_call["args"].get("case_id")
+            if name == "start_test_case":
+                active_case = case_id if isinstance(case_id, int) else None
+                pending_case_calls = []
+            elif name == "report_test_case" and active_case is not None and case_id == active_case:
+                reported_case_calls.update(pending_case_calls)
+                active_case = None
+                pending_case_calls = []
+            elif name in _MACRO_RESULT_TOOLS and active_case is not None:
+                pending_case_calls.append(tool_call["id"])
             step = tool_call["args"].get("step")
             if not isinstance(step, int):
                 continue
@@ -387,7 +401,7 @@ def _reported_macro_calls(messages: list[BaseMessage]) -> frozenset[str]:
                 position_of_call[tool_call["id"]] = position
             elif tool_call["name"] == _REPORT_TOOL:
                 reported_at[step] = position
-    return frozenset(
+    return frozenset(reported_case_calls) | frozenset(
         call_id
         for call_id, step in step_of_call.items()
         if reported_at.get(step, -1) > position_of_call[call_id]

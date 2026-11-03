@@ -13,6 +13,9 @@
 등록될 일이 없다.
 """
 
+import asyncio
+from functools import wraps
+
 from langchain_core.tools import BaseTool
 
 from app.agents.qa.arch import ResolvedArch, default_resolved_arch
@@ -103,7 +106,22 @@ def build_tools(
     # gate 바깥에서 감싼다. gate 가 거절한 호출의 결과에도 끝난 behavior 의 소식이 붙는다.
     if ctx.arch.behaviors == "on":
         tools = [with_behavior_endings(one, ctx) for one in tools]
-    return tools
+    # 한 응답에 여러 tool call이 있어도 사용자 질문 대기 중에는 다음 호출을 실행하지 않는다.
+    execution_lock = asyncio.Lock()
+    return [_serialized(one, execution_lock) for one in tools]
+
+
+def _serialized(tool: BaseTool, lock: asyncio.Lock) -> BaseTool:
+    inner = tool.coroutine
+    if inner is None:
+        raise AssertionError(f"tool {tool.name!r} has no coroutine")
+
+    @wraps(inner)
+    async def guarded(*args, **kwargs):
+        async with lock:
+            return await inner(*args, **kwargs)
+
+    return tool.model_copy(update={"coroutine": guarded})
 
 
 def _phase_gated(tool: BaseTool, cycle: PhaseCycle) -> BaseTool:

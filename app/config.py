@@ -127,6 +127,9 @@ class Settings(BaseSettings):
     # run a candidate. A value naming a directory that does not exist fails at
     # startup.
     qa_prompt_version: str | None = None
+    # 같은 TC 의 사람 판정 기록을 QA 첫 메시지에 싣는가(ARTEL-1257). 영향 실측에서 실은 런과 안 실은
+    # 런을 같은 시나리오로 비교하려고 둔 스위치다. 끄면 orchestration 이 보내도 첫 메시지가 기록 없는 런과 같다.
+    qa_human_review: bool = True
     # Versioned separately from `qa_prompt_version`: the summarizing prompt is a
     # different call to a different model, and rolling one back must not roll
     # back the other.

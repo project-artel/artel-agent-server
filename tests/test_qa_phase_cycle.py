@@ -103,22 +103,8 @@ def test_the_directive_names_the_same_tools_the_table_does() -> None:
     set may be named at all: a name the model cannot call is worse than no
     advice.
     """
-    # `v19` 는 macro 가 켜진 구조를 더는 재지 않는다. 그 지시문은 `search_macros` 보다
-    # 먼저 나왔고 released version 은 고치지 않으므로, 그 tool 을 못 대는 것이 맞다.
-    for version, macros in (
-        ("v18", "off"),
-        ("v19", "off"),
-        ("v20", "off"),
-        ("v20", "on"),
-        ("v21", "off"),
-        ("v21", "on"),
-        ("v22", "off"),
-        ("v22", "on"),
-        ("v23", "off"),
-        ("v23", "on"),
-        ("v24", "off"),
-        ("v24", "on"),
-    ):
+    # Released prompts retain their historical tool contract.
+    for version, macros in (("v26", "off"), ("v26", "on")):
         _the_directive_names_what_this_structure_offers(version, macros)
 
 
@@ -173,7 +159,7 @@ def test_the_tools_that_pause_the_game_do_not_end_the_act_phase() -> None:
 def test_lite_walks_four_phases_and_comes_back_to_observe() -> None:
     """One lap, with the three repeating phases doing the repeating.
 
-    Only `report_step` moves the run on by being called — it is the one tool in
+    Only `report_test_case` moves the run on by being called — it is the one tool in
     the lap whose phase ends on it. The other three phases are left by calling
     the tool of a later one, so the phase after an `observe_scene` or a `click`
     is the phase it was already in.
@@ -189,8 +175,8 @@ def test_lite_walks_four_phases_and_comes_back_to_observe() -> None:
         # ACT opens on the first action and does not end on it either.
         ("click", RunPhase.act),
         ("click", RunPhase.act),
-        # `report_step` closes ACT and VERIFY in one call.
-        ("report_step", RunPhase.update_memory),
+        # `report_test_case` closes ACT and VERIFY in one call.
+        ("report_test_case", RunPhase.update_memory),
         # And UPDATE_MEMORY stays open for a second thing to write down.
         ("skip_memory_update", RunPhase.update_memory),
         # The next lap starts when the run looks at the screen again.
@@ -258,7 +244,7 @@ def test_update_memory_stays_open_for_a_correction_that_takes_two_calls() -> Non
     than if it had written nothing.
     """
     cycle = build_phase_cycle(PhaseCycleMode.lite)
-    cycle.advance("report_step")
+    cycle.advance("report_test_case")
     assert cycle.phase is RunPhase.update_memory
 
     for name in ("forget_knowledge", "record_knowledge", "record_capability_verdict"):
@@ -280,13 +266,13 @@ def test_each_step_owes_its_own_memory_update() -> None:
     to prevent.
     """
     cycle = build_phase_cycle(PhaseCycleMode.lite)
-    cycle.advance("report_step")
+    cycle.advance("report_test_case")
     cycle.advance("record_knowledge")
     assert cycle.refusal_for("capture_screen") is None
 
     # Step 2's verdict, reported without leaving UPDATE_MEMORY.
-    assert cycle.refusal_for("report_step") is None
-    cycle.advance("report_step")
+    assert cycle.refusal_for("report_test_case") is None
+    cycle.advance("report_test_case")
     assert cycle.phase is RunPhase.update_memory
 
     # Step 1's record does not pay for step 2.
@@ -316,8 +302,8 @@ def test_a_step_that_only_looks_needs_no_action() -> None:
     cycle = build_phase_cycle(PhaseCycleMode.lite)
     cycle.advance("observe_scene")
 
-    assert cycle.refusal_for("report_step") is None
-    cycle.advance("report_step")
+    assert cycle.refusal_for("report_test_case") is None
+    cycle.advance("report_test_case")
     assert cycle.phase is RunPhase.update_memory
 
 
@@ -354,7 +340,7 @@ def test_update_memory_is_still_the_one_phase_that_cannot_be_skipped() -> None:
     cycle = build_phase_cycle(PhaseCycleMode.lite)
     cycle.advance("observe_scene")
     cycle.advance("press_key")
-    cycle.advance("report_step")
+    cycle.advance("report_test_case")
     assert cycle.phase is RunPhase.update_memory
 
     assert "UPDATE_MEMORY" in cycle.refusal_for("press_key")
@@ -423,11 +409,11 @@ def test_an_out_of_phase_call_is_refused_and_counted() -> None:
     # The tool it names is the one that unblocks the jump, which is not the same
     # as one that ends the phase the run is sitting in. OBSERVE is skippable, so
     # nothing is owed there; what stands between here and UPDATE_MEMORY is
-    # VERIFY, and `report_step` is how that is answered. Naming `observe_scene`
+    # VERIFY, and `report_test_case` is how that is answered. Naming `observe_scene`
     # instead would be advice the model can follow and still be refused.
     # `offered` 없이 만든 cycle 이라 표의 이름을 모두 댄다. 실제 run 은 자기 tool 만 댄다 —
     # ORDERED run 에는 `report_case` 가 없다(`build_tools`).
-    assert "VERIFY ends when you call one of:" in refusal and "`report_step`" in refusal
+    assert "VERIFY ends when you call one of:" in refusal and "`report_test_case`" in refusal
     assert cycle.refusals == 1
     assert cycle.phase is RunPhase.observe
 
@@ -473,16 +459,16 @@ def test_a_refused_tool_does_not_run() -> None:
         channel, state, tools, sent = make(PhaseCycleMode.lite)
         standing_on(channel)
 
-        # UPDATE_MEMORY 로 보낸다. 거기서 `report_step` 은 뒤로 가는 호출이라 거절된다 —
+        # UPDATE_MEMORY 로 보낸다. 거기서 `report_test_case` 은 뒤로 가는 호출이라 거절된다 —
         # OBSERVE 와 ACT 는 건너뛸 수 있지만 UPDATE_MEMORY 는 아니다.
-        state.phase_cycle.advance("report_step")
+        state.phase_cycle.advance("report_test_case")
         assert state.phase_cycle.phase is RunPhase.update_memory
         before = len(sent)
 
-        result = await tools["report_step"].ainvoke(
+        result = await tools["report_test_case"].ainvoke(
             {
-                "step": 1,
-                "passed": True,
+                "case_id": 42,
+                "verdict": "PASSED",
                 "message": "saw it",
                 "thought": "판정한다",
                 "learned": "",
@@ -490,7 +476,7 @@ def test_a_refused_tool_does_not_run() -> None:
         )
 
         assert "UPDATE_MEMORY" in result
-        assert state.step_results == []
+        assert state.case_attempt_results == []
         assert len(sent) == before
         assert state.phase_cycle.refusals == 1
 
@@ -547,19 +533,19 @@ def test_an_empty_reason_does_not_buy_a_way_past_update_memory() -> None:
     asyncio.run(run())
 
 
-def test_an_omitted_learned_does_not_buy_a_way_past_verify() -> None:
-    """Same hole, at `report_step`. No verdict was recorded, so `VERIFY` is not done."""
+def test_a_report_without_a_started_attempt_does_not_end_verify() -> None:
+    """A rejected TC report must leave VERIFY unanswered."""
 
     async def run() -> None:
         channel, state, tools, _sent = make(PhaseCycleMode.lite)
         standing_on(channel)
         state.phase_cycle.phase = RunPhase.verify
 
-        await tools["report_step"].ainvoke(
-            {"step": 1, "passed": True, "message": "saw it", "thought": "판정한다"}
+        await tools["report_test_case"].ainvoke(
+            {"case_id": 42, "verdict": "PASSED", "message": "saw it", "thought": "판정한다"}
         )
 
-        assert state.step_results == []
+        assert state.case_attempt_results == []
         assert state.phase_cycle.phase is RunPhase.verify
 
     asyncio.run(run())
@@ -609,7 +595,7 @@ def _lite(offered=None):
 
 def _into_update_memory(cycle) -> None:
     """한 step 을 손으로 하고 판정해서 `UPDATE_MEMORY` 에 앉힌다."""
-    for name in ("observe_scene", "click", "report_step"):
+    for name in ("observe_scene", "click", "report_test_case"):
         assert cycle.refusal_for(name) is None, name
         cycle.advance(name)
     assert cycle.phase is RunPhase.update_memory
@@ -657,13 +643,13 @@ def test_a_macro_can_be_registered_mid_act_without_leaving_act() -> None:
     # 등록이 ACT 를 끝내지 않는다. 조작을 이어 가고 판정으로 넘어간다.
     assert cycle.phase is RunPhase.act
     assert cycle.refusal_for("press_key") is None
-    assert cycle.refusal_for("report_step") is None
+    assert cycle.refusal_for("report_test_case") is None
 
 
 def test_a_registration_outside_update_memory_does_not_answer_it() -> None:
     """ACT 에서 등록했다고 이 step 의 지식화가 끝난 것은 아니다. UPDATE_MEMORY 는 따로 답해야 한다."""
     cycle = _lite()
-    for name in ("observe_scene", "press_key", "register_macro", "report_step"):
+    for name in ("observe_scene", "press_key", "register_macro", "report_test_case"):
         assert cycle.refusal_for(name) is None, name
         cycle.advance(name)
     assert cycle.phase is RunPhase.update_memory
@@ -772,7 +758,7 @@ def test_a_search_after_update_memory_is_answered_leaves_the_next_step_open() ->
 
 def test_the_refusal_names_only_the_tools_this_run_has() -> None:
     """`macros=off` 런에 "`register_macro` 로 끝내라" 고 하면 없는 tool 을 찾는다."""
-    offered = frozenset({"observe_scene", "click", "report_step", "record_knowledge", "skip_memory_update"})
+    offered = frozenset({"observe_scene", "click", "report_test_case", "record_knowledge", "skip_memory_update"})
     cycle = _lite(offered)
     _into_update_memory(cycle)
 
@@ -815,14 +801,14 @@ def _into_review_draft(cycle) -> None:
     """한 step 을 손으로 하고, `draft` 를 내민 판정으로 `REVIEW_DRAFT` 에 앉힌다.
 
     `refusal_for` → tool 본문 → `advance` 순서는 `tools/__init__.py` 의 gate 와 같다.
-    `expect_draft_review` 는 `report_step` 본문 안의 `_macro_draft` 가 부르는 자리다.
+    `expect_draft_review` 는 `report_test_case` 본문 안의 `_macro_draft` 가 부르는 자리다.
     """
     for name in ("observe_scene", "click"):
         assert cycle.refusal_for(name) is None, name
         cycle.advance(name)
-    assert cycle.refusal_for("report_step") is None
+    assert cycle.refusal_for("report_test_case") is None
     cycle.expect_draft_review()
-    cycle.advance("report_step")
+    cycle.advance("report_test_case")
     assert cycle.phase is RunPhase.review_draft
 
 
@@ -843,7 +829,7 @@ def test_a_verdict_without_a_draft_goes_straight_to_update_memory() -> None:
     cycle.advance("register_macro")
     cycle.advance("skip_memory_update")
     # 다음 step 의 판정. 이번에는 `draft` 가 없다.
-    for name in ("observe_scene", "click", "report_step"):
+    for name in ("observe_scene", "click", "report_test_case"):
         assert cycle.refusal_for(name) is None, name
         cycle.advance(name)
     assert cycle.phase is RunPhase.update_memory
@@ -887,7 +873,7 @@ def test_update_memory_still_needs_its_own_answer_after_review_draft() -> None:
     assert cycle.refusal_for("click") is None
 
 
-@pytest.mark.parametrize("name", ["skip_memory_update", "record_knowledge", "click", "report_step"])
+@pytest.mark.parametrize("name", ["skip_memory_update", "record_knowledge", "click", "report_test_case"])
 def test_other_tools_are_refused_in_review_draft_with_the_two_answers_named(name: str) -> None:
     """`skip_memory_update` 한 번이 두 질문에 답하던 길을 막는다. 거절문은 답할 tool 을 댄다."""
     cycle = _lite()
@@ -918,7 +904,7 @@ def test_review_draft_lets_the_run_through_after_two_refusals() -> None:
 
 def test_review_draft_names_only_the_answers_this_run_has() -> None:
     offered = frozenset(
-        {"observe_scene", "click", "report_step", "skip_memory_update", "register_macro"}
+        {"observe_scene", "click", "report_test_case", "skip_memory_update", "register_macro"}
     )
     cycle = _lite(offered)
     _into_review_draft(cycle)
@@ -936,7 +922,7 @@ def test_full_puts_review_draft_between_verify_and_update_memory() -> None:
         assert cycle.refusal_for(name) is None, name
         cycle.advance(name)
     cycle.expect_draft_review()
-    cycle.advance("report_step")
+    cycle.advance("report_test_case")
     assert cycle.phase is RunPhase.review_draft
 
     assert "REVIEW_DRAFT" in cycle.refusal_for("record_knowledge")
@@ -955,9 +941,9 @@ def test_a_verdict_reported_from_update_memory_can_offer_a_draft() -> None:
     _into_update_memory(cycle)
     cycle.advance("skip_memory_update")
 
-    assert cycle.refusal_for("report_step") is None
+    assert cycle.refusal_for("report_test_case") is None
     cycle.expect_draft_review()
-    cycle.advance("report_step")
+    cycle.advance("report_test_case")
 
     assert cycle.phase is RunPhase.review_draft
 
@@ -966,14 +952,14 @@ def test_a_held_verdict_leaves_no_draft_expectation_behind() -> None:
     """받아들여지지 않은 판정의 표시가 다음 판정으로 넘어가면 `draft` 없는 step 이 갇힌다."""
     cycle = _lite()
     cycle.advance("click")
-    assert cycle.refusal_for("report_step") is None
+    assert cycle.refusal_for("report_test_case") is None
     cycle.expect_draft_review()
     cycle.hold()
-    cycle.advance("report_step")
+    cycle.advance("report_test_case")
     assert cycle.phase is RunPhase.act
 
-    assert cycle.refusal_for("report_step") is None
-    cycle.advance("report_step")
+    assert cycle.refusal_for("report_test_case") is None
+    cycle.advance("report_test_case")
     assert cycle.phase is RunPhase.update_memory
 
 
@@ -981,12 +967,12 @@ def test_a_call_that_raised_leaves_no_draft_expectation_behind() -> None:
     """예외로 끝난 호출은 `advance` 를 안 탄다. 그 표시는 다음 호출의 `refusal_for` 가 지운다."""
     cycle = _lite()
     cycle.advance("click")
-    assert cycle.refusal_for("report_step") is None
+    assert cycle.refusal_for("report_test_case") is None
     cycle.expect_draft_review()
-    # 본문이 예외로 끝나 `advance("report_step")` 이 없었다.
+    # 본문이 예외로 끝나 `advance("report_test_case")` 이 없었다.
 
-    assert cycle.refusal_for("report_step") is None
-    cycle.advance("report_step")
+    assert cycle.refusal_for("report_test_case") is None
+    cycle.advance("report_test_case")
     assert cycle.phase is RunPhase.update_memory
 
 
@@ -1003,4 +989,4 @@ def test_declining_with_no_draft_waiting_is_refused_and_never_enters_review_draf
     cycle.advance("decline_macro_draft")
     assert cycle.forced_passes == 1
     assert cycle.phase is RunPhase.act
-    assert cycle.refusal_for("report_step") is None
+    assert cycle.refusal_for("report_test_case") is None

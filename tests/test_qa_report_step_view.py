@@ -5,6 +5,7 @@
 """
 
 import asyncio
+from tests.qa_attempts import configure_attempts, start_case, report_case
 
 import app.agents  # noqa: F401  (import order: avoids a circular import through app.qa)
 from app.agents.qa.arch import PhaseCycleMode, default_resolved_arch
@@ -46,11 +47,12 @@ def _tools(report_step_view: bool):
     arch = default_resolved_arch().model_copy(
         update={"phase_cycle": PhaseCycleMode.off, "report_step_view": report_step_view}
     )
+    configure_attempts(channel, state)
     tools = {tool.name: tool for tool in build_tools(channel, state, arch=arch)}
     return channel, tools
 
 
-_VERDICT = {"step": 1, "passed": True, "message": "됐다", "thought": "HP 가 줄었다"}
+_VERDICT = {"case_id": 1, "verdict": "PASSED", "message": "됐다", "thought": "HP 가 줄었다"}
 
 
 def test_report_step_view_is_on_by_default() -> None:
@@ -59,15 +61,17 @@ def test_report_step_view_is_on_by_default() -> None:
 
 def test_report_step_keeps_its_view_when_the_knob_is_on() -> None:
     channel, tools = _tools(report_step_view=True)
+    asyncio.run(start_case(tools))
     channel.on_pulse({"payload": _pulse(1, 10, [_enemy("Slime[1]", 30)], whole=True)})
 
-    answer = asyncio.run(tools["report_step"].ainvoke(_VERDICT))
+    answer = asyncio.run(tools["report_test_case"].ainvoke(_VERDICT))
 
     assert "<<pulse>>" in answer
 
 
 def test_report_step_answers_with_one_line_when_the_knob_is_off() -> None:
     channel, tools = _tools(report_step_view=False)
+    asyncio.run(start_case(tools))
     channel.on_pulse({"payload": _pulse(1, 10, [_enemy("Slime[1]", 30)], whole=True)})
     # 첫 view 는 scene 전환 page 다. 실제 run 에서 첫 action 결과가 이것을 그린다.
     channel.scene.pulse.since_action(None)
@@ -75,11 +79,11 @@ def test_report_step_answers_with_one_line_when_the_knob_is_off() -> None:
         "payload": _pulse(2, 20, [_enemy("Slime[1]", 25)], changed=["Battle/Slime[1]|Combat.Enemy::Hp"])
     })
 
-    answer = asyncio.run(tools["report_step"].ainvoke(_VERDICT))
+    answer = asyncio.run(tools["report_test_case"].ainvoke(_VERDICT))
 
     assert "<<pulse>>" not in answer
     assert "pulse: 1 values moved since the last view" in answer
-    assert "continue with step 2" in answer
+    assert "PASSED" in answer
 
 
 def test_a_deferred_value_comes_back_in_the_next_view_as_changed_earlier() -> None:

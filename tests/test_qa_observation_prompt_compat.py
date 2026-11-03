@@ -6,7 +6,7 @@ from app.prompts import load_tool_description, roles_in
 from tests.test_qa_game_errors import make
 
 
-@pytest.mark.parametrize("version", ["v24", "v31", "v32", "v33", "v34"])
+@pytest.mark.parametrize("version", ["v24", "v26", "v27", "v28", "v29", "v30", "v31", "v32", "v33", "v34"])
 def test_pinned_prompt_keeps_diagnostic_tools(version, monkeypatch):
     monkeypatch.setattr(get_settings(), "qa_prompt_version", version)
     _, _, tools = make()
