@@ -536,84 +536,6 @@ def numbered(statements: tuple[MacroStatement, ...], start: int = 1) -> list[tup
     return flat
 
 
-def reader_calls_in(
-    statement: MacroStatement, definition: MacroDefinition
-) -> list[MacroReaderCall]:
-    """이 statement 가 돌 때 읽게 되는 reader 호출 전부. predicate·숫자 `def` 안의 것까지.
-
-    runner 가 statement 를 돌리기 전에 `static`·`member` 의 이름을 게임에 물을 수 있게(ARTEL-1285)
-    적힌 순서대로 모은다. 몸통이 있는 statement(`if`·`for`·`while`)는 제 조건만이다 — 몸통의
-    statement 는 저마다 `_statement` 를 지나며 제 것을 모은다.
-    """
-    calls: list[MacroReaderCall] = []
-    visited: set[str] = set()
-
-    def from_operand(operand: MacroOperand) -> None:
-        if isinstance(operand, MacroReaderOperand):
-            calls.append(operand.call)
-        elif isinstance(operand, MacroNumberCallOperand):
-            from_function(operand.callee)
-        elif isinstance(operand, MacroArithmeticOperand):
-            from_operand(operand.left)
-            from_operand(operand.right)
-        elif isinstance(operand, MacroExtremumOperand):
-            for one in operand.operands:
-                from_operand(one)
-
-    def from_condition(condition: MacroCondition) -> None:
-        if isinstance(condition, MacroReaderCondition):
-            calls.append(condition.call)
-        elif isinstance(condition, MacroComparisonCondition):
-            from_operand(condition.left)
-            from_operand(condition.right)
-        elif isinstance(condition, MacroPredicateCondition):
-            from_function(condition.callee)
-
-    def from_function(name: str) -> None:
-        # 같은 `def` 를 두 번 걷지 않는다. parser 가 재귀를 거절하지만 걷는 쪽이 그것에 기대지 않는다.
-        if name in visited:
-            return
-        visited.add(name)
-        function = definition.function(name)
-        if function is None:
-            return
-        from_statements(function.statements)
-
-    def from_statements(statements: tuple[MacroStatement, ...]) -> None:
-        for inner in statements:
-            if isinstance(inner, MacroIfStatement):
-                from_condition(inner.condition)
-                from_statements(inner.body)
-                from_statements(inner.orelse)
-            elif isinstance(inner, MacroReturnStatement):
-                if inner.condition is not None:
-                    from_condition(inner.condition)
-                if inner.expression is not None:
-                    from_operand(inner.expression)
-            else:
-                from_statement(inner)
-
-    def from_statement(one: MacroStatement) -> None:
-        if isinstance(one, MacroAssignStatement):
-            if isinstance(one.value, MacroReadValue):
-                calls.append(one.value.call)
-            elif isinstance(one.value, MacroComputeValue):
-                from_operand(one.value.expression)
-        elif isinstance(
-            one,
-            (
-                MacroRequireStatement,
-                MacroIfStatement,
-                MacroWhileStatement,
-                MacroWaitUntilStatement,
-            ),
-        ):
-            from_condition(one.condition)
-
-    from_statement(statement)
-    return calls
-
-
 def _bodies(statement: MacroStatement) -> tuple[tuple[MacroStatement, ...], ...]:
     """statement 가 품은 몸통들. 번호를 매기고 범위를 잴 때 같은 순서로 내려간다."""
     if isinstance(statement, MacroIfStatement):
@@ -752,8 +674,7 @@ class _Runner:
         # 모르는 batch 는 세지도 지우지도 않는다 — 까닭은 `_went_wrong` 에 있다.
         self.still_screens = 0
         self.waited_this_call = 0.0
-        # 이 run 에서 `read_member` 로 물은 이름(SDK 꼴). 한 run 에 이름마다 한 번만 묻는다 — `wait_until`
-        # 과 `while` 은 같은 조건을 `pulse` 마다 다시 읽는데, 그때마다 왕복하면 대기가 질의가 된다.
+        # 입력이나 새 pulse 이후에는 비운다. 같은 상태를 읽는 동안만 이름별 조회를 재사용한다.
         self.read_members_asked: set[str] = set()
 
     # -- 바깥 --
@@ -904,16 +825,27 @@ class _Runner:
     async def _read_unknown_members(
         self, frame: _Frame, statement: MacroStatement
     ) -> None:
-        """`static`·`member` 가 `pulse` 에서 못 찾을 이름을 statement 앞에서 게임에 묻는다(ARTEL-1285).
-
-        host 가 `MemberReader` 가 아니면 아무것도 안 한다 — reader 가 종전처럼 거절한다. 받은 값은
-        `PulseMemory.learn_member` 로, 못 읽었다는 답은 `refuse_member` 로 적어 두고, 그 뒤의 동기
-        평가가 그것을 읽는다. 게임이 답하지 않으면(`None`) 적는 것이 없고 reader 의 거절도 종전 그대로다.
-        """
+        """statement가 실제로 읽을 이름을 해당 scope에서 준비한다."""
         if not isinstance(self.host, MemberReader):
             return
-        calls = reader_calls_in(statement, frame.definition)
-        if not calls:
+        if isinstance(statement, MacroAssignStatement):
+            if isinstance(statement.value, MacroReadValue):
+                await self._read_member_calls(frame, [statement.value.call])
+            elif isinstance(statement.value, MacroComputeValue):
+                await self._prepare_operand(frame, statement.value.expression)
+        elif isinstance(
+            statement,
+            (MacroRequireStatement, MacroIfStatement, MacroWhileStatement, MacroWaitUntilStatement),
+        ):
+            await self._prepare_condition(frame, statement.condition)
+        elif isinstance(statement, MacroReturnStatement):
+            if statement.condition is not None:
+                await self._prepare_condition(frame, statement.condition)
+            elif statement.expression is not None:
+                await self._prepare_operand(frame, statement.expression)
+
+    async def _read_member_calls(self, frame: _Frame, calls: list[MacroReaderCall]) -> None:
+        if not isinstance(self.host, MemberReader):
             return
         memories = self.memories()
         for name in unknown_member_names(memories, frame.scope, calls):
@@ -921,9 +853,71 @@ class _Runner:
             if sdk_name is None or sdk_name in self.read_members_asked:
                 continue
             self.read_members_asked.add(sdk_name)
+            declaring, member = sdk_name.split("::", 1)
+            # timeout이나 응답 누락 시에도 이전 holder의 값으로 판정하지 않는다.
+            memories.pulse.forget_member(declaring, member)
             answer = await self.host.read_member(sdk_name)
             if answer is not None:
                 _apply_read_member(memories.pulse, sdk_name, answer)
+
+    async def _prepare_condition(self, frame: _Frame, condition: MacroCondition) -> None:
+        if isinstance(condition, MacroReaderCondition):
+            await self._read_member_calls(frame, [condition.call])
+        elif isinstance(condition, MacroComparisonCondition):
+            await self._prepare_operand(frame, condition.left)
+            await self._prepare_operand(frame, condition.right)
+        elif isinstance(condition, MacroPredicateCondition):
+            await self._prepare_function(frame, condition)
+
+    async def _prepare_operand(self, frame: _Frame, operand: MacroOperand) -> None:
+        if isinstance(operand, MacroReaderOperand):
+            await self._read_member_calls(frame, [operand.call])
+        elif isinstance(operand, MacroNumberCallOperand):
+            await self._prepare_function(frame, operand)
+        elif isinstance(operand, MacroArithmeticOperand):
+            await self._prepare_operand(frame, operand.left)
+            await self._prepare_operand(frame, operand.right)
+        elif isinstance(operand, MacroExtremumOperand):
+            for value in operand.operands:
+                await self._prepare_operand(frame, value)
+
+    async def _prepare_function(
+        self, caller: _Frame, call: MacroPredicateCondition | MacroNumberCallOperand
+    ) -> None:
+        function = caller.definition.function(call.callee)
+        if function is None:
+            return
+        arguments = {
+            parameter.name: value
+            for parameter, value in _helper_arguments(function, call, caller, self)
+        }
+        frame = _Frame(function, MacroScope(arguments), caller.definition)
+
+        async def walk(statements: tuple[MacroStatement, ...]) -> bool:
+            for statement in statements:
+                frame.at = frame.number_of(statement)
+                await self._read_unknown_members(frame, statement)
+                if isinstance(statement, MacroAssignStatement):
+                    # 이름이 parameter나 앞서 읽은 값에 의존할 수 있어 실제 실행 순서로 bind한다.
+                    self._assign(frame, statement)
+                elif isinstance(statement, MacroIfStatement):
+                    selected = (
+                        statement.body
+                        if self._evaluate(frame, statement.condition, {})
+                        else statement.orelse
+                    )
+                    if await walk(selected):
+                        return True
+                elif isinstance(statement, MacroReturnStatement):
+                    return True
+            return False
+
+        try:
+            await walk(function.statements)
+        except MacroFailure as failure:
+            where = "predicate" if function.returns == "bool" else "number_def"
+            failure.payload.setdefault(where, f"{function.name} step {frame.at}")
+            raise
 
     def _assign(
         self,
@@ -1287,6 +1281,7 @@ class _Runner:
                 observed: dict[str, Any] = {}
                 if guard is not None:
                     try:
+                        await self._read_unknown_members(frame, guard)
                         if not await self._condition(
                             frame, frame.place(loop_number), guard.condition, observed
                         ):

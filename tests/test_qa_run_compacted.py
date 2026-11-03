@@ -217,7 +217,8 @@ def test_the_turn_after_a_compaction_reads_the_summary_and_the_ledger(
     # prompt names the marker too, when it teaches the agent to read the block.
     ledger = next(text for text in texts if text.startswith("CONTEXT COMPACTED."))
     assert "TC 1, attempt" in ledger and "PASSED — 1번 확인함" in ledger
-    assert "Choose what to verify next" in ledger
+    case_ledger = next(text for text in texts if text.startswith("AUTHORITATIVE TC LEDGER"))
+    assert '"without_report_ids": [\n    2' in case_ledger
     # The conversation really was cut: the opening instructions are gone.
     assert not any("Begin. Observe the screen first." in text for text in texts)
 

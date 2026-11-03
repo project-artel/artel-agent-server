@@ -515,11 +515,7 @@ def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-#
-# `v48-pulse-events-and-fragments` (ARTEL-1285, ARTEL-1289) moved the label alone: `PulseMemory.render`
-# gained the `what happened since the last reading:` block, member counts, unread reasons, per-holder
-# statics, adapter fragments, coverage gaps and audio lines, none of which the fingerprint hashes.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v48-pulse-events-and-fragments"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v50-pulse-events-tc-context"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -586,6 +582,7 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
     "report_issue",
     "finish_run",
     "reply_to_operator",
+    "get_test_case",
     "capture_screen",
     "skip_memory_update",
     "load_skill",
@@ -657,7 +654,7 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 # `max_behavior_calls_per_run` (ARTEL-1054) joined `QaArchSpec` and the label moved to
 # `v27-game-functions`. Both axes default to `off`, so the default tool set is unchanged; the
 # digest moved because `arch.model_dump()` gained four keys.
-_EXPECTED_DEFAULT_FINGERPRINT = "d9de4842e9fd"
+_EXPECTED_DEFAULT_FINGERPRINT = "be218211b86c"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:
