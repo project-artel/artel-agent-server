@@ -387,8 +387,9 @@ def _gpt(
     OpenRouter 경로는 OpenRouter 가 지원하지 않는 값을 빼 주므로 `TEMPERATURE` 를 보낸다.
     Bedrock 의 `openai` 경로와 같은 선택이다.
 
-    prompt cache 는 OpenAI 가 스스로 하므로 `cache_prompt` 를 받지 않는다. 읽은 cache 는
-    `usage_metadata` 의 `cache_read` 로 온다.
+    prompt cache는 OpenAI가 관리하므로 `cache_prompt`를 받지 않는다. `usage_metadata`의
+    `cache_read`와 `cache_creation`을 기록하고, 입력 합계에 포함된 쓰기 토큰은 분리한다.
+    비용은 catalog의 Standard / 기본 30m cache 단가로 추정한다.
     """
     settings = get_settings()
     if reasoning is None:
@@ -403,6 +404,8 @@ def _gpt(
         base_url=OPENAI_API_BASE_URL,
         api_key=openai_api_key,
         use_responses_api=True,
+        # catalog의 Standard 단가와 맞춘다. 생략하면 사용자 Project의 auto 설정을 따른다.
+        service_tier="default",
         store=False,
         include=["reasoning.encrypted_content"],
         reasoning={"effort": effort} if effort is not None else None,
@@ -411,7 +414,11 @@ def _gpt(
         timeout=settings.openrouter_timeout_seconds,
         max_retries=settings.openrouter_max_retries,
         # 응답의 `model_name` 에는 `gpt/` 가 없다. catalog id 로 기록하려고 slug 를 넘긴다.
-        callbacks=[UsageCallback(slug=model, key_source="user")],
+        # Responses의 input_tokens에는 cache write도 포함된다. 원장에서는 이를 분리해
+        # 일반 입력과 캐시 쓰기 단가를 같은 토큰에 두 번 적용하지 않는다.
+        callbacks=[
+            UsageCallback(slug=model, input_includes_cache_write=True, key_source="user")
+        ],
     )
 
 
