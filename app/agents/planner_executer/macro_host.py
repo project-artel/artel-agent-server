@@ -58,7 +58,7 @@ class ChannelMacroHost:
     # `checkpoint` 나 `none_fits` 로 멈춘 이유.
     paused: str | None = None
     operator_messages: list[str] = field(default_factory=list)
-    # 계약 행동(pe30)이 입력할 수 있는 대상: 바인딩한 객체의 selector 와 body 에 글자로 적은 고정 대상(`[n]` 없는 꼴). `None`
+    # 계약 행동이 입력할 수 있는 대상: 바인딩한 객체의 selector 와 body 에 글자로 적은 고정 대상(`[n]` 없는 꼴). `None`
     # 이면 제한하지 않는다(legacy). 정적 검사를 helper·import 로 비켜 가도 여기서 막는다.
     allowed_targets: frozenset[str] | None = None
     contract_violation: str | None = None

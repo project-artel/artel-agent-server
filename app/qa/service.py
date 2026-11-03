@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 
 from pydantic import ValidationError
 
+from app.agents.planner_executer.identities import GameIdentity, fetch_game_identities
 from app.agents.planner_executer.developer_macros import (
     NO_DEVELOPER_MACROS,
     LoadedDeveloperMacros,
@@ -42,11 +43,11 @@ Send = Callable[[dict], Awaitable[None]]
 
 
 def _build_runner(
-    *, config: RunConfig, developer: LoadedDeveloperMacros = NO_DEVELOPER_MACROS
+    *, config: RunConfig, developer: LoadedDeveloperMacros = NO_DEVELOPER_MACROS, identities: tuple[GameIdentity, ...] = ()
 ) -> QaRunner | PlannerExecuterRunner:
     """The runner for the engine the run asked for (`QaArchSpec.engine`)."""
     if config.arch.engine == "planner_executer":
-        return PlannerExecuterRunner(config, developer=developer)
+        return PlannerExecuterRunner(config, developer=developer, identities=identities)
     return QaRunner(config)
 
 
@@ -221,10 +222,14 @@ class QaExecutionService:
         # (`DeveloperMacros` 는 developer macro 안에서만 import 를 푼다). 다른 엔진의 runner
         # factory 에는 넘기지 않는다.
         runner_options = {}
-        if record.run_config.arch.engine == "planner_executer":
+        arch = record.run_config.arch
+        if arch.engine == "planner_executer" and (arch.planner is None or arch.planner.developer_macros == "on"):
             runner_options["developer"] = await load_developer_macros(
                 await fetch_developer_macros(record.project_id, record.game_build_id)
             )
+        # 대상 계약의 해석이 읽는 게임 값의 뜻. 계약을 켠 런만 읽는다.
+        if arch.engine == "planner_executer" and arch.planner is not None and arch.planner.target_contract == "on":
+            runner_options["identities"] = await fetch_game_identities(record.project_id)
 
         for index, item in enumerate(record.scenarios):
             # Every model call inherits this label; the contextvar rides the task.
@@ -405,6 +410,11 @@ class QaExecutionService:
             elif message_type == MessageType.BEHAVIOR_ENDED:
                 # 무엇도 기다리지 않는다. 다음 tool 결과 끝에 붙는다(ARTEL-1054).
                 channel.on_behavior_ended(raw)
+            elif message_type == MessageType.ISSUE_RESULT:
+                # `ISSUE` 의 성공 회신(ARTEL-366). 기다리는 것이 없으므로 읽지 않고 받기만 한다.
+                # 모르는 타입으로 두면 `False` 로 떨어져 "unsupported inbound frame" 으로 답하고,
+                # 저쪽은 그것을 프로토콜 오류로 읽는다(`docs/qa-protocol.md` 함정 4).
+                pass
             elif message_type == MessageType.ERROR:
                 # Always accepted, answered or not. ERROR is a legitimate frame in
                 # both directions, so answering it with "unsupported inbound frame"

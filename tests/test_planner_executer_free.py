@@ -12,7 +12,7 @@ import asyncio
 import pytest
 
 from app.agents.planner_executer import runner as runner_module
-from app.agents.planner_executer.evaluator import CASES_PER_JUDGEMENT, SceneEvaluator
+from app.agents.evaluator import CASES_PER_JUDGEMENT, SceneEvaluator
 from app.agents.planner_executer.executer import StepPlay
 from app.agents.planner_executer.free import FreeCase, candidates, next_scene
 from app.agents.planner_executer.planner import read_plan
@@ -94,7 +94,9 @@ def _resettable_menu() -> FakeGame:
 
 
 def _run_free(fake: FakeGame, scenario: QaScenario, asked: Raw, judge, jev: FakeJev, **knobs):
-    config = _config(no_action_grace_seconds=0.2, **knobs)
+    # editor 를 끈다: 이 테스트들은 FREE 의 흐름을 고정하고, `Raw` 는 planner 의 답만 들고 있다. 이동 step 에서
+    # action 이 연달아 실패하면 editor 가 모델을 한 번 더 불러 그 답을 소비한다(ARTEL-1288).
+    config = _config(no_action_grace_seconds=0.2, **{"editor": "off", **knobs})
 
     async def go():
         fake.push_reading()
@@ -171,7 +173,8 @@ def test_each_scene_is_planned_and_judged_once_for_all_its_cases() -> None:
     asked = Raw(_plan([8]), _plan([7], actions=""))
     judge, seen = _judge(_verdicts_of((8, True)), _verdicts_of((7, True)))
 
-    state, failure = _run_free(fake, _free(MAP_CASE, MENU_CASE), asked, judge, FakeJev())
+    # `analysis="off"` keeps the judge count to the two scene judgements; on, the run review asks once more.
+    state, failure = _run_free(fake, _free(MAP_CASE, MENU_CASE), asked, judge, FakeJev(), analysis="off")
 
     assert failure is None and state.finished
     # The game starts on the menu: the menu's case first; play leaves the game on the map, so the
@@ -202,7 +205,8 @@ def test_the_planner_moves_to_a_scene_that_still_has_cases() -> None:
 
 def test_a_case_never_reached_is_played_again_after_a_reset() -> None:
     fake = _resettable_menu()
-    jev = FakeJev(picks=("look_around", "look_around", "look_around", "press_start"))
+    # 첫 play 는 아무것도 고르지 않아 목표에 못 닿는다. 입력 없이 끝난 action 은 선택지에서 빠지므로 대기는 `none_fits` 다.
+    jev = FakeJev(picks=("none_fits", "none_fits", "none_fits", "press_start"))
     judge, _ = _judge(_verdicts_of((8, False)), _verdicts_of((8, True)))
 
     _run_free(fake, _free(MENU_CASE), Raw(_plan([8]), _plan([8])), judge, jev, max_turns_per_step=3)
@@ -217,7 +221,7 @@ def test_a_case_the_planner_keeps_for_later_is_reported_unreached_at_the_limits(
     later = {"8": "Start needs 10 coins and the wallet is empty."}
     judge, seen = _judge()
 
-    _run_free(fake, _free(MENU_CASE), Raw(_plan([], later), _plan([], later)), judge, FakeJev())
+    _run_free(fake, _free(MENU_CASE), Raw(_plan([], later), _plan([], later)), judge, FakeJev(), analysis="off")
 
     (verdict,) = _verdicts(fake)
     assert verdict["status"] == "FAILED"
@@ -233,7 +237,7 @@ def test_a_case_still_unreached_after_its_plays_is_reported_unreached() -> None:
     judge, _ = _judge(_verdicts_of((8, False)), _verdicts_of((8, False)))
 
     _run_free(
-        fake, _free(MENU_CASE), Raw(_plan([8]), _plan([8])), judge, FakeJev(picks=("look_around",)),
+        fake, _free(MENU_CASE), Raw(_plan([8]), _plan([8])), judge, FakeJev(picks=("none_fits",)),
         max_turns_per_step=3,
     )
 
@@ -405,7 +409,7 @@ def test_a_move_that_does_not_arrive_is_logged_and_its_cases_end_scene_unreached
     judge, _ = _judge()
 
     _run_free(
-        fake, _free(MAP_CASE), Raw(MOVE, MOVE), judge, FakeJev(picks=("look_around",)), max_turns_per_step=2
+        fake, _free(MAP_CASE), Raw(MOVE, MOVE), judge, FakeJev(picks=("none_fits",)), max_turns_per_step=2
     )
 
     travels = _decisions(fake, "travel")

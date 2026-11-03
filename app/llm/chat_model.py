@@ -7,7 +7,7 @@ from botocore.config import Config as BotocoreConfig
 from langchain_anthropic import ChatAnthropic
 from langchain_aws import ChatBedrockConverse
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable
 from langchain_openai import ChatOpenAI
 
@@ -663,6 +663,39 @@ def select_structured_method(model: LLMModel) -> str:
     if model.startswith(CLAUDE_PREFIX):
         return "json_schema"
     return "json_schema" if get_model_spec(model).supports_strict_json else "json_mode"
+
+
+# 명시적 cache 경계를 붙일 만큼 긴 고정 부분의 최소 글자 수. Claude 는 1024 token 아래의 prefix 를 cache 하지 않는다.
+MIN_CACHED_PREFIX_CHARS = 4_000
+
+
+def prompt_messages(
+    model: str, system: str, user: str, stable_prefix: str = "", images: list[dict] | None = None
+) -> list[BaseMessage]:
+    """`[system, user]` 메시지. Claude API 경로면 매 호출 같은 앞부분 끝에 cache 경계를 둔다.
+
+    `cache_prompt=True` 의 top-level `cache_control` 은 마지막 block 에 경계를 하나 둔다. 대화가 자라는 tool loop 에서는
+    앞 호출의 끝이 다음 호출의 중간이 되어 읽히지만, 끝(현재 화면)이 매번 다른 단발 호출은 매번 쓰기만 하고 읽지 못한다
+    (PE 엔진 런 154~160 의 Claude 호출 전부가 cache 읽기 0 이었다). 그래서 고정된 앞부분 끝에 경계를 둔다: system 끝, 그리고
+    `user` 가 `stable_prefix` 로 시작하면 그 끝. 다른 provider 는 content block 의 `cache_control` 을 모르므로 그대로 보낸다.
+    """
+    # `images` 는 요청 끝에 붙는 그림 content block 이다(PE 엔진의 화면 한 장). cache 경계 뒤라 매 호출 새로 읽힌다.
+    images = images or []
+    if not model.startswith(CLAUDE_PREFIX):
+        user_message = HumanMessage(content=[{"type": "text", "text": user}, *images]) if images else HumanMessage(user)
+        return [SystemMessage(system), user_message]
+    system_message = SystemMessage(content=[_cached_block(system)]) if len(system) >= MIN_CACHED_PREFIX_CHARS else SystemMessage(system)
+    if stable_prefix and len(stable_prefix) >= MIN_CACHED_PREFIX_CHARS and user.startswith(stable_prefix):
+        rest = user[len(stable_prefix):]
+        blocks = [_cached_block(stable_prefix)] + ([{"type": "text", "text": rest}] if rest else [])
+        return [system_message, HumanMessage(content=blocks + images)]
+    if images:
+        return [system_message, HumanMessage(content=[{"type": "text", "text": user}, *images])]
+    return [system_message, HumanMessage(user)]
+
+
+def _cached_block(text: str) -> dict[str, Any]:
+    return {"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}
 
 
 def structured(
