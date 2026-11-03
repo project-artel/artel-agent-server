@@ -18,7 +18,6 @@ SDK record를 곧바로 Spec으로 만들지 않는다.
 
 `candidate`는 Ready와 Review 사이의 보수적인 중간 등급이다. scene·trigger·assertion target은 확정됐고 화면에서 관찰 가능하지만, 표현식 기대값 또는 안전하게 제한된 호출 조건 합성 근거가 덜 닫힌 경우만 허용한다. `unresolved_target`, scene 미확정, runtime instance 미관찰, 읽지 못한 조건은 candidate로 승격하지 않는다. 생성 연산은 생성 대상이 구조적으로 확정되면 별도의 반환값 없이도 완성된 기대 결과로 판정한다.
 
-Candidate는 Ready Specs에서 `status=candidate`와 남은 `review_reason`을 함께 표시한다. 완전히 증명된 상태 연결만 유지하기 위해 candidate 행은 Connected Flows 합성에는 참여하지 않는다.
 
 ## 현재 구현한 연결 motif
 
