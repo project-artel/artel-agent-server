@@ -391,6 +391,21 @@ def test_render_test_case_list_carries_state_and_exits() -> None:
     assert "to TurnBattleScene: Return" in rendered
 
 
+def test_render_test_case_list_marks_exception_cases() -> None:
+    """An exception case is marked in its head; a functional case carries no mark."""
+    rendered = render_test_case_list(
+        [
+            TestCaseListItem(id=1, scene="광산 안", step="상자를 연다", expected_value="동전 50개",
+                             verification_status="DRAFT"),
+            TestCaseListItem(id=2, scene="광산 안", step="상자를 연다", precondition="열쇠가 없다",
+                             expected_value="잠겨 있다", verification_status="DRAFT", kind="EXCEPTION"),
+        ]
+    )
+
+    assert "[id 1 · 광산 안 · DRAFT] 상자를 연다" in rendered
+    assert "[id 2 · 광산 안 · DRAFT · exception] 상자를 연다" in rendered
+
+
 def test_render_test_case_list_says_when_nothing_is_pressed() -> None:
     """"Nothing to press" and "not known" are different answers.
 

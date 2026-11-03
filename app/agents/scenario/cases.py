@@ -285,8 +285,10 @@ def render_test_case_list(entries: list[TestCaseListItem]) -> str:
         "These are ALL of them — there is nothing else to find."
     ]
     for entry in entries:
+        # 예외 TC 는 머리에 표시한다 — 묶기가 여정에서 빼고, 요청이 있을 때만 쓴다(ARTEL-1307).
+        exception = " · exception" if (entry.kind or "").upper() == "EXCEPTION" else ""
         lines.append(
-            f"\n[id {entry.id} · {entry.scene} · {entry.verification_status}] {entry.step}"
+            f"\n[id {entry.id} · {entry.scene} · {entry.verification_status}{exception}] {entry.step}"
         )
         if entry.precondition:
             lines.append(f"    precondition: {entry.precondition}")
