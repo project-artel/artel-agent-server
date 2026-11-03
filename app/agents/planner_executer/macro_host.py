@@ -11,12 +11,14 @@ asks its host to act, to read, to wait and to ask Jev. This host does what the t
 | `wait_for_pulse` | `QaRunChannel.wait_for_reading`                                                 |
 | `checkpoint`     | does not wait: the macro stops there and the turn ends                          |
 | `decide`/`ask`   | `JevClient` from `app/qa/jev.py`, the client the tool loop's host uses          |
+| `read_member`    | `QaRunChannel.read_member`, the `MemberReader` capability (ARTEL-1285)          |
 
 operator 의 말은 runner 에 넘기지 않는다. 이 engine 에는 답할 사람이 없고, 넘기면 macro 가
 `OPERATOR_INTERRUPTED` 로 멈춘다. 받은 말은 비우고 turn 기록에 남긴다.
 """
 
 import asyncio
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -27,6 +29,7 @@ from app.agents.qa.macro.runner import (
     MacroJevUnavailable,
     MacroPulseWait,
     MacroRunResult,
+    ReadMemberAnswer,
 )
 from app.agents.qa.tools.tool_context import _is_press, _press_landing
 from app.qa.acting import ActionOutcome, ScreenChange
@@ -39,6 +42,9 @@ ASK_TRUE_MEANS = "The answer to the question is yes."
 ASK_FALSE_MEANS = "The answer to the question is no."
 
 
+_INDEX = re.compile(r"\[\d+\]")
+
+
 @dataclass
 class ChannelMacroHost:
     """`run_macro` 가 바깥에 대고 하는 일을 run 의 channel 과 Jev client 에 잇는다."""
@@ -46,15 +52,30 @@ class ChannelMacroHost:
     channel: QaRunChannel
     jev: JevClient
     step: int
-    # 보낸 batch 마다 {summary, ok, error, reached}.
+    # 보낸 batch 마다 {summary, ok, error, reached} 와, 사람이 읽을 값 — 종류·씬·누른 대상의 화면 글자·키·
+    # 입력한 글(`describe_actions`). Evaluator 의 재현 절차가 이것으로 쓰이고 검사된다(ARTEL-1267).
     sent: list[dict[str, Any]] = field(default_factory=list)
     # `checkpoint` 나 `none_fits` 로 멈춘 이유.
     paused: str | None = None
     operator_messages: list[str] = field(default_factory=list)
+    # 계약 행동(pe30)이 입력할 수 있는 대상: 바인딩한 객체의 selector 와 body 에 글자로 적은 고정 대상(`[n]` 없는 꼴). `None`
+    # 이면 제한하지 않는다(legacy). 정적 검사를 helper·import 로 비켜 가도 여기서 막는다.
+    allowed_targets: frozenset[str] | None = None
+    contract_violation: str | None = None
 
     async def run(self, actions: list[JsonRpcAction], summary: str, step: int) -> ActionOutcome:
-        record: dict[str, Any] = {"summary": summary, "ok": False, "error": None, "reached": None}
+        pulse = self.channel.scene.pulse
+        record: dict[str, Any] = {
+            "summary": summary, "ok": False, "error": None, "reached": None, "blocked": None,
+            **describe_actions(actions, pulse),
+        }
         self.sent.append(record)
+        outside = self._outside_contract(actions)
+        if outside is not None:
+            # 고르지 않은 대상에는 입력하지 않는다. 게임에 아무것도 보내지 않고 멈춘다.
+            self.contract_violation = f"{summary} aims at `{outside}`, which is not an object bound to this action"
+            record["error"] = self.contract_violation
+            return ActionOutcome(text=f"{summary}: FAILED — {self.contract_violation}")
         result, looked = await self.channel.act_and_look(actions, summary, step)
         self._drain_operator()
         if result is None:
@@ -74,6 +95,13 @@ class ChannelMacroHost:
         record["reached"] = next(
             (value["reached"] or "nothing" for value in returned if _is_press(value)), None
         )
+        record["blocked"] = next(
+            (value["blockedBy"] for value in returned if _is_press(value) and value.get("blockedBy")), None
+        )
+        # 겨눈 객체보다 실제로 닿은 객체의 글자가 재현에 맞다. 닿은 경로가 pulse 에 있으면 그것으로 바꾼다.
+        landed = object_text(pulse, record["reached"]) if record["reached"] not in (None, "nothing") else None
+        if landed and record["kind"] != "drag":
+            record["target_text"] = landed
         if looked:
             screen = ScreenChange.moved
         elif self.channel.scene.pulse.seen:
@@ -85,6 +113,21 @@ class ChannelMacroHost:
             screen=screen,
             landings=tuple(_press_landing(value) for value in returned if _is_press(value)),
         )
+
+    def _outside_contract(self, actions: list[JsonRpcAction]) -> str | None:
+        if self.allowed_targets is None:
+            return None
+        for action in actions:
+            if action.method != "move_mouse" or not action.params or not isinstance(action.params[0], str):
+                continue
+            target = action.params[0]
+            plain = _INDEX.sub("", target).strip("/")
+            if not any(
+                target == allowed or target.startswith(allowed + "/") or plain == allowed or plain.startswith(allowed + "/")
+                for allowed in self.allowed_targets
+            ):
+                return target
+        return None
 
     def memories(self) -> MacroMemories:
         return MacroMemories(scene=self.channel.scene)
@@ -118,5 +161,86 @@ class ChannelMacroHost:
         except JevError as error:
             raise MacroJevUnavailable(str(error)) from error
 
+    async def read_member(self, name: str) -> ReadMemberAnswer | None:
+        """`static()`·`member()` 가 `pulse` 에 없는 이름을 읽을 때 runner 가 한 번 묻는 자리(ARTEL-1285).
+
+        `sent` 에 적지 않는다. 그 목록은 사람이 따라 할 입력이고(Evaluator 의 재현 절차가 거기서
+        글자를 검사한다) 값을 읽는 것은 입력이 아니다.
+        """
+        item = await self.channel.read_member(name, self.step)
+        self._drain_operator()
+        return ReadMemberAnswer.from_result(item, name)
+
     def _drain_operator(self) -> None:
         self.operator_messages.extend(self.channel.drain_operator_messages())
+
+
+# `move_mouse` 가 두 번이면 드래그, `mouse_down` 이 두 번이면 더블 클릭. 그 밖은 method 하나가 종류다.
+_KIND_BY_METHOD = {
+    "key_click": "key", "key_down": "key_down", "key_up": "key_up", "enter_text": "text",
+    "mouse_down": "hold", "mouse_up": "release", "set_axis": "axis", "set_button": "button",
+    "pause_time": "time", "resume_time": "time", "move_mouse": "move",
+}
+
+
+def describe_actions(actions: list[JsonRpcAction], pulse: Any) -> dict[str, Any]:
+    """보낸 batch 를 사람이 읽을 값으로: 종류, 씬, 겨눈 대상과 그 화면 글자, 키, 입력한 글.
+
+    Evaluator 의 재현 절차는 모델이 한글로 쓰되 여기 적힌 글자를 그대로 써야 하고, 코드가 그것을
+    검사한다(ARTEL-1267). selector 경로는 사람이 따라 할 수 없어 `target` 에만 남기고 문장에는
+    못 들어간다. 글자가 없는 객체(스프라이트)는 `target_text` 가 `None` 이고 `target_name` 이
+    경로의 마지막 이름이다.
+    """
+    methods = [action.method for action in actions]
+    if methods.count("move_mouse") >= 2 and "mouse_down" in methods:
+        kind = "drag"
+    elif methods.count("mouse_down") >= 2:
+        kind = "double_click"
+    elif "move_mouse" in methods and "mouse_down" in methods:
+        kind = "click"
+    else:
+        kind = _KIND_BY_METHOD.get(methods[0], "other") if methods else "other"
+    described: dict[str, Any] = {
+        "kind": kind, "scene": getattr(pulse, "scene", None), "target": None, "target_name": None,
+        "target_text": None, "to_text": None, "key": None, "value": None,
+    }
+    aims = [action.params[0] for action in actions if action.method == "move_mouse" and action.params]
+    if aims:
+        described["target"] = _ref(aims[0])
+        described["target_name"] = object_name(aims[0])
+        described["target_text"] = object_text(pulse, aims[0])
+        if kind == "drag":
+            described["to_text"] = object_text(pulse, aims[-1]) or object_name(aims[-1])
+    for action in actions:
+        if action.method in ("key_click", "key_down", "key_up") and action.params:
+            described["key"] = str(action.params[0])
+        elif action.method == "enter_text" and len(action.params) > 1:
+            described["target"] = _ref(action.params[0])
+            described["target_name"] = object_name(action.params[0])
+            described["target_text"] = object_text(pulse, action.params[0])
+            described["value"] = str(action.params[1])
+    return described
+
+
+def object_text(pulse: Any, ref: Any) -> str | None:
+    """`ref`(selector·path·instance id)가 가리키는 객체가 지금 화면에 띄운 글자. 없으면 `None`."""
+    held = getattr(pulse, "held", None) or {}
+    for obj in held.values():
+        if (isinstance(ref, str) and ref in (obj.selector, obj.path)) or (isinstance(ref, int) and ref == obj.id):
+            text = (obj.text or "").strip()
+            return text or None
+    return None
+
+
+def object_name(ref: Any) -> str | None:
+    """경로의 마지막 이름에서 `(Clone)` 과 `[n]` 을 뗀 것. 글자가 없는 객체의 이름표다."""
+    if not isinstance(ref, str) or not ref:
+        return None
+    last = ref.rsplit("/", 1)[-1]
+    while last.endswith("]") and "[" in last:
+        last = last[: last.rindex("[")]
+    return last.replace("(Clone)", "").strip() or None
+
+
+def _ref(ref: Any) -> str:
+    return ref if isinstance(ref, str) else str(ref)

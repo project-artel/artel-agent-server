@@ -33,6 +33,13 @@ DEVELOPER_MACRO_RULES = (
     "related macros together in one call; their order inside it does not matter.",
     'A `selector("...")` must not be a `#id`, `-` or an empty string: a `#id` changes '
     "between game launches, and the other two name nothing.",
+    # 문법 글이 따로 말하지 않는 함정. `find` 는 여럿이 맞으면 거절하고 루프에는 `break` 가 없어, 루프 안에서 매번 확인하지 않으면
+    # 맞은 것 전부에 입력이 간다. 로컬 QA 런 182 에서 developer macro 가 같은 단어 카드를 모두 Shift-클릭해 채운 슬롯을 도로 뺐다.
+    "To act on one of several matches — one card of a kind, one target — loop over "
+    "`find_all(...)` and check inside the loop, before each input, whether the work is already "
+    "done (the slot is filled, the target is taken), with the input under that `if`. `find` "
+    "refuses a name that matches more than one object and a loop has no `break`, so without "
+    "the check every match gets the input, and a second press can undo the first.",
     "Publishing checks the source statically — parsing, the rules above, and imports. It "
     "does not run the macro in the game, so passing does not mean it works there; a QA "
     "run finds that out.",
