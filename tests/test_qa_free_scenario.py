@@ -135,7 +135,8 @@ def test_free_attempts_arrive_out_of_order_and_retries_do_not_overwrite():
             await report_case(tools, case_id, passed)
         assert [(x.case_id, x.verdict) for x in state.case_attempt_results] == [(23, 'FAILED'), (21, 'PASSED'), (23, 'PASSED')]
         assert len({x.attempt_id for x in state.case_attempt_results}) == 3
-        assert '22' in render_progress_ledger(state, channel)
+        from app.agents.qa.case_context import render_case_ledger
+        assert '"without_report_ids": [\n    22' in render_case_ledger(state, channel)
         before = len(channel.evaluation.requests)
         assert '없는 TC' in await start_case(tools, 99)
         assert len(channel.evaluation.requests) == before

@@ -271,6 +271,7 @@ def test_the_macro_table_names_exactly_the_tools_a_macro_may_call() -> None:
             "record_new_capability",
             "ask_user",
             "start_test_case",
+            "get_test_case",
             "report_test_case",
             "report_issue",
             "finish_run",
