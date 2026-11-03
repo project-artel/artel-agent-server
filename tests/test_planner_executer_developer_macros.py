@@ -13,13 +13,17 @@ import pytest
 from app.agents.planner_executer import executer as executer_module
 from app.agents.planner_executer.developer_macros import (
     DeveloperMacro,
+    bind_developer_calls,
     fetch_developer_macros,
+    leading_requires,
     load_developer_macros,
 )
 from app.agents.planner_executer.macros import RegisteredMacros
+from app.agents.qa.macro.errors import MacroRejection
 from app.agents.planner_executer.planner import Planner
 from app.agents.planner_executer.prompts import RULES_ROLE, prompt_text
 from app.agents.planner_executer.runner import PlannerExecuterRunner
+from app.agents.planner_executer.arch import PlannerExecuterArchSpec
 from app.agents.qa.arch import QaArchSpec
 from app.qa.jev import JevClient
 from app.qa.schemas import QaRunScenario
@@ -205,7 +209,7 @@ def _start_menu() -> FakeGame:
 
 def _run(fake: FakeGame, asked, developer_macros: tuple[DeveloperMacro, ...], jev: FakeJev | None = None, **knobs):
     config = _config(no_action_grace_seconds=0.2, **knobs)
-    judge, _ = _judge({"passed": True, "reason": "The map opens."})
+    judge, _ = _judge({"passed": True, "reason": "The map opens.", "state_detail": "", "insight": ""})
 
     async def go():
         fake.push_reading()
@@ -242,9 +246,10 @@ def test_the_planner_sees_each_developer_macro_with_its_build() -> None:
     (system, user), = asked.calls
     assert "select the ones this step needs in the ```developer block" in user
     assert "from macros import" not in user
-    # 기본 planner prompt 는 v3 이고(rules 는 v2 와 같은 본문), 목록과 같은 말을 하는 reuse-first 규칙을 담는다.
-    assert _config().prompt_version == "v3"
-    assert system == prompt_text(RULES_ROLE, "v3") == prompt_text(RULES_ROLE, "v2")
+    # 기본 planner prompt 는 v4 다. v4 의 rules 는 v2 에 ```observe·```check 블록을 더한 것이고, 목록과 같은 말을 하는
+    # reuse-first 규칙은 그대로 담는다.
+    assert _config().prompt_version == "v4"
+    assert system == prompt_text(RULES_ROLE, "v4", summary_language="Korean")
     assert "- Reuse first. Before you write an action, read the developer macros the request lists." in system
     assert (
         "- `tap_start()` — written against build 1.2.0 (beta)\n"
@@ -451,6 +456,16 @@ def test_the_tool_loop_does_not_read_developer_macros(monkeypatch) -> None:
     assert fetched == [] and seen == [{}, {}]
 
 
+def test_with_developer_macros_off_the_planner_executer_runs_without_them(monkeypatch) -> None:
+    async def fetch(project_id, game_build_id):
+        raise AssertionError("developer macros were read with the knob off")
+
+    arch = QaArchSpec(engine="planner_executer", planner=PlannerExecuterArchSpec(developer_macros="off"))
+    seen, fetched = _serve(monkeypatch, arch, fetch)
+
+    assert fetched == [] and seen == [{}, {}]
+
+
 def test_the_run_goes_on_when_orchestration_fails(monkeypatch) -> None:
     async def fetch(project_id, game_build_id):
         async with _orchestration(lambda request: httpx.Response(503)) as client:
@@ -460,3 +475,102 @@ def test_the_run_goes_on_when_orchestration_fails(monkeypatch) -> None:
 
     assert [options["developer"].usable for options in seen] == [{}, {}]
 
+
+
+def test_a_picked_argument_becomes_one_option_per_object_on_screen_and_runs_on_the_one_jev_chose() -> None:
+    """인자는 planner 가 박지 않고 매 turn 고른다. 런 185 는 계획 때 묶은 적이 죽은 뒤에도 그 적을 겨눴다."""
+    fake = _start_menu()
+    jev = FakeJev(picks=("developer:press @ Root/Start",))
+    answer = _answer(ONLY_DONE, 'press(pick("Start", "Quit"))')
+
+    state, failure = _run(fake, Answered(answer), (_macro("press", PRESS),), jev)
+
+    assert failure is None and state.step_results[0].passed
+    options = jev.asked("choice")[0]["questions"]["answer"]["criteria"]
+    assert {"developer:press @ Root/Start", "developer:press @ Root/Quit"} <= set(options)
+    assert "developer:press" not in options
+    assert options["developer:press @ Root/Quit"]["what"].endswith("This option acts on `Root/Quit`.")
+    assert fake.actions[0][0] == "move_mouse" and fake.actions[0][1][0] == "Root/Start"
+    turn = next(f["payload"]["turn"] for f in fake.frames("LOG") if f["payload"].get("kind") == "turn")
+    assert turn["picked"] == "developer:press @ Root/Start" and turn["target"] == "Root/Start"
+
+
+def test_pick_takes_object_names_and_only_one_argument_may_be_picked() -> None:
+    async def go(call: str):
+        developer = await load_developer_macros((_macro("press", PRESS),))
+        return await bind_developer_calls([call], developer)
+
+    bound = asyncio.run(go('press(pick("Enemy(Clone)", "Boss(Clone)"))'))
+    (action,) = bound.values()
+    assert action.pick is not None and action.pick.names == ("Enemy(Clone)", "Boss(Clone)")
+    assert "picked each turn among those named Enemy(Clone), Boss(Clone)" in action.description
+    for refused in ('press(pick(find(name="X")))', "press(pick())", 'press(pick(name="X"))'):
+        with pytest.raises(MacroRejection):
+            asyncio.run(go(refused))
+
+
+def test_pick_candidates_keep_same_name_objects_apart_and_stay_in_the_scene() -> None:
+    """런 186: 색인 없는 `path` 로 카드 여러 장이 선택지 하나로 뭉쳤다. `selector` 로 가르고 다른 씬의 객체는 빼낸다."""
+    from types import SimpleNamespace
+
+    from app.agents.planner_executer.executer import Executer
+
+    def held(selector, path, scene="Battle", live=True):
+        return SimpleNamespace(selector=selector, path=path, scene=scene, live=live)
+
+    pulse = SimpleNamespace(held={
+        "a": held("Card(Clone)[21]", "Card(Clone)"),
+        "b": held("Card(Clone)[22]", "Card(Clone)"),
+        "c": held("Card(Clone)[23]", "Card(Clone)", live=False),
+        "d": held("Card(Clone)[30]", "Card(Clone)", scene="Map"),
+        "e": held("Card(Clone)[21]/nameTMP[0]", "Card(Clone)/nameTMP"),
+    })
+    stub = SimpleNamespace(_channel=SimpleNamespace(scene=SimpleNamespace(pulse=pulse)), _scene=lambda: "Battle")
+
+    assert Executer._candidates(stub, ("Card(Clone)",)) == ["Card(Clone)[21]", "Card(Clone)[22]"]
+
+
+# 대상이 쓰러졌는지를 앞부분 `require` 로 거절하는 developer macro. 런 190~219 의 `battle_select_target` 과 같은 모양이다.
+STRIKE = '''def strike(enemy: object) -> None:
+    """Strike one living enemy."""
+    require(scene() == "Menu", "Strike only works on the menu.")
+    require(member(enemy, "Enemy.hp") > 0, "That enemy is already defeated.")
+    click(enemy)
+    require(member(enemy, "Enemy.hp") >= 0, "Read after the input: not a ready check.")
+    wait_until(scene() == "Map", 1, "The strike did not open the map.")
+'''
+
+WAVE = '''def wave() -> None:
+    """Wave on the battle screen."""
+    require(scene() == "Battle", "Wave only works in battle.")
+    click(selector("Root/Start"))
+'''
+
+
+def test_only_the_requires_before_the_first_input_are_ready_checks() -> None:
+    whole, by_parameter = leading_requires(STRIKE, "strike")
+
+    assert whole == ['scene() == "Menu"']
+    assert by_parameter == {"enemy": ['member(enemy, "Enemy.hp") > 0']}
+    two = 'def hit(a: object, b: object) -> None:\n    """Hit."""\n    require(member(a, "X.y") == member(b, "X.y"), "x")\n    click(a)\n'
+    assert leading_requires(two, "hit") == ([], {})
+
+
+def test_a_target_its_macro_would_refuse_is_no_option_and_an_action_off_its_screen_is_hidden() -> None:
+    """쓰러진 적은 고르기 전에 빠진다. 전에는 Jev 가 고르면 `require` 가 거절해 실패로 쌓였다."""
+    fake = _start_menu()
+    fake.objects["Root/Start"]["members"] = {"Enemy.hp": 3}
+    fake.objects["Root/Quit"]["members"] = {"Enemy.hp": 0}
+    jev = FakeJev(picks=("developer:strike @ Root/Start",))
+    answer = _answer(ONLY_DONE, 'strike(pick("Start", "Quit"))', "wave")
+
+    state, failure = _run(fake, Answered(answer), (_macro("strike", STRIKE), _macro("wave", WAVE)), jev)
+
+    assert failure is None and state.step_results[0].passed
+    options = jev.asked("choice")[0]["questions"]["answer"]["criteria"]
+    assert "developer:strike @ Root/Start" in options and "developer:strike @ Root/Quit" not in options
+    assert "developer:wave" not in options
+    turn = next(f["payload"]["turn"] for f in fake.frames("LOG") if f["payload"].get("kind") == "turn")
+    assert turn["not_ready"] == ["developer:wave"]
+    assert turn["not_ready_targets"] == ["developer:strike @ Root/Quit (unmet)"]
+    assert turn["target"] == "Root/Start"

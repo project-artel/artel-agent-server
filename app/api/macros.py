@@ -13,6 +13,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter
 from pydantic import BaseModel, Field, StringConstraints
 
+from app.agents.planner_executer.contract import contract_json, registered_contract
 from app.agents.qa.macro.errors import MacroRejection
 from app.agents.qa.macro.model import MacroDefinition
 from app.developer_macro import (
@@ -42,6 +43,8 @@ class MacroCheckRequest(BaseModel):
     source: MacroSource
     # `from macros import ...` 가 가리킬 수 있는 같은 프로젝트의 developer macro, 이름 → source.
     imports: dict[MacroName, MacroSource] = Field(default_factory=dict)
+    # 행동 계약(`contract.registered_contract`). 없으면 계약 없이 검사한다 — 예전 요청과 같다.
+    contract: dict | None = None
 
 
 class MacroCheckRejection(BaseModel):
@@ -55,6 +58,8 @@ class MacroCheckPassed(BaseModel):
     definition: MacroDefinition
     parameters: list[str]
     docstring: str
+    # 계약을 받았으면 정규화한 계약(`contract_json`). orchestration 은 이것을 저장한다. 계약 없이 검사했으면 없다.
+    contract: dict | None = None
 
 
 class MacroCheckRefused(BaseModel):
@@ -73,6 +78,11 @@ async def macro_grammar() -> MacroGrammarResponse:
 async def check_macro(payload: MacroCheckRequest) -> MacroCheckPassed | MacroCheckRefused:
     try:
         definition = check_developer_macro(payload.name, payload.source, payload.imports)
+        contract = (
+            contract_json(registered_contract(payload.name, payload.contract, payload.source))
+            if payload.contract is not None
+            else None
+        )
     except MacroRejection as rejection:
         return MacroCheckRefused(
             rejection=MacroCheckRejection(line=rejection.line, reason=rejection.render())
@@ -83,4 +93,5 @@ async def check_macro(payload: MacroCheckRequest) -> MacroCheckPassed | MacroChe
         definition=definition,
         parameters=[parameter.name for parameter in definition.entry.parameters],
         docstring=definition.entry.docstring,
+        contract=contract,
     )
