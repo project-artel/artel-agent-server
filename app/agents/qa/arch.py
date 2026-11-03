@@ -33,7 +33,7 @@ from enum import StrEnum
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.agents.planner_executer.arch import PlannerExecuterArchSpec
 from app.config import get_settings
@@ -425,7 +425,74 @@ from app.llm.models import LLMModel, get_model_spec
 # only because `arch.model_dump()` gained four keys (the v4 note above). The label moves anyway,
 # the v8 argument: the structure now has shapes a run must say it was or was not filed under, and
 # orchestration turns the axes on per run from the build's catalog.
-QA_ARCH_LABEL = "v27-game-functions"
+#
+# v28 because `report_step` and `report_case` take a separate `performed` argument, and their
+# arguments now come in the order `message`, `performed`, `passed` (ARTEL-1220). Before this,
+# `passed` meant "I carried the action out" on every step that had no `verify`, and Claude Sonnet
+# 5.5 read it that way on verifying steps too: on 2026-10-22 it reported 4 of L1's 5 false
+# expectations passed in every run, each time with a message that described the refusal correctly
+# ("발동 버튼이 표시되지 않아 눌릴 수 없음" → passed). `passed` now means only that the expected
+# result matched the observed one, and the model is asked to write the two side by side in
+# `message` before it reaches `passed` in the schema. A report with `performed=false` and
+# `passed=true` is sent back once per step, since that is the combination the measurement found;
+# the second identical report is recorded, because a step whose expected result is the refusal
+# itself is judged that way correctly. The first message's step rules say the same. Two tool
+# schemas moved, so `arch_fingerprint` moves with the label. Checked before picking the number:
+# no branch on origin carries a label above v27.
+#
+# v29 because the model now reads how many exceptions the game logged and it has not looked at,
+# and can read them (ARTEL-1219). The SDK puts `errors` on `PULSE` and `ACTION_RESULT`
+# (ARTEL-1218); `QaRunChannel.game_errors` keeps them by `(type, message, stackHead)`. Every tool
+# answer that goes through `ToolContext.answer` ends with `unseen errors: N` while N is above 0,
+# and the new `get_errors` tool lists the unseen items and marks them seen, so an item read once
+# is not counted again however often it repeats. Putting the items themselves into every call was
+# rejected: gyemong logs two of its own exceptions during a scan, and the luna models filed false
+# alarms in 169 of 170 L1 runs. `get_errors` is in `ANY_PHASE`, since it is called after ACT and
+# before VERIFY. One tool joined the default set, so `arch_fingerprint` moves; the line in every
+# answer does not, which is the fourth item AGENTS.md names.
+#
+# v30 because what the model reads around a screen capture moved (ARTEL-1221). The answer of
+# `capture_screen` now ends with a checklist — empty areas, elements with no art, overlap,
+# clipping, a developer console — to go over after the question the capture was taken for, and
+# the first view of each scene in an `on_demand` run with vision is followed by one line asking
+# for a whole-screen capture there. On 2026-10-22 a title screen with no background was found in
+# 0 of 3 runs (no run captured at step 1), and cards drawn without their art in 0 of 3, although
+# all three captured the hand. Nothing hashed moves: the tool set, the schemas and the middleware
+# list are unchanged, so the label is the only record of this change.
+#
+# v31 because a `run_macro` or `resume_macro` answer now lists the text the game put on screen
+# while the macro ran, one line per text, with a sentence asking for `report_issue` on a blank
+# line, a placeholder or garbled characters (ARTEL-1222). `QaRunChannel.shown_text` records every
+# `text` a `pulse` carries, in arrival order, and grows a line in place while a typewriter effect
+# lengthens it. On 2026-10-22 a build whose opening had one line replaced by
+# `[MISSING TEXT: STORY_003]` was caught in 0 of 3 runs: `advance_story` pressed Return 12 to 22
+# times and only the last line was ever in front of the model. A clean result that carries these
+# lines is wrapped in the macro result markers so `fold_context` folds it once its step is
+# reported. Nothing hashed moves.
+#
+# v32 because the agent can now read the game's frame times (ARTEL-1223). The SDK has sent
+# `PERFORMANCE` every second for a while and orchestration stored it, but nothing in this server
+# read it, so no run could judge a hitch. `get_performance` asks orchestration for one window —
+# `last_seconds` or `since_frame`, the last 10 s by default — and answers with average and p95
+# frame time, lowest fps, hitches, memory growth and CPU. Every tool answer that goes through
+# `ToolContext.answer` also ends with one line counting the hitches of the last 10 s while that
+# count is above 0, re-read at most every 5 s after an action or an `observe_scene`. The same
+# split as `get_errors` (v29): the count rides along, the detail is a tool call, and a problem is
+# a `report_issue`, never a verdict. One tool joined the default set, so the fingerprint moves.
+# v33은 TC에 승인된 시연 절차가 있을 때 첫 실행 `context`에 revision과 검증 기준을
+# 추가한다. 과거 시연 결과와 이번 실행의 `evidence`를 구분하도록 명시한다.
+# `tool`과 `middleware`는 같으므로 `fingerprint`는 유지하지만 모델이 읽는 내용은 달라진다.
+# v34: step 판정을 TC 시작·결과 보고로 바꾸고 시도별 영상 구간을 남긴다.
+# tool 실행을 직렬화하여 사용자 질문 대기 중 다른 조작을 막고, 대기는 실행 제한 시간에서 뺀다.
+# 통합 arch는 예외·성능·시각 점검·시연 절차와 TC 시도별 판정·사용자 대기를 함께 제공한다.
+# v35는 사람이 수행한 시연 절차를 QA context에서 제거한다. TC 명세·현재 관찰·사람 판정 피드백은 유지한다.
+# 자동 scene capture와 응답 checklist를 제거한 구조다. 시각 점검 skill은 필요할 때 읽으며
+# 이 view와 tool 구성을 이전 실행과 구분해 기록한다.
+# 자동 scene capture와 응답 checklist를 제거한 구조다. 시각 점검 skill은 필요할 때 읽으며
+# 이 view와 tool 구성을 이전 실행과 구분해 기록한다.
+# macro 결과에서 중간 대사 목록을 제거하고 현재 화면을 관찰하는 계약을 명시한다.
+# 모델이 읽는 결과 형식이 바뀌므로 이전 실행과 별도 label로 기록한다.
+QA_ARCH_LABEL = "v47-visual-skill-without-dialogue-history"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
@@ -680,6 +747,15 @@ class QaArchSpec(BaseModel):
     # 기본값이 `True` 인 이유는 `pulse_relevance` 와 같다. 기본 run 의 view 가 그대로라
     # `QA_ARCH_LABEL` 이 안 움직인다.
     report_step_view: bool = True
+    # 판정마다 기대 항목별 근거(`checks`)를 받고 판독 기록과 대조한다(ARTEL-1133). 켜면
+    # `report_step` · `report_case` 가 `checks` 인자를 하나 더 받고, 판정과 항목이 서로 반대면
+    # 돌려보내며, 근거마다 기록과 맞는지를 `STATUS` 에 싣는다(`app/qa/verdict_evidence.py`).
+    #
+    # 기본값이 `off` 인 이유는 `pulse_relevance` 와 같다. 끄면 tool schema 가 그대로라 기본
+    # 런의 모양과 `QA_ARCH_LABEL` 이 안 움직인다. 켠 런과 끈 런을 같은 시나리오로 재 본 뒤에
+    # 기본값을 정한다. `arch_fingerprint` 도 끈 런에서는 이 칸을 넣지 않는다 — 넣으면 이 축이
+    # 생긴 날 모든 기본 런의 digest 가 바뀐다.
+    verdict_evidence: Literal["off", "on"] = "off"
     # 끝까지 간 `run_macro` 결과를 한 줄로 내고, 호출한 step 이 보고된 뒤 오래된 결과를 한 줄로
     # `fold` 한다(ARTEL-1026). 기본값이 `True` 이고 `QA_ARCH_LABEL` 이 `v26-macro-result-fold` 로
     # 올랐다. 끄면 결과 문장과 `fold` 종류가 v25 그대로다.
@@ -713,6 +789,29 @@ class QaArchSpec(BaseModel):
     # field enters `arch_fingerprint` — see there.
     engine: Literal["agent", "planner_executer"] = "agent"
     planner: PlannerExecuterArchSpec | None = None
+
+    @field_validator("vision", mode="before")
+    @classmethod
+    def vision_accepts_a_boolean(cls, value: object) -> object:
+        """`true` 는 `on`, `false` 는 `off` 로 받는다 (ARTEL-1236).
+
+        `vision` 이 `auto`/`on`/`off` 가 되기 전의 run_config 는 이 칸에 boolean 을 저장했다.
+        그 run_config 를 그대로 다시 보내면 422 로 거절됐고, orchestration 이 그것을 503 으로
+        바꿔 사용자는 agent-server 가 죽은 것으로 읽었다 (2026-10-22). `auto` 로 받지 않는 것은
+        저장된 값이 "보여 준다" 를 고른 것이지 "모델에 맡긴다" 를 고른 것이 아니기 때문이다.
+        """
+        if value is True:
+            return VisionMode.on
+        if value is False:
+            return VisionMode.off
+        # 이 422 는 orchestration 을 거쳐 `agent_rejected_request` 의 `message` 로 사용자에게 간다.
+        # pydantic 의 기본 문장은 boolean 을 받는다는 것을 말하지 못하므로 여기서 쓴다.
+        if value not in {mode.value for mode in VisionMode} and not isinstance(value, VisionMode):
+            raise ValueError(
+                f"vision must be 'auto', 'on' or 'off' (true and false from a stored "
+                f"run_config are read as 'on' and 'off'), not {value!r}"
+            )
+        return value
 
     @model_validator(mode="after")
     def planner_knobs_need_their_engine(self) -> "QaArchSpec":
@@ -790,6 +889,8 @@ def withheld_skills(arch: "QaArchSpec | ResolvedArch") -> frozenset[str]:
         withheld.add(CHEATS_SKILL)
     if arch.behaviors != "on":
         withheld.add(BEHAVIORS_SKILL)
+    if arch.vision is False or arch.vision is VisionMode.off:
+        withheld.add("visual_inspection")
     return frozenset(withheld)
 
 
@@ -823,6 +924,7 @@ class ResolvedArch(BaseModel):
     fold_stale_skills: bool
     pulse_relevance: bool
     report_step_view: bool
+    verdict_evidence: Literal["off", "on"]
     fold_stale_macro_results: bool
     fold_threshold_chars: int
     cheats: Literal["off", "on"]
@@ -964,7 +1066,10 @@ def arch_fingerprint(
         # with `engine="agent"` has the same loop whatever they hold, and the other engine is
         # hashed by `planner_executer_fingerprint`. Hashed here, the axis would have moved every
         # default run's digest the day it was added, filing one structure under two.
-        "arch": arch.model_dump(mode="json", exclude={"label", "engine", "planner"}),
+        "arch": arch.model_dump(
+            mode="json",
+            exclude={"label", "engine", "planner"} | ({"verdict_evidence"} if arch.verdict_evidence == "off" else set()),
+        ),
         "tools": sorted(
             (tool.name, json.dumps(tool.args, sort_keys=True, default=str))
             for tool in tools
@@ -979,7 +1084,7 @@ def arch_fingerprint(
 
 @lru_cache(maxsize=32)
 def structure_of(
-    arch: ResolvedArch, execution_mode: str = "ORDERED"
+    arch: ResolvedArch, execution_mode: str = "ORDERED", prompt_version: str | None = None
 ) -> tuple[tuple[str, ...], tuple[str, ...], str]:
     """Tool names, middleware names and the fingerprint for one structure.
 
@@ -1002,7 +1107,7 @@ def structure_of(
     # FREE 시나리오는 `report_step` 대신 `report_case` 를 받으므로(ARTEL-1029) 같은 arch 라도
     # tool 목록과 fingerprint 가 다르다. 기록이 실제로 준 tool 을 말하도록 mode 로 만든다.
     state = QaRunState(total_steps=0, execution_mode=execution_mode)
-    tools = build_tools(_ThrowawayChannel(), state, arch)
+    tools = build_tools(_ThrowawayChannel(), state, arch, prompt_version)
     # The compaction middleware carries its own tool rather than registering it in
     # `build_tools` — a `compact_context` that sets a flag nothing reads is worse
     # than an absent one. It still has to be counted here: what the agent can call

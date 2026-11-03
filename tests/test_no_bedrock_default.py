@@ -67,9 +67,12 @@ def test_default_router_builds_without_any_bedrock_value(no_bedrock):
     assert type(chat).__name__ == "ChatOpenAI"
 
 
-def test_app_boots_without_bedrock_and_the_model_routes_are_gone(no_bedrock):
+def test_app_boots_without_bedrock_and_the_model_routes_are_gone(no_bedrock, monkeypatch):
     from app.main import create_app
 
+    # 이 검증은 외부 Redis 없이 Bedrock 설정과 app route만 확인한다.
+    monkeypatch.setenv("SESSION_STORE", "memory")
+    get_settings.cache_clear()
     with TestClient(create_app()) as client:
         assert client.get("/health").status_code == 200
         assert client.get("/internal/models").status_code == 404

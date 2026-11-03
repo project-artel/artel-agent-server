@@ -44,9 +44,11 @@ from app.qa.envelope import (
     ToolResultPayload,
     outbound_envelope,
 )
+from app.qa.game_errors import GameErrorLedger
 from app.qa.game_functions import BehaviorEndedPayload, GameFunctionCatalog
 from app.qa.pulse import PulseReading
 from app.qa.scene import SceneMemory
+from app.qa.evaluation import QaEvaluationClient
 
 if TYPE_CHECKING:
     from app.qa.relevance import PulseRelevanceJudge
@@ -167,6 +169,7 @@ class QaRunChannel:
         search_timeout: float = KNOWLEDGE_SEARCH_TIMEOUT_SECONDS,
     ) -> None:
         self._qa_try_id = qa_try_id
+        self.evaluation = QaEvaluationClient(qa_try_id)
         self._send = send
         self._action_timeout = action_timeout
         # Injectable for the same reason `action_timeout` is: a suite that waited
@@ -246,6 +249,9 @@ class QaRunChannel:
         # 도착했고 아직 어느 tool 결과에도 안 붙은 `BEHAVIOR_ENDED`, 온 순서대로. operator 의 말과
         # 같은 방식이다 — 그래프를 끊지 않고 다음 tool 결과 끝에 붙인다(`tools/__init__.py`).
         self._behavior_endings: list[BehaviorEndedPayload] = []
+        # 게임이 `PULSE` 와 `ACTION_RESULT` 에 실어 보낸 예외 (ARTEL-1219). tool 결과마다 안 본
+        # 항목 수가 한 줄로 붙고(`ToolContext.answer`), `get_errors` 가 펼쳐 보인다.
+        self.game_errors = GameErrorLedger()
 
     @property
     def qa_try_id(self) -> int:
@@ -766,7 +772,9 @@ class QaRunChannel:
         `on_game_state` 와 달리 풀어 줄 future 가 없다. 판독은 무엇을 물어서 오는 것이
         아니라 게임이 도는 동안 계속 도착하는 관측이고, 도구가 그것을 기다리지 않는다.
         """
-        self.scene.pulse.apply(PulseReading.model_validate(raw.get("payload") or {}))
+        reading = PulseReading.model_validate(raw.get("payload") or {})
+        self.scene.pulse.apply(reading)
+        self.game_errors.apply(raw.get("payload"))
         # 새 member 타입이 왔으면 판정을 띄운다. 기다리지 않는다 — 판정이 도착하기 전의 view 는
         # 아무것도 숨기지 않으므로, 늦어도 잃는 것은 줄 몇 개다.
         if self.pulse_relevance is not None:
@@ -776,6 +784,8 @@ class QaRunChannel:
 
     def on_action_result(self, raw: dict) -> None:
         payload = ActionResultPayload.model_validate(raw.get("payload") or {})
+        # 늦게 와서 풀어 줄 waiter 가 없는 답에 실린 예외도 받는다. 예외는 action 과 상관없이 난다.
+        self.game_errors.apply(raw.get("payload"))
         waiter = self._action_waiter_for(raw.get("correlationId"))
         if waiter is not None and not waiter.done():
             waiter.set_result(payload)

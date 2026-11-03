@@ -12,7 +12,7 @@ phase 하나에 붙이고, 런은 **더 뒤 phase 의 tool 을 불러서** 앞�
 step 이 보는 것도 누르는 것도 적는 것도 한 번으로 안 끝나기 때문이다(`_REPEATABLE`).
 
 `REVIEW_DRAFT` 하나만 tool 이름이 아니라 tool 이 한 일로 들어간다. macro `draft` 를 내밀었는지는
-`report_step` 이라는 이름만으로 알 수 없어서, 내민 tool 이 `expect_draft_review` 로 알린다.
+`report_test_case` 이라는 이름만으로 알 수 없어서, 내민 tool 이 `expect_draft_review` 로 알린다.
 
 ## 거절은 tool result 한 줄이다
 
@@ -82,7 +82,8 @@ ALWAYS_ALLOWED = frozenset(
         "search_macros",
         "observe_scene",
         "reply_to_operator",
-        "wait_for_operator",
+        "start_test_case",
+        "ask_user",
         "report_issue",
         "finish_run",
         "compact_context",
@@ -115,6 +116,9 @@ _TOOL_PHASE: dict[str, RunPhase] = {
     # 다른 phase 에서도 거절하지 않는다(`ANY_PHASE`).
     "search_knowledge": RunPhase.observe,
     "expand_knowledge": RunPhase.observe,
+    # 다른 phase 에서도 거절하지 않는다(`ANY_PHASE`). 판정 직전, ACT 뒤에 부르는 tool 이다.
+    "get_errors": RunPhase.observe,
+    "get_performance": RunPhase.observe,
     # DECIDE — `full` 에만 있는 tool 하나.
     "decide_next_action": RunPhase.decide,
     # ACT — `action_tools.py` 의 16 개 중 게임을 실제로 움직이는 14 개.
@@ -146,8 +150,7 @@ _TOOL_PHASE: dict[str, RunPhase] = {
     "run_cheat": RunPhase.act,
     "start_behavior": RunPhase.act,
     # VERIFY — 판정 하나.
-    "report_step": RunPhase.verify,
-    "report_case": RunPhase.verify,
+    "report_test_case": RunPhase.verify,
     # UPDATE_MEMORY — 런을 넘어 남는 것을 적는 자리, 그리고 적을 것이 없다고 답하는 자리.
     "record_capability_verdict": RunPhase.update_memory,
     "record_new_capability": RunPhase.update_memory,
@@ -203,7 +206,13 @@ def _answers(tool_name: str, phase: RunPhase) -> bool:
 # `OBSERVE` 로 넘어가 버리고, 그 뒤의 `record_knowledge` 는 거절된다. 서버는 같은 사실을 두 번
 # 적어도 막지 않으므로 그대로 두면 중복 항목이 쌓인다. 읽기만 하는 tool 이라 어느 phase 에서
 # 불러도 아무것도 남기지 않는다. `OBSERVE` 에서 불리면 종전대로 `OBSERVE` 의 호출로 센다.
-ANY_PHASE = frozenset({"register_macro", "search_knowledge"})
+#
+# `get_errors` 도 같은 자리다 (ARTEL-1219). prompt 는 "안 본 예외가 있으면 판정 전에 본다" 를
+# 시키는데, 그 순간은 ACT 를 마친 뒤다. `OBSERVE` 에만 묶으면 거기서 거절된다. `ALWAYS_ALLOWED`
+# 에 넣지 않는 것은 locked `phase_directive` 가 그 목록을 빠짐없이 적어야 해서다.
+#
+# `get_performance` 도 같은 이유다 (ARTEL-1223). hitch 를 본 것은 대개 action 결과에서다.
+ANY_PHASE = frozenset({"register_macro", "search_knowledge", "get_errors", "get_performance"})
 
 
 # 두 순서 모두 `REVIEW_DRAFT` 를 `VERIFY` 와 `UPDATE_MEMORY` 사이에 적어 두지만, 그 칸은 런이
@@ -261,7 +270,7 @@ MAX_CONSECUTIVE_REFUSALS = 2
 # 지우고 `record_knowledge` 로 다시 적는 것이 한 번의 정정이고, capability 판정과 지식을
 # 같이 남기는 스텝도 있다.
 #
-# 반복 phase 를 끝내는 것은 자기 tool 이 아니라 **다음으로 가는 tool** 이다. `report_step`
+# 반복 phase 를 끝내는 것은 자기 tool 이 아니라 **다음으로 가는 tool** 이다. `report_test_case`
 # 이 `ACT` 와 `VERIFY` 를 함께 닫는 것이 그 예다 — 판정하는 행위가 곧 "그만 조작한다" 는
 # 선언이기 때문이다.
 _REPEATABLE = frozenset({RunPhase.observe, RunPhase.act, RunPhase.update_memory})
@@ -273,7 +282,7 @@ _REPEATABLE = frozenset({RunPhase.observe, RunPhase.act, RunPhase.update_memory}
 # `system.md` 는 action tool 이 "returns the outcome AND the scene it produced" 이므로
 # "you usually do not need a separate observation afterwards" 라고 적는다. 그 말은 맞다 —
 # 그런데 gate 가 매 바퀴 `observe_scene` 을 요구했다. 2026-09-18 ACT 수정 후 파일럿에서
-# 거절 137 회 중 **97 회가 `OBSERVE` 에서** 났고, 그중 47 회는 `report_step` 이었다.
+# 거절 137 회 중 **97 회가 `OBSERVE` 에서** 났고, 그중 47 회는 `report_test_case` 이었다.
 #
 # `ACT` 도 건너뛸 수 있다. 관측만 하는 스텝이 있다 — L1 의 step 1 이 "타이틀 화면을
 # 관찰한다" 이고, 거기서 조작을 요구하면 없는 동작을 지어내게 된다.
@@ -380,7 +389,7 @@ class PhaseCycle:
         """phase 를 옮기고, 그 자리의 일이 아직 안 됐다고 표시한다.
 
         고리이므로 옮긴 결과가 지금과 같은 이름일 수 있다 — `UPDATE_MEMORY` 에 앉은 채
-        다음 스텝의 `report_step` 을 부르면 한 바퀴 돌아 다시 `UPDATE_MEMORY` 다. 그때도
+        다음 스텝의 `report_test_case` 을 부르면 한 바퀴 돌아 다시 `UPDATE_MEMORY` 다. 그때도
         `_satisfied` 는 풀려야 한다. 안 그러면 첫 스텝에 적어 둔 것 하나로 남은 스텝이
         전부 기록 없이 지나간다.
         """
@@ -434,7 +443,7 @@ class PhaseCycle:
         gate 는 tool 이 **돌았는지**만 안다. 안에서 무엇을 답했는지는 못 본다. 그 차이가
         구멍을 하나 낸다 — `skip_memory_update` 를 빈 `reason` 으로 부르면 tool 은 거절하는데
         gate 는 `UPDATE_MEMORY` 가 끝난 것으로 읽고, 물어보려던 질문을 빈 인자 하나로 넘어갈
-        수 있게 된다. `report_step` 에서 `learned` 를 빠뜨린 경우도 같고, `decline_macro_draft`
+        수 있게 된다. `report_test_case` 에서 `learned` 를 빠뜨린 경우도 같고, `decline_macro_draft`
         가 빈 `reason` 이나 내밀지 않은 `draft` 이름을 받은 경우도 같다.
 
         그래서 그 자리들만 이것을 부른다. **인자가 비어서 질문 자체가 답을 안 받은 경우**가
@@ -448,7 +457,7 @@ class PhaseCycle:
         self._held = True
 
     def expect_draft_review(self) -> None:
-        """지금 도는 `report_step` 이 macro `draft` 를 내밀었다고 알린다.
+        """지금 도는 `report_test_case` 이 macro `draft` 를 내밀었다고 알린다.
 
         gate 는 tool 이름만 보므로 판정에 `draft` 가 붙었는지 모른다. 그래서 `draft` 를 만든
         `reporting_tools._macro_draft` 가 tool 본문 안에서 이것을 부르고, tool 이 돌아온 뒤
@@ -497,7 +506,7 @@ class PhaseCycle:
             return (
                 f"Not now — this run is in the {self.phase.value} phase and no macro draft "
                 f"is waiting for an answer. Nothing ran and nothing was recorded. "
-                f"`{tool_name}` answers a draft right after a passing `report_step` offers "
+                f"`{tool_name}` answers a draft right after a passing `report_test_case` offers "
                 "one; carry on with the step."
             )
         # 막고 있는 자리를 문구가 직접 댄다. 지금 앉은 phase 일 때도 있고, 가는 길에 낀 다른
@@ -546,7 +555,7 @@ class PhaseCycle:
             self._enter(self._after_closing(self.phase, draft_expected))
             return
         if self._reachable(at):
-            # `report_step` 이 `ACT` 와 `VERIFY` 를 함께 닫는다 — 판정이 곧 조작을 그만둔다는
+            # `report_test_case` 이 `ACT` 와 `VERIFY` 를 함께 닫는다 — 판정이 곧 조작을 그만둔다는
             # 선언이고, 그 호출 자체가 `VERIFY` 가 요구하는 바로 그것이다. 건너뛰어 온 경우도
             # 같다: 지나온 phase 는 건너뛸 수 있는 것뿐이었고, 이 tool 이 자기 phase 를 닫는다.
             #

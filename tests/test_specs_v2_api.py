@@ -210,7 +210,6 @@ def test_generate_accepts_one_raw_sdk_report() -> None:
     assert payload["artifact"] == "editor"
     assert payload["capture"] == "editor"
     assert payload["summary"]["ready_specs"] >= 2
-    assert payload["summary"]["candidate_specs"] >= 1
     assert payload["summary"]["review_specs"] >= 1
     assert any(
         row["expected_result"] == "`PlayScene` 화면으로 전환된다"
@@ -224,8 +223,7 @@ def test_generate_accepts_one_raw_sdk_report() -> None:
     assert key_steps
     assert all("Space:down" not in step for step in key_steps)
     assert any(
-        row["status"] == "candidate"
-        and "ambiguous_expected_value" in row["review_reason"]
+        "ambiguous_expected_value" in row["review_reason"]
         for row in payload["ready_specs"]
     )
     assert any(
@@ -303,14 +301,10 @@ def test_test_cases_reshape_every_discovered_spec() -> None:
     assert payload["artifact"] == "editor"
     assert payload["build_evidence"] == "fixture-editor"
 
-    # The same discovery, so the two endpoints must not disagree about how many
-    # specs exist or what state each is in.
+    # 두 출력은 등급과 관계없이 같은 TC를 포함한다.
     other = client.post("/internal/specs/v2/generate", json=_sdk_report()).json()
-    assert payload["counts"]["ready"] == other["summary"]["ready_specs"]
-    assert payload["counts"]["candidate"] == other["summary"]["candidate_specs"]
-    assert payload["counts"]["review"] == other["summary"]["review_specs"]
-    assert payload["counts"]["unsupported"] == other["summary"]["unsupported_specs"]
-    assert len(payload["test_cases"]) == sum(payload["counts"].values())
+    assert "counts" not in payload
+    assert len(payload["test_cases"]) == len(other["ready_specs"]) + len(other["review_specs"])
 
 
 def test_every_test_case_says_what_shape_it_is() -> None:
@@ -325,7 +319,6 @@ def test_every_test_case_says_what_shape_it_is() -> None:
             "precondition",
             "step",
             "expected_value",
-            "status",
         }
         assert case["metadata"]["generation"]["capture"] == "editor"
         assert case["metadata"]["generation"]["build_evidence"] == "fixture-editor"
@@ -361,7 +354,6 @@ def test_review_reason_becomes_a_list_of_gap_codes() -> None:
     gaps = [
         case["metadata"]["source"]["evidence_gaps"]
         for case in payload["test_cases"]
-        if case["spec"]["status"] in {"review", "unsupported"}
     ]
     assert gaps, "the fixture is meant to produce at least one non-ready spec"
     assert any(gaps)

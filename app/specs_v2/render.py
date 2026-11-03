@@ -25,7 +25,6 @@ SPEC_FIELDNAMES = [
     "precondition",
     "test_step",
     "expected_result",
-    "status",
     "scene",
     "ui_text",
     "ui_sprite",
@@ -461,7 +460,6 @@ def _scenario_row(
         "capture": result.capture,
         "build_evidence": str(result.build.get("evidence") or ""),
         "spec_id": scenario.id if row_suffix is None else f"{scenario.id}:{row_suffix}",
-        "status": scenario.quality,
         "scene": scenario.scene or "미확정",
         "ui_text": ui_text,
         "ui_sprite": ui_sprite,
@@ -583,7 +581,6 @@ def _spec_rows(
         key=lambda row: (
             scene_rank.get(row["scene"], len(scene_rank)),
             row["scene"],
-            status_rank[row["status"]],
             original_rank[id(row)],
         )
     )

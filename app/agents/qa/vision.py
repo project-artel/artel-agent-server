@@ -325,7 +325,10 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
 
             messages.append(
                 build_capture_message(
-                    capture.capture_id, encoded, capture.mime_type, capture.caption
+                    capture.capture_id,
+                    encoded,
+                    capture.mime_type,
+                    self._state.saw_capture(capture.capture_id, capture.caption),
                 )
             )
 
@@ -439,7 +442,7 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
             self._last_scene = scene
 
         # `failure` — 실패 판정이 새로 적힌 turn 의 화면. 몇 turn 뒤에 내린다.
-        failures = sum(1 for result in getattr(state, "step_results", []) if not result.passed)
+        failures = sum(1 for result in getattr(state, "case_attempt_results", []) if result.verdict == "FAILED")
         if failures > self._last_failures:
             if current is not None:
                 self._held["failure"] = current
@@ -491,5 +494,5 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
             capture_id=capture.capture_id,
             mime_type=capture.mime_type,
             encoded=encoded,
-            caption=capture.caption,
+            caption=self._state.saw_capture(capture.capture_id, capture.caption),
         )

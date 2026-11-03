@@ -21,7 +21,7 @@ from app.prompts import load_prompt
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import LogCategory, MessageType
 from app.qa.scene import SCENE_VIEW_END, SCENE_VIEW_START_PREFIX, SCENE_VIEW_START_SUFFIX
-from app.qa.schemas import QaStepResult
+from app.qa.schemas import QaStepResult, QaCaseAttemptResult
 
 SUMMARY_TEXT = "## SCENARIO\nA scenario.\n\n## NEXT ACTION\nCarry on."
 
@@ -277,10 +277,10 @@ def test_the_ledger_restates_what_the_summary_is_told_not_to_carry() -> None:
     """Verdicts, the steps still open, and the operator's standing instructions are
     facts the run already holds. Asking a model to remember them would trade
     certainty for nothing."""
-    state = QaRunState(total_steps=4)
-    state.step_results = [
-        QaStepResult(step=1, passed=True, message="시작 화면이 떴다"),
-        QaStepResult(step=2, passed=False, message="설정 버튼이 없다"),
+    state = QaRunState(total_steps=4, step_meta=[(i, True) for i in range(1,5)])
+    state.case_attempt_results = [
+        QaCaseAttemptResult(attempt_id="a", case_id=1, verdict="PASSED", message="시작 화면이 떴다"),
+        QaCaseAttemptResult(attempt_id="b", case_id=2, verdict="FAILED", message="설정 버튼이 없다"),
     ]
     channel, _sent = make_channel()
     channel.on_chat({"payload": {"message": "느리게 진행해줘"}})
@@ -288,10 +288,10 @@ def test_the_ledger_restates_what_the_summary_is_told_not_to_carry() -> None:
 
     ledger = render_progress_ledger(state, channel)
 
-    assert "step 1: PASS — 시작 화면이 떴다" in ledger
-    assert "step 2: FAIL — 설정 버튼이 없다" in ledger
+    assert "TC 1, attempt a: PASSED — 시작 화면이 떴다" in ledger
+    assert "TC 2, attempt b: FAILED — 설정 버튼이 없다" in ledger
     assert "3, 4" in ledger
-    assert "Continue with step 3" in ledger
+    assert "Choose what to verify next" in ledger
     assert "느리게 진행해줘" in ledger
     assert "소리는 끄고" in ledger
     # The same wording the tools use, so an instruction reads on re-entry exactly
@@ -301,7 +301,7 @@ def test_the_ledger_restates_what_the_summary_is_told_not_to_carry() -> None:
 
 def test_the_ledger_reaches_the_model_after_the_summary() -> None:
     state = QaRunState(total_steps=2)
-    state.step_results = [QaStepResult(step=1, passed=True, message="확인함")]
+    state.case_attempt_results = [QaCaseAttemptResult(attempt_id="a", case_id=1, verdict="PASSED", message="확인함")]
     channel, _sent = make_channel()
     middleware = build_middleware(state, channel, FakeSummarizer(), max_input_tokens=10)
 
@@ -312,20 +312,20 @@ def test_the_ledger_reaches_the_model_after_the_summary() -> None:
     summary_at = next(index for index, text in enumerate(texts) if SUMMARY_TEXT in text)
     ledger_at = next(index for index, text in enumerate(texts) if "CONTEXT COMPACTED" in text)
     assert ledger_at == summary_at + 1
-    assert "step 1: PASS — 확인함" in texts[ledger_at]
+    assert "TC 1, attempt a: PASSED — 확인함" in texts[ledger_at]
 
 
 def test_compaction_cannot_lose_a_verdict() -> None:
     """`step_results` lives on `QaRunState`, never in the message list — which is
     what makes the ledger able to restate it. Asserted rather than assumed."""
     state = QaRunState(total_steps=2)
-    state.step_results = [QaStepResult(step=1, passed=True, message="확인함")]
+    state.case_attempt_results = [QaCaseAttemptResult(attempt_id="a", case_id=1, verdict="PASSED", message="확인함")]
     channel, _sent = make_channel()
     middleware = build_middleware(state, channel, FakeSummarizer(), max_input_tokens=10)
 
     compact(middleware, conversation(pairs=10))
 
-    assert [result.step for result in state.step_results] == [1]
+    assert [result.case_id for result in state.case_attempt_results] == [1]
 
 
 def test_langchain_still_offers_the_seams_this_is_built_on() -> None:

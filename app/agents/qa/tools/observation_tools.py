@@ -11,8 +11,21 @@ from langchain_core.tools import BaseTool, tool
 from app.agents.qa.arch import ScreenCaptureMode
 from app.agents.qa.tools.state import capture_from_action_result
 from app.agents.qa.tools.tool_context import ToolContext
-from app.prompts import load_tool_description
+from app.prompts import load_tool_description, resolve_version, roles_in
 from app.qa.envelope import JsonRpcAction, LogCategory
+from app.qa.game_errors import render_errors
+from app.qa.performance import PerformanceUnavailable, render_summary, summarize
+
+# `get_performance` 가 창을 안 받았을 때 쓰는 창. tool 결과 끝의 한 줄과 같은 10초다.
+DEFAULT_PERFORMANCE_SECONDS = 10.0
+
+
+def _diagnostic_description(name: str, first_version: str) -> str:
+    """구버전 prompt에 없는 진단 도구만 최초 지원 description을 사용한다."""
+    version = resolve_version("qa_run")
+    if f"tool_{name}" not in roles_in("qa_run", version):
+        version = first_version
+    return load_tool_description(name, version).body
 
 
 def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
@@ -25,6 +38,7 @@ def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
         step: int, thought: str, wait_seconds: float = 0.0, current_scene: bool = False
     ) -> str:
         arrived = await channel.look(wait_seconds)
+        await ctx.performance().refresh_summary()
         messages = channel.drain_operator_messages()
         if not arrived:
             return _answer(
@@ -55,7 +69,49 @@ def build_observation_tools(ctx: ToolContext) -> list[BaseTool]:
         messages = channel.drain_operator_messages()
         return _answer(found, messages)
 
-    return [observe_scene, inspect_object]
+    @tool(description=_diagnostic_description("get_errors", "v31"))
+    async def get_errors(step: int, thought: str, include_seen: bool = False) -> str:
+        # What the agent reads is `qa_run/<version>/tool_get_errors.md`.
+        # 게임에 아무것도 묻지 않는다. `PULSE` 와 `ACTION_RESULT` 가 이미 실어 온 것을 읽는다.
+        # 화면은 안 붙인다 — 화면을 바꾸지 않는 tool 이라 view 를 붙이면 지난 view 를 반복한다.
+        ledger = channel.game_errors
+        items = ledger.take(include_seen)
+        return _answer(
+            render_errors(items, ledger, include_seen),
+            channel.drain_operator_messages(),
+            screen=False,
+        )
+
+    @tool(description=_diagnostic_description("get_performance", "v34"))
+    async def get_performance(
+        step: int,
+        thought: str,
+        since_frame: int | None = None,
+        last_seconds: float | None = None,
+    ) -> str:
+        # What the agent reads is `qa_run/<version>/tool_get_performance.md`.
+        # 둘 다 없으면 지난 10초다. 둘 다 오면 orchestration 이 둘을 함께 건다.
+        if since_frame is None and last_seconds is None:
+            last_seconds = DEFAULT_PERFORMANCE_SECONDS
+        window = (
+            f"frames since {since_frame}" if since_frame is not None else ""
+        ) + (
+            f"{' and ' if since_frame is not None else ''}the last {last_seconds:g} s"
+            if last_seconds is not None
+            else ""
+        )
+        try:
+            samples = await ctx.performance().fetch(since_frame, last_seconds)
+        except PerformanceUnavailable as error:
+            body = (
+                f"Performance data could not be read — {error}. Judge from what you see, "
+                "and do not ask again in this step."
+            )
+        else:
+            body = render_summary(summarize(samples), window)
+        return _answer(body, channel.drain_operator_messages(), screen=False)
+
+    return [observe_scene, inspect_object, get_errors, get_performance]
 
 
 def build_capture_tool(ctx: ToolContext) -> BaseTool:

@@ -13,6 +13,9 @@
 등록될 일이 없다.
 """
 
+import asyncio
+from functools import wraps
+
 from langchain_core.tools import BaseTool
 
 from app.agents.qa.arch import ResolvedArch, default_resolved_arch
@@ -78,8 +81,7 @@ def build_tools(
     # and order it had before the axis existed, whatever `phase_cycle` says.
     # `load_skill` is in neither of `phase.py`'s tables, so the gate below wraps it
     # but never refuses it.
-    if ctx.arch.skills == "on_demand":
-        tools.extend(build_skill_tools(ctx, prompt_version))
+    tools.extend(build_skill_tools(ctx, prompt_version))
 
     # 게임이 등록한 function 의 tool (ARTEL-1054). 맨 뒤라서 두 축이 꺼진 run 은 목록도 순서도
     # 종전 그대로다. `run_cheat` 와 `start_behavior` 는 게임을 움직이므로 `phase.py` 표에서 `ACT`
@@ -103,7 +105,22 @@ def build_tools(
     # gate 바깥에서 감싼다. gate 가 거절한 호출의 결과에도 끝난 behavior 의 소식이 붙는다.
     if ctx.arch.behaviors == "on":
         tools = [with_behavior_endings(one, ctx) for one in tools]
-    return tools
+    # 한 응답에 여러 tool call이 있어도 사용자 질문 대기 중에는 다음 호출을 실행하지 않는다.
+    execution_lock = asyncio.Lock()
+    return [_serialized(one, execution_lock) for one in tools]
+
+
+def _serialized(tool: BaseTool, lock: asyncio.Lock) -> BaseTool:
+    inner = tool.coroutine
+    if inner is None:
+        raise AssertionError(f"tool {tool.name!r} has no coroutine")
+
+    @wraps(inner)
+    async def guarded(*args, **kwargs):
+        async with lock:
+            return await inner(*args, **kwargs)
+
+    return tool.model_copy(update={"coroutine": guarded})
 
 
 def _phase_gated(tool: BaseTool, cycle: PhaseCycle) -> BaseTool:

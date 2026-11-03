@@ -1,12 +1,7 @@
-"""다음 step 에 맞는 등록된 macro 를 `report_step` 의 답에 이름으로 대는지 재는 테스트.
-
-맞춤은 순수 함수(`macros_for_step`)로 재고, 답에 붙는 것은 실제 tool 로 잰다. 문구 전체는 다른
-곳에서 바뀌므로 macro 이름과 `run_macro` 를 대는지만 본다. 마지막으로 `UPDATE_MEMORY` 와
-`REVIEW_DRAFT` 에서 `run_macro` 를 거절하는 문구가 "다음 step 의 첫 동작으로 하라" 고 덧붙이는지
-본다.
-"""
+"""macro 조회와 phase gate를 유지하고 TC 판정이 다음 참고 step을 강제하지 않는지 확인한다."""
 
 import asyncio
+from tests.qa_attempts import configure_attempts, start_case, report_case
 
 from app.agents.qa.arch import PhaseCycleMode, QaArchSpec, VisionMode, resolve_arch
 from app.agents.qa.macro.book import RegisteredMacro
@@ -167,68 +162,22 @@ def make(macros: str):
         QaArchSpec(vision=VisionMode.on, phase_cycle=PhaseCycleMode.off, macros=macros),
         "openai/gpt-6-luna",
     )
+    configure_attempts(channel, state)
     tools = {one.name: one for one in build_tools(channel, state, arch)}
     return state, tools
 
 
-async def report(tools, step: int, passed: bool = True) -> str:
-    return await tools["report_step"].ainvoke(
-        {"step": step, "passed": passed, "message": "m", "thought": "t"}
-    )
-
-
-def test_reporting_step_1_names_the_macro_of_step_2() -> None:
-    async def scenario() -> None:
-        _state, tools = make("on")
-        answer = await report(tools, 1)
-        assert "continue with step 2" in answer
-        assert "def replay_step_2()  [no screen yet]" in answer
-        assert '"""Step 2: 오프닝을 넘긴다' in answer
-        assert "`run_macro` as the first action of step 2" in answer
-
-    asyncio.run(scenario())
-
-
-def test_a_failed_step_still_names_the_macro_of_the_next_one() -> None:
-    async def scenario() -> None:
-        _state, tools = make("on")
-        answer = await report(tools, 1, passed=False)
-        assert "def replay_step_2()" in answer
-
-    asyncio.run(scenario())
-
-
-def test_a_step_whose_next_has_no_macro_gets_no_sentence() -> None:
-    async def scenario() -> None:
-        _state, tools = make("on")
-        answer = await report(tools, 2)
-        assert "continue with step 3" in answer
-        assert "registered macro" not in answer
-
-    asyncio.run(scenario())
-
-
-def test_the_last_step_answer_is_unchanged() -> None:
-    async def scenario() -> None:
+def test_tc_report_does_not_choose_the_next_reference_step():
+    async def run():
         state, tools = make("on")
-        state.total_steps = 2
-        await report(tools, 1)
-        answer = await report(tools, 2)
-        assert "last step" in answer
-        assert "registered macro" not in answer
-
-    asyncio.run(scenario())
-
-
-def test_macros_off_adds_nothing() -> None:
-    async def scenario() -> None:
-        _state, tools = make("off")
-        answer = await report(tools, 1)
-        assert "continue with step 2" in answer
-        assert "replay_step_2" not in answer
-        assert "run_macro" not in answer
-
-    asyncio.run(scenario())
+        await start_case(tools, 1)
+        text = await report_case(tools, 1)
+        assert "continue with step" not in text
+        assert "last step" not in text
+        assert "replay_step_2" not in text
+        assert state.case_attempt_results[0].case_id == 1
+        assert not state.finished
+    asyncio.run(run())
 
 
 # --- running a macro out of phase ---------------------------------------------
@@ -239,7 +188,7 @@ def _into(cycle: PhaseCycle, draft: bool) -> None:
         cycle.advance(name)
     if draft:
         cycle.expect_draft_review()
-    cycle.advance("report_step")
+    cycle.advance("report_test_case")
 
 
 def test_run_macro_refused_in_update_memory_says_to_run_it_next_step() -> None:

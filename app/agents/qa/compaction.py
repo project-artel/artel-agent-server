@@ -118,53 +118,15 @@ def render_progress_ledger(state: QaRunState, channel: QaRunChannel) -> str:
         f"Scenario steps: {state.total_steps}",
     ]
 
-    free = state.execution_mode == "FREE"
-    if state.step_results and free:
-        # FREE 는 `report_case` 가 case_id 로 받으므로 원장도 case_id 로 적는다. 판정을 한 번
-        # 덮어쓸 수 있으므로 "다시 하지 말라" 고 하지 않는다.
-        lines.append("")
-        lines.append("Verdicts already recorded (case_id):")
-        for result in state.step_results:
-            verdict = "PASS" if result.passed else "FAIL"
-            lines.append(f"  case {result.case_id}: {verdict} — {result.message}")
-    elif state.step_results:
-        lines.append("")
-        lines.append("Verdicts already recorded — do NOT report or re-attempt these:")
-        for result in state.step_results:
-            verdict = "PASS" if result.passed else "FAIL"
-            lines.append(f"  step {result.step}: {verdict} — {result.message}")
-    else:
-        lines.append("")
-        lines.append("No step has a verdict yet.")
-
-    remaining = state.unreported_steps()
+    lines.append("Steps are reference guidance; no per-step verdict is required.")
+    lines.append("Recorded TC attempts:")
+    for result in state.case_attempt_results:
+        lines.append(f"  TC {result.case_id}, attempt {result.attempt_id}: {result.verdict} — {result.message}")
+    reported = {result.case_id for result in state.case_attempt_results}
+    remaining = sorted({identifier for identifier, _ in state.step_meta if identifier is not None} - reported)
     if remaining:
-        if free:
-            listed = ", ".join(str(state.case_of_step(step)) for step in remaining)
-            lines.append("")
-            lines.append(f"Test cases still without a verdict (case_id): {listed}")
-        else:
-            listed = ", ".join(str(step) for step in remaining)
-            lines.append("")
-            lines.append(f"Steps still without a verdict: {listed}")
-        if free:
-            # FREE 시나리오는 순서를 agent 가 정하므로 가장 작은 번호를 다음으로 지정하지 않는다.
-            # 압축이 "시간이 없다" 로 읽히지 않게 한 줄을 더한다 — 2026-10-14 qa_try 3 에서 압축
-            # 직후 agent 가 그렇게 판단하고 남은 TC 를 시도 없이 실패로 보고했다(`app/qa/reach.py`).
-            lines.append(
-                "Choose which of these to verify next. Observe the screen first if "
-                "you are unsure where the game is. This compaction is not a sign that "
-                "time is running out: there is no time or token budget to save, so "
-                "reach and carry out every remaining case before you report it."
-            )
-        else:
-            lines.append(
-                f"Continue with step {remaining[0]}. Observe the screen first if you "
-                "are unsure where the game is."
-            )
-    else:
-        lines.append("")
-        lines.append("Every step has a verdict. Call `finish_run` to close the run.")
+        lines.append(f"TCs without a reported attempt: {remaining}. Choose what to verify next from the current screen.")
+    lines.append("Use start_test_case before each attempt and report_test_case for its outcome. Use ask_user when guidance is needed.")
 
     # 압축이 바로 그 순간이다. 앞의 상세가 여기서 사라지므로, 그것으로만 알 수 있던 것을
     # 남길 마지막 기회다 — 넘어가면 "이 게임은 키가 아니라 축으로 읽는다" 를 알아낸 판독도

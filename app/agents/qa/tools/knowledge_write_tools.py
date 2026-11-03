@@ -349,7 +349,7 @@ def build_knowledge_write_tools(ctx: ToolContext) -> list[BaseTool]:
             return (
                 f"You have used all {arch.max_forgets_per_run} knowledge deletion(s) for "
                 "this run, so nothing was deleted. If another entry still looks "
-                "wrong, say so in `report_step` instead of deleting it."
+                "wrong, say so in `report_test_case` instead of deleting it."
             )
 
         target = (knowledge_id or "").strip()
