@@ -319,8 +319,23 @@ def test_the_default_qa_version_is_v21() -> None:
     v24 ships with the game function tools (ARTEL-1054): `tool_run_cheat.md`,
     `tool_start_behavior.md`, `tool_stop_behavior.md`, `tool_extend_behavior.md`, and the
     `cheats` and `behaviors` skills. Every v23 role is carried over unchanged.
+
+    v25 changes how a step is judged (ARTEL-1220): `## How to work` step 4 asks for
+    `expected:` and `observed:` lines before the verdict, and the four verdict tool
+    descriptions describe the new `performed` argument.
+
+    v26 adds `tool_get_errors.md` and one paragraph to the system prompt on reading
+    `unseen errors: N` (ARTEL-1219).
+
+    v27 adds two sentences to the vision directive (ARTEL-1221): a whole-screen capture on
+    the first entry to each scene, and a checklist for reading any capture.
+
+    v28 adds one paragraph to the macro skill (ARTEL-1222): read the text lines a macro
+    answer carries and file blank, placeholder or garbled lines with `report_issue`.
+
+    v29 adds `tool_get_performance.md` for the new `get_performance` tool (ARTEL-1223).
     """
-    assert resolve_version("qa_run") == "v24"
+    assert resolve_version("qa_run") == "v34"
 
 
 # v20 이 고쳐 쓴 v19 문단. 나머지 문단은 한 글자도 안 바뀌어야 한다.
@@ -1093,3 +1108,37 @@ def test_v24_adds_the_game_function_tools_and_keeps_every_v23_role() -> None:
     assert v24_roles - v23_roles == V24_ADDED_ROLES
     for role in sorted(v23_roles):
         assert load_prompt("qa_run", role, "v24").body == load_prompt("qa_run", role, "v23").body, role
+
+
+# v25 가 v24 에서 고쳐 쓴 role. 나머지 role 은 한 글자도 안 바뀌어야 한다 (ARTEL-1220).
+V25_REWRITTEN_ROLES = {
+    "system",
+    "tool_report_step",
+    "tool_report_step_memory",
+    "tool_report_case",
+    "tool_report_case_memory",
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def test_qa_snapshot_keeps_the_base_step_contract() -> None:
+    """중간 QA 기능은 #262의 performed 계약을 요구하지 않는다."""
+    version = resolve_version("qa_run")
+    for role in ("tool_report_step", "tool_report_step_memory", "tool_report_case", "tool_report_case_memory"):
+        assert load_prompt("qa_run", role, version).body == load_prompt("qa_run", role, "v24").body
+    assert "`performed`" not in load_prompt("qa_run", "system", version).body
+    assert "unseen errors: N" in load_prompt("qa_run", "system", version).body
+    assert "first time you enter each scene" in load_prompt("qa_run", "vision_directive", version).body
+    assert "**The answer lists the text the game showed while the macro ran**" in load_prompt("qa_run", "skill_macro", version).body
+    assert "tool_get_performance" in roles_in("qa_run", version)

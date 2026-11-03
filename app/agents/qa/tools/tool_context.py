@@ -15,8 +15,10 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from app.agents.qa.arch import ResolvedArch
+from app.agents.qa.arch import ResolvedArch, ScreenCaptureMode
 from app.agents.qa.tools.state import QaRunState
+from app.config import get_settings
+from app.qa.performance import PerformanceReader
 from app.qa.acting import ActionOutcome, PressLanding, ScreenChange
 from app.qa.channel import QaRunChannel, with_operator_messages
 from app.qa.envelope import ActionResultItem, JsonRpcAction
@@ -66,9 +68,53 @@ class ToolContext:
             state.watermark = channel.scene.updates
             # 화면이 곧 답인 도구(`observe_scene`)는 앞에 얹을 몸통이 없다.
             body = f"{body}\n\n{view}" if body else view
+            first_entry = self._first_entry_line()
+            if first_entry is not None:
+                body = f"{body}\n\n{first_entry}"
+
+        # 안 본 예외의 수 한 줄 (ARTEL-1219). 0 이면 줄이 없다. 화면을 안 붙이는 tool 에도 붙인다 —
+        # 예외는 화면과 상관없이 쌓이고, `report_step` 직전에 보는 답이 지식 tool 일 수도 있다.
+        errors_line = channel.game_errors.summary_line()
+        if errors_line is not None:
+            body = f"{body}\n\n{errors_line}" if body else errors_line
+        # 지난 10초 hitch 수 한 줄 (ARTEL-1223). 0 이거나 아직 못 읽었으면 줄이 없다. 값은 `act` 와
+        # `observe_scene` 이 간격을 두고 새로 읽어 둔 것이다 — 이 함수는 동기라 여기서 묻지 않는다.
+        performance_line = self.performance().summary_line()
+        if performance_line is not None:
+            body = f"{body}\n\n{performance_line}" if body else performance_line
 
         # 오퍼레이터의 말이 맨 뒤다. 지금부터 적용되는 지시라 화면보다 나중에 읽혀야 한다.
         return with_operator_messages(body, messages)
+
+    def performance(self) -> PerformanceReader:
+        """이 런의 `PerformanceReader`. 처음 부를 때 만든다."""
+        if self.state.performance is None:
+            self.state.performance = PerformanceReader(
+                self.channel.qa_try_id, get_settings().orchestration_base_url
+            )
+        return self.state.performance
+
+    def _first_entry_line(self) -> str | None:
+        """scene 의 view 가 이 런에서 처음 그려졌으면, 전체 screen capture 를 한 장 찍으라는 줄.
+
+        2026-10-22 측정에서 타이틀 배경이 안 그려지는 빌드를 3런 중 0런이 찾았다. step 1 에서
+        capture 를 찍은 런이 하나도 없었다(ARTEL-1221). scene 목록은 무엇이 있는지만 말하고 그것이
+        그려졌는지는 말하지 않으므로, 그림을 볼 수 있는 자리는 capture 하나다.
+
+        `capture_screen` 이 있는 `on_demand` 런에만 붙는다. `every_call` 과 `by_role` 은 이미 매
+        호출 그림을 받고, vision 이 꺼진 런은 그 tool 이 없다. scene 마다 한 번이다.
+        """
+        if not self.arch.vision or self.arch.screen_capture is not ScreenCaptureMode.on_demand:
+            return None
+        scene_memory = self.channel.scene
+        scene = (scene_memory.scene or scene_memory.pulse.scene or "").strip()
+        if not scene or scene in self.state.scenes_entered:
+            return None
+        self.state.scenes_entered.add(scene)
+        return (
+            f"First view of scene `{scene}` this run: call `capture_screen` once for the whole "
+            "screen and check the picture, even if the step does not ask how it looks."
+        )
 
     async def run(self, actions: list[JsonRpcAction], summary: str, step: int) -> str:
         """Every acting tool goes through here: act, then look at what it did.
@@ -127,6 +173,7 @@ class ToolContext:
         # 여기서 나온다 — 모델은 method 이름만 말하고 인자는 이 기록이 낸다(ARTEL-644).
         state.remember_dispatch(actions)
         result, looked = await channel.act_and_look(actions, summary, step)
+        await self.performance().refresh_summary()
         messages = channel.drain_operator_messages()
         # 같은 말이 둘로 간다. `messages` 는 `_answer` 가 문장 끝에 붙이는 데 쓰고,
         # `said` 는 부르는 쪽이 문장을 안 읽고도 "말이 왔다" 를 알게 하는 데 쓴다.
