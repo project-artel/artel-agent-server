@@ -44,6 +44,7 @@ from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.context import FoldKind, fold_every_stale_block
+from app.agents.qa.case_context import TC_LEDGER_ID, fold_case_details, render_case_ledger
 from app.agents.qa.tools import QaRunState
 from app.prompts import load_tool_description
 from app.qa.channel import QaRunChannel
@@ -122,10 +123,7 @@ def render_progress_ledger(state: QaRunState, channel: QaRunChannel) -> str:
     lines.append("Recorded TC attempts:")
     for result in state.case_attempt_results:
         lines.append(f"  TC {result.case_id}, attempt {result.attempt_id}: {result.verdict} — {result.message}")
-    reported = {result.case_id for result in state.case_attempt_results}
-    remaining = sorted({identifier for identifier, _ in state.step_meta if identifier is not None} - reported)
-    if remaining:
-        lines.append(f"TCs without a reported attempt: {remaining}. Choose what to verify next from the current screen.")
+    lines.append("The separate authoritative TC ledger supplies all IDs and current progress.")
     lines.append("Use start_test_case before each attempt and report_test_case for its outcome. Use ask_user when guidance is needed.")
 
     # 압축이 바로 그 순간이다. 앞의 상세가 여기서 사라지므로, 그것으로만 알 수 있던 것을
@@ -312,6 +310,10 @@ class QaCompactionMiddleware(SummarizationMiddleware):
             return True
         return super()._should_summarize(messages, total_tokens)
 
+    async def _acreate_summary(self, messages_to_summarize: list[AnyMessage]) -> str:
+        # TC 상세와 ledger는 원본 데이터로 복원하므로 요약 입력에서만 제외한다.
+        return await super()._acreate_summary(fold_case_details(messages_to_summarize, for_summary=True))
+
     async def _decline_compaction(self) -> None:
         """런이 계속 커지고 있음을 오퍼레이터에게 알리고, 그대로 둔다.
 
@@ -343,6 +345,7 @@ class QaCompactionMiddleware(SummarizationMiddleware):
         # 폴딩만 밖에 있다. `_folded_token_counter`가 base class 안에서 다시 폴딩하고,
         # 그 호출은 아래 핸들러 아래에 있다.
         folded = fold_every_stale_block(state["messages"], [FoldKind.scene_view])
+        folded = fold_case_details(folded, self._state.current_case_id)
 
         try:
             update = await super().abefore_model({**state, "messages": folded}, runtime)
@@ -378,6 +381,7 @@ class QaCompactionMiddleware(SummarizationMiddleware):
         update["messages"] = _insert_after_summary(
             messages, HumanMessage(content=render_progress_ledger(self._state, self._channel))
         )
+        update["messages"].append(HumanMessage(id=TC_LEDGER_ID, content=render_case_ledger(self._state, self._channel)))
         self._length_at_last_compaction = len(update["messages"])
         self._state.compactions += 1
 

@@ -261,6 +261,8 @@ class QaRunState:
         # 항목이 어긋나 돌려보낸 연속 횟수.
         self.pending_checks: list | None = None
         self.evidence_refusals = 0
+        self.current_case_id: int | None = None
+        self.case_reviews: dict[int, list[dict]] = {}
         # Set by `compact_context`, read and cleared by the compaction middleware
         # before the next model call. A flag rather than the tool doing the work
         # itself: the tool runs inside the tools node, where its own AIMessage is
