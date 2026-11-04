@@ -5,6 +5,7 @@ from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, field_validator, model_validator
 
 from app.agents.qa.arch import DEFAULT_ARCH, QaArchSpec, resolve_arch
+from app.agents.planner_executer.identities import GameIdentitySnapshot
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage
 from app.llm.chat_model import key_service_of
 from app.llm.credentials import LlmKey, LlmKeyService
@@ -42,6 +43,7 @@ class QaContext(BaseModel):
     # 건너뛴 채 런이 그대로 돈다.
     project_id: int | None = None
     game_build_id: int | None = None
+    game_identities: list[GameIdentitySnapshot] | None = None
     # 이 run 이 부를 수 있는 cheat 와 behavior 의 catalog entry (ARTEL-1054). orchestration 이
     # run 의 허용 목록으로 걸러서 보내고, 비었거나 그 mode 가 `off` 면 안 보낸다. 그때
     # `arch.cheats` / `arch.behaviors` 도 안 오므로 tool 이 없다.
@@ -185,6 +187,7 @@ async def open_qa_session(
         llm_key=payload.llm_key,
         cheats=payload.context.cheats,
         behaviors=payload.context.behaviors,
+        game_identities=payload.context.game_identities,
     )
     return OpenQaSessionResponse(session_id=session_id, run_config=run_config)
 
