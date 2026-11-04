@@ -17,6 +17,7 @@ from langchain_core.messages.utils import count_tokens_approximately
 
 from app.agents.qa.arch import ResolvedArch, withheld_skills
 from app.agents.qa.compaction import QaCompactionMiddleware
+from app.agents.qa.case_context import TC_DETAIL_BUDGET, QaCaseContextMiddleware, detail_block
 from app.agents.qa.context import (
     FOLDED_PULSE_VIEW_PREFIX,
     FOLDED_VIEW_PREFIX,
@@ -36,6 +37,7 @@ from app.prompts import load_prompt, load_skill, skill_descriptions, skill_names
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory
 from app.qa.failure_site import failure_site_of
+from app.qa.provider_error import classify_provider_error
 from app.qa.game_functions import render_catalog
 from app.qa.reach import UnreachedJudge
 from app.qa.relevance import PulseRelevanceJudge
@@ -125,13 +127,14 @@ def phase_directive_for(arch: ResolvedArch, prompt_version: str) -> str:
     if not arch.phase_cycle.gates_phases:
         return ""
     directive = load_prompt(PROMPT_AGENT, PHASE_ROLE, prompt_version).body
+    directive += "\n`get_test_case` reads an original run snapshot and remains available in every phase."
     if macro_memory_directive_applies(arch, prompt_version):
         directive = (
             directive.rstrip()
             + "\n\n"
             + load_prompt(PROMPT_AGENT, MACRO_MEMORY_ROLE, prompt_version).body
         )
-    return directive
+    return directive.rstrip() + "\n\n" + load_prompt("qa_history", "phase_directive", "v1").body
 
 
 def _skills_directive(
@@ -290,6 +293,17 @@ def _plan(scenario: QaScenario) -> str:
             if (reviews := _human_review(case)) is not None:
                 item["human_review"] = reviews
             cases[step.case_id] = item
+    document = {"test_cases": list(cases.values()), "reference_steps": references}
+    payload = json.dumps(document, ensure_ascii=False, indent=2)
+    if count_tokens_approximately([{"role": "user", "content": payload}]) > TC_DETAIL_BUDGET:
+        document = {"test_cases": [
+            {"case_id": item["case_id"], "scene": item["scene"],
+             "title": (item["test_step"] or "").split("\n", 1)[0][:160]}
+            for item in cases.values()
+        ], "reference_steps": []}
+        payload = json.dumps(document, ensure_ascii=False, indent=2)
+    else:
+        payload = detail_block("plan", payload)
     return (
         f"Scenario: {scenario.title} — {scenario.description}\n\n"
         "Verify the test cases. Steps are reference guidance: choose the route and actions from the current screen. "
@@ -299,7 +313,9 @@ def _plan(scenario: QaScenario) -> str:
         "Use INCONCLUSIVE when you cannot establish the actual outcome. Ask the user with ask_user if you do not know how to proceed. "
         "TC failures create issues automatically. report_issue is only for defects unrelated to a TC.\n"
         + (HUMAN_REVIEW_RULE if any("human_review" in case for case in cases.values()) else "")
-        + json.dumps({"test_cases": list(cases.values()), "reference_steps": references}, ensure_ascii=False, indent=2)
+        + "Read original specifications with get_test_case(case_id); start_test_case returns them too. "
+        "The TC ledger preserves all IDs and current progress even after compaction.\n"
+        + payload
         + "\nObserve the screen and begin."
     )
 
@@ -345,6 +361,7 @@ def middleware_names_for(arch: ResolvedArch) -> tuple[str, ...]:
     Order only sequences middleware sharing a hook.
     """
     names = ["compaction"] if arch.compaction else []
+    names.append("case_context")
     # 네 종류의 `fold` 를 middleware 하나가 한 번에 한다(`fold_context`). 따로 두면 각자 제 시점에
     # 프롬프트 중간을 고쳐 써서 `cache` 손실을 종류 수만큼 따로 낸다. 종류마다 켜고 끄는 것은
     # 여전히 실험 축이라 `fold_kinds_for` 가 `arch` 에서 읽는다.
@@ -379,6 +396,7 @@ def build_middleware(
 ) -> list:
     """The middleware named by `middleware_names_for`, in that order."""
     builders = {
+        "case_context": lambda: QaCaseContextMiddleware(state, channel),
         "compaction": lambda: QaCompactionMiddleware(
             # Not the run's model, and not `cache_prompt`: summarizing is one
             # call over a prefix nothing will send again, so caching it would pay
@@ -688,7 +706,7 @@ class QaRunner:
                 # would quietly cost the run a third of its tool budget.
                 "recursion_limit": (
                     self._tool_call_limit(total_steps)
-                    * (2 + (1 if arch.compaction else 0))
+                    * (3 + (1 if arch.compaction else 0))
                 ),
                 "run_name": "qa-scenario-run",
                 "tags": ["agent", "qa"],
@@ -879,6 +897,8 @@ class QaRunner:
                 for step in scenario.steps
             ],
         )
+        state.case_reviews = {step.case.id: review for step in scenario.steps
+                             if step.case is not None and (review := _human_review(step.case)) is not None}
         if scenario.execution_mode == "FREE":
             # FREE run 은 실패 판정이 미도달인지 Jev 에 묻는다(`app/qa/reach.py`).
             state.step_expected = [
@@ -902,6 +922,7 @@ class QaRunner:
             return state, None
         except Exception as error:  # noqa: BLE001 - the reason has to reach the timeline
             state.failure_site = failure_site_of(error)
+            state.provider_failure = classify_provider_error(error)
             return state, f"The run stopped on an error: {error}"
         finally:
             # `checkpoint` 에서 멈춘 채 남은 macro 를 끊는다. 눌러 둔 것은 없다 — parser 가

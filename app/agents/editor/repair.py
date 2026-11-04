@@ -15,11 +15,14 @@ parser (`parse_step`); a refused answer goes back with the parser's sentences, u
 `max_rewrites` times, like the planner's. Developer macros selected for the step stay as they
 are: they are registered macros the editor cannot change, and when the failing action is one of
 them it is taken out of the step and the editor is told to write a `def` in its place.
+
+`guidance` 모드의 등록 행동은 source 밖의 계약이므로 editor가 수정할 수 없다. 이 조합은 기존 계획을 보존하고 명시적으로
+거절한다. `contract` 모드의 source는 원래 domain·효과 계약으로 다시 파싱하고, editor가 받지 않는 계획 정보는 유지한다.
 """
 
 import json
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app.agents.planner_executer.arch import PlannerExecuterArchSpec
 from app.agents.planner_executer.decisions import (
@@ -98,8 +101,21 @@ class MacroEditor:
     ) -> Repaired:
         """Step `step`'s source rewritten around `action`; rewritten again while the parser refuses
         it, up to `max_rewrites`. `turns` are the action's turn records that called the editor."""
+        if self._spec.actions == "guidance":
+            # 등록 행동의 body·계약은 editor의 source 밖에 있다. 목표 조건만 바꿔 행동을 고쳤다고 기록하지 않는다.
+            refusal = (
+                "The editor cannot rewrite registered actions in guidance mode. "
+                "The current plan and contracts are unchanged; use planner repair to revise the plan."
+            )
+            await note_decision(
+                self._channel, MACRO_FIX_REFUSED, f"Step {step}: {refusal}", step,
+                action=action, refusal=refusal,
+            )
+            return Repaired(macros.source, None, refusal)
         developer_actions = {
-            key: DeveloperAction(definition, macros.descriptions.get(key, ""), macros.picks.get(key))
+            key: DeveloperAction(
+                definition, macros.descriptions.get(key, ""), macros.picks.get(key), macros.readies.get(key)
+            )
             for key, definition in macros.actions.items()
             if key.startswith(DEVELOPER_ACTION_PREFIX) and key != action
         }
@@ -116,7 +132,21 @@ class MacroEditor:
             answer = await self._ask(self._system, self._request(scenario, step, macros, action, turns, feedback))
             source = extract_code(normalize_paths(answer))
             try:
-                repaired = Repaired(source, await parse_step(source, self._registered, developer_actions))
+                contracts = None
+                if self._spec.actions == "contract":
+                    contracts = _contracts_text(macros)
+                parsed = await parse_step(source, self._registered, developer_actions, contracts)
+                available = set(parsed.actions) | set(parsed.contracts)
+                # editor가 받지 않는 계획 범위와 순서는 유지한다. 제거한 행동을 가리키는 순서만 제외한다.
+                parsed = replace(
+                    parsed, observe=macros.observe, check=macros.check, facts=macros.facts,
+                    guidance=macros.guidance,
+                    after={
+                        name: tuple(next_action for next_action in following if next_action in available)
+                        for name, following in macros.after.items() if name in available
+                    },
+                )
+                repaired = Repaired(source, parsed)
             except MacroRejection as rejection:
                 repaired = Repaired(source, None, rejection.render())
                 await note_decision(
@@ -136,7 +166,8 @@ class MacroEditor:
                     "The refusal names what is accepted instead. Rewrite the whole source."
                 )
                 continue
-            before, after = list(macros.actions), list(repaired.macros.actions)
+            before = [*macros.actions, *macros.contracts]
+            after = [*repaired.macros.actions, *repaired.macros.contracts]
             await note_decision(
                 self._channel,
                 MACRO_FIX,
@@ -162,6 +193,11 @@ class MacroEditor:
             + f"Scenario: {scenario.title}\n\n"
             + f"The step:\n{this_step(scenario, step)}\n\n"
             + f"The step's macros as they run now:\n```python\n{macros.source.rstrip()}\n```\n\n"
+            + (
+                "Keep these action contracts and their action names while repairing their Python bodies:\n"
+                f"```actions\n{_contracts_text(macros)}\n```\n\n"
+                if self._spec.actions == "contract" else ""
+            )
             + f"The action that does not progress the step: `{action}`"
             + (
                 " — a developer macro selected for the step, not in the source above; it is taken out of the "
@@ -209,6 +245,19 @@ class MacroEditor:
             self._model = build_chat_model(self._config.model, self._config.reasoning)
         answer = await self._model.ainvoke(prompt_messages(self._config.model, system, user))
         return _text(answer.content)
+
+
+def _contracts_text(macros: StepMacros) -> str:
+    """원래 행동의 domain·효과 계약을 유지한 채 수정된 source를 다시 검사한다."""
+    return json.dumps({
+        name: {
+            "params": {parameter: list(domain) for parameter, domain in contract.domains.items()},
+            "effect": {
+                "mode": contract.effect.mode, "within": contract.effect.within, "reason": contract.effect.reason,
+            },
+        }
+        for name, contract in macros.contracts.items()
+    })
 
 
 def evidence_lines(turns: list[dict]) -> list[str]:

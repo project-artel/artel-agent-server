@@ -5,9 +5,10 @@ executer side — when the editor is called and how play goes on — is in `test
 """
 
 import asyncio
+from dataclasses import replace
 
 from app.agents.editor import MacroEditor
-from app.agents.planner_executer.macros import RegisteredMacros, StepMacros, parse_step
+from app.agents.planner_executer.macros import RegisteredMacros, StepCheck, StepMacros, StepObserve, parse_guidance_step, parse_step
 from app.agents.planner_executer.runner import PlannerExecuterRunner
 from app.qa.jev import JevClient
 from tests.planner_executer_fakes import FakeGame
@@ -204,3 +205,69 @@ def test_runner_passes_loaded_developer_sources_to_editor() -> None:
     assert failure is None and state.step_results[0].passed
     assert source.rstrip() in asked.calls[1][1]
     assert "no compatible cards" in asked.calls[1][1]
+
+
+def test_guidance_등록_행동의_editor_수정은_기존_계획을_유지하고_거절() -> None:
+    from app.agents.planner_executer.developer_macros import DeveloperMacro, bind_guidance_calls, load_developer_macros
+    from app.agents.planner_executer.executer import Executer
+    from tests.test_planner_executer_guidance import CONTRACT, DONE, STRIKE, _battle
+
+    fake = _battle()
+    asked = Asked()
+    config = _config(actions="guidance", max_turns_per_step=1)
+
+    async def go():
+        fake.push_reading()
+        loaded = await load_developer_macros((
+            DeveloperMacro("strike", STRIKE, "1.0", None, False, CONTRACT),
+            DeveloperMacro("backup", STRIKE.replace("strike", "backup"), "1.0", None, False, CONTRACT),
+        ))
+        actions, contracts, binder = await bind_guidance_calls(["strike", "backup"], loaded)
+        registered = RegisteredMacros(fake.channel)
+        macros = await parse_guidance_step(DONE, registered, actions, contracts, binder, "Strike the weaker enemy first.")
+        macros = replace(macros, observe=StepObserve(paths=("Enemy",)), check=StepCheck(members=("Enemy.hit",)),
+                         after={"developer:strike": ("developer:backup",)}, facts=("enemy_hp",))
+        editor = MacroEditor(config, fake.channel, config.arch.planner, registered, ask=asked, developer=loaded)
+        repaired = await editor.repair(_scenario(), 1, macros, "developer:strike", TURNS)
+        assert repaired.macros is None and "cannot rewrite registered actions" in repaired.refusal
+        assert set(macros.contracts) == {"developer:strike", "developer:backup"}
+        assert macros.binder is binder and macros.guidance == "Strike the weaker enemy first."
+        assert macros.after == {"developer:strike": ("developer:backup",)} and macros.facts == ("enemy_hp",)
+        assert macros.observe.paths == ("Enemy",) and macros.check.members == ("Enemy.hit",)
+        return await Executer(fake.channel, config.arch.planner, JevClient(post=FakeJev(
+            picks=("developer:backup @ Enemy(Clone)[1]",)
+        ))).play(1, "Clear the wave.", macros)
+
+    play = asyncio.run(go())
+
+    assert asked.calls == []
+    assert play.turns[0]["picked"] == "developer:backup @ Enemy(Clone)[1]"
+    assert play.turns[0]["result"] == "effect_met"
+    assert _decisions(fake, "macro_fix") == []
+    assert len(_decisions(fake, "macro_fix_refused")) == 1
+
+
+def test_contract_editor_수정은_계약과_계획_범위를_유지() -> None:
+    from tests.test_planner_executer_contract import ACTIONS, SOURCE, _table
+
+    fake = _table()
+    asked = Asked(SOURCE.replace("Take a free card", "Take the free card"))
+    config = _config(actions="contract")
+
+    async def go():
+        fake.push_reading()
+        registered = RegisteredMacros(fake.channel)
+        original = await parse_step(SOURCE, registered, contracts_text=ACTIONS)
+        original = replace(original, observe=StepObserve(paths=("Card",)), check=StepCheck(members=("Card.taken",)),
+                           after={"take": ("take",)}, facts=("cards_in_hand",))
+        editor = MacroEditor(config, fake.channel, config.arch.planner, registered, ask=asked)
+        return original, await editor.repair(_scenario(), 1, original, "take", TURNS)
+
+    original, repaired = asyncio.run(go())
+
+    assert repaired.refusal is None and repaired.macros is not None
+    assert list(repaired.macros.contracts) == ["take"] and repaired.macros.binder is not None
+    assert repaired.macros.contracts["take"].domains == original.contracts["take"].domains
+    assert repaired.macros.contracts["take"].effect == original.contracts["take"].effect
+    assert repaired.macros.observe == original.observe and repaired.macros.check == original.check
+    assert repaired.macros.after == original.after and repaired.macros.facts == original.facts

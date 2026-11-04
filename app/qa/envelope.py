@@ -254,6 +254,9 @@ class StepStatus(StrEnum):
 class RunResult(StrEnum):
     PASSED = "PASSED"
     FAILED = "FAILED"
+    # 게임을 검증하지 못하고 끝났다(ARTEL-1370). 모델 API 가 크레딧 · 인증 · 모델 오류로 거절해 런을
+    # 멈춘 시나리오다. 실패가 아니므로 통과율 · 실패 집계에 들어가지 않는다. 까닭은 `StatusPayload.stop`.
+    UNDECIDED = "UNDECIDED"
 
 
 class ActionItemStatus(StrEnum):
@@ -1433,6 +1436,8 @@ class StatusPayload(BaseModel):
     is_verification: bool = False
     message: str
     summary: dict | None = None
+    # result=UNDECIDED 인 끝남 프레임에만 싣는다: `{code, provider, message}`(app/qa/provider_error.py).
+    stop: dict | None = None
     # Knowledge this verdict actually rested on (ARTEL-293). Only a per-step frame
     # ever carries it, and only `report_step` fills it: knowledge bears on the
     # judgement of a step, not on an individual click. Attached to the acting tools

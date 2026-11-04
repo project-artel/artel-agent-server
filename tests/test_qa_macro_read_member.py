@@ -306,3 +306,98 @@ def test_the_answer_model_turns_a_refused_action_into_an_unresolvable_entry() ->
         "Game::Score",
     )
     assert [one.read for one in answered.values] == [True, False]
+
+
+def test_while_조건은_입력_후_read_member를_다시_조회한다() -> None:
+    fake = _game()
+    score = 0
+
+    def changed(game):
+        nonlocal score
+        score = 1
+        game.objects["Root/Enemy"]["text"] = "Changed"
+
+    fake.reactions[("press", "Root/Enemy")] = changed
+    fake.answers["read_member"] = lambda params: {"values": [{"value": score}]}
+    result = _run(fake, '\n'.join([
+        "def check() -> None:",
+        '    while static("Game.Score") == 0:',
+        '        click(selector("Root/Enemy"))',
+    ]))
+
+    assert result.failure is None
+    assert _sent(fake) == [("read_member", ["Game::Score"])] * 2
+    assert sum(method == "mouse_down" for method, _ in fake.actions) == 1
+
+
+@pytest.mark.parametrize("after_input", [False, True])
+def test_read_member_응답이_없으면_이전_조회값을_쓰지_않는다(after_input: bool) -> None:
+    fake = _game()
+    fake.reactions[("press", "Root/Enemy")] = lambda game: game.objects["Root/Enemy"].update(text="Changed")
+    calls = []
+
+    async def read_member(name):
+        calls.append(name)
+        return ReadMemberAnswer(values=[{"value": 0}]) if len(calls) == 1 else None
+
+    async def run():
+        fake.push_reading()
+        host = ChannelMacroHost(fake.channel, JevClient(post=FakeJev()), step=1)
+        host.read_member = read_member
+        first = 'def check() -> None:\n    require(static("Game.Score") == 0, "initial")\n'
+        if after_input:
+            source = first + '    click(selector("Root/Enemy"))\n    require(static("Game.Score") == 0, "after input")\n'
+        else:
+            previous = await run_macro(host, macro_definition_from_source("check", first), {}, step=1)
+            assert previous.failure is None
+            source = first
+        return await run_macro(host, macro_definition_from_source("check", source), {}, step=1)
+
+    result = asyncio.run(run())
+    assert result.failure.code == ACTION_REJECTED
+    assert calls == ["Game::Score", "Game::Score"]
+    assert "Game::Score" not in fake.channel.scene.pulse.read_members
+
+
+@pytest.mark.parametrize("function", [
+    'def ready(key: string) -> bool:\n    return static(key) == 7\n',
+    'def ready(key: string) -> bool:\n    local_key: string = "Game.Score"\n    return static(local_key) == 7\n',
+    'def score(key: string) -> int:\n    return static(key)\ndef ready(key: string) -> bool:\n    return score(key) == 7\n',
+    'def ready(key: string) -> bool:\n    local_key: string = static("Game.Key")\n    return static(local_key) == 7\n',
+])
+def test_def_내부_reader는_인자와_지역_scope에서_이름을_해석한다(function: str) -> None:
+    fake = _game()
+    fake.answers["read_member"] = lambda params: {"values": [{"value": "Game.Score" if params[0] == "Game::Key" else 7}]}
+    source = function + '\ndef check() -> None:\n    require(ready("Game.Score"), "score should be seven")\n'
+    result = _run(fake, source)
+    assert result.failure is None
+    assert ("read_member", ["Game::Score"]) in _sent(fake)
+
+
+def test_def_reader는_선택된_branch만_준비한다() -> None:
+    fake = _game()
+    fake.answers["read_member"] = lambda params: {"values": [{"value": 7}]}
+    source = '\n'.join([
+        'def ready(key: string) -> bool:',
+        '    if static("Game.Mode") == 7:',
+        '        return static(key) == 7',
+        '    return static("Game.Unchosen") == 7',
+        'def check() -> None:',
+        '    require(ready("Game.Score"), "should be ready")',
+    ])
+    assert _run(fake, source).failure is None
+    assert _sent(fake) == [("read_member", ["Game::Mode"]), ("read_member", ["Game::Score"])]
+
+
+def test_def_member_reader는_object_인자를_받은_scope에서_조회한다() -> None:
+    fake = _game()
+    fake.answers["read_member"] = _answer(values=[{"value": 7}])
+    source = '\n'.join([
+        'def ready(target: object, key: string) -> bool:',
+        '    return member(target, key) == 7',
+        'def check() -> None:',
+        '    enemy: object = find(name="Enemy")',
+        '    require(ready(enemy, "Enemy.Shield"), "should have shield")',
+    ])
+    assert _run(fake, source).failure is None
+    assert _sent(fake) == [("read_member", ["Enemy::Shield"])]

@@ -215,7 +215,8 @@ class QaExecutionService:
         with that scenario's qa_try_id) to its own deadline; a clean scenario
         closes itself with a terminal STATUS via `finish_run`, a cut-short one is
         closed here. A **failed scenario does not stop the run** — the next one
-        still runs (ARTEL-242). Only an operator CANCEL stops the whole run.
+        still runs (ARTEL-242). An operator CANCEL stops the whole run, and so does a
+        model API error that a retry cannot fix (ARTEL-1370, `app/qa/provider_error.py`).
         Between scenarios the ResetPolicy puts the game back so the next one starts
         from a known state.
         """
@@ -318,6 +319,31 @@ class QaExecutionService:
                 # ended. Report it and carry on to the next scenario.
                 # 테스트용 가짜 runner 는 state 가 `None` 일 수 있다.
                 failure_site = getattr(state, "failure_site", None)
+                provider_failure = getattr(state, "provider_failure", None)
+                if provider_failure is not None:
+                    # 다시 해도 같은 답이 오는 모델 API 오류다(ARTEL-1370). 남은 시나리오도 같은 이유로
+                    # 실패하므로 여기서 런을 멈춘다 — 다음 시나리오로 넘어가지 않고 게임도 초기화하지
+                    # 않는다. 시작하지 못한 시나리오는 orchestration 이 `stop` 을 보고 닫는다.
+                    await channel.emit(
+                        MessageType.ERROR,
+                        ErrorPayload(
+                            message=provider_failure.summary,
+                            code=provider_failure.code,
+                            retryable=False,
+                            detail=provider_failure.as_detail(),
+                            exception_type=failure_site.exception_type if failure_site else None,
+                            frames=failure_site.frames if failure_site else None,
+                        ),
+                    )
+                    await self._send_terminal(
+                        channel,
+                        StepStatus.FAILED,
+                        RunResult.UNDECIDED,
+                        provider_failure.summary,
+                        state,
+                        stop=provider_failure.as_stop(),
+                    )
+                    return
                 await channel.emit(
                     MessageType.ERROR,
                     ErrorPayload(
@@ -338,13 +364,14 @@ class QaExecutionService:
         result: RunResult | None,
         message: str,
         state=None,
+        stop: dict | None = None,
     ) -> None:
         # 정상 종료(finish_run)와 같은 2단 요약 형태(steps+cases)를 낸다 — 다운스트림이 종료
         # 사유마다 다른 스키마를 보지 않도록. build_summary가 유일한 생성 지점이다.
         summary = state.build_summary() if state is not None else None
         await channel.emit(
             MessageType.STATUS,
-            StatusPayload(status=status, result=result, message=message, summary=summary),
+            StatusPayload(status=status, result=result, message=message, summary=summary, stop=stop),
         )
 
     # --- inbound --------------------------------------------------------------

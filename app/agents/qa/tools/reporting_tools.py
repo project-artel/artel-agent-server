@@ -7,6 +7,7 @@ import httpx
 from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.tools.tool_context import ToolContext
+from app.agents.qa.case_context import render_case
 from app.agents.qa.tools.state import QaRunState
 from app.agents.qa.tools.game_function_tools import focus, stop_not_allowed_before, active_behaviors
 from app.agents.qa.macro.lift import draft_for_step, offer
@@ -50,7 +51,11 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             state.phase_cycle.expect_draft_review()
         return offer(draft)
 
-    @tool(description="TC 검증 전에 호출한다. case_id는 시나리오의 TC ID다. 같은 TC를 재검증할 때도 새 시도를 시작한다. step은 참고 절차이며 각 step을 보고할 의무는 없다.")
+    @tool(description="이 시나리오의 TC ID로 실행 당시 원문 snapshot을 조회한다. 사전 조건, 테스트 절차, 기대 결과와 제공된 사람 피드백을 읽는다. 모든 phase에서 사용할 수 있으며 검증 시도를 시작하거나 변경하지 않는다.")
+    async def get_test_case(case_id: int, thought: str) -> str:
+        return render_case(case_id, state, channel)
+
+    @tool(description="TC 검증 전에 호출하고 실행 당시 TC 원문을 읽는다. case_id는 시나리오의 TC ID다. 같은 TC를 재검증할 때도 새 시도를 시작한다. step은 참고 절차이며 각 step을 보고할 의무는 없다.")
     async def start_test_case(case_id: int, thought: str) -> str:
         step = state.step_of_case(case_id)
         if step is None:
@@ -60,11 +65,13 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             attempt = await channel.evaluation.start(case_id)
         except httpx.HTTPError:
             return "TC 검증 시작을 저장하지 못했습니다. 같은 start_test_case 호출로 재시도하세요."
+        state.current_case_id = case_id
         dispatch_starts.setdefault(case_id, len(state.dispatches))
         cheat_starts.setdefault(case_id, len(state.used_cheats))
         if arch.cheats == "on" or arch.behaviors == "on":
             focus(ctx, step)
-        return _answer(f"TC {case_id} 검증 시도를 시작했습니다: {attempt.id}. 검증 후 report_test_case를 호출하세요." + stopped, channel.drain_operator_messages())
+        return _answer(f"TC {case_id} 검증 시도를 시작했습니다: {attempt.id}. 검증 후 report_test_case를 호출하세요." + stopped
+                       + "\n" + render_case(case_id, state, channel), channel.drain_operator_messages())
 
     @tool(description="시작한 TC 검증 시도의 결과를 PASSED/FAILED/INCONCLUSIVE로 보고한다. step별 판정은 하지 않는다. 반복 검증은 새 시도로 보존한다. TC 실패 issue는 자동 생성된다. 판단할 증거가 부족하면 INCONCLUSIVE를 사용한다.")
     async def report_test_case(case_id: int, verdict: Literal["PASSED", "FAILED", "INCONCLUSIVE"],
@@ -104,6 +111,8 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         pending_reports.pop(case_id, None)
         state.case_attempt_results.append(QaCaseAttemptResult(attempt_id=str(attempt_id), case_id=case_id,
             verdict=verdict, message=pending[2]))
+        if state.current_case_id == case_id:
+            state.current_case_id = None
         start = dispatch_starts.pop(case_id, len(state.dispatches))
         cheat_starts.pop(case_id, None)
         draft = draft_for_attempt(case_id, start) if verdict == "PASSED" else ""
@@ -190,4 +199,4 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         await channel.say(message, step)
         return _answer("전송했습니다.", channel.drain_operator_messages())
 
-    return [start_test_case, report_test_case, ask_user, report_issue, finish_run, reply_to_operator]
+    return [start_test_case, report_test_case, ask_user, report_issue, finish_run, reply_to_operator, get_test_case]

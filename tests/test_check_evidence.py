@@ -111,8 +111,29 @@ def test_a_value_that_held_still_says_so_and_a_failed_reading_is_named() -> None
     assert "not by itself a sign the result is missing: Ghost.x" in drawn
 
 
-def test_without_a_state_set_nothing_is_read_and_the_evaluator_is_told_so() -> None:
+def test_pulse_memory_observations_reach_the_evaluator_without_state_set_values() -> None:
     play = _play_checked(_menu(), StepCheck(paths=("Root/Start",)), state_source="pulse_memory")
+
+    assert play.evidence == []
+    assert play.state_source == "pulse_memory"
+    assert "Root/Start" in play.start_screen and "Root/Stage" in play.end_screen
+    drawn = evidence_text(play)
+    assert f"Screen before play began:\n{play.start_screen}" in drawn
+    assert f"Screen when play stopped:\n{play.end_screen}" in drawn
+    assert "(no reading succeeded)" not in drawn
+
+
+def test_missing_pulse_memory_observations_are_reported_at_both_boundaries() -> None:
+    play = StepPlay("done", state_source="pulse_memory")
+
+    drawn = evidence_text(play)
+
+    assert "Screen before play began:\n(no reading available)" in drawn
+    assert "Screen when play stopped:\n(no reading available)" in drawn
+
+
+def test_state_set_without_successful_readings_still_reports_missing_evidence() -> None:
+    play = StepPlay("done", check=StepCheck(paths=("Root/Start",)), state_source="state_set")
 
     assert play.evidence == []
     assert "(no reading succeeded)" in evidence_text(play)
