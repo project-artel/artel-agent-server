@@ -316,6 +316,7 @@ def test_the_declarations_are_read_from_orchestration_and_a_failure_reads_none()
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/internal/projects/3/game-identities"
+        assert request.url.params["gameBuildId"] == "4"
         return httpx.Response(200, json={"identities": [{
             "name": "StageData.stagePosition", "kind": "ordinal", "base": 0, "meaning": "now", "changesWhen": "on entry",
             "identifies": "stage", "role": "current", "gameBuildId": "4", "version": 2,
@@ -323,7 +324,7 @@ def test_the_declarations_are_read_from_orchestration_and_a_failure_reads_none()
 
     async def go(transport: httpx.MockTransport):
         async with httpx.AsyncClient(transport=transport) as client:
-            return await fetch_game_identities(3, base_url="http://orch", client=client)
+            return await fetch_game_identities(3, base_url="http://orch", client=client, game_build_id=4)
 
     (identity,) = asyncio.run(go(httpx.MockTransport(handler)))
     assert identity.name == "StageData.stagePosition" and identity.role == "current" and identity.identifies == "stage"

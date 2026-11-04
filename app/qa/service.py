@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from pydantic import ValidationError
 
 from app.agents.planner_executer.facts import GameFacts, resolve_game_facts
-from app.agents.planner_executer.identities import GameIdentity, fetch_game_identities
+from app.agents.planner_executer.identities import GameIdentity, GameIdentitySnapshot, fetch_game_identities
 from app.agents.planner_executer.developer_macros import (
     NO_DEVELOPER_MACROS,
     LoadedDeveloperMacros,
@@ -127,6 +127,7 @@ class QaExecutionService:
         llm_key: LlmKey | None = None,
         cheats: list[GameFunctionEntry] | None = None,
         behaviors: list[GameFunctionEntry] | None = None,
+        game_identities: list[GameIdentitySnapshot] | None = None,
     ) -> tuple[str, RunConfig]:
         """Open a run-scoped session and return its id alongside what it will run with.
 
@@ -166,6 +167,7 @@ class QaExecutionService:
             llm_key=llm_key,
             cheats=cheats or [],
             behaviors=behaviors or [],
+            game_identities=game_identities,
         )
         await self._store.save(session_id, record)
         return session_id, run_config
@@ -235,7 +237,12 @@ class QaExecutionService:
             )
         # 대상 계약의 해석이 읽는 게임 값의 뜻. 계약을 켠 런만 읽는다.
         if arch.engine == "planner_executer" and arch.planner is not None and arch.planner.target_contract == "on":
-            runner_options["identities"] = await fetch_game_identities(record.project_id)
+            # 빈 snapshot도 확정된 입력이다. 최신 선언 재조회로 실행 도중 의미가 바뀌면 안 된다.
+            runner_options["identities"] = (
+                tuple(item.identity() for item in record.game_identities)
+                if record.game_identities is not None
+                else await fetch_game_identities(record.project_id, game_build_id=record.game_build_id)
+            )
         # 개발자가 선언한 fact·rule. `facts` 를 켠 런만 읽는다(orchestration, 또는 `qa_facts_dir` 의 로컬 덮어쓰기).
         if arch.engine == "planner_executer" and arch.planner is not None and arch.planner.facts == "on":
             runner_options["facts"] = await resolve_game_facts(record.project_id)
