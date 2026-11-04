@@ -11,7 +11,7 @@ import app.agents  # noqa: F401
 
 from app.llm import decision
 from app.qa import jev
-from app.qa.jev import JevClient, JevError
+from app.qa.jev import JevChoice, JevClient, JevError
 
 
 def _jev_without_typesafe_key(monkeypatch: pytest.MonkeyPatch, openrouter_key: str | None) -> None:
@@ -254,3 +254,29 @@ def test_cancelled_error_passes_through() -> None:
 
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(JevClient(post).choose("Choose.", {"yes": "Yes."}, {}))
+
+
+def test_choose_scored_keeps_the_scores_jev_returned() -> None:
+    async def post(body: dict) -> dict:
+        return {
+            "answers": {
+                "answer": {"choice": "heal", "confidence": 0.45, "probabilities": {"heal": 0.54, "attack": 0.46}}
+            }
+        }
+
+    chosen = asyncio.run(JevClient(post).choose_scored("Pick.", {"attack": "Hit.", "heal": "Rest."}, {}))
+
+    assert chosen == JevChoice("heal", 0.45, {"heal": 0.54, "attack": 0.46})
+
+
+@pytest.mark.parametrize(
+    "scores",
+    [{}, {"confidence": "high", "probabilities": "none"}, {"confidence": 1.5, "probabilities": {"heal": -1, "attack": True}}],
+)
+def test_choose_scored_keeps_the_choice_when_the_scores_are_missing_or_malformed(scores: dict) -> None:
+    async def post(body: dict) -> dict:
+        return {"answers": {"answer": {"choice": "heal", **scores}}}
+
+    chosen = asyncio.run(JevClient(post).choose_scored("Pick.", {"attack": "Hit.", "heal": "Rest."}, {}))
+
+    assert chosen == JevChoice("heal")

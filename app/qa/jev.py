@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal
 
 import httpx
@@ -49,6 +50,9 @@ class JevRequest(BaseModel):
 
 class JevChoiceAnswer(BaseModel):
     choice: str
+    # 판단을 보여 주는 값이라 형식이 어긋나도 답을 버리지 않는다. 읽는 쪽은 `_score` 를 거친다.
+    confidence: Any = None
+    probabilities: Any = None
 
 
 class JevNoulAnswer(BaseModel):
@@ -69,6 +73,28 @@ class JevNoulResponse(BaseModel):
     usage: JevUsage | None = None
 
 
+@dataclass(frozen=True)
+class JevChoice:
+    """Jev 의 선택과 그 점수. 결정 API 가 점수를 안 주면(다른 model 등) 비어 있다."""
+
+    choice: str
+    confidence: float | None = None
+    probabilities: dict[str, float] | None = None
+
+
+def _score(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
+        return None
+    return float(value)
+
+
+def _scores(value: Any) -> dict[str, float] | None:
+    if not isinstance(value, dict):
+        return None
+    scores = {name: score for name, raw in value.items() if (score := _score(raw)) is not None}
+    return scores or None
+
+
 class JevClient:
     def __init__(self, post: Callable[[dict], Awaitable[dict]] | None = None) -> None:
         self._post_call = post or self._post
@@ -77,6 +103,11 @@ class JevClient:
     async def choose(
         self, instructions: str, options: dict[str, str], state: dict[str, Any]
     ) -> str:
+        return (await self.choose_scored(instructions, options, state)).choice
+
+    async def choose_scored(
+        self, instructions: str, options: dict[str, str], state: dict[str, Any]
+    ) -> JevChoice:
         request = JevRequest(
             state=state,
             questions={
@@ -92,13 +123,14 @@ class JevClient:
         response = await self._send(request)
         try:
             answer = JevChoiceResponse.model_validate(response)
-            choice = answer.answers["answer"].choice
+            picked = answer.answers["answer"]
+            choice = picked.choice
         except (ValidationError, KeyError) as error:
             raise JevError("Jev choice response is missing a valid answers.answer.choice.") from error
         if choice not in options:
             raise JevError(f"Jev chose an unknown option: {choice!r}.")
         self._log_cost(answer.usage)
-        return choice
+        return JevChoice(choice, _score(picked.confidence), _scores(picked.probabilities))
 
     async def probability(
         self, instructions: str, state: dict[str, Any], true_means: str, false_means: str
