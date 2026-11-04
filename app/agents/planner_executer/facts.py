@@ -6,7 +6,8 @@ fact 는 게임 값 하나에 플레이어 말의 이름과 뜻을 붙인 것이
 
 rule 은 값과 행동의 관계를 말하는 게임 지식이다. planner 만 읽는다. 행동 결정 코드로 바꾸지 않는다.
 
-PoC 단계라 선언은 로컬 파일(`qa_facts_dir` 의 `facts.json`·`rules.json`)에서 읽는다. MCP 등록은 별도 작업이다.
+선언은 개발자 에이전트가 MCP(`modify_facts`·`modify_rules`)로 orchestration 에 등록하고, 런 시작 때 내부 API 로 읽는다.
+`qa_facts_dir` 이 있으면 그 디렉터리의 `facts.json`·`rules.json` 을 대신 읽는다 — 로컬에서 선언을 바꿔 보는 덮어쓰기다.
 """
 
 from __future__ import annotations
@@ -17,15 +18,20 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+import httpx
 
 from app.agents.qa.macro.errors import MacroRejection
+from app.config import get_settings
 
 if TYPE_CHECKING:
     from app.qa.channel import QaRunChannel
 
 logger = logging.getLogger(__name__)
 
+GAME_FACTS_PATH = "/internal/projects/{project_id}/game-facts"
+GAME_FACTS_TIMEOUT_SECONDS = 10.0
 FACTS_FILE = "facts.json"
 RULES_FILE = "rules.json"
 # fact 이름은 선언과 guidance 에서 그대로 쓰인다.
@@ -59,8 +65,10 @@ class GameRule:
 class GameFacts:
     facts: tuple[GameFact, ...]
     rules: tuple[GameRule, ...]
-    # 선언 두 파일의 내용 hash. 런 기록에 남겨 어떤 선언으로 돌았는지 가린다.
+    # 선언의 내용 hash. 런 기록에 남겨 어떤 선언으로 돌았는지 가린다.
     revision: str
+    # 어디서 읽었나: `orchestration`(MCP 로 등록한 것) 또는 `local`(`qa_facts_dir`). 읽은 것이 없으면 빈 글이다.
+    origin: str = ""
 
     def get(self, name: str) -> GameFact | None:
         return next((fact for fact in self.facts if fact.name == name), None)
@@ -75,13 +83,59 @@ def load_game_facts(directory: str | None) -> GameFacts:
         return NO_FACTS
     root = Path(directory)
     try:
-        facts_raw = (root / FACTS_FILE).read_bytes()
+        facts_json = json.loads((root / FACTS_FILE).read_bytes())
         rules_path = root / RULES_FILE
-        rules_raw = rules_path.read_bytes() if rules_path.exists() else b"[]"
-        facts_json, rules_json = json.loads(facts_raw), json.loads(rules_raw)
+        rules_json = json.loads(rules_path.read_bytes()) if rules_path.exists() else []
     except (OSError, ValueError) as error:
         logger.warning("[QA] game facts not loaded from %s: %s", directory, error)
         return NO_FACTS
+    return build_game_facts(facts_json, rules_json, origin="local")
+
+
+async def fetch_game_facts(
+    project_id: int | None,
+    base_url: str | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> GameFacts:
+    """orchestration 에 등록된 프로젝트의 fact·rule. 어떤 이유로든 못 읽으면 `NO_FACTS` 이고 log 를 남긴다 — 조회 하나로
+    런이 시작하지 못하면 안 된다(`identities.fetch_game_identities` 와 같다)."""
+    if project_id is None:
+        return NO_FACTS
+    root = base_url if base_url is not None else get_settings().orchestration_base_url
+    if not root:
+        return NO_FACTS
+    url = root.rstrip("/") + GAME_FACTS_PATH.format(project_id=project_id)
+    try:
+        if client is not None:
+            response = await client.get(url)
+        else:
+            async with httpx.AsyncClient(timeout=GAME_FACTS_TIMEOUT_SECONDS) as owned:
+                response = await owned.get(url)
+        response.raise_for_status()
+        body = response.json()
+        # 내부 API 는 `scope`·`member` 를 펼쳐 싣는다. 로컬 선언 파일과 같은 모양으로 바꿔 같은 검사를 거친다.
+        facts_json = [
+            {"name": item.get("name"), "source": {"scope": item.get("scope"), "member": item.get("member")},
+             "type": item.get("type"), "unit": item.get("unit"), "means": item.get("means")}
+            for item in body.get("facts") or []
+        ]
+        rules_json = [{"name": item.get("name"), "says": item.get("says"), "facts": item.get("facts")} for item in body.get("rules") or []]
+    except Exception as error:  # noqa: BLE001 - 조회 하나로 런이 시작하지 못하면 안 된다
+        logger.warning("[QA] game facts unavailable, running without them: %s", error)
+        return NO_FACTS
+    return build_game_facts(facts_json, rules_json, origin="orchestration")
+
+
+async def resolve_game_facts(project_id: int | None) -> GameFacts:
+    """런이 읽을 선언. `qa_facts_dir` 이 있으면 그 디렉터리를, 없으면 orchestration 을 읽는다."""
+    directory = get_settings().qa_facts_dir
+    if directory:
+        return load_game_facts(directory)
+    return await fetch_game_facts(project_id)
+
+
+def build_game_facts(facts_json: list[Any], rules_json: list[Any], *, origin: str) -> GameFacts:
+    """선언 목록을 검사해 `GameFacts` 로. 규칙에 어긋난 fact, 선언되지 않은 fact 를 가리키는 rule 은 빼고 log 를 남긴다."""
     facts: list[GameFact] = []
     for item in facts_json:
         problem = _fact_problem(item, {fact.name for fact in facts})
@@ -99,8 +153,17 @@ def load_game_facts(directory: str | None) -> GameFacts:
             logger.warning("[QA] game rule skipped: %s (facts not declared: %s)", item.get("name"), missing)
             continue
         rules.append(GameRule(item["name"], item["says"], refs))
-    revision = hashlib.sha256(facts_raw + b"\0" + rules_raw).hexdigest()[:12]
-    return GameFacts(tuple(facts), tuple(rules), revision)
+    if not facts and not rules:
+        return NO_FACTS
+    # orchestration 은 이름순으로, 로컬 파일은 적은 순서로 준다. 같은 선언이면 출처와 상관없이 같은 결과(와 revision)가 되게 정렬한다.
+    facts.sort(key=lambda fact: fact.name)
+    rules.sort(key=lambda rule: rule.name)
+    canonical = json.dumps(
+        [[f.name, f.scope, f.member, f.type, f.unit, f.means] for f in facts] + [[r.name, r.says, list(r.facts)] for r in rules],
+        ensure_ascii=False,
+    )
+    revision = hashlib.sha256(canonical.encode()).hexdigest()[:12]
+    return GameFacts(tuple(facts), tuple(rules), revision, origin)
 
 
 def _fact_problem(item: dict, taken: set[str]) -> str | None:
