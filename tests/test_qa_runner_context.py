@@ -110,6 +110,7 @@ def scripted_run(
     monkeypatch: pytest.MonkeyPatch,
     observations: int = 4,
     fold_threshold_chars: int | None = None,
+    batched_finish: bool = False,
 ) -> tuple[ScriptedModel, QaRunChannel, list[dict]]:
     """`observations` observations, a verdict and a close, against a model that
     records every message list it was handed.
@@ -136,30 +137,19 @@ def scripted_run(
         }
         for index in range(1, observations + 1)
     ]
-    model = ScriptedModel(
-        turns=[
-            *looks,
-            {
-                "tool_calls": [
-                    {
-                        "name": "report_test_case",
-                        "args": {"case_id": 1, "verdict": "PASSED", "message": "화면 확인함", "thought": "판정"},
-                        "id": "report",
-                    }
-                ]
-            },
-            {
-                "tool_calls": [
-                    {
-                        "name": "finish_run",
-                        "args": {"passed": True, "summary": "통과", "thought": "종료"},
-                        "id": "finish",
-                    }
-                ]
-            },
-            {"content": "done"},
-        ]
-    )
+    report = {
+        "name": "report_test_case",
+        "args": {"case_id": 1, "verdict": "PASSED", "message": "화면 확인함", "thought": "판정"},
+        "id": "report",
+    }
+    finish = {
+        "name": "finish_run",
+        "args": {"passed": True, "summary": "통과", "thought": "종료"},
+        "id": "finish",
+    }
+    # 실제 런은 마지막 판정과 끝내기를 한 턴에 함께 부르곤 한다(런 63).
+    closing = [{"tool_calls": [report, finish]}] if batched_finish else [{"tool_calls": [report]}, {"tool_calls": [finish]}]
+    model = ScriptedModel(turns=[*looks, *closing, {"content": "done"}])
     monkeypatch.setattr(
         "app.agents.qa.runner.build_chat_model",
         lambda _model, reasoning=None, **_: model,
@@ -176,7 +166,8 @@ def scripted_run(
 
     assert state.finished
     assert len(state.case_attempt_results) == 1
-    assert len(model.received) >= observations + 2
+    # 관측 턴들 + 판정 턴 + 끝내기 턴. 판정과 끝내기를 한 턴에 부르면 하나 적다.
+    assert len(model.received) >= observations + (1 if batched_finish else 2)
     return model, channel, sent
 
 
@@ -320,3 +311,25 @@ def test_컨텍스트_분해가_런을_죽이지_않는다():
 
     # `messages` 가 없는 request 여도 호출이 지나간다.
     asyncio.run(_log_token_usage.awrap_model_call(object(), handler))
+
+
+def test_finish_run_뒤로는_모델을_다시_부르지_않는다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """끝낸 뒤 마무리 글을 받으려고 대화 전체를 한 번 더 보내지 않는다(런 60: 9만 토큰, 8초)."""
+    model, _channel, _sent = scripted_run(monkeypatch)
+
+    saw_finish = [
+        received for received in model.received
+        if any(isinstance(m, ToolMessage) and m.tool_call_id == "finish" for m in received)
+    ]
+    assert saw_finish == []
+
+
+def test_finish_run_을_다른_도구와_함께_불러도_모델을_다시_부르지_않는다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`create_agent` 는 한 턴의 도구가 모두 `return_direct` 일 때만 끝낸다. 판정과 함께 부른 끝내기에도 멈춰야 한다(런 63: 7초)."""
+    model, _channel, _sent = scripted_run(monkeypatch, batched_finish=True)
+
+    saw_finish = [
+        received for received in model.received
+        if any(isinstance(m, ToolMessage) and m.tool_call_id == "finish" for m in received)
+    ]
+    assert saw_finish == []
