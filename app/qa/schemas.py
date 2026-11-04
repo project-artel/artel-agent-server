@@ -1,6 +1,7 @@
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
+from app.agents.planner_executer.identities import GameIdentitySnapshot
 
 from app.llm.credentials import LlmKey
 from app.qa.envelope import QaChatTurn
@@ -121,6 +122,8 @@ class QaSessionRecord(BaseModel):
     # 블록 없이 돈다. orchestration 은 세션 open 에 둘을 싣는다.
     project_id: int | None = None
     game_build_id: int | None = None
+    # None은 이전 프로토콜이고 []는 확정된 빈 snapshot이다. 최신 선언으로 바꾸지 않는다.
+    game_identities: list[GameIdentitySnapshot] | None = None
     # The run's scenarios, executed in order — each carries its own qa_try_id.
     scenarios: list[QaRunScenario]
     # Settled at open, not at run start: the run has to be attributable from the

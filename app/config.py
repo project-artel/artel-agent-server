@@ -130,7 +130,7 @@ class Settings(BaseSettings):
     # 같은 TC 의 사람 판정 기록을 QA 첫 메시지에 싣는가(ARTEL-1257). 영향 실측에서 실은 런과 안 실은
     # 런을 같은 시나리오로 비교하려고 둔 스위치다. 끄면 orchestration 이 보내도 첫 메시지가 기록 없는 런과 같다.
     qa_human_review: bool = True
-    # fact·rule 선언(`facts.json`·`rules.json`)이 있는 디렉터리. PoC 단계의 로컬 선언이다.
+    # fact·rule 선언(`facts.json`·`rules.json`)이 있는 디렉터리. 있으면 orchestration 에 등록된 선언 대신 이것을 읽는다(로컬 덮어쓰기).
     qa_facts_dir: str | None = None
     # Versioned separately from `qa_prompt_version`: the summarizing prompt is a
     # different call to a different model, and rolling one back must not roll
