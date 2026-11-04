@@ -744,3 +744,17 @@ def test_a_run_pinned_to_v3_is_not_asked_for_game_insight() -> None:
     assert '"game_insight"' not in seen[0][0]
 
 
+def test_a_turn_records_the_scores_jev_gave_its_pick() -> None:
+    class Scored(FakeJev):
+        async def __call__(self, body: dict) -> dict:
+            answer = await super().__call__(body)
+            if body["questions"]["answer"]["type"] == "choice":
+                answer["answers"]["answer"].update(confidence=0.81, probabilities={"press_start": 0.86, "none_fits": 0.14})
+            return answer
+
+    play = _play(_menu(), Scored())
+    scored, unscored = play.turns[0], _play(_menu(), FakeJev()).turns[0]
+
+    assert scored["confidence"] == 0.81
+    assert scored["probabilities"] == {"press_start": 0.86, "none_fits": 0.14}
+    assert "confidence" not in unscored and "probabilities" not in unscored
