@@ -2,10 +2,11 @@
 
 import json
 import re
+from uuid import uuid4
 from typing import TYPE_CHECKING
 
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import BaseMessage, HumanMessage, RemoveMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 
 if TYPE_CHECKING:
     from app.agents.qa.tools.state import QaRunState
@@ -13,9 +14,20 @@ if TYPE_CHECKING:
 
 TC_DETAIL_BUDGET = 4_000
 TC_LEDGER_ID = "qa-tc-ledger"
+# 지난 장부를 접은 자리. 장부는 바뀔 때마다 새로 덧붙이고 지난 것은 지우지 않는다 — 대화 중간의 메시지를
+# 지우거나 고치면 그 뒤가 전부 프롬프트 캐시에서 빠진다(런 60: 호출 81번 중 캐시를 읽은 것이 손에 꼽았다).
+SUPERSEDED_LEDGER = "[Earlier TC ledger, superseded by the newest AUTHORITATIVE TC LEDGER further down.]"
+# 지난 장부와 지난 TC 상세가 이만큼 쌓였을 때만 한 번에 접는다. 접을 때마다 그 뒤가 캐시에서 빠지므로,
+# 매번 접지 않고 묶어서 접어 캐시가 깨지는 횟수를 줄인다.
+CONTEXT_FOLD_BATCH = 4
 DETAIL_START = "<<test case details "
 DETAIL_END = "<<end test case details>>"
 DETAIL_PATTERN = re.compile(re.escape(DETAIL_START) + r"(?P<id>\d+|plan)>>\n.*?" + re.escape(DETAIL_END), re.DOTALL)
+
+
+def is_ledger(message: BaseMessage) -> bool:
+    """TC 장부 메시지인가. 장부마다 id 가 달라서(덧붙이므로) 앞머리로 가린다."""
+    return bool(message.id) and message.id.startswith(TC_LEDGER_ID)
 
 
 def case_ids(state: "QaRunState") -> list[int]:
@@ -79,14 +91,14 @@ def fold_case_details(messages: list[BaseMessage], current_case_id: int | None =
     latest = None
     if not for_summary:
         for index, message in enumerate(messages):
-            if message.id == TC_LEDGER_ID or not isinstance(message.content, str):
+            if is_ledger(message) or not isinstance(message.content, str):
                 continue
             for match in DETAIL_PATTERN.finditer(message.content):
                 if match.group("id") != "plan":
                     latest = (index, match.start())
     result = []
     for index, message in enumerate(messages):
-        if message.id == TC_LEDGER_ID:
+        if is_ledger(message):
             if not for_summary:
                 result.append(message)
             continue
@@ -110,7 +122,12 @@ def fold_case_details(messages: list[BaseMessage], current_case_id: int | None =
 
 
 class QaCaseContextMiddleware(AgentMiddleware):
-    """상태가 바뀔 때만 ledger를 교체해 graph에 저장한다."""
+    """상태가 바뀔 때만 새 ledger 를 덧붙여 graph 에 저장한다.
+
+    **지난 ledger 를 지우지 않는다.** 예전에는 지난 것을 지우고 끝에 새로 붙였는데, 대화 중간의 메시지가
+    사라지면 그 뒤가 전부 프롬프트 캐시에서 빠지고 thinking block 도 무효가 된다. 지난 ledger 와 지난 TC
+    상세는 [CONTEXT_FOLD_BATCH] 개가 쌓였을 때 한 번에 접는다.
+    """
 
     def __init__(self, state: "QaRunState", channel: "QaRunChannel") -> None:
         self.state = state
@@ -119,10 +136,23 @@ class QaCaseContextMiddleware(AgentMiddleware):
     async def abefore_model(self, state, runtime):
         messages = state["messages"]
         content = render_case_ledger(self.state, self.channel)
-        previous = next((message for message in messages if message.id == TC_LEDGER_ID), None)
-        changes = [new for old, new in zip(messages, fold_case_details(messages, self.state.current_case_id)) if new is not old]
-        if previous is None or previous.content != content:
-            if previous is not None:
-                changes.append(RemoveMessage(id=TC_LEDGER_ID))
-            changes.append(HumanMessage(id=TC_LEDGER_ID, content=content))
+        ledgers = [message for message in messages if is_ledger(message)]
+        appended = None
+        if not ledgers or ledgers[-1].content != content:
+            appended = HumanMessage(id=f"{TC_LEDGER_ID}-{uuid4().hex[:12]}", content=content)
+        # 새 것을 붙이면 지금 가장 새 ledger 도 지난 것이 된다.
+        superseded = ledgers if appended is not None else ledgers[:-1]
+        stale_ledgers = [message for message in superseded if message.content != SUPERSEDED_LEDGER]
+        folded = fold_case_details(messages, self.state.current_case_id)
+        stale_details = sum(
+            len(DETAIL_PATTERN.findall(old.content)) - len(DETAIL_PATTERN.findall(new.content))
+            for old, new in zip(messages, folded)
+            if new is not old and isinstance(old.content, str)
+        )
+        changes: list[BaseMessage] = []
+        if len(stale_ledgers) + stale_details >= CONTEXT_FOLD_BATCH:
+            changes += [new for old, new in zip(messages, folded) if new is not old]
+            changes += [message.model_copy(update={"content": SUPERSEDED_LEDGER}) for message in stale_ledgers]
+        if appended is not None:
+            changes.append(appended)
         return {"messages": changes} if changes else None

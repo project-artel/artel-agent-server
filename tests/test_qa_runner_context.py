@@ -245,11 +245,14 @@ def test_아무것도_모델_뒤에_덧붙지_않는다(
     # 첫 호출은 시스템 프롬프트와 시나리오뿐이다. 아직 도구를 부른 적이 없다.
     assert isinstance(first[-1], HumanMessage)
 
-    # 그 뒤로는 매번 도구 결과가 마지막이다. 미들웨어가 뒤에 얹었다면 그것이 마지막일
-    # 것이고, 이 검사가 그것을 잡는다.
+    # 그 뒤로는 매번 앞 요청이 다음 요청의 접두로 그대로 남는다. 미들웨어가 꼬리를 얹었다가
+    # 다음 호출에서 빼거나, 중간 메시지를 지우거나 고쳤다면 이 검사가 그것을 잡는다. TC 장부처럼
+    # 그래프에 덧붙여 계속 남는 메시지는 접두를 깨지 않는다.
     assert rest, "루프가 한 번도 안 돌았다면 이 검사가 아무것도 안 지킨다"
-    for received in rest:
-        assert isinstance(received[-1], ToolMessage), type(received[-1]).__name__
+    def form(message):
+        return (type(message).__name__, str(message.content), getattr(message, "tool_call_id", None))
+    for before, after in zip(model.received, rest):
+        assert [form(m) for m in after[: len(before)]] == [form(m) for m in before]
 
 
 async def _swallow(frame: dict) -> None:
