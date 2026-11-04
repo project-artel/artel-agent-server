@@ -45,6 +45,7 @@ from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.context import FoldKind, fold_every_stale_block
 from app.agents.qa.case_context import TC_LEDGER_ID, fold_case_details, render_case_ledger
+from app.agents.qa.question_policy import USER_QUESTION_POLICY
 from app.agents.qa.tools import QaRunState
 from app.prompts import load_tool_description
 from app.qa.channel import QaRunChannel
@@ -124,7 +125,8 @@ def render_progress_ledger(state: QaRunState, channel: QaRunChannel) -> str:
     for result in state.case_attempt_results:
         lines.append(f"  TC {result.case_id}, attempt {result.attempt_id}: {result.verdict} — {result.message}")
     lines.append("The separate authoritative TC ledger supplies all IDs and current progress.")
-    lines.append("Use start_test_case before each attempt and report_test_case for its outcome. Use ask_user when guidance is needed.")
+    lines.append("Use start_test_case before each attempt and report_test_case for its outcome.")
+    lines.append(USER_QUESTION_POLICY)
 
     # 압축이 바로 그 순간이다. 앞의 상세가 여기서 사라지므로, 그것으로만 알 수 있던 것을
     # 남길 마지막 기회다 — 넘어가면 "이 게임은 키가 아니라 축으로 읽는다" 를 알아낸 판독도

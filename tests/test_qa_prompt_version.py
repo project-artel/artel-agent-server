@@ -1113,3 +1113,48 @@ def test_current_tc_prompt_preserves_the_recorded_tc_contract() -> None:
     for role in roles_in("qa_run", "v30"):
         assert load_prompt("qa_run", role, "v35").body == load_prompt("qa_run", role, "v30").body
     assert "report_test_case" in load_prompt("qa_run", "system", "v35").body
+
+@pytest.mark.parametrize("version", ["v1", "v42", resolve_version("qa_run")])
+def test_user_question_policy_reaches_the_final_system_and_tc_plan(version, stubbed_agent, monkeypatch):
+    from app.agents.qa.question_policy import USER_QUESTION_POLICY
+    captured = []
+
+    def create_agent(**arguments):
+        captured.append(arguments)
+        return SilentAgent()
+
+    monkeypatch.setattr(runner_module, "create_agent", create_agent)
+
+    async def send(_frame):
+        return None
+
+    asyncio.run(QaRunner(resolve_run_config(
+        prompt_version=version, arch=QaArchSpec(phase_cycle=PhaseCycleMode.off)
+    )).run(QaRunChannel(qa_try_id=7, send=send), make_scenario(), QaRunState(total_steps=1)))
+
+    assert len(captured) == 1
+    system = captured[0]["system_prompt"]
+    assert USER_QUESTION_POLICY in system
+    assert "overrides any earlier instruction" in system
+    assert system.rfind(USER_QUESTION_POLICY) > system.rfind("ask_user sends the question")
+    assert USER_QUESTION_POLICY in runner_module._plan(make_scenario())
+    assert "Ask the user with ask_user if you do not know how to proceed" not in runner_module._plan(make_scenario())
+
+
+def test_question_policy_preserves_tool_arguments_and_pause_contract():
+    from app.agents.qa.question_policy import ASK_USER_DESCRIPTION
+    channel = QaRunChannel(qa_try_id=7, send=_ignore)
+    tools = {tool.name: tool for tool in build_tools(channel, QaRunState(total_steps=1))}
+    question = tools["ask_user"]
+    assert set(question.args) == {"question", "thought"}
+    assert question.description == ASK_USER_DESCRIPTION
+    for instruction in ("게임 의도", "기대 결과", "사람의 게임 내 작업", "agent 코드", "workflow", "INCONCLUSIVE", "첫 답변까지", "시간 제한은 없고"):
+        assert instruction in question.description
+
+
+def test_compacted_context_keeps_the_same_question_policy():
+    from app.agents.qa.compaction import render_progress_ledger
+    from app.agents.qa.question_policy import USER_QUESTION_POLICY
+    ledger = render_progress_ledger(QaRunState(total_steps=1), QaRunChannel(qa_try_id=7, send=_ignore))
+    assert USER_QUESTION_POLICY in ledger
+    assert "Use ask_user when guidance is needed" not in ledger

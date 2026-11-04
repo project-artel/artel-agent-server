@@ -8,6 +8,7 @@ from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.tools.tool_context import ToolContext
 from app.agents.qa.case_context import render_case
+from app.agents.qa.question_policy import ASK_USER_DESCRIPTION
 from app.agents.qa.tools.state import QaRunState
 from app.agents.qa.tools.game_function_tools import focus, stop_not_allowed_before, active_behaviors
 from app.agents.qa.macro.lift import draft_for_step, offer
@@ -125,7 +126,7 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
                 body += f"\n\n{deferred}"
         return _answer(body, channel.drain_operator_messages(), screen=arch.report_step_view)
 
-    @tool(description="진행 방법을 모르면 사용자에게 질문한다. 첫 답변까지 QA 전체를 일시 정지한다. 대기 시간 제한은 없고 사용자가 QA를 종료할 수 있다.")
+    @tool(description=ASK_USER_DESCRIPTION)
     async def ask_user(question: str, thought: str) -> str:
         answer = await channel.evaluation.ask(question, lambda: channel.cancelled)
         channel.operator_instructions.append(answer)
