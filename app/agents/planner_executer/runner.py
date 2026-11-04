@@ -81,6 +81,7 @@ from app.qa.envelope import (
     StepStatus,
 )
 from app.qa.jev import JevClient
+from app.qa.provider_error import classify_provider_error
 from app.qa.run_config import RunConfig
 from app.qa.schemas import QaScenario
 
@@ -139,6 +140,7 @@ class PlannerExecuterRunner:
         except QaCancelled:
             return state, None
         except Exception as error:  # noqa: BLE001 - the reason has to reach the timeline
+            state.provider_failure = classify_provider_error(error)
             return state, f"The run stopped on an error: {type(error).__name__}: {error}"
         finally:
             if self._jev is None:

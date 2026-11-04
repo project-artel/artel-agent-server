@@ -14,6 +14,7 @@ from app.agents.qa.macro.session import MacroSession
 from app.qa.jev import JevClient
 from app.qa.envelope import ActionResultItem, JsonRpcAction
 from app.qa.failure_site import FailureSite
+from app.qa.provider_error import ProviderFailure
 from app.qa.game_functions import CaseFunctions, UsedCheat
 from app.qa.schemas import QaStepResult, QaCaseAttemptResult
 
@@ -121,6 +122,9 @@ class QaRunState:
         # run 이 예외나 timeout 으로 멈췄을 때 `run_with_deadline` 이 채운다. 취소와
         # "닫지 않고 멈춤" 은 예외가 아니므로 `None` 으로 남는다.
         self.failure_site: FailureSite | None = None
+        # 런을 멈출 제공사 오류(ARTEL-1370). `run_with_deadline` 이 예외를 가를 때 채운다. 이것이 있으면
+        # run 루프는 이 시나리오를 미판정으로 닫고 남은 시나리오를 돌리지 않는다.
+        self.provider_failure: ProviderFailure | None = None
         # The observation the agent last saw, so the next look is a diff.
         self.watermark = 0
         # 마지막 행위가 끝난 Unity 프레임. 판독의 창이 여기서 시작한다 — 타이머가 아니라

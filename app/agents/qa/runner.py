@@ -37,6 +37,7 @@ from app.prompts import load_prompt, load_skill, skill_descriptions, skill_names
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory
 from app.qa.failure_site import failure_site_of
+from app.qa.provider_error import classify_provider_error
 from app.qa.game_functions import render_catalog
 from app.qa.reach import UnreachedJudge
 from app.qa.relevance import PulseRelevanceJudge
@@ -921,6 +922,7 @@ class QaRunner:
             return state, None
         except Exception as error:  # noqa: BLE001 - the reason has to reach the timeline
             state.failure_site = failure_site_of(error)
+            state.provider_failure = classify_provider_error(error)
             return state, f"The run stopped on an error: {error}"
         finally:
             # `checkpoint` 에서 멈춘 채 남은 macro 를 끊는다. 눌러 둔 것은 없다 — parser 가
