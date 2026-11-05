@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "Artel Agent Server"
-    app_version: str = "0.1.0"
+    app_version: str = "0.2.0"
     environment: str = Field(default="local", validation_alias="APP_ENV")
     # 채팅이 말을 거는 곳. **provider 이름을 달지 않는다** — 이 값은 OpenRouter 를
     # 가리킬 수도, 여러 provider 를 함께 서빙하는 gateway 를 가리킬 수도 있다.
