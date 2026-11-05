@@ -1,0 +1,1640 @@
+"""판독 채널을 받아 상태의 출처로 삼는다 (ARTEL-401).
+
+병합 규칙의 출처는 SDK 의 판독 뷰어(`artel-sdk/tools/watch-readings.py`)다. 이 채널을 읽는
+쪽이 둘뿐이고, 둘이 델타를 다르게 해석하면 어느 한쪽이 틀린 것보다 나쁘다.
+"""
+
+from app.qa.envelope import MessageType
+from app.qa.pulse import (
+    MAX_CHANGED_NAMED,
+    MAX_READING_LOG,
+    MAX_SCREEN_TEXT,
+    PulseMemory,
+    PulseReading,
+)
+from app.qa.scene import SceneMemory
+from app.qa.service import QaExecutionService
+from app.qa.store import InMemoryQaSessionStore
+
+
+def reading(**over) -> dict:
+    base = {
+        "schema": 2,
+        "reading": 1,
+        "frame": 100,
+        "scene": "TurnBattleScene",
+        "whole": True,
+        "statics": [],
+        "active": [],
+        "deactive": [],
+        "changed": [],
+        "watching": 3,
+        "unresolved": 0,
+        "unwatchable": 1126,
+    }
+    base.update(over)
+    return base
+
+
+def obj(selector="Canvas[2]/continue[1]", **over) -> dict:
+    base = {
+        "scene": "TurnBattleScene",
+        "id": 26168,
+        "path": "Canvas/continue",
+        "selector": selector,
+        "members": [
+            {"on": "Battle.Turns.TurnBattleSystem", "member": "turn", "value": 2, "asked": True}
+        ],
+    }
+    base.update(over)
+    return base
+
+
+def fold(*docs: dict) -> PulseMemory:
+    memory = PulseMemory()
+    for doc in docs:
+        memory.apply(PulseReading.model_validate(doc))
+    return memory
+
+
+def test_전량_판독이_들고_있던_것을_갈아치운다():
+    memory = fold(
+        reading(active=[obj(selector="A")]),
+        reading(reading=2, whole=True, active=[obj(selector="B")]),
+    )
+
+    assert [held.selector for held in memory.held.values()] == ["B"]
+    assert memory.wholes == 2
+
+
+def test_델타는_직전_상태_위에_얹힌다():
+    memory = fold(
+        reading(active=[obj(selector="A"), obj(selector="B")]),
+        # B 만 움직였다고 말하는 델타. A 는 말하지 않으므로 그대로 남아야 한다.
+        # `on` 을 첫 판독과 같게 두는 것이 요점이다 — 키가 `on::member#among` 이라
+        # 다르게 쓰면 덮어쓰기가 아니라 다른 멤버가 하나 더 생긴다.
+        reading(
+            reading=2,
+            whole=False,
+            active=[
+                obj(
+                    selector="B",
+                    members=[
+                        {
+                            "on": "Battle.Turns.TurnBattleSystem",
+                            "member": "turn",
+                            "value": 9,
+                        }
+                    ],
+                )
+            ],
+            changed=["B|turn"],
+        ),
+    )
+
+    assert sorted(held.selector for held in memory.held.values()) == ["A", "B"]
+    b = next(h for h in memory.held.values() if h.selector == "B")
+    assert [m.value for m in b.members.values()] == [9]
+    # A 는 델타가 말하지 않았으므로 값이 그대로다.
+    a = next(h for h in memory.held.values() if h.selector == "A")
+    assert [m.value for m in a.members.values()] == [2]
+
+
+def test_아무_말도_없는_객체는_있던_목록에_그대로_남는다():
+    memory = fold(
+        reading(deactive=[obj(selector="Off")]),
+        reading(reading=2, whole=False, active=[obj(selector="On")]),
+    )
+
+    off = next(h for h in memory.held.values() if h.selector == "Off")
+    on = next(h for h in memory.held.values() if h.selector == "On")
+    assert off.live is False
+    assert on.live is True
+
+
+def test_같은_객체가_목록을_옮기면_그것이_따라간다():
+    memory = fold(
+        reading(active=[obj(selector="X")]),
+        reading(reading=2, whole=False, deactive=[obj(selector="X")]),
+    )
+
+    assert next(iter(memory.held.values())).live is False
+
+
+def test_창_안_변화_횟수가_쌓인다():
+    memory = fold(
+        reading(changed=["StageManager.turn"]),
+        reading(reading=2, whole=False, changed=["StageManager.turn", "CardManager.hand"]),
+        reading(reading=3, whole=False, changed=["StageManager.turn"]),
+    )
+
+    assert memory.moves["StageManager.turn"] == 3
+    assert memory.moves["CardManager.hand"] == 1
+
+
+def test_판독이_들어온_순서대로_남는다():
+    memory = fold(
+        reading(reading=1, changed=["a"]),
+        reading(reading=2, whole=False, changed=["b"]),
+        reading(reading=3, whole=False, changed=[]),
+    )
+
+    assert [entry.reading for entry in memory.log] == [1, 2, 3]
+    assert [entry.whole for entry in memory.log] == [True, False, False]
+    assert memory.log[1].changed == ["b"]
+    assert memory.log[2].changed == []
+    assert memory.log[2].moved == 0
+    assert memory.trimmed is False
+
+
+def test_열_개를_넘으면_앞에서_버린다():
+    """FIFO. 접힌 상태가 아니라 순서만 버린다 — 값은 이미 상태에 들어가 있다."""
+    memory = fold(*[reading(reading=n, whole=(n == 1)) for n in range(1, 15)])
+
+    assert len(memory.log) == MAX_READING_LOG
+    # 최신 열 개가 순서대로 남는다.
+    assert [entry.reading for entry in memory.log] == list(range(5, 15))
+    assert memory.trimmed is True
+    # 버린 것이 있다는 사실이 화면에 남아야 한다.
+    assert "earlier readings dropped" in memory.render()
+
+
+def test_한_판독은_변화가_몇_개든_항목_하나다():
+    """상한은 판독 수에 걸린다. 한 문서가 여러 칸을 먹지 않는다."""
+    memory = fold(reading(changed=[f"K{i}" for i in range(50)]))
+
+    assert len(memory.log) == 1
+    assert memory.log[0].moved == 50
+
+
+def test_줄이_이름_대는_키에_상한이_있다():
+    """전량 판독은 감시 중인 전부를 changed 에 담는다(실측 watching 111).
+
+    상한이 없으면 로그 한 줄이 화면을 덮는다.
+    """
+    memory = fold(reading(reading=9, whole=False, changed=[f"Enemy{i}.hp" for i in range(23)]))
+
+    entry = memory.log[0]
+    assert entry.moved == 23
+    assert len(entry.changed) == MAX_CHANGED_NAMED
+    line = memory.render()
+    assert "+15 more" in line
+    assert "Enemy22.hp" not in line
+
+
+def test_전량_판독은_키를_이름_대지_않는다():
+    """직전이 없어 전부가 움직인 것으로 오므로, 그 목록은 '무엇을 보고 있나'에 답한다."""
+    memory = fold(reading(reading=1, whole=True, changed=[f"K{i}" for i in range(111)]))
+
+    line = memory.render()
+    assert "whole — 111 values reported" in line
+    assert "K0" not in line
+
+
+def test_로그가_값을_두_번_들지_않는다():
+    """같은 사실이 어긋날 자리를 둘 두지 않는다 — 값은 접힌 상태에만 있다."""
+    memory = fold(reading(active=[obj()], changed=["TurnBattleSystem.turn"]))
+
+    entry = memory.log[0]
+    assert entry.changed == ["TurnBattleSystem.turn"]
+    assert not hasattr(entry, "value")
+    assert not hasattr(entry, "active")
+
+
+def test_statics_는_객체_아래로_섞이지_않는다():
+    memory = fold(
+        reading(
+            statics=[{"declaring": "Combat.Stage.StageDataSingleton", "member": "stage", "value": 3}],
+            active=[obj()],
+        )
+    )
+
+    assert list(memory.statics) == ["Combat.Stage.StageDataSingleton::stage"]
+    held = next(iter(memory.held.values()))
+    assert [m.member for m in held.members.values()] == ["turn"]
+
+
+def test_행위_이후의_판독만_그린다():
+    """창의 경계가 타이머가 아니라 행위다.
+
+    읽기(0.1초)와 전달(1초)이 두 속도라, 액션 직후 도착하는 첫 배치는 액션 **전에**
+    잡힌 것일 수 있다. 그것을 결과로 치면 도구가 액션 이전 화면을 보여 주고, 에이전트는
+    안 먹혔다고 읽어 같은 것을 또 누른다(ARTEL-621)."""
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(reading(reading=1, frame=100, active=[obj()])))
+    # 첫 판독은 전량이라 페이지가 먼저 나간다. 그것을 소진하고 나서 델타를 본다.
+    memory.since_action(None)
+    memory.apply(
+        PulseReading.model_validate(
+            reading(
+                reading=2,
+                frame=200,
+                whole=False,
+                active=[
+                    {
+                        "selector": "Canvas[2]/continue[1]",
+                        "id": 26168,
+                        "members": [
+                            {"member": "phase", "value": "enemy", "on": "Battle.Turns.TurnBattleSystem"}
+                        ],
+                    }
+                ],
+            )
+        )
+    )
+
+    # 프레임 100 은 판독 1 이 잡힌 자리다. 그 뒤에 온 것만 이 행위의 결과다.
+    drawn = memory.since_action(100)
+
+    assert "TurnBattleSystem.phase = 'enemy'" in drawn
+    assert "TurnBattleSystem.turn" not in drawn
+
+
+def test_프레임을_모르면_종전의_창으로_돌아간다():
+    """그 필드를 모르는 옛 SDK 다. 없는 경계를 지어내면 판독을 통째로 잃는다."""
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(reading(reading=1, frame=100, active=[obj()])))
+
+    assert memory.after_frame(None) is None
+    # 지어내지 않고 그린다.
+    assert "TurnBattleSystem.turn" in memory.since_action(None)
+
+
+def test_씬이_바뀌면_한_번은_전량으로_그린다():
+    """델타만 이어 붙이면 독자가 씬 경계를 지나 거슬러 읽어야 한다. 판독이 그 경계를
+    이미 말해 주므로 여기서 새 규칙을 만들지 않는다."""
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(reading(reading=1, frame=100, active=[obj()])))
+    memory.since_action(None)          # 첫 전량을 소진한다
+
+    # 씬이 바뀐다 — SDK 가 whole 을 보낸다.
+    memory.apply(
+        PulseReading.model_validate(reading(reading=2, frame=200, whole=True, active=[obj()]))
+    )
+
+    assert memory.page_due
+    page = memory.since_action(150)
+    assert "TurnBattleSystem.turn" in page, "전량이라야 새 화면이 한 덩어리로 온다"
+    # 한 번만이다. 그 뒤로는 델타이고, 페이지는 대화에 남는다.
+    assert not memory.page_due
+
+
+def test_static_은_안_바뀌어도_계속_보인다():
+    """static 은 소유자가 없어 어느 객체 아래에도 안 실린다. 델타에서 빠지면 화면
+    어디에도 없다.
+
+    그리고 static 으로 뽑히는 값이 대체로 래칭이다 — 한 번 켜지면 꺼질 때까지 유지되고
+    그 사이 내내 무엇을 할 수 있는지를 결정한다. 샘플 게임의 `InteractionLock.IsLocked`
+    가 그렇다: 잠긴 동안 카드 드래그가 통째로 취소되는데, 그 사실이 잠기는 순간 한 번만
+    보이고 사라졌다(ARTEL-573)."""
+    lock = {"declaring": "Core.InteractionLock", "member": "IsLocked", "value": True}
+    memory = fold(reading(statics=[lock], active=[obj()]))
+    # 한 번 보고 나면 그 판독은 더 이상 소식이 아니다.
+    memory.render()
+    memory.apply(
+        PulseReading.model_validate(
+            reading(reading=2, whole=False, statics=[], active=[])
+        )
+    )
+
+    drawn = memory.render()
+
+    assert "InteractionLock.IsLocked = True" in drawn
+    # 판독이 그 값을 다시 말하지 않았으므로 소식 표시는 없다.
+    assert "(changed)" not in drawn
+
+
+def test_바뀐_static_은_소식으로_표시된다():
+    """전부 그리면서 표시까지 없으면 읽는 쪽이 무엇이 소식인지 스스로 찾아야 하고,
+    그것이 창이 하라고 있는 일이다."""
+    memory = fold(
+        reading(
+            statics=[{"declaring": "Core.InteractionLock", "member": "IsLocked", "value": False}],
+            active=[obj()],
+        )
+    )
+    memory.render()
+    memory.apply(
+        PulseReading.model_validate(
+            reading(
+                reading=2,
+                whole=False,
+                statics=[
+                    {"declaring": "Core.InteractionLock", "member": "IsLocked", "value": True}
+                ],
+                active=[],
+            )
+        )
+    )
+
+    drawn = memory.render()
+
+    assert "InteractionLock.IsLocked = True  (changed)" in drawn
+
+
+def test_한_객체의_같은_타입_컴포넌트_둘이_서로를_덮지_않는다():
+    memory = fold(
+        reading(
+            active=[
+                obj(
+                    members=[
+                        {"on": "DropZone", "member": "held", "among": 0, "value": 1},
+                        {"on": "DropZone", "member": "held", "among": 1, "value": 2},
+                    ]
+                )
+            ]
+        )
+    )
+
+    held = next(iter(memory.held.values()))
+    assert sorted(m.value for m in held.members.values()) == [1, 2]
+
+
+def test_값을_해석하지_않고_그대로_들고_있는다():
+    shapes = [
+        {"on": "T", "member": "a", "value": {"path": "Canvas/x", "world": {"x": 1.5, "y": 2.0}}},
+        {"on": "T", "member": "b", "value": {"sprite": "Sprite_Start"}},
+        {"on": "T", "member": "c", "value": None},
+        {"on": "T", "member": "d", "value": "문자열"},
+    ]
+    memory = fold(reading(active=[obj(members=shapes)]))
+
+    held = next(iter(memory.held.values()))
+    got = {m.member: m.value for m in held.members.values()}
+    assert got["a"] == {"path": "Canvas/x", "world": {"x": 1.5, "y": 2.0}}
+    assert got["b"] == {"sprite": "Sprite_Start"}
+    assert got["c"] is None
+    assert got["d"] == "문자열"
+
+
+def test_판독이_없으면_아무것도_실리지_않는다():
+    """구버전 SDK 호환 — 이것이 깨지면 프롬프트가 통째로 달라진다."""
+    memory = SceneMemory()
+    assert memory.pulse.render() is None
+    assert memory.pulse.since_action(None) is None
+    assert memory.render(0) == "No scene has been received yet."
+
+
+def test_판독만_와도_보인다():
+    memory = SceneMemory()
+    memory.pulse.apply(PulseReading.model_validate(reading(active=[obj()])))
+
+    now = memory.render(0)
+    assert now is not None
+    assert "TurnBattleSystem.turn" in now
+    assert "could not read: 1126" in now
+
+
+def test_모르는_필드가_와도_읽는다():
+    """더하기만 하는 변경에 이 쪽이 먼저 깨지면 안 된다."""
+    doc = reading(active=[obj(members=[{"on": "T", "member": "m", "value": 1, "새필드": "x"}])])
+    doc["앞으로생길것"] = 1
+
+    memory = fold(doc)
+
+    assert memory.readings == 1
+
+
+def test_service_가_PULSE_를_채널로_보낸다():
+    service = QaExecutionService(store=InMemoryQaSessionStore())
+
+    class Recorder:
+        def __init__(self):
+            self.got = None
+
+        def on_pulse(self, raw):
+            self.got = raw
+
+    recorder = Recorder()
+    service._channels["s"] = recorder
+
+    assert service.deliver("s", {"type": MessageType.PULSE, "payload": reading()}) is True
+    assert recorder.got is not None
+    assert recorder.got["payload"]["scene"] == "TurnBattleScene"
+
+
+def test_모르는_타입은_여전히_거절된다():
+    """대조군.
+
+    `deliver` 가 False 를 돌려주면 WS 핸들러가 `Unsupported inbound frame` 오류를 되쏜다
+    (`app/api/qa_sessions.py`). 실제 스택으로 판독을 흘렸을 때 그 오류가 **없었다**는 것이
+    "받아들여졌다"의 근거인데, 아무 타입이나 다 True 를 돌려준다면 그 근거가 성립하지
+    않는다. 이 테스트가 그 전제를 지킨다.
+    """
+    service = QaExecutionService(store=InMemoryQaSessionStore())
+    service._channels["s"] = object()
+
+    assert service.deliver("s", {"type": "NOT_A_TYPE", "payload": {}}) is False
+
+
+# ── 조준값과 가능한 조작 (ARTEL-512) ─────────────────────────────────────────
+#
+# 판독은 이것들을 처음부터 싣고 있었다. 접는 과정에서 잃거나 그리지 않았을 뿐이라,
+# 여기서 지키는 것은 "도착한 것이 프롬프트까지 간다" 하나다.
+
+
+def test_조준값이_접히는_과정에서_살아남는다():
+    """`id` 가 없으면 독자는 무엇이 바뀌었는지 알면서 그것을 건드릴 방법이 없다.
+
+    판독이 `id` 를 매 기록에 싣는 이유가 그것이고(`LiveState.Object` 주석), 접을 때
+    버리면 그 의도가 마지막 한 칸에서 무너진다.
+    """
+    memory = fold(reading(active=[obj(id=26168)]))
+
+    held = next(iter(memory.held.values()))
+    assert held.id == 26168
+    assert "id=26168" in memory.render()
+
+
+def test_조준값이_델타에서도_유지된다():
+    """델타는 안 바뀐 것을 다시 말하지 않는다. `id` 는 결코 바뀌지 않으므로 델타에
+    없을 수 있고, 그때 이전 값을 잃으면 눌 수 있던 것이 눌 수 없게 된다."""
+    memory = fold(
+        reading(active=[obj(id=26168)]),
+        reading(reading=2, whole=False, active=[obj(id=None)]),
+    )
+
+    assert next(iter(memory.held.values())).id == 26168
+
+
+def test_화면_사각형이_중심으로_실린다():
+    """좌표는 조준의 대체 수단이다. 컨트롤로 만들어지지 않은 것을 겨누는 유일한 방법이
+    rect 이고, 판독이 그것을 싣는데 모델에 자리가 없어 사라지고 있었다.
+
+    싣는 것은 **중심**이다. 판독의 `rect.x/y` 는 요소의 좌상단인데 포인터 도구가 받는
+    것은 겨눌 점이라, 모서리를 그대로 내면 크기의 절반만큼 어긋난 자리를 겨누게 된다.
+    `GAME_STATE` 쪽(`app/qa/scene.py` 의 `_where`)은 처음부터 중심을 냈고 여기만
+    빠져 있었다(ARTEL-569). 표기 `@` 도 그쪽과 맞춘 것이다."""
+    memory = fold(reading(active=[obj(rect={"x": 860, "y": 600, "w": 200, "h": 60})]))
+
+    assert "@ 960,630 200x60" in memory.render()
+
+
+def test_소수점_좌표도_중심을_낸다():
+    """SDK 는 rect 를 `"0.####"` 로 쓰므로 정수가 아닐 수 있다. 그때 조준이 깨지지 않고,
+    잘라 낸 값도 픽셀 아래라 화면의 무엇도 다르게 그려지지 않는다."""
+    memory = fold(reading(active=[obj(rect={"x": 860.5, "y": 600.25, "w": 200, "h": 60})]))
+
+    assert "@ 960,630 200x60" in memory.render()
+
+
+def test_가능한_조작이_실린다():
+    """`offers` 는 스캔이 볼 수 없는 둘을 준다 — 어떤 키가 뜻을 가지는가, 어떤 객체가
+    포인터에 답하는가. 배선된 메서드 이름까지 함께 쓰는 것은, 누른 뒤 아무것도 움직이지
+    않았을 때 무엇이 불렸어야 하는지를 아는 독자만 그것을 결함으로 부를 수 있기 때문이다.
+    """
+    memory = fold(
+        reading(
+            active=[
+                obj(
+                    offers={
+                        "clicks": [
+                            {"on": "TitleSceneManager", "event": "m_OnClick", "method": "StartGame"}
+                        ],
+                        "keys": ["space"],
+                        "pointers": ["left"],
+                    }
+                )
+            ]
+        )
+    )
+
+    view = memory.render()
+    assert "click → TitleSceneManager.StartGame" in view
+    assert "keys: space" in view
+    assert "pointer: left" in view
+
+
+def test_멤버가_없어도_누를_것이면_그린다():
+    """판독이 유일한 출처일 때, 감시 대상 멤버가 없고 조준값과 `offers` 만 들고 오는
+    객체가 대다수다. 그것을 건너뛰면 누를 것이 화면에서 통째로 사라진다 — 실측에서
+    에이전트가 아홉 턴을 조준값 찾는 데 쓰고 결국 화면 캡처로 좌표를 눈으로 찾았다.
+    """
+    memory = fold(
+        reading(
+            active=[
+                obj(
+                    members=[],
+                    offers={"clicks": [{"on": "M", "event": "m_OnClick", "method": "Go"}]},
+                )
+            ]
+        )
+    )
+
+    assert "Canvas[2]/continue[1]" in memory.render()
+
+
+def test_아무것도_말하지_않는_객체는_여전히_빠진다():
+    """상한이 있어야 한다. 조준값도 조작도 멤버도 없는 객체는 판독이 그것에 대해 할 말이
+    없는 객체이고, 그것까지 그리면 화면이 배경으로 덮인다."""
+    memory = fold(reading(active=[obj(id=None, members=[], offers=None)]))
+
+    assert memory.render() is not None
+    assert "Canvas[2]/continue[1]" not in memory.render()
+
+
+def test_꺼진_객체는_그리지_않는다():
+    """화면에 없고 누를 수도 없는 것을 조준 후보로 권하지 않는다.
+
+    `GAME_STATE` 도 활성 GameObject 만 보냈다(`SceneScanner`). 판독이 꺼진 것까지 그리면
+    걷어내려는 그것보다 못해진다.
+    """
+    memory = fold(reading(active=[obj(selector="A[1]")], deactive=[obj(selector="B[1]")]))
+
+    view = memory.render()
+    assert "A[1]" in view
+    # 조준 후보로는 안 올린다. 다만 꺼져 있다는 것은 한 번 말한다(ARTEL-665) — 안 그리는 것과
+    # 없다고 하는 것은 다르고, 침묵은 "이번에 소식이 없다" 와 구분이 안 된다.
+    assert "B[1]  [" not in view, view
+    assert "switched off: B[1]" in view
+
+
+def test_꺼진_객체도_들고_있는다():
+    """그리지 않는 것과 버리는 것은 다르다.
+
+    판독이 "그건 꺼졌다" 고 말한 것 자체가 사실이고, 버리면 다시 켜질 때 그 사이의 값을
+    잃어 전량 판독을 기다리게 된다.
+    """
+    memory = fold(reading(deactive=[obj(selector="B[1]")]))
+
+    held = next(iter(memory.held.values()))
+    assert held.live is False
+    assert held.members  # 값은 그대로 있다
+
+
+def test_다시_켜지면_돌아온다():
+    """판독이 그 객체를 active 통에 넣어 보내므로 저절로 돌아온다. 되살리는 코드가 따로
+    있어야 하는 것이 아니다 — 어느 통에 들어가는가가 곧 그 진술이다."""
+    memory = fold(
+        reading(deactive=[obj(selector="B[1]")]),
+        reading(reading=2, whole=False, active=[obj(selector="B[1]")]),
+    )
+
+    assert "B[1]" in memory.render()
+
+
+def test_풀에서_꺼내_쓰는_씬에서_프롬프트가_자라지_않는다():
+    """카드 스무 장짜리 풀에서 손에 든 셋만 활성이면 프롬프트에 드는 것도 셋이다.
+
+    풀은 객체를 재사용하므로 selector 가 그대로다 — `held` 는 풀 크기에서 수렴하고,
+    렌더는 활성 수만큼이다. 이 테스트가 없으면 "꺼진 것도 그린다" 로 되돌아갔을 때
+    긴 전투에서만, 그것도 프롬프트 길이로만 드러난다.
+    """
+    pool = [f"Card(Clone)[{i}]" for i in range(1, 21)]
+    hand, rest = pool[:3], pool[3:]
+    memory = fold(
+        reading(
+            whole=True,
+            active=[obj(selector=s) for s in hand],
+            deactive=[obj(selector=s) for s in rest],
+        )
+    )
+    def drawn(mem) -> int:
+        """렌더에 이름이 오른 카드 수. 판독 로그 절은 자기 상한이 따로 있어 총 줄 수로는
+        객체 증가를 가릴 수 없다."""
+        return sum(
+            1
+            for line in mem.render().splitlines()
+            if "Card(Clone)[" in line and not line.startswith(("switched off:", "here but switched off:"))
+        )
+
+    assert drawn(memory) == len(hand)
+
+    # 한 장 내고 한 장 뽑기를 스무 번. 풀이 재사용되므로 새 키가 생기지 않는다.
+    for turn in range(20):
+        out, inn = hand.pop(0), rest.pop(0)
+        hand.append(inn)
+        rest.append(out)
+        memory.apply(
+            PulseReading.model_validate(
+                reading(
+                    reading=turn + 2,
+                    whole=False,
+                    active=[obj(selector=inn)],
+                    deactive=[obj(selector=out)],
+                )
+            )
+        )
+
+    assert len(memory.held) == len(pool)   # 풀 크기에서 수렴한다
+    assert drawn(memory) == len(hand)      # 손에 든 수만큼만 그린다
+
+
+# --- 창을 타는 렌더와 상세 조회 (ARTEL-541) -----------------------------------
+
+
+def _reading(n: int, *members, whole: bool = False, selector: str = "Enemy[1]") -> dict:
+    """판독 하나. `members` 는 (이름, 값) 쌍이다."""
+    return {
+        "schema": 2,
+        "reading": n,
+        "scene": "Battle",
+        "whole": whole,
+        "active": [
+            {
+                "scene": "Battle",
+                "id": -101,
+                "selector": selector,
+                "rect": {"x": 10, "y": 20, "w": 30, "h": 40},
+                "offers": {"clicks": [{"event": "onClick", "method": "Enemy.Hit"}]},
+                "members": [
+                    {"on": "Enemy", "member": name, "value": value, "asked": True}
+                    for name, value in members
+                ],
+            }
+        ],
+        "deactive": [],
+        "changed": [f"Enemy::{name}" for name, _ in members],
+    }
+
+
+def test_a_value_that_did_not_move_again_is_not_drawn_again():
+    """판독은 이미 델타다. 지난번에 그린 값을 매 턴 다시 적을 이유가 없다.
+
+    이것이 이 변경의 전부다 — 실측에서 매 턴 5,148 토큰이던 것이 758 이 됐다. 객체 40개짜리
+    샘플 게임의 전투에서 그랬고, 비용이 씬 크기에 비례하던 것을 변화량에 비례하게 만든다.
+    """
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(_reading(1, ("Hp", 100), whole=True)))
+
+    first = memory.render()
+    assert "Hp = 100" in first
+
+    # 아무것도 안 왔다. 값은 그대로지만 독자는 이미 읽었다.
+    second = memory.render()
+    assert "Hp = 100" not in second
+
+    memory.apply(PulseReading.model_validate(_reading(2, ("Hp", 80))))
+    third = memory.render()
+    assert "Hp = 80" in third, "움직인 값은 다시 그린다"
+
+
+def test_what_you_can_act_on_is_drawn_every_turn():
+    """조작 가능한 것은 창과 무관하게 매번 그린다.
+
+    **이 성질을 잃으면 줄인 것이 아니라 눈을 가린 것이다.** GAME_STATE 시절 에이전트가 화면을
+    물어보느라 34턴을 쓰다 죽었고, 상시로 보이게 하니 4턴에 끝났다. 무엇을 누를 수 있는지는
+    그 "묻지 않아도 보이는" 것의 절반이다.
+    """
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(_reading(1, ("Hp", 100), whole=True)))
+    memory.render()
+
+    again = memory.render()
+    assert "Enemy[1]" in again
+    assert "id=-101" in again, "조준값이 남는다"
+    assert "can do" in again, "무엇을 할 수 있는지가 남는다"
+    assert "Hp" not in again, "값은 안 남는다 — 그것은 안 움직였다"
+
+
+def test_a_run_of_identical_readings_folds_into_one_line():
+    """한 멤버만 계속 움직이는 판독은 한 줄로 접는다.
+
+    실측에서 전투 중 변화의 98%가 `SlimeAnimator::spriteRenderer` 하나였다. 애니메이션이
+    스프라이트를 갈아 끼우는 것이지 QA 가 판정할 값이 아닌데, 그것이 판독 로그 열 줄을
+    독차지해 프롬프트의 31%를 먹었다.
+    """
+    memory = PulseMemory()
+    for n in range(1, 7):
+        memory.apply(PulseReading.model_validate(_reading(n, ("sprite", f"frame{n}"))))
+
+    out = memory.render()
+    assert "readings, only" in out
+    assert "Enemy::sprite" in out
+    # 접혔으니 판독 번호가 줄줄이 나오지 않는다.
+    assert out.count("(delta") == 0
+
+
+def test_inspect_answers_with_everything_it_holds():
+    """상시 블록이 안 싣는 값을 물으면 답한다.
+
+    줄이는 것과 잃는 것의 차이가 여기 있다. 안 움직인 값을 매 턴 적지 않되, 스텝이 그 값에
+    걸리면 가져올 수 있어야 한다.
+    """
+    memory = PulseMemory()
+    memory.apply(
+        PulseReading.model_validate(_reading(1, ("Hp", 100), ("MaxHp", 100), whole=True))
+    )
+    memory.render()  # 다 그렸다. 이제 창에는 아무것도 없다
+
+    assert "Hp = 100" not in (memory.render() or "")
+    found = memory.inspect("Enemy")
+    assert "Hp = 100" in found
+    assert "MaxHp = 100" in found
+
+
+def test_inspect_takes_a_partial_address():
+    """블록에 적히는 주소는 길고 대괄호 안 숫자는 바뀔 수 있다. 정확히 옮겨 적기를
+    요구하면 그것 자체가 왕복을 만든다."""
+    memory = PulseMemory()
+    memory.apply(
+        PulseReading.model_validate(
+            _reading(1, ("Hp", 7), whole=True, selector="RangedCat(Clone)[17]")
+        )
+    )
+    assert "Hp = 7" in memory.inspect("RangedCat")
+
+
+def test_inspect_says_so_when_nothing_matches():
+    """빈손을 조용히 돌려주면 에이전트가 그것을 '값이 없다'로 읽는다."""
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(_reading(1, ("Hp", 7), whole=True)))
+    assert "No object matching" in memory.inspect("Nothing")
+
+
+# --- 키가 무엇을 하는지 (ARTEL-539) -------------------------------------------
+
+
+def _with_keys(keys) -> dict:
+    return {
+        "schema": 2,
+        "reading": 1,
+        "scene": "Map_scene",
+        "whole": True,
+        "active": [
+            {
+                "scene": "Map_scene",
+                "id": -1,
+                "selector": "MapScene[1]",
+                "offers": {"keys": keys},
+                "members": [],
+            }
+        ],
+        "deactive": [],
+        "changed": [],
+    }
+
+
+def test_a_key_says_what_it_does():
+    """이름만으로는 다섯 키 중 무엇을 눌러야 할지 못 고른다.
+
+    stage 에서 Map 씬의 QA 가 화살표와 Return 을 대등하게 받고 위/아래를 눌러 보다 전투에
+    진입하지 못했다. 근거 문서는 `Return` 이 씬을 바꾼다는 것을 알고 있었고, 그 앎이 채널에서
+    버려지고 있었다.
+    """
+    memory = PulseMemory()
+    memory.apply(
+        PulseReading.model_validate(
+            _with_keys(
+                [
+                    {"key": "key:UpArrow (down)", "does": ["sets MapMove.position"]},
+                    {
+                        "key": "key:Return (down)",
+                        "does": ["sets StageDataSingleton.stagePosition", "→ TurnBattleScene"],
+                    },
+                ]
+            )
+        )
+    )
+
+    out = memory.render()
+    assert "key:Return (down) → sets StageDataSingleton.stagePosition; → TurnBattleScene" in out
+    assert "key:UpArrow (down) → sets MapMove.position" in out
+
+
+def test_a_key_whose_effect_is_unknown_says_so():
+    """비어 있는 것을 '아무 일도 안 한다' 로 읽히게 두지 않는다.
+
+    분석이 못 읽은 것과 정말 아무 일도 안 하는 것은 에이전트의 다음 수가 다르다 — 앞의 것은
+    눌러 볼 값이 있고 뒤의 것은 없다.
+    """
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(_with_keys([{"key": "key:Space (down)"}])))
+    assert "key:Space (down) (effect unknown)" in (memory.render() or "")
+
+
+def test_an_old_sdk_still_gets_its_keys_drawn():
+    """구버전은 키를 문자열로 보낸다. 그 빌드도 무엇을 누를 수 있는지는 말할 수 있어야 한다."""
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(_with_keys(["key:Space (down)"])))
+    out = memory.render() or ""
+    assert "keys: key:Space (down)" in out
+    assert "effect unknown" not in out, "모양이 다를 뿐 모르는 것이 아니다"
+
+
+# --- SDK 가 접어 보내는 모양 (ARTEL-540 / ARTEL-552) ---------------------------
+
+
+def _folded(scene: str = "Battle") -> dict:
+    """새 모양: `on` 을 컴포넌트마다 한 번, 객체의 `scene` 은 생략, `type` 없음."""
+    return {
+        "schema": 2,
+        "reading": 1,
+        "scene": scene,
+        "whole": True,
+        "active": [
+            {
+                "id": -101,
+                "selector": "Enemy[1]",
+                "rect": {"x": 1, "y": 2, "w": 3, "h": 4},
+                "by": [
+                    {
+                        "on": "Combat.Enemies.SwordEnemy",
+                        "m": [
+                            {"member": "Hp", "value": 20},
+                            {"member": "MaxHp", "value": 20},
+                        ],
+                    },
+                    {"on": "Combat.SlimeAnimator", "m": [{"member": "sprite", "value": "a"}]},
+                ],
+            }
+        ],
+        "deactive": [],
+        "changed": [],
+    }
+
+
+def test_members_folded_by_component_are_spread_again():
+    """`on` 을 멤버마다 되풀이하지 않는 것은 전송의 사정이다.
+
+    한 문서에서 `on` 316개 중 295개가 같은 값이었다. 접는 것은 SDK 가 하고, 읽는 쪽은 펴서
+    종전과 같은 것을 본다 — 병합도 렌더도 접힌 모양을 알 이유가 없다.
+    """
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(_folded()))
+
+    out = memory.render() or ""
+    assert "SwordEnemy.Hp = 20" in out
+    assert "SwordEnemy.MaxHp = 20" in out
+    assert "SlimeAnimator.sprite = 'a'" in out
+
+
+def test_an_object_without_a_scene_takes_the_readings():
+    """객체의 `scene` 이 없으면 판독의 것이다. 다른 씬의 객체만 제 이름을 댄다.
+
+    키가 `{scene}/{selector}` 라 이것을 안 채우면 같은 객체가 씬마다 다른 키로 앉는다.
+    """
+    memory = PulseMemory()
+    memory.apply(PulseReading.model_validate(_folded(scene="Battle")))
+
+    keys = list(memory.held)
+    assert keys == ["Battle/Enemy[1]"], keys
+
+
+def test_the_old_flat_shape_still_reads():
+    """구버전 SDK 는 멤버를 평평하게 보낸다. 그 빌드가 붙어도 읽힌다."""
+    memory = PulseMemory()
+    memory.apply(
+        PulseReading.model_validate(
+            {
+                "schema": 2,
+                "reading": 1,
+                "scene": "Battle",
+                "whole": True,
+                "active": [
+                    {
+                        "scene": "Battle",
+                        "id": -101,
+                        "selector": "Enemy[1]",
+                        "members": [{"on": "SwordEnemy", "member": "Hp", "value": 20}],
+                    }
+                ],
+                "deactive": [],
+                "changed": [],
+            }
+        )
+    )
+    assert "SwordEnemy.Hp = 20" in (memory.render() or "")
+
+
+def test_태그가_조준값_옆에_실린다():
+    """`CompareTag` 로 갈라지는 규칙이 흔하고, 그 갈래가 QA 가 확인해야 하는 규칙인
+    경우도 흔하다. 샘플 게임에서 어느 카드가 어느 조합 칸에 들어가는지가 이것으로
+    갈리는데, 판독에 그 값이 없어 에이전트가 카드를 반대로 넣었다(ARTEL-631)."""
+    memory = fold(reading(active=[obj(tag="Spell")]))
+
+    assert "tag=Spell" in memory.since_action(None)
+
+
+def test_태그가_없으면_조용하다():
+    """SDK 가 `Untagged` 를 안 보낸다. 여기서 없다는 것은 태그가 없다는 뜻이고,
+    기본값을 모든 객체에 붙이면 문서만 커지고 말하는 것이 없다."""
+    memory = fold(reading(active=[obj()]))
+
+    assert "tag=" not in memory.since_action(None)
+
+
+def test_델타가_태그를_다시_말하지_않아도_지킨다():
+    """장부를 타므로 안 바뀐 태그는 델타에 안 실린다. 그때 잃으면 카드가 어느 칸에
+    들어가는지를 한 판독 뒤에 잊는다."""
+    memory = fold(reading(active=[obj(tag="Spell")]))
+    memory.since_action(None)
+    memory.apply(
+        PulseReading.model_validate(
+            reading(
+                reading=2,
+                whole=False,
+                active=[
+                    {
+                        "selector": "Canvas[2]/continue[1]",
+                        "id": 26168,
+                        "members": [
+                            {"member": "turn", "value": 3, "on": "Battle.Turns.TurnBattleSystem"}
+                        ],
+                    }
+                ],
+            )
+        )
+    )
+
+    assert "tag=Spell" in memory.since_action(None)
+
+
+def test_사라졌다고_한_객체는_지운다():
+    """파괴된 객체는 어느 통에도 안 실린다 — 걷기가 살아 있는 계층만 걷기 때문이다. 그래서
+    판독이 따로 말하고(ARTEL-651), 여기서 그것을 놓는다.
+
+    꺼진 것과 달리 **지운다.** 꺼진 것은 다시 켜지면 판독이 `active` 통에 넣어 보내지만,
+    파괴된 것은 영영 안 온다.
+    """
+    memory = fold(
+        reading(active=[obj(selector="Card(Clone)[16]"), obj(selector="Word[12]")]),
+        reading(reading=2, whole=False, gone=["TurnBattleScene/Card(Clone)[16]"]),
+    )
+
+    assert [held.selector for held in memory.held.values()] == ["Word[12]"]
+    # 객체로는 안 그려진다. 이름은 "사라졌다" 는 말에만 남는다(ARTEL-663).
+    view = memory.render()
+    assert "Card(Clone)[16]  [" not in view, view
+    assert "gone from the scene: Card(Clone)[16]" in view
+
+
+def test_사라진_객체는_물어도_없다():
+    """`inspect` 가 같은 자리를 본다. 화면에서만 지우고 여기 남겨 두면, 안 보이는데 물으면
+    답하는 객체가 된다."""
+    memory = fold(
+        reading(active=[obj(selector="Card(Clone)[16]")]),
+        reading(reading=2, whole=False, gone=["TurnBattleScene/Card(Clone)[16]"]),
+    )
+
+    assert "Card(Clone)[16]" not in memory.inspect("Card")
+
+
+def test_꺼진_객체는_사라진_것이_아니다():
+    """두 상태가 섞이면 풀에서 대기하는 객체가 지워지고, 그것으로 사는 게임이 있다."""
+    memory = fold(
+        reading(deactive=[obj(selector="B[1]")]),
+        reading(reading=2, whole=False, gone=[]),
+    )
+
+    assert memory.held  # 그대로 들고 있는다
+
+
+def test_사라짐을_모르는_판독은_아무_일도_안_일으킨다():
+    """그 필드가 없는 SDK 에서도 종전처럼 돈다. 잔상이 전량 판독까지 남을 뿐이다."""
+    memory = fold(
+        reading(active=[obj(selector="Card(Clone)[16]")]),
+        reading(reading=2, whole=False, changed=["TurnBattleScene/Card(Clone)[16]|active"]),
+    )
+
+    assert "Card(Clone)[16]" in memory.render()
+
+
+def test_같은_이름으로_다시_태어난_객체가_옛_이동_횟수를_안_물려받는다():
+    """selector 는 자리 번호라 다음 카드가 같은 이름을 받을 수 있다. 이동 횟수를 남겨 두면
+    갓 태어난 객체가 죽은 객체의 "여러 판독에서 움직였다"를 달고 나온다."""
+    key = "TurnBattleScene/Card(Clone)[16]|Battle.Turns.TurnBattleSystem::turn"
+    memory = fold(
+        reading(active=[obj(selector="Card(Clone)[16]")], changed=[key]),
+        reading(reading=2, whole=False, changed=[key]),
+        reading(reading=3, whole=False, gone=["TurnBattleScene/Card(Clone)[16]"]),
+        reading(reading=4, whole=False, active=[obj(selector="Card(Clone)[16]")]),
+    )
+
+    assert "moved in" not in memory.render()
+
+
+def test_사라진_것을_말한다():
+    """지우기만 하면 읽는 쪽은 대화에 남은 옛 화면에서 그 객체를 계속 본다.
+
+    없음은 추론이고 사라짐은 진술이다 — 델타에서 안 적힌 것은 "이번에 소식이 없다" 와
+    구분이 안 된다. 실제 런에서 파괴된 카드의 좌표로 두 번 드래그했다(ARTEL-663).
+    """
+    memory = fold(
+        reading(active=[obj(selector="Card(Clone)[16]"), obj(selector="Word[12]")]),
+        reading(reading=2, whole=False, gone=["TurnBattleScene/Card(Clone)[16]"]),
+    )
+
+    view = memory.render()
+    assert "gone from the scene: Card(Clone)[16]" in view, view
+    # 화면의 머리줄과 같은 이름으로 부른다. 지금 씬은 이름을 안 단다.
+    assert "TurnBattleScene/Card(Clone)[16]" not in view
+
+
+def test_사라졌다는_말은_한_번만_한다():
+    """창을 탄다. 매 턴 반복하면 그것이 새 소식인 줄 알고 다시 확인하러 간다."""
+    memory = fold(
+        reading(active=[obj(selector="Card(Clone)[16]")]),
+        reading(reading=2, whole=False, gone=["TurnBattleScene/Card(Clone)[16]"]),
+    )
+
+    assert "gone from the scene" in memory.render()
+    memory.apply(PulseReading.model_validate(reading(reading=3, whole=False)))
+    assert "gone from the scene" not in memory.render()
+
+
+def test_사라진_것이_없으면_그_줄이_없다():
+    memory = fold(reading(active=[obj(selector="Word[12]")]))
+
+    assert "gone from the scene" not in memory.render()
+
+
+def test_전량_판독은_그_앞의_사라짐을_말하지_않는다():
+    """쥔 것을 통째로 갈아치우는 판독이다. 그 앞에서 무엇이 없어졌다는 말은 새 화면에 대고
+    할 말이 아니다."""
+    memory = fold(
+        reading(active=[obj(selector="Card(Clone)[16]")]),
+        reading(reading=2, whole=False, gone=["TurnBattleScene/Card(Clone)[16]"]),
+        reading(reading=3, whole=True, scene="Lobby", active=[obj(selector="A", scene="Lobby")]),
+    )
+
+    assert "gone from the scene" not in memory.render()
+
+
+def test_다른_씬의_것은_씬을_달고_불린다():
+    """DontDestroyOnLoad 처럼 다른 씬에 사는 객체다. 이름에서 씬을 떼면 지금 씬의 객체와
+    구분이 안 된다."""
+    memory = fold(
+        reading(
+            active=[obj(selector="TutorialController[3]", scene="DontDestroyOnLoad")],
+        ),
+        reading(reading=2, whole=False, gone=["DontDestroyOnLoad/TutorialController[3]"]),
+    )
+
+    assert "gone from the scene: DontDestroyOnLoad/TutorialController[3]" in memory.render()
+
+
+def test_행위_전에_움직인_값도_한_번은_나온다():
+    """창의 경계는 마지막 **행위**다. 그 전에 변한 값은 창 밖이고, 아무도 다시 말해 주지
+    않으면 영원히 창 밖이다.
+
+    실측으로 159턴 런에서 판독이 움직였다고 이름 댄 멤버 53종 중 23종이 한 번도 값을 못
+    냈다 — 거기 `Enemy::Hp` 와 `CombineZone::spellCards` 가 있었다(ARTEL-662).
+    """
+    memory = fold(reading(active=[obj(selector="Enemy[9]")]))
+    memory.render()  # 여기까지는 말했다
+
+    memory.apply(
+        PulseReading.model_validate(
+            reading(
+                reading=2,
+                whole=False,
+                active=[obj(selector="Enemy[9]", members=[
+                    {"on": "Combat.Enemies.Enemy", "member": "Hp", "value": 12, "asked": True}
+                ])],
+            )
+        )
+    )
+
+    # 행위가 판독 2 뒤에 끝났다 = 이 값은 창 밖이다.
+    view = memory.render(since=2)
+    assert "Enemy.Hp = 12" in view, view
+    assert "(changed earlier)" in view
+
+
+def test_한_번_말한_값은_다시_안_말한다():
+    memory = fold(reading(active=[obj(selector="Enemy[9]")]))
+    memory.render()
+
+    assert "TurnBattleSystem.turn" not in memory.render(since=1)
+
+
+def test_안_말한_값만_있는_객체도_그린다():
+    """`TutorialController` 처럼 누를 것이 없는 객체다. 이것이 안 보여서 에이전트가 대사창이
+    떠 있는지도 모르고 진행했다."""
+    memory = fold(
+        reading(
+            active=[
+                {
+                    "scene": "TurnBattleScene",
+                    "id": 36492,
+                    "path": "TutorialController",
+                    "selector": "TutorialController[3]",
+                    "members": [
+                        {
+                            "on": "Tutorial.TutorialController",
+                            "member": "waitingForAcknowledge",
+                            "value": True,
+                            "asked": True,
+                        }
+                    ],
+                }
+            ]
+        )
+    )
+
+    view = memory.render(since=1)
+    assert "TutorialController[3]" in view, view
+    assert "TutorialController.waitingForAcknowledge = True" in view
+
+
+def test_갚을_것이_없으면_종전과_같다():
+    """말할 것이 남지 않았으면 렌더가 한 글자도 안 달라진다."""
+    memory = fold(reading(active=[obj(selector="Enemy[9]")]))
+    memory.render()
+
+    first = memory.render(since=1)
+    second = memory.render(since=1)
+    assert first == second
+    assert "(changed earlier)" not in first
+
+
+def test_window_와_값이_같은_자를_쓴다():
+    """`after_frame` 은 `reading` 번호를 돌려주는데 값에는 적용 횟수를 찍고 있었다. 그래서
+    `at > since` 가 `3 > 1010` 이 되어 늘 거짓이었다 — 행위 직후 `render` 에서 값이 한 줄도
+    안 나오고 `gone` 된 객체도 조용히 없어졌다(ARTEL-665).
+
+    실제 런의 모양 그대로 잰다: SDK 의 `reading` 번호는 1,000번대, 이 메모리가 적용한 것은 세 번.
+    """
+    memory = fold(reading(reading=1000, frame=5000, active=[obj(selector="Enemy[9]")]))
+    memory.since_action(4999)  # 전량 페이지를 여기서 소진한다
+
+    memory.apply(
+        PulseReading.model_validate(
+            reading(
+                reading=1010,
+                frame=5100,
+                whole=False,
+                active=[obj(selector="Enemy[9]", members=[
+                    {"on": "Combat.Enemies.Enemy", "member": "Hp", "value": 7, "asked": True}
+                ])],
+            )
+        )
+    )
+    memory.apply(
+        PulseReading.model_validate(
+            reading(reading=1020, frame=5200, whole=False, gone=["TurnBattleScene/Enemy[9]"])
+        )
+    )
+
+    assert memory.after_frame(5150) == 1010, "`window` 는 `reading` 번호로 잰다"
+    view = memory.since_action(5150)
+    assert "gone from the scene: Enemy[9]" in view, view
+
+
+def test_꺼진_것을_한_번_말한다():
+    """조합 zone 이 닫히면 칸이 목록에서 그냥 없어졌다. 없어진 것은 "이번에 소식이 없다" 와
+    구분이 안 돼서, 에이전트가 없는 칸에 카드를 끌었다."""
+    memory = fold(
+        reading(active=[obj(selector="Zone1[0]")]),
+        reading(reading=2, whole=False, deactive=[obj(selector="Zone1[0]")]),
+    )
+
+    assert "switched off: Zone1[0]" in memory.render()
+    memory.apply(PulseReading.model_validate(reading(reading=3, whole=False)))
+    assert "switched off" not in memory.render(), "한 번 말하고 만다"
+
+
+def test_처음부터_꺼져_있던_것은_소식이_아니다():
+    """처음 보는데 이미 꺼져 있는 것은 전이가 아니라 사정이다. 전량 페이지가 한 번에 세고,
+    "방금 꺼졌다" 로는 말하지 않는다."""
+    memory = fold(reading(deactive=[obj(selector="Zone1[0]")]))
+
+    view = memory.render()
+    assert not any(l.startswith("switched off:") for l in view.splitlines()), view
+    assert "here but switched off: Zone1[0]" in view
+
+
+def test_전량_페이지가_꺼진_것들을_한_번_센다():
+    """페이지는 켜진 것만 그린다. 씬에 막 들어온 독자는 무엇이 있는데 꺼져 있는지를 알
+    길이 없다."""
+    memory = fold(
+        reading(
+            active=[obj(selector="Word[12]")],
+            deactive=[obj(selector="Zone1[0]"), obj(selector="Zone2[1]")],
+        )
+    )
+
+    page = memory.render(since=0)
+    assert "here but switched off: Zone1[0], Zone2[1]" in page, page
+
+
+def test_수십이_한꺼번에_꺼져도_한_줄이_짧다():
+    """scene 이 헐리는 순간이다. 명단이 아니라 "많이 꺼졌다" 는 사실이 필요하다."""
+    memory = fold(
+        reading(active=[obj(selector=f"Pooled[{n}]") for n in range(30)]),
+        reading(
+            reading=2,
+            whole=False,
+            deactive=[obj(selector=f"Pooled[{n}]") for n in range(30)],
+        ),
+    )
+
+    line = [l for l in memory.render().splitlines() if l.startswith("switched off:")][0]
+    assert "+18 more" in line, line
+    assert len(line) < 300, line
+
+
+def test_current_scene_은_쥔_것을_전부_그린다():
+    """창 뷰는 마지막 행위 이후 달라진 것만 준다. 한 번 말하고 가만히 있는 값은 안 나오고,
+    그려지지 않은 객체는 `selector` 를 알 길이 없어 `inspect_object` 로도 못 묻는다 —
+    실제 런에서 `Card(Clone)` 을 찍어서 묻고 없다는 답을 받았다(ARTEL-673)."""
+    memory = fold(reading(active=[obj(selector="Enemy[9]"), obj(selector="Word[12]")]))
+    memory.render()  # 여기까지 말했다
+
+    assert "Enemy[9]" not in memory.render(since=memory.clock()), "창 뷰에는 안 나온다"
+
+    page = memory.current_scene()
+    assert "Enemy[9]" in page, page
+    assert "Word[12]" in page
+    assert "TurnBattleSystem.turn = 2" in page, "값이 안 변했어도 나온다"
+
+
+def test_current_scene_이_새_것에만_표를_단다():
+    """전부 그리면서 표까지 없으면 읽는 쪽이 무엇이 소식인지 스스로 찾아야 한다."""
+    memory = fold(reading(active=[obj(selector="Enemy[9]")]))
+    memory.render()
+    memory.apply(
+        PulseReading.model_validate(
+            reading(
+                reading=2,
+                whole=False,
+                active=[obj(selector="Enemy[9]", members=[
+                    {"on": "Combat.Enemies.Enemy", "member": "Hp", "value": 7, "asked": True}
+                ])],
+            )
+        )
+    )
+
+    page = memory.current_scene()
+    assert "Enemy.Hp = 7  (changed)" in page, page
+    # 안 변한 값은 그려지되 소식이 아니다.
+    assert "TurnBattleSystem.turn = 2" in page
+    assert "TurnBattleSystem.turn = 2  (changed)" not in page
+
+
+def test_current_scene_은_예약된_페이지를_안_먹는다():
+    """scene 전환이 예약한 페이지는 새 화면을 한 덩어리로 주기로 한 약속이다. 여기서 먹으면
+    그 약속이 조용히 사라진다."""
+    memory = fold(reading(active=[obj(selector="Enemy[9]")]))
+
+    memory.current_scene()
+
+    assert memory.page_due is True
+
+
+# --- 화면의 글자 (ARTEL-690) ----------------------------------------------
+
+
+def label(said: str | None = "전투를 시작하려면 Space", **over) -> dict:
+    """멤버도 offer 도 없이 글자만 든 객체. 라벨이 실제로 이 모양으로 온다."""
+    base = {
+        "scene": "TurnBattleScene",
+        "id": 31182,
+        "path": "Canvas/Dialogue",
+        "selector": "Canvas[2]/Dialogue[0]",
+        "members": [],
+    }
+    if said is not None:
+        base["text"] = said
+    base.update(over)
+    return base
+
+
+def test_화면의_글자_절이_글자와_주소를_함께_싣는다():
+    """이것이 없으면 라벨은 파싱까지 되고 렌더에서 사라진다.
+
+    객체 블록의 가지치기(ARTEL-662)는 신선한 값도, 빚진 값도, 누를 것도 없으면 건너뛰는데
+    라벨은 셋 다 비어 있다. 글자가 먼저이고 주소가 뒤인 것은 읽을 것이 글자이고 주소는
+    그것을 `inspect_object` 로 펴거나 겨누기 위한 것이기 때문이다.
+    """
+    memory = fold(reading(active=[label()]))
+
+    view = memory.render(since=0)
+
+    assert "the screen reads:" in view
+    assert "'전투를 시작하려면 Space'   Canvas[2]/Dialogue[0]" in view
+
+
+def test_안_변한_글자가_여러_turn_뒤에도_계속_보인다():
+    """이 절이 창(window)을 안 타는 이유 전부가 이것이다.
+
+    글자는 바뀔 때만 델타에 실리므로 창으로 가르면 한 번 그리고 끝인데, `pulse` block 은
+    scene view marker 안에 들어가고 `DEFAULT_KEEP_SCENES = 1` 이라 다음 도구 결과가 오는
+    순간 접힌다. 그래서 튜토리얼 안내문처럼 떠 있는 내내 안 변하는 글자가 모델 호출 딱 한 번
+    동안만 문맥에 있었고, QA agent 가 화면이 시키는 것을 안 따랐다.
+    """
+    memory = fold(reading(active=[label("Space 를 눌러 계속")]))
+    memory.render(since=0, advance=True)
+
+    for turn in range(2, 6):
+        memory.apply(
+            PulseReading.model_validate(
+                reading(reading=turn, whole=False, active=[obj()], changed=["continue|turn"])
+            )
+        )
+        view = memory.render(advance=True)
+
+        assert "'Space 를 눌러 계속'" in view, (turn, view)
+        # 안 바뀐 글자에 소식 표가 붙으면 표가 뜻을 잃는다.
+        assert "(changed)" not in view, (turn, view)
+
+
+def test_화면의_글자는_위에서_아래로_왼쪽에서_오른쪽으로_읽힌다():
+    """줄 순서가 곧 화면을 읽는 순서여야 한다.
+
+    화면 좌표의 원점이 좌상단이라 y 가 작은 것이 위쪽이다. 순서를 안 세우면 제목과 대사와
+    버튼 라벨이 `held` 사전 순서대로 섞여 나오고, 읽는 쪽은 어느 글자가 어느 글자에 딸린
+    것인지를 좌표로 되짚어야 한다.
+    """
+    memory = fold(
+        reading(
+            active=[
+                label("아래쪽 안내", selector="Hint[1]", rect={"x": 10, "y": 400, "w": 200, "h": 40}),
+                label("위쪽 오른쪽", selector="Score[2]", rect={"x": 500, "y": 20, "w": 100, "h": 40}),
+                label("위쪽 왼쪽", selector="Title[0]", rect={"x": 10, "y": 20, "w": 200, "h": 40}),
+            ]
+        )
+    )
+
+    view = memory.render(since=0)
+
+    assert view.index("'위쪽 왼쪽'") < view.index("'위쪽 오른쪽'") < view.index("'아래쪽 안내'")
+
+
+def test_rect_없는_라벨도_빠지지_않고_맨_뒤에_나온다():
+    """자리를 모르는 것과 없는 것은 다르다.
+
+    `rect` 를 안 싣는 라벨을 빼면 그 글자가 화면 어디에도 안 남는다. 자리를 모르니 줄을
+    세울 수 없을 뿐이라, 좌표를 아는 것들 뒤에 붙이고 그 안에서는 주소 순으로 둔다 —
+    순서가 판독마다 흔들리면 같은 화면이 매번 다르게 읽힌다.
+    """
+    memory = fold(
+        reading(
+            active=[
+                label("자리를 모르는 안내", selector="Floating[9]", rect=None),
+                label("아래쪽 안내", selector="Hint[1]", rect={"x": 10, "y": 400, "w": 200, "h": 40}),
+            ]
+        )
+    )
+
+    view = memory.render(since=0)
+
+    assert "'자리를 모르는 안내'" in view
+    assert view.index("'아래쪽 안내'") < view.index("'자리를 모르는 안내'")
+
+
+def test_바뀐_턴에만_changed_가_붙는다():
+    """이 표가 "Space 를 눌렀는데 대사가 넘어갔는가" 를 가리는 값이다.
+
+    이 절은 창과 무관하게 매번 전부 그리므로, 표가 없으면 창 뷰에서도 어느 줄이 이번에
+    바뀐 것인지 알 수 없다. 그러면 누른 뒤 대사가 넘어갔는지를 아는 수단이 없어져서, 안
+    먹은 입력을 먹은 것으로 읽는다.
+    """
+    memory = fold(reading(active=[label("첫 줄")]))
+    memory.render(since=0, advance=True)
+
+    memory.apply(
+        PulseReading.model_validate(
+            reading(reading=2, whole=False, active=[label("둘째 줄")])
+        )
+    )
+    turned = memory.render(advance=True)
+
+    assert "'둘째 줄'   Canvas[2]/Dialogue[0]" in turned
+    assert "(changed)" in turned
+
+    memory.apply(
+        PulseReading.model_validate(reading(reading=3, whole=False, active=[obj()]))
+    )
+    later = memory.render(advance=True)
+
+    # 글자는 그대로 있고, 소식 표만 사라진다.
+    assert "'둘째 줄'" in later
+    assert "(changed)" not in later
+
+
+def test_꺼진_객체의_글자는_화면에_안_나온다():
+    """화면에 없는 글자를 읽게 하면 안 된다.
+
+    SDK 는 꺼진 객체에도 글자를 싣는다 — `silent` 이 멤버 값에만 걸리기 때문이다. 거르는
+    것은 이쪽 몫이고, 객체 블록이 이미 `live` 로 거르고 있다. 그 보장을 이 절에도 못 박는다.
+    """
+    memory = fold(
+        reading(active=[label("보이지 않는 대사")]),
+        reading(reading=2, whole=True, active=[], deactive=[label("보이지 않는 대사")]),
+    )
+
+    view = memory.render(since=0)
+
+    assert "보이지 않는 대사" not in view
+
+
+def test_빈_글자와_공백뿐인_글자는_화면에_안_나온다():
+    """빈 라벨은 화면에서 아무것도 아니다.
+
+    Unity 의 텍스트 컴포넌트는 값이 아직 안 들어온 동안 `""` 를 들고 있고, 자리만 잡아 두는
+    라벨은 공백을 들고 있다. 그것을 줄로 만들면 이 절이 빈 따옴표로 차고, 상한 30 줄을 그런
+    줄이 먹는다.
+    """
+    memory = fold(
+        reading(
+            active=[
+                label("", selector="Empty[0]"),
+                label("   ", selector="Blank[1]"),
+            ]
+        )
+    )
+
+    view = memory.render(since=0)
+
+    assert "the screen reads:" not in view
+
+
+def test_상한을_넘으면_바뀐_줄이_살아남고_몇_개가_더_있는지_말한다():
+    """이 절은 창을 안 타므로 상한이 곧 매 턴 드는 비용이다.
+
+    목록이나 상점 화면은 글자 든 객체가 서른을 쉽게 넘는데, 그때 읽는 쪽이 찾는 것은 전체
+    명단이 아니라 방금 무엇이 달라졌나다. 자른 것을 조용히 자르면 독자가 남은 서른 줄을
+    화면의 전부로 읽는다.
+    """
+    crowd = [
+        label(
+            f"줄 {index}",
+            selector=f"Line[{index}]",
+            rect={"x": 0, "y": index, "w": 10, "h": 10},
+        )
+        for index in range(MAX_SCREEN_TEXT + 5)
+    ]
+    memory = fold(reading(active=crowd))
+    memory.render(since=0, advance=True)
+
+    # 읽는 순서로는 맨 마지막인 줄이 바뀐다. 상한이 앞에서부터 자르면 이것이 떨어진다.
+    memory.apply(
+        PulseReading.model_validate(
+            reading(
+                reading=2,
+                whole=False,
+                active=[
+                    label(
+                        "방금 바뀐 대사",
+                        selector=f"Line[{MAX_SCREEN_TEXT + 4}]",
+                        rect={"x": 0, "y": MAX_SCREEN_TEXT + 4, "w": 10, "h": 10},
+                    )
+                ],
+            )
+        )
+    )
+    view = memory.render(advance=True)
+
+    kept = next(line for line in view.splitlines() if "방금 바뀐 대사" in line)
+    assert kept.startswith("  '방금 바뀐 대사'   Line[34]")
+    assert kept.endswith("  (changed)")
+    assert view.count("   Line[") == MAX_SCREEN_TEXT
+    assert "(+5 more labels on screen; inspect_object shows what one says)" in view
+
+
+def test_글자만_든_객체는_객체_블록을_안_만든다():
+    """같은 주소가 두 번 나오면 읽는 쪽이 두 객체로 읽는다.
+
+    화면의 글자 절이 글자와 주소를 이미 싣는다. 글자만 들고 멤버도 offer 도 없는 객체가
+    그 아래에 헤더만 있는 블록을 하나 더 만들면, 그 블록은 아무 값도 안 싣고 자리만 먹는다.
+    """
+    memory = fold(reading(active=[label()]))
+
+    view = memory.render(since=0)
+
+    assert "Canvas[2]/Dialogue[0]  [id=31182]:" not in view
+    assert view.count("Canvas[2]/Dialogue[0]") == 1
+
+
+def test_글자를_안_실은_델타가_들고_있던_글자를_지우지_않는다():
+    """델타는 움직인 것만 나른다. 안 실렸다는 것은 "없다" 가 아니라 "안 바뀌었다" 다.
+
+    전량은 반대다 — 그쪽은 held 를 통째로 갈아치우고 SDK 가 볼 수 있는 것을 다 보내므로,
+    전량에 글자가 없으면 그 객체는 정말로 글자가 없는 것이다. `tag` 도 같은 규칙을 탄다.
+    """
+    memory = fold(
+        reading(active=[label("들고 있어야 하는 대사")]),
+        reading(reading=2, whole=False, active=[label(said=None)]),
+    )
+
+    held = next(iter(memory.held.values()))
+
+    assert held.text == "들고 있어야 하는 대사"
+
+
+def test_물으면_이미_말한_글자도_답한다():
+    """`inspect` 는 창과 무관하게 지금 아는 것을 다 적는 자리다."""
+    memory = fold(reading(active=[label("이미 말한 대사")]))
+    memory.render(since=0, advance=True)
+
+    assert "says '이미 말한 대사'" in memory.inspect("Dialogue")
+
+
+# --- `PULSE.events` (ARTEL-1285) --------------------------------------------------
+
+
+def event(
+    kind: str, detail: str | None = None, target: str | None = None, **over
+) -> dict:
+    base = {
+        "kind": kind,
+        "target": target,
+        "detail": detail,
+        "value": None,
+        "frame": 99,
+        "count": 1,
+    }
+    base.update(over)
+    return base
+
+
+EVENTS = [
+    event("scene.load", "Map_scene"),
+    event("audio.play", "Pixel 10", "Root/BackgroundMusic", count=3),
+    event("anim.trigger", "Attack", "Root/Player"),
+    event("anim.bool", "IsRunning", "Root/Player", value=True),
+]
+
+
+def test_schema_3_reading_의_events_가_what_happened_절로_그려진다():
+    memory = fold(reading(schema=3, active=[obj()], events=EVENTS))
+
+    view = memory.render()
+
+    block = view[view.index("what happened since the last reading:") :].split("\n\n")[0]
+    assert block.split("\n") == [
+        "what happened since the last reading:",
+        "  scene.load Map_scene",
+        "  audio.play Pixel 10 on BackgroundMusic (x3)",
+        "  anim.trigger Attack on Player",
+        "  anim.bool IsRunning=True on Player",
+    ]
+    # `<<scene context>>` 가 view 뒤에 붙으므로, 그보다 앞에 두려면 객체 블록보다도 앞이어야 한다.
+    assert view.index("what happened") < view.index("Canvas[2]/continue[1]")
+
+
+def test_events_가_없는_reading_은_그_절을_만들지_않는다():
+    """schema 2 의 SDK 는 종전 view 와 byte 단위로 같아야 한다."""
+    memory = fold(reading(active=[obj()]))
+
+    assert "what happened" not in memory.render()
+    assert memory.events == []
+
+
+def test_events_도_값과_같은_창을_탄다():
+    memory = fold(reading(schema=3, active=[obj()], events=EVENTS[:2]))
+    memory.render()
+    memory.apply(
+        PulseReading.model_validate(
+            reading(
+                schema=3,
+                reading=2,
+                whole=False,
+                events=[event("destroy", target="Root/Slime[3]")],
+            )
+        )
+    )
+
+    view = memory.render()
+
+    assert "destroy on Slime[3]" in view
+    assert "audio.play" not in view
+
+
+def test_새_event_가_없으면_마지막_몇_개를_earlier_로_적는다():
+    """빈 창을 침묵으로 두면 "게임이 아무것도 안 했다" 와 "이 SDK 는 event 를 안 보낸다" 가 같아진다."""
+    memory = fold(reading(schema=3, active=[obj()], events=EVENTS))
+    memory.render()
+
+    view = memory.render()
+
+    assert "what happened earlier (nothing new since the last reading, last 4):" in view
+    assert "  anim.bool IsRunning=True on Player" in view
+
+
+def test_events_는_상한까지만_쥐고_그릴_때는_최신을_남긴다():
+    from app.qa.pulse import MAX_EVENTS_KEPT, MAX_EVENTS_SHOWN
+
+    docs = [
+        reading(
+            schema=3,
+            active=[obj()],
+            events=[event("spawn", f"Slime{n}") for n in range(30)],
+        )
+    ]
+    docs.append(
+        reading(
+            schema=3,
+            reading=2,
+            whole=False,
+            events=[event("spawn", f"Bat{n}") for n in range(30)],
+        )
+    )
+    memory = fold(*docs)
+
+    view = memory.render()
+
+    assert len(memory.events) == MAX_EVENTS_KEPT
+    assert f"(+{MAX_EVENTS_KEPT - MAX_EVENTS_SHOWN} earlier events not listed)" in view
+    assert "spawn Bat29" in view
+    assert "spawn Slime0" not in view
+
+
+def test_planner_가_읽는_screen_도_같은_render_라_events_가_실린다():
+    from app.agents.planner_executer.prompts import screen
+
+    memory = fold(reading(schema=3, active=[obj()], events=EVENTS[:1]))
+
+    assert "  scene.load Map_scene" in screen(memory)

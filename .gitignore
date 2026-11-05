@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+dist/
+build/
+.env
+.env.notion
+
+# IDE
+.idea/
+
+# Jira MCP credentials
+.jira.env
+
+# Notion ntn CLI credentials
+.notion.env
+
+# macOS
+.DS_Store
+
+# 프롬프트의 옛 판과 그 판을 붙잡던 검사. git 이력에 남아 있고, 여기 사본은 손에 두려고 둔다.
+.archive/

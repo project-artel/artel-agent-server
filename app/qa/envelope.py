@@ -1,0 +1,1568 @@
+"""QA WebSocket envelope: the Agent <-> Orchestration wire contract.
+
+One envelope shape for every frame; the `type` selects the payload. Agent-facing
+only — Orchestration owns the SDK JSON-RPC translation, qa_log, and SSE. See the
+"QA Agent Session and WebSocket Protocol Plan".
+"""
+
+from datetime import datetime, timezone
+from enum import StrEnum
+from typing import Any, Literal
+from uuid import uuid4
+
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_serializer
+
+from app.qa.game_functions import ActiveBehavior, UsedCheat
+
+
+class MessageType(StrEnum):
+    # Orchestration -> Agent
+    GAME_STATE = "GAME_STATE"
+    ACTION_RESULT = "ACTION_RESULT"
+    # 0.1초마다 뜬 판독을 1초에 모아 보낸 것(ARTEL-401). orchestration 이 변환 없이
+    # 중계하므로(ARTEL-414) payload 는 SDK 가 쓴 문서 그대로다.
+    PULSE = "PULSE"
+    CANCEL = "CANCEL"
+    # The answer to a KNOWLEDGE_SEARCH, correlated by that frame's messageId.
+    KNOWLEDGE_SEARCH_RESULT = "KNOWLEDGE_SEARCH_RESULT"
+    # The answer to a KNOWLEDGE_EXPAND, correlated the same way.
+    KNOWLEDGE_EXPAND_RESULT = "KNOWLEDGE_EXPAND_RESULT"
+    # The answer to any one of the knowledge writes below (ARTEL-331). ONE type for
+    # all five, correlated the same way; which write it answers is in the payload's
+    # `type`. Orchestration chose a single type so that the next write inherits the
+    # contract instead of deciding again whether it has an answer at all.
+    KNOWLEDGE_WRITE_RESULT = "KNOWLEDGE_WRITE_RESULT"
+    # Agent -> Orchestration
+    LOG = "LOG"
+    ACTION = "ACTION"
+    STATUS = "STATUS"
+    # 모델이 부른 tool 하나와 그것이 돌려준 것(ARTEL-609).
+    #
+    # `ACTION` 이 이 자리를 대신하지 못한다. 그것은 조작 tool 이 SDK 로 내보낸 요청이라
+    # tool 28개 중 15개만 남기고, 지식 검색이나 스텝 판정처럼 SDK 를 거치지 않는 13개는
+    # 아무 흔적도 남기지 않았다 — 그래서 타임라인을 읽어도 에이전트가 무엇을 불렀는지
+    # 알 수 없었다.
+    #
+    # 이 두 프레임은 tool 이 각자 내지 않는다. 러너의 `_log_reasoning` 한 곳에서 낸다.
+    # 그 자리가 모든 tool 이 지나가는 길목이고, 개별 tool 이 스스로 남기는 방식은 새
+    # tool 이 생길 때마다 빠뜨린다.
+    #
+    # 철자는 Orchestration 의 `SUPPORTED_TYPES` 와 정확히 같아야 한다. 모르는 타입은
+    # 라우터가 통째로 거절한다.
+    TOOL = "TOOL"
+    TOOL_RESULT = "TOOL_RESULT"
+    # Asks the project's knowledge base a question. This name and the result type
+    # above are spelled exactly as Orchestration's QaAgentInboundRouter expects
+    # them: it rejects an unknown type outright, and that rejection reaches the
+    # waiting tool as silence rather than as an error it could report.
+    KNOWLEDGE_SEARCH = "KNOWLEDGE_SEARCH"
+    # Walks the knowledge graph out from one entry (ARTEL-275). Answered, like the
+    # search and for the same reason: the tool that asks parks on the reply.
+    KNOWLEDGE_EXPAND = "KNOWLEDGE_EXPAND"
+    # Writes to the project's knowledge base: one new entry, one correction, one
+    # soft delete. Spelled exactly as Orchestration's KNOWLEDGE_MUTATION_TYPES has
+    # them, for the reason given on the search above.
+    #
+    # Answered, since ARTEL-331: success comes back as KNOWLEDGE_WRITE_RESULT above,
+    # a rejection as a correlated ERROR — the same pair the search and the expansion
+    # already use. Before that these were one-way, which meant a rejection reached
+    # the model as a success; `record_knowledge` and friends validate locally partly
+    # for that reason, and they keep doing so because a round trip saved is still
+    # saved.
+    #
+    # An answer is not guaranteed. Orchestration performs the write and skips the
+    # reply when the run has no Agent session, and frames it drops before routing
+    # (unknown or finished run) are never answered at all. Silence therefore means
+    # "cannot confirm", NOT "did not happen" — see `QaRunChannel.write_knowledge`.
+    #
+    # KNOWLEDGE_UPDATE was deliberately absent until ARTEL-257. ARTEL-189 had the
+    # agent correct an entry by deleting it and recording the corrected version, to
+    # keep the tool surface small. What that cost is a history in which a repair
+    # and a discard are the same event — both a DELETE and nothing more — so
+    # comparing runs by whether the knowledge they wrote survived (ARTEL-239)
+    # scored the model that maintained knowledge most carefully as the worst.
+    KNOWLEDGE_CREATE = "KNOWLEDGE_CREATE"
+    KNOWLEDGE_UPDATE = "KNOWLEDGE_UPDATE"
+    KNOWLEDGE_DELETE = "KNOWLEDGE_DELETE"
+    # Asserts or withdraws a relation between two entries (ARTEL-274). Answered
+    # like the writes above, and by the same pair of frames. `link_knowledge` and
+    # `unlink_knowledge` still check the relation, the note and the endpoints
+    # themselves — that used to be the only thing standing between a bad frame and
+    # a false success, and it is now a round trip saved on a run that has a clock.
+    KNOWLEDGE_LINK = "KNOWLEDGE_LINK"
+    KNOWLEDGE_UNLINK = "KNOWLEDGE_UNLINK"
+    # One defect the run found in the game, filed against this run.
+    #
+    # Answered since ARTEL-366: Orchestration's `routeIssue` replies `ISSUE_RESULT` on
+    # success and a correlated `ERROR` on a rejection, the pair the knowledge writes use.
+    # Before that it was one-way, and a blank `payload.title` or a severity off its ladder
+    # dropped the frame in silence — which is why `report_issue` still validates both
+    # itself: a round trip saved on a run that has a clock. Nothing here waits for the
+    # answer; it is received so the frame is not reported back as unsupported.
+    ISSUE = "ISSUE"
+    # Orchestration -> Agent. The success reply to `ISSUE` (ARTEL-366), carrying the stored
+    # `issue_id`. Nothing waits on it; it is in this enum so `deliver()` accepts it instead of
+    # answering "unsupported inbound frame", which the far side reads as a protocol fault
+    # (`docs/qa-protocol.md`, 함정 4).
+    ISSUE_RESULT = "ISSUE_RESULT"
+    # 이 `scene` 에서 무엇이 `screen` 을 가르는지를 고쳐 쓴다 (ARTEL-657).
+    #
+    # 철자와 payload 는 orchestration 의 `ScreenSelectorFrames.kt` 와
+    # `docs/screen-selector-frames.md` 가 정한 것 그대로다(ARTEL-655). 라우터는 모르는
+    # 타입을 통째로 거절하고, 그 거절은 기다리는 tool 에게 침묵으로 도착한다.
+    #
+    # 답을 받는다. 받아들여진 항목과 거절 사유가 [SCREEN_SELECTOR_RESULT] 로 돌아오고,
+    # 프레임 자체가 못 돈 경우는 correlation 이 붙은 `ERROR` 다 — 지식 쓰기와 같은 짝이다.
+    SCREEN_SELECTOR_RULE = "SCREEN_SELECTOR_RULE"
+    # Orchestration -> Agent
+    #
+    # 목록에 없는 selector 를 만났을 때 오는 질문 (ARTEL-655). **QA 런은 여기에 답하지
+    # 않는다** — 답하는 것은 따로 띄우는 판정 agent 다(ARTEL-656,
+    # `app/qa/screen_verdict.py`). QA 런이 이 프레임에서 읽는 것은 하나뿐이다: 지도가 지금
+    # 어느 `screen` 이라고 말하는가, 그리고 그것을 가른 selector 가 무엇인가.
+    SCREEN_SELECTOR_PROPOSAL = "SCREEN_SELECTOR_PROPOSAL"
+    # [SCREEN_SELECTOR_PROPOSAL] 하나에 대한 답 (ARTEL-656). 봉투의 `correlationId` 가
+    # 그 제안의 `messageId` 다.
+    #
+    # QA agent 가 보내지 않는다. 게임을 하고 있는 agent 를 세워 판정시키면 기다리는 동안
+    # 게임이 흘러가고, 그 런의 문맥과 예산이 자기 시나리오와 무관한 질문에 쓰인다.
+    SCREEN_SELECTOR_VERDICT = "SCREEN_SELECTOR_VERDICT"
+    # Orchestration -> Agent
+    #
+    # 관측이 화면을 확정했다는 통보 (ARTEL-668). 답이 없고 `correlationId` 도 없다.
+    #
+    # [SCREEN_SELECTOR_PROPOSAL] 과 겸하지 않는 이유는 둘이 나가는 조건이 다르기
+    # 때문이다. 질문은 물어볼 것이 새로 생겼을 때 `(scene, selector)` 마다 **평생 한 번**
+    # 나가고, 사실은 그 사실이 달라질 때마다 나간다. 겸하게 두면 드문 쪽의 조건이 이겨서,
+    # 이미 한 번 플레이한 빌드에서는 제안이 한 장도 안 나가고 QA agent 가 런 내내 자기가
+    # 어느 `screen` 에 있는지 못 본다 — 목록을 고치는 tool 둘(ARTEL-657)이 부를 계기를
+    # 잃는 상태다.
+    #
+    # payload 는 `scene` · `previous_screen` · `current_screen` 이고 철자가 제안과 같다.
+    # 그래서 모델도 [ScreenSelectorProposalPayload] 를 그대로 쓴다.
+    SCREEN_SETTLED = "SCREEN_SETTLED"
+    # [SCREEN_SELECTOR_RULE] 의 답. 요청의 `messageId` 가 `correlationId` 로 돌아온다.
+    #
+    # `KNOWLEDGE_WRITE_RESULT` 와 같은 구조다 — 한 타입이 여러 쓰기에 답하고, 무엇의
+    # 답인지는 payload 의 `type` 이 말한다. 저쪽은 제안에 대한 답(`SCREEN_SELECTOR_VERDICT`)
+    # 에도 이 타입으로 답하므로, 그 `type` 을 확인하지 않으면 남의 답을 제 것으로 읽는다.
+    SCREEN_SELECTOR_RESULT = "SCREEN_SELECTOR_RESULT"
+    # Orchestration -> Agent
+    #
+    # 새로 굳은 `screen` 행 하나에 이름을 지어 달라는 요청 (ARTEL-909). 답은
+    # [SCREEN_NAME] 이고 봉투의 `correlationId` 가 이 frame 의 `messageId` 다.
+    #
+    # [SCREEN_SELECTOR_PROPOSAL] 과 겸하지 않는다. 제안은 `(scene, selector)` 마다 평생
+    # 한 번만 나가서 대부분의 `screen` 은 제안 없이 생기고, 이름 짓기를 판정에 얹으면 그
+    # screen 들이 이름 없이 남는다 (ARTEL-908). 언제 물어볼지는 orchestration 이 정한다.
+    SCREEN_NAME_REQUEST = "SCREEN_NAME_REQUEST"
+    # Agent -> Orchestration
+    #
+    # [SCREEN_NAME_REQUEST] 하나에 대한 답 (ARTEL-909).
+    #
+    # QA agent 가 보내지 않는다. 판정과 같은 이유다 — 게임을 하고 있는 agent 를 세워
+    # 이름을 짓게 하면 기다리는 동안 게임이 흘러간다. 답하는 것은 QA 런 밖에서 도는 단발
+    # agent 다(`app/qa/screen_name.py`).
+    SCREEN_NAME = "SCREEN_NAME"
+    # Agent -> Orchestration
+    #
+    # 이 런이 capability 하나에 대해 배운 것을 지도에 적는다 (ARTEL-644).
+    #
+    # 철자와 payload 는 orchestration 의 `contentmap/observe/CapabilityWriteFrames.kt` 와
+    # 그 저장소의 `docs/capability-write-frames.md` 가 정한 것 그대로다. **여기서 지어내지
+    # 않는다** — PR 135 는 없는 frame 을 이 저장소가 정의했다가 통째로 닫혔다.
+    #
+    # [CAPABILITY_VERDICT] 는 지도에 이미 있는 행이 되더라 / 안 되더라, [CAPABILITY_DISCOVERED]
+    # 는 근거에 없던 것을 새로 적는 것이다.
+    CAPABILITY_VERDICT = "CAPABILITY_VERDICT"
+    CAPABILITY_DISCOVERED = "CAPABILITY_DISCOVERED"
+    # Orchestration -> Agent
+    #
+    # 위의 두 쓰기에 대한 답. `KNOWLEDGE_WRITE_RESULT` 와 같은 구조로, 한 타입이 둘 모두에
+    # 답하고 무엇의 답인지는 payload 의 `type` 이 말한다. 거절은 요청의 `correlationId` 를 문
+    # `ERROR` 다 — 지식 쓰기(ARTEL-331)와 화면 판정 목록(ARTEL-657)이 이미 그 짝이라 이쪽에
+    # 새로 나눠 볼 것이 생기지 않는다.
+    CAPABILITY_WRITE_RESULT = "CAPABILITY_WRITE_RESULT"
+    # Agent -> Orchestration
+    #
+    # 등록된 macro 정의를 `content_map` 에 적고, 이름으로 다시 읽는다 (ARTEL-925).
+    #
+    # 철자와 payload 는 orchestration 의 `contentmap/macro/MacroWriteFrames.kt` 가 정한
+    # 것 그대로다. **여기서 지어내지 않는다** — PR 135 는 없는 frame 을 이 저장소가
+    # 정의했다가 통째로 닫혔다.
+    #
+    # 이 두 프레임이 macro 를 런 밖으로 내보내는 유일한 길이다. [MACRO_REGISTER] 가 없으면
+    # 등록된 macro 도 런이 끝나면 사라지고, [MACRO_READ] 가 없으면 지난 런이 등록한 것을
+    # 이번 런이 부를 수 없다.
+    MACRO_REGISTER = "MACRO_REGISTER"
+    MACRO_READ = "MACRO_READ"
+    # Orchestration -> Agent
+    #
+    # 위 둘의 답이고, 한 타입이 둘을 겸하지 않는다. 쓰기 답은 id 를 싣고 읽기 답은
+    # `source` 와 tree 를 실어 모양 자체가 다르다 — `KNOWLEDGE_WRITE_RESULT` 와
+    # `KNOWLEDGE_SEARCH_RESULT` 가 갈린 것과 같다.
+    #
+    # 거절은 둘 다 요청의 `correlationId` 를 문 `ERROR` 다.
+    MACRO_WRITE_RESULT = "MACRO_WRITE_RESULT"
+    MACRO_READ_RESULT = "MACRO_READ_RESULT"
+    # Agent -> Orchestration
+    #
+    # 이 build 의 `content_map` 에 등록된 macro 를 이름과 docstring 으로 찾는다
+    # (ARTEL-984). `KNOWLEDGE_SEARCH` 와 같은 왕복이고 범위는 `MACRO_READ` 와 같다.
+    # 계약은 `.plan/general/2026-10-13-macro-docstring-and-search.md` 의 `Contract` 절이다.
+    MACRO_SEARCH = "MACRO_SEARCH"
+    # Orchestration -> Agent
+    #
+    # [MACRO_SEARCH] 의 답. 범위 밖의 요청과 `content_map` 이 없는 런은 요청의
+    # `correlationId` 를 문 `ERROR` 를 받는다.
+    MACRO_SEARCH_RESULT = "MACRO_SEARCH_RESULT"
+    # Orchestration -> Agent
+    #
+    # 게임이 돌리던 behavior 하나가 끝났다(ARTEL-1054). orchestration 이 SDK frame 에서 `type` 만
+    # 빼고 payload 로 중계한다. 계약은 workspace 의
+    # `.plan/general/2026-10-14-game-functions-wire-contract.md` 다. 묻고 받는 답이 아니라서
+    # 풀어 줄 `future` 가 없고, 다음 tool 결과 끝에 붙는다.
+    BEHAVIOR_ENDED = "BEHAVIOR_ENDED"
+    # Bidirectional
+    ERROR = "ERROR"
+    # Bidirectional. The operator talking to the Agent mid-run, and its reply.
+    # One type both ways; the envelope's direction is what names the speaker.
+    CHAT = "CHAT"
+
+
+class LogLevel(StrEnum):
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARN = "WARN"
+    ERROR = "ERROR"
+
+
+class LogCategory(StrEnum):
+    THOUGHT = "THOUGHT"
+    OBSERVATION = "OBSERVATION"
+    SYSTEM = "SYSTEM"
+    VALIDATION = "VALIDATION"
+
+
+class StepStatus(StrEnum):
+    STARTED = "STARTED"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class RunResult(StrEnum):
+    PASSED = "PASSED"
+    FAILED = "FAILED"
+    # 게임을 검증하지 못하고 끝났다(ARTEL-1370). 모델 API 가 크레딧 · 인증 · 모델 오류로 거절해 런을
+    # 멈춘 시나리오다. 실패가 아니므로 통과율 · 실패 집계에 들어가지 않는다. 까닭은 `StatusPayload.stop`.
+    UNDECIDED = "UNDECIDED"
+
+
+class ActionItemStatus(StrEnum):
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
+# --- Inbound payloads (Orchestration -> Agent) --------------------------------
+# `extra="allow"`: the scene carries richer, game-specific data (each element's
+# invokable actions/methods and states). The Agent grounds the step's natural
+# language against exactly that data at runtime, so it must be PRESERVED and
+# forwarded, never stripped. Named fields below are just the always-present ones.
+
+
+def center_of(x: float, y: float, w: float, h: float) -> tuple[int, int]:
+    """조준점을 모서리와 크기에서 뽑는다.
+
+    두 채널이 이것을 쓴다 — `GAME_STATE` 는 [Rect.center] 를 거쳐, 판독은
+    `app/qa/pulse.py` 의 `_aim` 에서 직접. 계산을 두 자리에 두면 언젠가 한쪽만
+    반올림이 바뀌고, 그 차이는 1px 라 아무도 못 알아본 채로 조준이 갈린다.
+
+    판독의 좌표는 정수가 아닐 수 있다. SDK 가 `"0.####"` 로 쓰므로 `47.0` 은 `47` 로,
+    `47.5` 는 그대로 온다. 잘라 버린다 — 픽셀 아래로는 화면의 무엇도 다르게 그려지지
+    않고, 그것을 겨눈 무엇도 다른 데 떨어지지 않는다.
+    """
+    return int(x) + int(w) // 2, int(y) + int(h) // 2
+
+
+class Rect(BaseModel):
+    """Where an element sits on the game's screen, in pixels.
+
+    Origin is the TOP-LEFT of the screen and `x`/`y` are the element's own
+    top-left corner — the same coordinates the SDK's `move_mouse` takes, which
+    flips into Unity's bottom-left screen space itself. Nothing here converts.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    x: int
+    y: int
+    w: int
+    h: int
+
+    @property
+    def center(self) -> tuple[int, int]:
+        """The point to aim the pointer at. Derived here so no reader re-does it."""
+        return center_of(self.x, self.y, self.w, self.h)
+
+
+class Screen(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    w: int
+    h: int
+
+
+class Interactable(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: int
+    name: str
+    type: str
+    label: str | None = None
+    placeholder: str | None = None
+    # Both absent from an Orchestration server older than the coordinate relay,
+    # so neither may be required. `onScreen` defaults to true: an element the
+    # scene bothered to list is on screen unless it says otherwise.
+    rect: Rect | None = None
+    onScreen: bool = True
+
+
+class Visual(BaseModel):
+    """Something on screen the scene does not offer as an interactable.
+
+    Backgrounds, portraits, sprites — no id worth clicking, but a position worth
+    aiming at: the pointer tools reach anything with a rect. `rect` and `onScreen`
+    carry the same meaning as on `Interactable`, so one formatter serves both.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    id: int
+    name: str
+    # `image` for a uGUI Image, `sprite` for a SpriteRenderer.
+    type: str
+    # The sprite asset's name; absent when the element has none, as a flat-colour
+    # Image does.
+    sprite: str | None = None
+    rect: Rect | None = None
+    onScreen: bool = True
+
+
+class ActionRecord(BaseModel):
+    """One action the game actually ran, as the scene reported it.
+
+    Distinct from ACTION_RESULT: that answers "did the action I dispatched
+    succeed", this also covers actions the game ran on its own, which the Agent
+    would otherwise have no way to observe.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    target: str
+    name: str
+    success: bool
+    returnValue: Any | None = None
+    error: str | None = None
+    at: str
+
+
+class GameState(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    scene: str
+    screen: Screen | None = None
+    interactables: list[Interactable] = Field(default_factory=list)
+    # Everything else on screen. Disjoint from `interactables` by construction —
+    # an element listed there never repeats here. Empty on an Orchestration
+    # server older than the visuals relay.
+    visuals: list[Visual] = Field(default_factory=list)
+    # Observable state/content values, keyed by name; opaque to the Agent server.
+    observables: dict[str, Any] = Field(default_factory=dict)
+    # Oldest first, capped by Orchestration.
+    recentActions: list[ActionRecord] = Field(default_factory=list)
+
+
+class ActionResultItem(BaseModel):
+    """One action's outcome, as the SDK reports it.
+
+    The SDK sends `{id, success, error}` — a boolean, not the status enum this
+    once expected. Every ACTION_RESULT failed validation because of it.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    id: int
+    success: bool = False
+    error: str | None = None
+
+    # What the action produced, for the actions that produce something. Absent on
+    # every action that does not, which is why it cannot be required. `capture_screen`
+    # puts the uploaded image's URL here; the bytes never travel over this socket.
+    #
+    # `Any` 인 이유: `invoke_cheat` 의 답이 handler 가 돌려준 값을 싣는다(ARTEL-1054). 계약은
+    # 지금 dict 만 적지만, 읽는 쪽이 dict 인지 보고 읽으면 다른 모양이 와도 frame 하나 때문에
+    # `ACTION_RESULT` 전체가 검증에서 떨어지지 않는다.
+    returnValue: Any | None = None
+
+    @property
+    def status(self) -> ActionItemStatus:
+        return ActionItemStatus.SUCCEEDED if self.success else ActionItemStatus.FAILED
+
+
+class ActionResultPayload(BaseModel):
+    message: str | None = None
+    batchId: int | None = None
+    results: list[ActionResultItem] = Field(default_factory=list)
+    # 배치의 마지막 액션이 끝난 Unity 프레임 (SDK ARTEL-620). 판독이 싣는 `frame` 과 같은
+    # 시계라, 이 값보다 뒤인 판독만이 "내 액션 이후"다.
+    #
+    # `None` 은 이 필드를 모르는 옛 SDK 다. 그때는 시간으로 어림잡던 종전 동작으로 돌아간다 —
+    # 새 SDK 를 요구하면 그 게임의 QA 가 통째로 멎는데, 이 값이 주는 것은 그만한 것이 아니다.
+    frame: int | None = None
+
+
+class KnowledgeNeighbour(BaseModel):
+    """One entry hanging off another by a relation, or by similarity.
+
+    Every field defaults and unknown ones are kept, for the reason
+    `KnowledgeSearchHit` gives: a neighbour that failed validation would take the
+    whole answer down with it and leave the asking tool sitting until its timeout.
+
+    `origin` is the discriminator, not `relation`. A neighbour reached by an EDGE
+    is something a run asserted deliberately, with a written reason in `note`; a
+    VECTOR one is a machine guess with nobody standing behind it, and `relation`
+    reads "SIMILAR" only as a label. Weighing them the same is the mistake this
+    field exists to prevent.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str = ""
+    # LEADS_TO|CONTRADICTS|REFINES|DEPENDS_ON|REPLACES, or SIMILAR for a vector
+    # neighbour. A plain string for the same reason `tag` is one below.
+    relation: str = ""
+    origin: str = ""
+    # OUT|IN from the entry this hangs off; NONE for symmetric relations and for
+    # vector neighbours, where a direction word would invent a claim.
+    direction: str = ""
+    # Why the relation was asserted. None for a vector neighbour — nobody asserted it.
+    note: str | None = None
+    tag: str = ""
+    source: str = ""
+    summary: str = ""
+    depth: int = 1
+    # Cosine similarity, VECTOR only.
+    score: float | None = None
+    # Which entry this hangs off. Useful at depth 2, where it says where a
+    # neighbour branched from.
+    via: str = ""
+
+
+class KnowledgeAnchor(BaseModel):
+    """One place an entry is tied to: the fact holds there and not everywhere.
+
+    A list rather than a single value on the hit below, because one entry can be
+    tied to several screens. An EMPTY list is not "the anchors could not be read"
+    — it is the ordinary case of a fact true wherever the player is, and it is
+    also what an Orchestration that predates anchors sends.
+
+    `screen_id` absent is normal too: a screen is decided from observation, and
+    when it was not decided the anchor says the scene and stops there. It is text
+    for the reason every other id here is — a 64-bit value must not lose precision
+    on the way through JSON — and it goes back out that way on
+    `KnowledgeCreatePayload`.
+
+    Both fields default, as on `KnowledgeSearchHit`: an anchor that failed
+    validation would take the whole answer down with it, and the tool that asked
+    would sit until its own timeout.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    scene_name: str = ""
+    screen_id: str | None = None
+
+
+class KnowledgeSearchHit(BaseModel):
+    """One piece of project knowledge the search matched.
+
+    Every field defaults, and unknown ones are kept. A hit that failed validation
+    would take the whole answer down with it, and the tool that asked would then
+    sit until its own timeout — the run paying twenty seconds for a renamed
+    field. A missing summary reads as an empty one instead.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str = ""
+    # One of CONTROL|RULE|OBJECTIVE|UI|MISC. Left as a plain string rather than an
+    # enum: Orchestration owns that vocabulary, and a value added there must not
+    # make this side drop the hit.
+    tag: str = ""
+    source: str = ""
+    summary: str = ""
+    description: str = ""
+    # Cosine similarity, so higher is closer. Orchestration flips pgvector's
+    # distance before sending precisely so nobody downstream has to remember which
+    # direction is good.
+    score: float = 0.0
+    # Entries one hop from this one (ARTEL-275). Defaults to empty, so an
+    # Orchestration that predates the graph — or one with `expand-search-hits`
+    # turned off — simply sends hits without it and nothing here notices.
+    neighbors: list[KnowledgeNeighbour] = Field(default_factory=list)
+    # Where this entry holds, when it holds in one place only (ARTEL-592). Defaults
+    # to empty for the same reason `neighbors` does: an Orchestration that does not
+    # send anchors and an entry that has none read identically here, and both mean
+    # "no screen is claimed".
+    anchors: list[KnowledgeAnchor] = Field(default_factory=list)
+
+
+class KnowledgeExpandResultPayload(BaseModel):
+    """The answer to one KNOWLEDGE_EXPAND.
+
+    An empty `neighbors` is a normal answer: the entry may simply have no
+    relations yet, and on a run with `knowledge_mode=off` it is always empty.
+
+    `truncated` says a cap cut something off. It rides along rather than being
+    inferred from the count because the caps are Orchestration's and this side
+    does not know them — and a silently truncated list reads as "that is all
+    there is", which is the one thing it is not.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str = ""
+    summary: str = ""
+    neighbors: list[KnowledgeNeighbour] = Field(default_factory=list)
+    truncated: bool = False
+
+
+class KnowledgeWriteResultPayload(BaseModel):
+    """The answer to one knowledge write (ARTEL-331).
+
+    `type` echoes the write it answers, so a reader of the log can tell what
+    happened without matching correlation ids by hand. Only one of the two id
+    fields is filled: entry writes carry `knowledge_id`, relation writes carry
+    `edge_id`.
+
+    The id is the row that now holds the fact **in this run's knowledge scope**.
+    On a scoped run that corrected or deleted a baseline entry it is the shadow or
+    tombstone, not the baseline — the baseline id is one this run could not name
+    again.
+
+    Both default to empty rather than being required: an Orchestration that adds a
+    field must not make this side drop the frame that releases a waiting tool.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str = ""
+    knowledge_id: str = ""
+    edge_id: str = ""
+
+
+class KnowledgeSearchResultPayload(BaseModel):
+    """The answer to one KNOWLEDGE_SEARCH.
+
+    An empty `results` is a normal answer, not a failure: the embedding backfill
+    runs asynchronously, so knowledge that exists may have no vector yet.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    query: str = ""
+    # Which embedding model the search ran under. Kept because a search that keeps
+    # coming back empty is diagnosed by comparing this against the Agent's own
+    # embedding configuration.
+    model: str = ""
+    results: list[KnowledgeSearchHit] = Field(default_factory=list)
+
+
+class CancelPayload(BaseModel):
+    message: str | None = None
+    reason: str | None = None
+
+
+class ChatPayload(BaseModel):
+    """One operator turn on the way in, one Agent turn on the way out."""
+
+    message: str
+    step: int | None = None
+
+
+class QaChatTurn(BaseModel):
+    """One recorded turn of the operator conversation.
+
+    Lives here, beside the wire types, rather than in the agent package: both the
+    session record and the agent request need it, and `app.qa` importing
+    `app.agents.qa` would close an import cycle (see `app/qa/__init__.py`).
+    """
+
+    role: Literal["USER", "AGENT"]
+    message: str
+    step: int | None = None
+
+
+# --- Outbound payloads (Agent -> Orchestration) -------------------------------
+
+
+class LogPayload(BaseModel):
+    level: LogLevel = LogLevel.INFO
+    category: LogCategory
+    message: str
+    step: int | None = None
+
+
+class ContextUsage(BaseModel):
+    used_tokens: int
+    max_tokens: int
+
+
+class ContextUsagePayload(LogPayload):
+    """A `LOG` line that also carries how full the model's context was on one call.
+
+    Rides on `LOG` rather than a new type: Orchestration rejects a type it does not
+    know, and it stores and relays a `LOG` payload whole. Screens find these lines by
+    the `context` key; every other `LOG` frame lacks it.
+    """
+
+    context: ContextUsage
+
+
+class ToolCallPayload(BaseModel):
+    """모델이 부른 tool 하나.
+
+    `message` 가 `tool` 과 같은 값을 한 번 더 이고 있는 것은 중복이 아니다. Orchestration
+    의 라우터는 표시용 `payload.message` 가 비어 있으면 프레임을 통째로 거절하므로, 그
+    가드를 지나는 값이 여기 있어야 한다.
+
+    `args` 는 모델이 쓴 그대로다. 모든 tool 이 받는 `thought` 도 그 안에 있고, 그래서 tool
+    이 따로 남기던 산문 한 줄이 필요 없어졌다.
+    """
+
+    message: str
+    tool: str
+    tool_call_id: str
+    args: dict[str, Any] = Field(default_factory=dict)
+    step: int | None = None
+
+
+class ToolResultPayload(BaseModel):
+    """그 tool 이 모델에게 돌려준 것.
+
+    `content` 는 잘라서 싣는다. `observe_scene` 이 씬 렌더를 통째로 돌려주는데, 이 프레임은
+    qa_log 행이 되고 SSE 로도 발행되므로 자르지 않으면 타임라인 한 줄이 수십 KB 가 된다.
+
+    성패를 담는 불리언이 없다. tool 은 문자열 하나를 돌려줄 뿐이라 서버가 지어낼 수 없다 —
+    조작이 실제로 됐는지는 같은 왕복의 `ACTION_RESULT` 가 말한다.
+    """
+
+    message: str
+    tool: str
+    tool_call_id: str
+    content: str
+    step: int | None = None
+
+
+class JsonRpcAction(BaseModel):
+    """One SDK JSON-RPC 2.0 action item carried inside an ACTION frame."""
+
+    id: int
+    jsonrpc: str = "2.0"
+    method: str
+    params: list = Field(default_factory=list)
+
+
+class ActionPayload(BaseModel):
+    message: str
+    step: int | None = None
+    actions: list[JsonRpcAction] = Field(default_factory=list)
+
+
+class KnowledgeSearchPayload(BaseModel):
+    """A question for the project's knowledge base.
+
+    The project is deliberately absent. Orchestration resolves the search's scope
+    from the run itself (`qaTryId -> gameInstanceId -> projectId`), so no frame
+    from here can read another project's knowledge.
+    """
+
+    query: str
+    # Singular, though Orchestration accepts a `tags` list too. The tool offers one
+    # topic because one question has one topic, and a result's own `tag` is
+    # singular — so a value read off a hit can be fed straight back as a filter.
+    tag: str | None = None
+    limit: int
+    # Which scenario step asked. `search_knowledge` has always taken this and never
+    # sent it, which is why `knowledge_usage.step` was null on every row ever
+    # written. It is a COORDINATE, not a filter: the far side records it and the
+    # results do not change. Optional because an Orchestration that predates it
+    # ignores unknown payload fields, so neither side has to deploy first.
+    step: int | None = None
+
+
+class KnowledgeCreatePayload(BaseModel):
+    """One fact the run learned, to be filed against this project.
+
+    No project and no source travel with it. Orchestration fixes both from the run
+    itself — `qaTryId -> gameInstanceId -> projectId`, `source=QA`,
+    `source_id=qa_try.id` — which is what stops one run's frame from writing into
+    another project's knowledge base.
+    """
+
+    tag: str
+    summary: str
+    description: str
+    # The ANCHOR: where this fact holds, when it holds in one place only (ARTEL-592).
+    # A control that behaves on this screen unlike anywhere else, a screen whose
+    # usual way back does nothing. A fact true wherever the player is fills neither
+    # field, and that asymmetry is the whole design — a fact tied to one screen is
+    # a fact the run standing on the next one never finds.
+    #
+    # NOTHING here reads the run's current scene. Filling the anchor from wherever
+    # the run happened to be standing would file every game-wide rule under one
+    # screen; the agent names it or leaves it out.
+    #
+    # Optional for the reason `KnowledgeSearchPayload.step` is optional: an
+    # Orchestration that does not know these fields ignores unknown payload fields,
+    # so neither side has to deploy first. A frame carrying neither is treated
+    # exactly as it was before anchors existed.
+    #
+    # `screen_id` travels as text for the reason every other id crossing this
+    # boundary does — `knowledge_id` on the update and the delete, both endpoints of
+    # a link: a 64-bit value must not lose precision on the way through JSON. It
+    # comes back the same way on `KnowledgeAnchor`.
+    #
+    # `screen_id` cannot travel alone. A screen lives inside a scene, so an anchor
+    # naming a screen and no scene cannot later be read back as which scene's
+    # screen it was — Orchestration refuses that pair, and `record_knowledge`
+    # refuses it here before a frame is spent finding out.
+    scene_name: str | None = None
+    screen_id: str | None = None
+
+
+class KnowledgeUpdatePayload(BaseModel):
+    """A correction to one existing entry, which keeps its id and its lineage.
+
+    A third model rather than a widened create or delete, by the same rule that
+    split those two below: this is the only one of the three that names an id AND
+    carries a body, and both are load-bearing. Collapsing all three into
+    Orchestration's single `KnowledgeMutationRequest` would make every field
+    optional here too, and leave which ones each type actually requires to a
+    comment.
+
+    A field left as None is left alone on the far side — `updateFromQaTry` writes
+    only what it was given. That is what lets fixing one sentence be a frame
+    carrying one sentence, rather than a re-send of the whole entry with the parts
+    that were already right copied back over themselves. All three None is refused
+    there, so `update_knowledge` refuses it here instead of spending a frame to
+    find out.
+    """
+
+    knowledge_id: str
+    tag: str | None = None
+    summary: str | None = None
+    description: str | None = None
+
+
+class KnowledgeDeletePayload(BaseModel):
+    """The soft delete of one existing entry.
+
+    Split from the create rather than sharing Orchestration's single
+    `KnowledgeMutationRequest`, because on this side the two have no field in
+    common: a create never names an id, and a delete never carries a body. One
+    model would make every field optional and leave which ones are required to a
+    comment.
+
+    `knowledge_id` is a string, and matches the wire name Orchestration maps with
+    `@JsonProperty("knowledge_id")`. Ids leave Orchestration as text so a 64-bit
+    value cannot lose precision on the way through JSON, and it comes back the
+    same way — the update above names its target the same way, for the same reason.
+    """
+
+    knowledge_id: str
+
+
+class KnowledgeExpandPayload(BaseModel):
+    """A request to walk the graph out from one entry.
+
+    No project and no scope travel with it, for the reason `KnowledgeSearchPayload`
+    gives — both come from the run on the far side.
+
+    `depth` is a request, not a guarantee: Orchestration clamps it to its own
+    ceiling rather than refusing, so a value past the limit costs a shallower
+    answer instead of a failed tool call.
+    """
+
+    knowledge_id: str
+    depth: int
+    include_similar: bool = True
+    # Carried for the same reason the search carries it: an expansion writes
+    # `knowledge_usage` rows too, and a coordinate on one of the two paths but not
+    # the other leaves half the table unable to say when it was read.
+    step: int | None = None
+
+
+class KnowledgeLinkPayload(BaseModel):
+    """One relation asserted between two entries.
+
+    Both endpoints are ids the run has been shown. Orchestration folds them to the
+    baseline entry they represent before storing, so an id that names a
+    scope-local shadow still records the relation where every run can read it.
+
+    `note` is required here and NOT NULL on the far side. An edge nobody can audit
+    is an edge nobody can remove with confidence, and for `LEADS_TO` the note is
+    not the reason but the ACTION — it is what makes the route usable by a run
+    that has never walked it.
+    """
+
+    from_knowledge_id: str
+    to_knowledge_id: str
+    relation: str
+    note: str
+
+
+class KnowledgeUnlinkPayload(BaseModel):
+    """The withdrawal of one relation.
+
+    Named by its endpoints and relation rather than by an edge id, because this
+    side has never seen an edge id — the id printed with a neighbour is the
+    knowledge id. Exposing edge ids would add a second id space to everything the
+    agent reads, for the sake of one tool.
+
+    No note. Why a relation was withdrawn is carried by the tool's `thought`,
+    which is already the run's record of its reasoning, and there is no surviving
+    row to attach it to.
+    """
+
+    from_knowledge_id: str
+    to_knowledge_id: str
+    relation: str
+
+
+# --- screen selector frames (ARTEL-655 의 계약) --------------------------------
+#
+# 프레임 넷이 전부 여기 있다. 계약 원본은 orchestration 의
+# `contentmap/observe/ScreenSelectorFrames.kt` 이고 산문 설명은 그 저장소의
+# `docs/screen-selector-frames.md` 다. 이름과 필드 철자는 그쪽이 정한 것이고, 어긋나면
+# 라우터가 프레임을 거절하거나 payload 를 빈 값으로 읽는다.
+#
+# 넷을 보내고 받는 주체가 둘이다. `SCREEN_SELECTOR_RULE` 은 QA agent 의 tool 이 보내고
+# (ARTEL-657), `SCREEN_SELECTOR_VERDICT` 는 QA 런 밖에서 도는 판정 agent 가 보낸다
+# (ARTEL-656). `SCREEN_SELECTOR_RESULT` 는 그 둘 모두에 답하므로 payload 의 `type` 을
+# 봐야 무엇의 답인지 알 수 있다.
+#
+# 다섯째로 `SCREEN_SETTLED` 가 붙었다(ARTEL-668). 목록을 묻지도 고치지도 않고, 그 목록이
+# 만들어 낸 결과 — 지금 어느 `screen` 인가 — 만 알린다. payload 모델을 따로 두지 않는
+# 이유는 [ScreenSelectorProposalPayload] 에 적었다.
+
+
+class ScreenDiscriminatorEntry(BaseModel):
+    """`screen` 하나를 가른 selector 하나와 그때의 on/off.
+
+    이 배열이 곧 `discriminator` 이고, 두 `screen` 이 같은 행에 앉느냐 갈리느냐를 정하는
+    것이 이것뿐이다. 그래서 QA agent 에게 보여 줄 것도 화면 id 만이 아니라 이 목록이다 —
+    "왜 같은 화면이라고 하나" 의 답이 여기 있고, 그 답을 봐야 어느 selector 를 고칠지
+    고를 수 있다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    selector: str = ""
+    active: bool = False
+
+
+class ScreenSelectorSceneRef(BaseModel):
+    """제안이 가리키는 `scene`. 이름이 사람이 읽는 것이고 id 는 저쪽의 행 번호다."""
+
+    model_config = ConfigDict(extra="allow")
+
+    scene_id: str = ""
+    name: str = ""
+
+
+class ScreenSelectorScreenRef(BaseModel):
+    """제안이나 통보에 실린 `screen` 하나.
+
+    필드가 전부 기본값을 갖는다. 둘 다 런이 기다리는 답이 아니라 저쪽이 스스로 보내는
+    프레임이라, 한 칸이 비었다고 프레임을 통째로 버리면 그 화면을 볼 기회가 그대로
+    사라진다.
+
+    **빈 `discriminator` 는 빠진 값이 아니라 사실이다.** 그 `scene` 의 목록에 오른
+    selector 가 하나도 안 나타났다는 뜻이고, 그러면 그 `scene` 의 모든 관측이 화면 한
+    행에 앉는다 — QA agent 가 알아채고 tool 로 고쳐야 하는 상태가 정확히 그것이다
+    (`app/qa/screen.py` 의 `_told_apart_by`).
+
+    `capture_url` 은 서명된 단기 주소다. QA agent 는 이것을 안 읽는다 — 자기 눈으로 게임을
+    보고 있다. 이 주소를 실제로 여는 것은 제안에 답하는 판정 agent 뿐이고(ARTEL-656), 그
+    쪽에서는 이것이 "달라 보이는가" 를 판단할 유일한 그림이다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    screen_id: str = ""
+    name: str | None = None
+    discriminator: list[ScreenDiscriminatorEntry] = Field(default_factory=list)
+    capture_url: str | None = None
+    capture_expires_at: str | None = None
+
+
+class ScreenSelectorChange(BaseModel):
+    """잇단 두 `pulse` 사이에 달라진 것 하나.
+
+    `was` 가 `None` 이면 이 `pulse` 에서 처음 본 객체다. 있다가 사라지는 경우는 없다 —
+    `pulse` 는 말하지 않은 객체를 지우지 않는다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    selector: str = ""
+    was: bool | None = None
+    now: bool = False
+
+
+class ScreenSelectorCandidate(BaseModel):
+    """목록에 넣을지 물어보는 후보 하나와 그 통계.
+
+    통계 셋은 게임을 모르는 쪽이 판단할 수 있게 실려 오는 재료이고, **셋 다 그 자체로는
+    규칙이 아니다.** 규칙으로 쓰려던 시도가 셋 다 반례를 냈고, 그래서 이 프레임이
+    존재한다(`docs/screen-selector-frames.md` 의 표).
+
+    - `instances_in_reading` — 이 `pulse` 에서 같은 `path` 를 가진 객체 수. 여럿이면
+      스폰된 것일 수도 있고, 이름이 같은 형제 컨트롤 둘일 수도 있다
+    - `readings_seen_in_scene` — 이 `scene` 에서 이 selector 를 본 `pulse` 수. 저쪽
+      프로세스 메모리의 값이라 재시작하면 0 부터 다시 센다
+    - `distinct_values_observed` — 같은 `path` 로 접히는 서로 다른 selector 원문 수.
+      1 이면 hierarchy index 가 흔들리지 않는 고정 UI 다
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    selector: str = ""
+    path: str = ""
+    active: bool = False
+    instances_in_reading: int = 0
+    readings_seen_in_scene: int = 0
+    distinct_values_observed: int = 0
+    in_whitelist: bool = False
+
+
+class ScreenSelectorProposalPayload(BaseModel):
+    """`SCREEN_SELECTOR_PROPOSAL` 의 payload, 그리고 `SCREEN_SETTLED` 의 payload.
+
+    한 모델이 두 프레임을 받는다. 저쪽이 `scene` · `previous_screen` · `current_screen`
+    을 **글자 그대로 같은 철자로** 싣기로 정했기 때문이다(ARTEL-668) — 같은 값의 두 번째
+    모델을 두면 한쪽만 필드가 늘고 그것이 조용하다. `SCREEN_SETTLED` 는 `reason` ·
+    `changes` · `candidates` 를 안 싣고, 셋 다 기본값이 있어 그대로 읽힌다.
+
+    두 쪽이 이 하나를 읽고 서로 다른 것을 본다. QA 런은 `current_screen` 만 본다 —
+    지도가 지금 어느 `screen` 이라고 말하는가(`app/qa/screen.py`). 판정 agent 는 전부
+    본다 — 그 판정이 **이 payload 만 보고** 나야 하기 때문이다(ARTEL-656). 특정 게임의
+    관례를 프롬프트에 적으면 그 게임에서만 맞는 판정기가 되므로, 판단에 필요한 것이 전부
+    여기 실려야 한다.
+
+    제안은 드물게 온다 — 저쪽은 `(scene, selector)` 마다 평생 한 번만 물어보므로, 이미
+    다 물어본 빌드에서는 한 장도 안 온다. **그래서 화면을 그리는 쪽이 기대는 것은 제안이
+    아니라 `SCREEN_SETTLED` 다.** 그쪽은 화면이 바뀔 때마다 오고, 후보가 하나도 없어도
+    온다.
+
+    `reason` 은 제안에만 있고 `unknown-selector`(목록 밖 selector 가 상태를 바꿨다) 또는
+    `scene-screen-cap`(이 `scene` 이 화면 상한에 닿았다 — 그때 후보는 지금 화면을 가르고
+    있는 것들이고 답은 **뺄** 항목이다) 이다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    reason: str = ""
+    scene: ScreenSelectorSceneRef = Field(default_factory=ScreenSelectorSceneRef)
+    previous_screen: ScreenSelectorScreenRef | None = None
+    current_screen: ScreenSelectorScreenRef | None = None
+    changes: list[ScreenSelectorChange] = Field(default_factory=list)
+    candidates: list[ScreenSelectorCandidate] = Field(default_factory=list)
+
+
+class ScreenSelectorEntry(BaseModel):
+    """목록에 앉힐 항목 하나. `SCREEN_SELECTOR_RULE` 이 이것의 배열로 나간다.
+
+    `pattern` 은 **정확 문자열이고 정규식이 아니다.** 이 항목은 `discriminator` 를 만드는
+    Kotlin 과 화면을 접는 SQL 양쪽에서 평가되는데, 두 정규식 엔진이 다르면 같은 화면이 두
+    `discriminator` 로 갈린다. 그리고 잘못 쓴 정확 문자열은 아무것에도 안 맞고 거절되지만,
+    잘못 쓴 정규식은 전부 맞고 그 `scene` 의 화면을 조용히 한 행으로 뭉친다.
+
+    `reason` 은 필수다. 사유 없는 항목은 나중에 사람이 되짚을 수 없고, 되짚을 수 없는
+    항목은 지울지 말지도 판단할 수 없다.
+    """
+
+    match: str
+    pattern: str
+    screen_defining: bool
+    reason: str
+
+
+class ScreenSelectorRulePayload(BaseModel):
+    """`SCREEN_SELECTOR_RULE` 의 payload. tool 둘이 이 하나로 나간다.
+
+    `scene` 은 agent 가 **지금 서 있는** `scene` 이름이다. 목록은 `scene` 단위이고, 다른
+    `scene` 은 거기 서서 본 것이 아니므로 근거가 없다 — 그래서 tool 은 이 값을 인자로 받지
+    않고 런의 현재 `scene` 에서 채운다.
+    """
+
+    scene: str
+    entries: list[ScreenSelectorEntry] = Field(default_factory=list)
+
+
+class ScreenSelectorVerdictPayload(BaseModel):
+    """`SCREEN_SELECTOR_VERDICT` 의 payload. 제안 하나에 대한 답이다 (ARTEL-656).
+
+    `scene` 을 안 싣는다. 저쪽은 `proposal_id` 로 그 제안의 기록에서 `scene` 을 푼다 —
+    답이 늦게 닿을 때 QA agent 는 이미 다른 `scene` 에 서 있을 수 있고, 그때 이쪽이 지금
+    서 있는 `scene` 을 실으면 남의 `scene` 목록을 고친다.
+
+    **`entries` 가 비어도 정상이다.** 기본값이 무시라, "물어본 것 중 화면을 가르는 것이
+    없다" 와 "답을 안 낸다" 가 같은 결과다. 모델이 형식을 어겼을 때도 지어내지 말고 빈
+    배열로 답한다 — 빈 답은 지도를 종전대로 두지만, 지어낸 항목은 그 `scene` 을 영구히
+    잘못 가른다.
+
+    `proposal_id` 는 봉투의 `correlationId` 와 같은 값이다. 저쪽이 둘 중 하나만 있어도
+    풀지만 둘 다 채운다 — 봉투를 안 보는 경로가 생겨도 답이 미아가 되지 않는다.
+    """
+
+    proposal_id: str
+    entries: list[ScreenSelectorEntry] = Field(default_factory=list)
+    note: str | None = None
+
+
+class ScreenSelectorAcceptedEntry(BaseModel):
+    """받아들여져 목록에 앉은 항목 하나. 저장된 그대로 돌아온다."""
+
+    model_config = ConfigDict(extra="allow")
+
+    match: str = ""
+    pattern: str = ""
+    screen_defining: bool = False
+
+
+class ScreenSelectorRejectedEntry(BaseModel):
+    """거절된 항목 하나와 그 사유.
+
+    사유를 그대로 모델에 옮겨 tool 결과에 싣는다. 거절을 "안 됐다" 로만 전하면 부른 쪽이
+    같은 실수를 반복하고, 이 tool 의 거절은 대부분 고칠 수 있는 것이다 — 오타 난 selector,
+    이 `scene` 에서 본 적 없는 경로.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    match: str | None = None
+    pattern: str | None = None
+    reason: str = ""
+
+
+class ScreenSelectorResultPayload(BaseModel):
+    """`SCREEN_SELECTOR_RESULT` 의 payload.
+
+    `type` 은 무엇의 답인가다. 한 타입이 `SCREEN_SELECTOR_RULE` 과
+    `SCREEN_SELECTOR_VERDICT` 양쪽에 답하므로 이 값을 확인하지 않으면 남의 답으로 tool 을
+    풀어 준다.
+
+    `folded_screens` 가 0 인 것이 보통이고 오류가 아니다. 항목을 **넣는** 답은 과거 화면을
+    다시 가르지 않는다 — 그 selector 의 값이 애초에 `discriminator` 에 안 들어갔으니
+    기록이 없어 복원할 수 없고, 다음 관측부터 갈린다. **빼는** 답만 기존 행을 접는다.
+
+    `scene_id` 는 `scene` 을 풀지 못한 거절에서 null 로 온다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str = ""
+    scene_id: str | None = None
+    accepted: list[ScreenSelectorAcceptedEntry] = Field(default_factory=list)
+    rejected: list[ScreenSelectorRejectedEntry] = Field(default_factory=list)
+    folded_screens: int = 0
+
+
+
+# --- screen name frames (ARTEL-909 의 계약) ------------------------------------
+#
+# frame 둘이다. orchestration 이 새로 굳은 `screen` 하나를 들고 물어보고
+# (`SCREEN_NAME_REQUEST`), 이쪽이 이름 하나로 답한다(`SCREEN_NAME`). 그 사이에 왕복이
+# 더 없다.
+#
+# `screen` 과 `scene` 이 판정 frame 의 것과 **같은 모델**이다. 저쪽이 같은 철자로 싣기로
+# 정했고, 같은 값의 두 번째 모델을 두면 한쪽만 필드가 늘어도 아무도 모른다 — `SCREEN_SETTLED`
+# 가 [ScreenSelectorProposalPayload] 를 그대로 쓰는 것과 같은 판단이다.
+
+# 이름 길이 상한. 넘으면 버리고 이름 없이 답한다 (자르지 않는다 — 잘린 이름은 틀린 이름이고,
+# 이름 없는 `screen` 은 그냥 이름이 없을 뿐이다).
+MAX_SCREEN_NAME_LENGTH = 60
+
+
+class ScreenNameRequestPayload(BaseModel):
+    """`SCREEN_NAME_REQUEST` 의 payload. 이름을 물어보는 `screen` 하나.
+
+    `request_id` 가 답의 `correlation_id` 가 된다. 봉투의 `messageId` 와 같은 값이지만
+    payload 에도 싣는다 — 봉투를 안 보는 경로가 생겨도 답이 미아가 되지 않는다.
+
+    필드가 전부 기본값을 갖는다. 판정 frame 과 같은 이유다: 한 칸이 비었다고 frame 을
+    통째로 버리면 그 `screen` 은 영영 이름을 못 받는다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    request_id: str = ""
+    screen: ScreenSelectorScreenRef = Field(default_factory=ScreenSelectorScreenRef)
+    scene: ScreenSelectorSceneRef = Field(default_factory=ScreenSelectorSceneRef)
+
+
+class ScreenNamePayload(BaseModel):
+    """`SCREEN_NAME` 의 payload. 요청 하나에 대한 답이다 (ARTEL-909).
+
+    **`name` 이 `null` 인 답이 정상이다.** 모델이 형식을 어겼을 때도, 상한을 넘겼을 때도,
+    근거가 없어 못 지었을 때도 같은 모양으로 나간다. 이름은 표시값이라 없으면 `screen` 이
+    이름 없이 남을 뿐이고, 스키마를 채우려고 지어낸 이름은 사람이 content map 에서 그
+    화면을 계속 잘못 찾게 만든다.
+
+    `note` 는 한 문장이거나 `null` 이다. frame 이 `qa_log` 에 남으므로, 이름이 없는 답에서
+    이 문장이 "왜 이 `screen` 은 이름이 없나" 에 답하는 유일한 기록이다.
+    """
+
+    request_id: str
+    name: str | None = None
+    note: str | None = None
+
+
+# --- capability write frames (ARTEL-644 의 계약) -------------------------------
+#
+# 프레임 셋이 전부 여기 있다. 계약 원본은 orchestration 의
+# `contentmap/observe/CapabilityWriteFrames.kt` 이고 산문 설명은 그 저장소의
+# `docs/capability-write-frames.md` 다. **둘이 어긋나면 Kotlin 파일이 맞다.**
+#
+# 실측이 이 프레임을 부른다. `artel_integration` 의 capability 472 행 중
+# `verification = 'confirmed'` 이 2 행이고, 418 행은 `interaction = 'none'` 이라 누를 수가
+# 없어 action 전후의 `pulse` 를 비교하는 기계 검증이 아무 말도 못 한다. 일어났는지는 화면을
+# 본 쪽 — 이 agent — 이 안다.
+
+
+class CapabilityActionRecord(BaseModel):
+    """verdict 를 만든 조작. **재현이 읽히는 자리가 content_map 이 아니라 이 기록이다.**
+
+    전부 선택이다. 실측 472 행 중 418 행이 `interaction = 'none'` 이라 보낼 메서드가 애초에
+    없다.
+
+    `params` 가 리스트인 것은 SDK 프로토콜의 인자가 위치 인자이기 때문이다
+    ([JsonRpcAction.params] 와 같은 값). 저쪽은 이 값을 읽지 않고 `action_params` jsonb 로
+    그대로 넘기므로, 우리가 실제로 보낸 모양 그대로 싣는 것이 가장 정직하다.
+
+    `attempts` 를 안 싣는다. 그 칸은 "첫 메서드가 거절당해 바꿔 성공한 횟수" 인데, 이 런이
+    보낸 dispatch 중 무엇이 이 capability 의 재시도였는지 가릴 방법이 이쪽에 없다. 근거 없는
+    수를 적는 것보다 저쪽 기본값 1 이 낫다.
+    """
+
+    method: str | None = None
+    params: list[Any] | None = None
+    attempts: int | None = None
+
+
+class CapabilityVerdictPayload(BaseModel):
+    """`CAPABILITY_VERDICT` 의 payload. 지도에 **이미 있는** 행에 대한 판단이다.
+
+    `capability_key` 와 `capability_id` 중 **정확히 하나**를 싣는다. 둘 다거나 둘 다 아니면
+    거절이다. 키가 기본이고 — 재적재를 넘어 살아남으므로 — id 는 키가 없는 행,
+    즉 방금 `CAPABILITY_DISCOVERED` 로 만든 행을 지목할 때 쓴다. observed · inferred 출신은
+    `capability_key` 가 NULL 이다.
+
+    `scene` 이 필수인 것이 거절 규칙의 축이다. agent 가 서 있지 않은 `scene` 의 capability 에
+    verdict 를 찍으면 그 verdict 는 이 런이 실제로 본 것이 아니다.
+
+    id 는 전부 문자열이다. 64비트 값이 JSON 숫자로 오가면 정밀도가 깎인다 — 이 소켓의 다른
+    id 가 전부 같은 이유로 문자열이다.
+    """
+
+    scene: str
+    verdict: str
+    rationale: str
+    capability_key: str | None = None
+    capability_id: str | None = None
+    capture_id: str | None = None
+    screen_id: str | None = None
+    action: CapabilityActionRecord | None = None
+
+
+class CapabilityDiscoveredPayload(BaseModel):
+    """`CAPABILITY_DISCOVERED` 의 payload. 근거가 말한 적 없는 capability 다.
+
+    `origin` 은 `observed` 또는 `inferred` 만 받는다. `evidence` 를 받으면 agent 가 정적
+    분석의 옷을 입은 행을 만들 수 있고, 그 순간 "이 행이 어디서 왔나" 가 답할 수 없는 질문이
+    된다.
+
+    `verdict` 는 `observed` 에 **필수**이고 `inferred` 에는 실을 수 없다. `observed` 가 곧
+    "눌러 보고 결과를 봤다" 는 뜻이라 verdict 가 따라오는 것이 그 뜻이고, 그것이 `rationale`
+    이 실제로 어딘가에 앉게 하는 유일한 길이기도 하다.
+
+    `based_on` 은 `inferred` 일 때 딛고 선 `capability_observation` 의 id 목록이고 이 런의
+    것이어야 한다. 비면 거절이다 — 근거를 밝히지 않은 추론은 그럴듯한 거짓말이다.
+    """
+
+    scene: str
+    origin: str
+    summary: str
+    interaction: str
+    rationale: str
+    given_text: str | None = None
+    input_key: str | None = None
+    input_phase: str | None = None
+    control_path: str | None = None
+    control_label: str | None = None
+    capture_id: str | None = None
+    screen_id: str | None = None
+    verdict: str | None = None
+    action: CapabilityActionRecord | None = None
+    based_on: list[str] = Field(default_factory=list)
+
+
+class CapabilityWriteResultPayload(BaseModel):
+    """`CAPABILITY_WRITE_RESULT` 의 payload. 쓰기 둘에 이 한 타입이 답한다.
+
+    `type` 은 무엇의 답인가다. 확인하지 않으면 남의 답으로 tool 을 풀어 준다 —
+    `KnowledgeWriteResultPayload` 와 같은 검사이고 같은 이유다.
+
+    `capability_id` 를 **기억해 둔다.** `observed` · `inferred` 로 만든 행은 `capability_key`
+    가 없어서, 그 행에 나중에 verdict 를 찍는 길이 이 id 뿐이다.
+
+    `observation_id` 는 이 프레임이 쓴 `capability_observation` 행이고, verdict 를 안 실은
+    discovery 에서는 null 이다. `inferred` 를 적을 때 `based_on` 에 넣을 수 있는 id 가 이것뿐
+    이므로, 부르는 쪽이 이 값을 모아 둔다.
+
+    `created` 는 `CAPABILITY_DISCOVERED` 가 행을 **새로** 넣었을 때만 true 다. false 는
+    재전송이 흡수됐거나 이 답이 verdict 의 답이라는 뜻이다.
+
+    전부 기본값이 있다. 필드를 하나 더한 orchestration 이 기다리는 tool 을 풀지 못하게 만들면
+    안 된다 — `KnowledgeWriteResultPayload` 와 같은 판단이다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str = ""
+    capability_id: str = ""
+    capability_key: str | None = None
+    scene_id: str = ""
+    verification: str = ""
+    observation_id: str | None = None
+    created: bool = False
+
+
+# --- macro write frames (ARTEL-921 의 계약) ------------------------------------
+#
+# 계약 원본은 orchestration 의 `contentmap/macro/MacroWriteFrames.kt` 다. 그 저장소에
+# 산문 문서가 없다 — 그 KDoc 이 계약을 지고, payload 표는 PR 본문에 있다.
+#
+# id 는 전부 **JSON 문자열**이다. `screen.id` 를 싣는 `screens` 도 그렇다. 64비트 값이
+# JSON 숫자로 오가면 자바스크립트 소비자에서 정밀도가 깎인다 — 이 소켓의 다른 id 가 전부
+# 같은 이유로 문자열이다.
+
+
+class MacroRegisterPayload(BaseModel):
+    """`MACRO_REGISTER` 의 payload. 등록된 macro 정의 하나를 지도에 적는다.
+
+    `source` 가 원본이고 `definition` 이 파생이다. 둘 다 싣는 이유는
+    `app/agents/qa/macro/model.py` 가 적어 둔 것과 같다 — `ast.parse` 가 주석과 공백을
+    버리므로 tree 에서 텍스트를 다시 찍어내면 agent 가 적은 그대로가 아니고, tree 를 함께
+    적어 두는 것은 실행할 때마다 다시 파싱하지 않기 위해서다.
+
+    `definition` 만 `dict` 다. 저쪽은 이것을 `jsonb` 칸으로 그대로 넘기고 필드를 읽지
+    않으므로 passthrough 이고, 모양을 정하는 곳은 `MacroDefinition` 하나다. 다만 저쪽의
+    `ck_macro_require_carries_remedy` 와 `MacroDefinitionService` 가 `require` node 의
+    `kind` 와 `remedy` 두 key 에 기댄다 — `tests/test_qa_macro_model.py` 가 그 둘을
+    못박는다.
+
+    `parameters` 는 진입점 `def` 줄의 parameter 이름이고 **순서가 뜻을 가진다.**
+
+    `screens` 는 `screen.id` 문자열의 배열이고 **기존 관계에 더한다.** 저쪽은 이
+    build 의 `content_map` 에 없는 id 를 거절하므로 `scene` 이름을 실으면 안 된다.
+    비어 있는 것은 정상이고 "아직 어디서 쓸지 모른다" 는 뜻이다.
+    """
+
+    name: str
+    source: str
+    definition: dict[str, Any]
+    parameters: list[str] = Field(default_factory=list)
+    screens: list[str] = Field(default_factory=list)
+    # 진입점 `def` 의 docstring, `inspect.cleandoc` 로 정리한 것. 없으면 `None` 이다.
+    # orchestration 은 Python 을 파싱하지 않으므로 summary 와 검색에 쓸 글을 여기서 따로
+    # 싣는다. 이 칸을 모르는 orchestration 은 모르는 field 를 무시한다.
+    docstring: str | None = None
+
+
+class MacroReadPayload(BaseModel):
+    """`MACRO_READ` 의 payload. 이름 하나로 조회한다.
+
+    찾는 범위는 이 build 의 `content_map` 안이다. 같은 이름이 다른 build 에 있어도 그것은
+    이 게임에서 돌지 않으므로 안 돌아온다.
+    """
+
+    name: str
+
+
+class MacroWriteResultPayload(BaseModel):
+    """`MACRO_WRITE_RESULT` 의 payload. `MACRO_REGISTER` 의 답이다.
+
+    `type` 은 무엇의 답인가다. 확인하지 않으면 남의 답으로 tool 을 풀어 준다 —
+    `CapabilityWriteResultPayload` 와 같은 검사이고 같은 이유다.
+
+    `created` 는 행을 **새로** 넣었을 때만 true 다. 같은 이름을 다시 등록한 갱신이면
+    false 이고, 그것을 모델에게 말해 주지 않으면 방금 새 macro 를 만들었다고 읽는다.
+
+    `screen_ids` 는 관계를 더한 **뒤의** 상태다. 이번에 보낸 것만이 아니라 이 macro 에
+    달린 `screen` 전부다.
+
+    전부 기본값이 있다. 필드를 하나 더한 orchestration 이 기다리는 tool 을 풀지 못하게
+    만들면 안 된다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str = ""
+    macro_id: str = ""
+    name: str = ""
+    created: bool = False
+    screen_ids: list[str] = Field(default_factory=list)
+
+
+class MacroReadResultPayload(BaseModel):
+    """`MACRO_READ_RESULT` 의 payload. 저장된 정의 하나가 돌아온다.
+
+    `source` 가 이 payload 에서 실제로 쓰이는 칸이다. 이쪽은 그것을 다시 파싱해
+    `MacroDefinition` 을 만든다 — `definition` tree 를 그대로 모델로 읽지 않는 이유는
+    `app/agents/qa/macro/model.py` 가 정의를 만드는 길을
+    `macro_definition_from_source` 하나로 못박았기 때문이고, 다시 파싱하면 그 사이에
+    좁아진 허용 목록도 실행 전에 걸린다.
+
+    전부 기본값이 있다. 이유는 `MacroWriteResultPayload` 와 같다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    type: str = ""
+    macro_id: str = ""
+    name: str = ""
+    source: str = ""
+    definition: dict[str, Any] = Field(default_factory=dict)
+    parameters: list[str] = Field(default_factory=list)
+    screen_ids: list[str] = Field(default_factory=list)
+    # 저장된 `docstring` 칸. 이쪽은 `source` 를 다시 파싱해 docstring 을 얻으므로 이 칸은
+    # 읽지 않고, 저쪽이 보내는 모양을 적어 둔다.
+    docstring: str | None = None
+
+
+class MacroSearchPayload(BaseModel):
+    """`MACRO_SEARCH` 의 payload. 이 build 의 등록된 macro 를 글로 찾는다 (ARTEL-984).
+
+    범위는 보내지 않는다. 저쪽이 `MACRO_READ` 와 같은 방법으로 런에서 `content_map` 을
+    찾는다. `limit` 은 1 에서 10, `query` 는 비어 있지 않고 500자 이하 — tool 이 보내기 전에
+    확인한다. `step` 은 로그용이고 결과를 바꾸지 않는다.
+    """
+
+    query: str
+    limit: int
+    step: int | None = None
+
+
+class _MacroSearchPart(BaseModel):
+    """`MACRO_SEARCH_RESULT` 안의 객체가 공유하는 설정.
+
+    이 소켓의 payload 는 snake_case 이고 scene context 응답은 camelCase 다. 계약 문서는
+    `matchedBy` · `screenId` 처럼 camelCase 로 적었으므로 두 철자를 모두 받는다 — 한쪽
+    철자만 받으면 저쪽이 어느 쪽으로 보내든 field 하나가 조용히 기본값이 된다.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+
+class MacroSearchParameter(_MacroSearchPart):
+    name: str = ""
+    type: str = ""
+
+
+class MacroSearchScreen(_MacroSearchPart):
+    screen_id: str = Field(
+        default="", validation_alias=AliasChoices("screen_id", "screenId")
+    )
+    scene_name: str = Field(
+        default="", validation_alias=AliasChoices("scene_name", "sceneName")
+    )
+
+
+class MacroSearchItem(_MacroSearchPart):
+    """찾은 macro 하나. `parameters` 와 `screens` 는 scene context `macros[]` 와 같은 모양이다.
+
+    `score` 는 reciprocal rank fusion 점수라 순서만 뜻이 있다. 모델에게 보여 주지 않는다.
+    """
+
+    name: str = ""
+    parameters: list[MacroSearchParameter] = Field(default_factory=list)
+    docstring: str | None = None
+    screens: list[MacroSearchScreen] = Field(default_factory=list)
+    matched_by: list[str] = Field(
+        default_factory=list, validation_alias=AliasChoices("matched_by", "matchedBy")
+    )
+    score: float = 0.0
+
+
+class MacroSearchResultPayload(_MacroSearchPart):
+    """`MACRO_SEARCH_RESULT` 의 payload. 좋은 것이 먼저이고 최대 `limit` 개다.
+
+    `vector_available` 이 false 면 query embedding 이 실패해 keyword 일치만 담겼다.
+    기본값이 true 인 이유는 이 칸을 빠뜨린 답을 "similarity 검색이 실패했다" 로 읽지 않기
+    위해서다. 빈 `items` 는 정상 답이다.
+    """
+
+    items: list[MacroSearchItem] = Field(default_factory=list)
+    vector_available: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("vector_available", "vectorAvailable"),
+    )
+
+
+class StatusPayload(BaseModel):
+    attempt_id: str | None = None
+    status: StepStatus
+    # Always present: null for per-step frames, PASSED|FAILED only on the
+    # terminal run frame — so Orchestration can read it uniformly.
+    result: RunResult | None = None
+    step: int | None = None
+    # Per-step 판정 프레임에만 채워진다(2단 판정): 이 스텝이 속한 TC(`case_id`)와 그 스텝이
+    # 구간의 검증(마지막) 스텝인지(`is_verification`). Orche/FE가 스텝을 TC로 묶어 표시한다.
+    case_id: int | None = None
+    is_verification: bool = False
+    message: str
+    summary: dict | None = None
+    # result=UNDECIDED 인 끝남 프레임에만 싣는다: `{code, provider, message}`(app/qa/provider_error.py).
+    stop: dict | None = None
+    # Knowledge this verdict actually rested on (ARTEL-293). Only a per-step frame
+    # ever carries it, and only `report_step` fills it: knowledge bears on the
+    # judgement of a step, not on an individual click. Attached to the acting tools
+    # instead, an entry used across a ten-click step would score ten times what the
+    # same entry scores on a one-click step, and the metric would measure action
+    # count rather than usefulness.
+    #
+    # SELF-REPORTED, unlike everything Orchestration observes for itself. A model
+    # that used an entry and did not say so is invisible here, so the count leans
+    # LOW. That is the safe direction, and it is not corrected by pressing the
+    # model to cite more — pressure buys citations of whatever is at hand, and
+    # then the bias has no known direction at all.
+    used_knowledge_ids: list[str] = Field(default_factory=list)
+    # How many ids `report_step` threw away because this run had never been shown
+    # them. Sent rather than dropped because the hallucinated-citation RATE is
+    # itself a comparison between models — discarded in silence, that signal is
+    # gone, and a model that invents ids scores exactly like one that does not.
+    rejected_knowledge_id_count: int = 0
+    # 판정의 근거(ARTEL-1133). 사용자가 판정이 왜 그렇게 났는지 보게 하려고 싣는다.
+    # `reason` 은 판정한 쪽이 쓴 이유다 — `report_step` 의 `thought`, 평가기의 `reason`. 전에는
+    # tool 호출 행에만 남고 판정에는 이어지지 않았다.
+    reason: str | None = None
+    # 기대 항목마다 무엇을 보았고 그 근거가 판독 기록과 맞는지(`app/qa/verdict_evidence.py`).
+    # `verdict_evidence` axis 를 켠 런의 판정만 싣는다. 끈 런은 `None` 이다.
+    checks: list[dict] | None = None
+    # 근거 전체의 상태: `verified` · `uncertain` · `none`. `checks` 와 함께만 실린다.
+    evidence: str | None = None
+    # 이 step 에서 쓴 cheat 와 판정할 때 돌던 behavior (ARTEL-1054). 모델이 아니라 agent-server 가
+    # 채운다. `None` 이면 frame 에서 key 를 뺀다 — 축이 꺼진 run 의 `STATUS` 는 이 두 필드가
+    # 생기기 전과 같은 key 를 싣는다.
+    used_cheats: list[UsedCheat] | None = None
+    active_behaviors: list[ActiveBehavior] | None = None
+    # 실패한 step 의 분석(ARTEL-1267): `category`·`cause`·`reproduction`(한글 문장)·
+    # `reproduction_inputs`(그 근거)·`actual`·`insight`·`engine_claimed`, 게임 결함이면 이슈 초안용
+    # `title`·`severity` 까지. 종단 frame 에서는 런 리뷰(`overview`·`patterns`·`insights`)다.
+    # Evaluator(`app/agents/evaluator/`)가 채우고 orchestration 은 읽지 않고 `qa_log.payload` 에
+    # 통째로 저장한다. 이슈는 agent 가 만들지 않는다 — 사람이 이 판정을 승인할 때 orchestration 이
+    # 이 내용으로 만든다. `None` 이면 key 를 뺀다 — 분석을 끈 run 과 tool loop 의 `STATUS` 는 이
+    # 필드가 생기기 전과 같은 key 를 싣는다.
+    analysis: dict | None = None
+    # 이 step 의 play 가 돈 구간(ARTEL-1267): `start_frame`·`end_frame`(SDK frame 번호), `started_at`·
+    # `ended_at`(UTC ISO 8601), `seconds`, `stopped`. 영상에서 step 의 클립을 자르는 기준이다. planner–executer
+    # 가 play 한 step 에만 있고, play 없이 실패한 step(PLANNER-REFUSED, UNREACHED)과 tool loop 에는 없다.
+    # 계약은 `docs/evaluator-analysis-frames.md`.
+    played: dict | None = None
+    # planner–executer 의 Evaluator 가 낸 판정 상세: `state_detail`(판정을 가른 `STATE_SET` 값)과 `insight`. 판정 이유는
+    # `message` 다. orchestration 은 읽지 않고 `qa_log.payload` 에 통째로 저장한다. `None` 이면 key 를 뺀다.
+    verdict: dict | None = None
+
+    @model_serializer(mode="wrap")
+    def _drop_unset_function_fields(self, handler):
+        data = handler(self)
+        for key in ("used_cheats", "active_behaviors", "attempt_id", "analysis", "played", "verdict"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
+
+
+class IssueSeverity(StrEnum):
+    """How badly the defect hurts, worst first.
+
+    Spelled exactly as Orchestration's own `IssueSeverity`: it checks the value
+    against that ladder and drops the whole frame when it does not match. A value
+    added on that side has to be added here before this agent can send it.
+    """
+
+    BLOCKER = "BLOCKER"
+    CRITICAL = "CRITICAL"
+    MAJOR = "MAJOR"
+    MINOR = "MINOR"
+    TRIVIAL = "TRIVIAL"
+
+
+class IssuePayload(BaseModel):
+    """One defect, as the run observed it.
+
+    `title` carries the display line — the one field name that differs from every
+    other frame, which uses `message`. Orchestration requires it non-blank.
+
+    The rest is not validated on the far side; it is stored whole in `issue.detail`.
+    That is the reason to name the fields here rather than accept free text: an
+    issue whose expected/actual and steps are dissolved into one paragraph cannot
+    be read back as a bug report months later.
+    """
+
+    title: str
+    severity: IssueSeverity
+    # TC와 무관한 결함은 참고 step 없이도 보고할 수 있다.
+    step: int | None = None
+    expected: str
+    actual: str
+    # Oldest first. What someone else has to do to see this again.
+    reproduction: list[str] = Field(default_factory=list)
+
+
+class ErrorPayload(BaseModel):
+    message: str
+    code: str
+    retryable: bool = False
+    detail: dict | None = None
+    # run 이 예외로 멈췄을 때만 채운다. 클래스 이름과 `module:function:line` 뿐이고
+    # 예외 메시지와 파일 경로는 싣지 않는다(`app/qa/failure_site.py`).
+    # wire 이름은 camelCase 다 — `outbound_envelope` 가 alias 로 내보낸다.
+    exception_type: str | None = Field(default=None, serialization_alias="exceptionType")
+    frames: list[str] | None = None
+
+
+def outbound_envelope(
+    message_type: MessageType,
+    qa_try_id: int,
+    sequence: int,
+    payload: BaseModel,
+    correlation_id: str | None = None,
+) -> dict:
+    """Stamp a payload into the common envelope for sending over the socket."""
+    return {
+        # Canonical hyphenated UUID: Orchestration validates messageId with
+        # UUID.fromString, which rejects the 32-char dashless `.hex` form.
+        "messageId": str(uuid4()),
+        "type": message_type.value,
+        # Decimal string, per the envelope contract (Orchestration parses it as a
+        # digits-only string, not a JSON number).
+        "qaTryId": str(qa_try_id),
+        "correlationId": correlation_id,
+        "sequence": sequence,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "payload": payload.model_dump(by_alias=True),
+    }

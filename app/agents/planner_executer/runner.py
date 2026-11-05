@@ -1,0 +1,719 @@
+"""Runs one scenario on the planner–executer engine, in the place `QaRunner` takes for the agent.
+
+`QaExecutionService` calls `run_with_deadline(channel, scenario)` on whichever runner the run's
+engine names and reads back the state and, when the scenario did not close itself, why.
+
+Each step: the planner writes the step's macros, the executer plays them with Jev, the evaluator
+judges the step and sends the verdict the way the agent's `report_step` does. A step whose macros
+are still refused after the planner's rewrites fails without being played. The closing `STATUS`
+carries `QaRunState.build_summary`, so Orchestration grades both engines' runs the same way.
+
+An ORDERED scenario plays its steps in order. A FREE scenario is a set of test cases, one per step,
+in no order (ARTEL-1149), played scene by scene. In each scene the planner gets the cases still to
+verify there (`free.candidates`) and answers which to verify now, in what order, with shared actions
+and one goal per case; the executer plays them one after another while the scene stays, and the
+scene evaluator judges them a few at a time. A scene with more cases than one plan takes is planned
+again with the rest. Then the planner writes a move to the next scene that still has cases
+(`free.next_scene`). A case put off — left `later` by the planner, in a scene play could not reach,
+or played without ever reaching its goal — waits for the next round, after `reset_game`, up to
+`free_max_resets` resets and `free_case_attempts` plays per case; what is still left is reported
+failed as UNREACHED. The branch is per scenario: a session that mixes ORDERED and FREE scenarios is
+recorded as ORDERED, and its FREE scenarios still play this way.
+"""
+
+import asyncio
+from collections.abc import Awaitable, Callable
+
+from app.agents.editor import MacroEditor
+from app.agents.evaluator import (
+    Evaluator,
+    FailureAnalyzer,
+    FailureReport,
+    Judge,
+    RunReviewer,
+    SceneEvaluator,
+    engine_error,
+    insufficient,
+    send_verdict,
+    unobservable,
+)
+from app.agents.evaluator import (
+    unreached as unreached_report,
+)
+from app.agents.planner_executer.decisions import MAX_REFUSAL_CHARS, clip, note_decision
+from app.agents.planner_executer.evidence import readings
+from app.agents.planner_executer.developer_macros import (
+    DEVELOPER_ACTION_PREFIX,
+    NO_DEVELOPER_MACROS,
+    LoadedDeveloperMacros,
+)
+from app.agents.planner_executer.executer import (
+    Executer,
+    StepPlay,
+    merge_plays,
+    recent_action_lines,
+)
+from app.agents.planner_executer.free import (
+    FreeCase,
+    candidates,
+    free_cases,
+    next_scene,
+    same_scene,
+)
+from app.agents.planner_executer.macros import RegisteredMacros
+from app.agents.planner_executer.observe import watch
+from app.agents.planner_executer.planner import Ask, Planner
+from app.agents.planner_executer.ledger import ActionLedger
+from app.agents.planner_executer.prompts import screen, step_text
+from app.agents.planner_executer.screen_capture import capture_screen
+from app.agents.planner_executer.facts import NO_FACTS, GameFacts, load_game_facts, watch_facts
+from app.agents.planner_executer.identities import GameIdentity
+from app.config import get_settings
+from app.agents.planner_executer.target import StepContracts, StepTarget, TargetResolver, guard, observe
+from app.agents.qa.runner import _step_plan
+from app.agents.qa.tools import QaRunState
+from app.qa.channel import QaCancelled, QaRunChannel
+from app.qa.envelope import (
+    JsonRpcAction,
+    MessageType,
+    RunResult,
+    StatusPayload,
+    StepStatus,
+)
+from app.qa.jev import JevClient
+from app.qa.provider_error import classify_provider_error
+from app.qa.run_config import RunConfig
+from app.qa.schemas import QaScenario
+
+# How long the run waits for a first reading before it writes from an empty screen.
+FIRST_READING_SECONDS = 5.0
+# How long a FREE round waits for the game's first reading after `reset_game`.
+RESET_READING_SECONDS = 10.0
+
+
+class PlannerExecuterRunner:
+    def __init__(
+        self,
+        config: RunConfig,
+        ask: Ask | None = None,
+        judge: Judge | None = None,
+        jev: JevClient | None = None,
+        developer: LoadedDeveloperMacros = NO_DEVELOPER_MACROS,
+        resolve: Callable[[str, str], Awaitable[object]] | None = None,
+        identities: tuple[GameIdentity, ...] = (),
+        facts: GameFacts | None = None,
+    ) -> None:
+        """`ask` (planner), `judge` (evaluator) and `jev` are replaced by tests; a run uses the run's
+        model for the first two and `app/qa/jev.py`'s client for Jev. `developer` 는
+        `QaExecutionService` 가 런 시작에 한 번 읽고 파싱해 시나리오마다 같은 것을 넘긴다. `resolve` 는 대상 해석의
+        모델 호출이고 테스트가 바꿔 끼운다. `identities` 는 개발자가 선언한 게임 값의 뜻이고 해석이 읽는다."""
+        self._config = config
+        self._resolve = resolve
+        self._identities = identities
+        self._developer = developer
+        assert config.arch.planner is not None, "resolve_arch fills `planner` for this engine"
+        self._spec = config.arch.planner
+        # 개발자가 선언한 fact·rule. 런은 service 가 orchestration(또는 `qa_facts_dir`)에서 읽어 넘긴다. 넘기지 않았으면
+        # `qa_facts_dir` 만 본다.
+        if facts is None:
+            facts = load_game_facts(get_settings().qa_facts_dir) if self._spec.facts == "on" else NO_FACTS
+        self._facts = facts
+        self._ask = ask
+        self._judge = judge
+        self._jev = jev
+
+    async def run_with_deadline(
+        self, channel: QaRunChannel, scenario: QaScenario
+    ) -> tuple[QaRunState, str | None]:
+        """Returns the state and, when the scenario did not close cleanly, why."""
+        state = QaRunState(
+            total_steps=len(scenario.steps),
+            step_meta=_step_plan(scenario),
+            step_texts=[step_text(step) for step in scenario.steps],
+            execution_mode=scenario.execution_mode,
+        )
+        jev = self._jev or JevClient()
+        deadline = self._config.arch.deadline_seconds
+        try:
+            await asyncio.wait_for(self._run(channel, scenario, state, jev), timeout=deadline)
+        except asyncio.TimeoutError:
+            return state, f"The run exceeded its {int(deadline)}s limit."
+        except QaCancelled:
+            return state, None
+        except Exception as error:  # noqa: BLE001 - the reason has to reach the timeline
+            state.provider_failure = classify_provider_error(error)
+            return state, f"The run stopped on an error: {type(error).__name__}: {error}"
+        finally:
+            if self._jev is None:
+                await jev.aclose()
+        return state, None
+
+    async def _run(
+        self, channel: QaRunChannel, scenario: QaScenario, state: QaRunState, jev: JevClient
+    ) -> None:
+        if not channel.scene.pulse.seen:
+            await channel.wait_for_reading(FIRST_READING_SECONDS)
+        registered = RegisteredMacros(channel)
+        # 런 단위 행동 장부: play 마다 실패를 종류로 쌓고, planner 가 계획을 검증할 때 읽는다.
+        self._ledger = ActionLedger()
+        planner = Planner(
+            self._config, channel, self._spec, registered, ask=self._ask, developer=self._developer, ledger=self._ledger,
+            facts=self._facts,
+        )
+        executer = Executer(channel, self._spec, jev, facts=self._facts)
+        if self._spec.facts == "on":
+            await note_decision(
+                channel, "game_facts",
+                f"Game facts: {len(self._facts.facts)} facts, {len(self._facts.rules)} rules"
+                + (f" from {self._facts.origin} (revision {self._facts.revision})" if self._facts.revision else " (none loaded)"),
+                None, revision=self._facts.revision or None, origin=self._facts.origin or None,
+                facts=[fact.name for fact in self._facts.facts],
+                rules=[rule.name for rule in self._facts.rules],
+            )
+            await watch_facts(channel, self._facts)
+        # 런 중 macro 수정(ARTEL-1288). `editor="off"` 면 executer 는 멈춤 규칙만 더한 채 돈다.
+        self._editor = MacroEditor(
+            self._config, channel, self._spec, registered, ask=self._ask, developer=self._developer
+        ) if (
+            self._spec.editor == "on"
+        ) else None
+        judge = Evaluator(self._config, self._judge)
+        # 실패 분석과 런 리뷰(ARTEL-1267). `analysis="off"` 면 둘 다 없고 `STATUS` 는 pe2 그대로다.
+        analysing = self._spec.analysis == "on"
+        self._analyzer = FailureAnalyzer(self._config, self._judge) if analysing else None
+        self._reviewer = RunReviewer(self._config, self._judge) if analysing else None
+        self._reports: dict[int, FailureReport] = {}
+        # 시나리오의 `observe` 이름을 SDK 에 한 번 청한다. 못 푼 이름은 case 별로 쥐고, 그 case 의
+        # 실패는 모델을 부르지 않고 `INCONCLUSIVE` 로 채운다(ARTEL-1279).
+        self._unobservable = await watch(channel, scenario)
+
+        if scenario.execution_mode == "FREE":
+            await self._run_free(channel, scenario, state, planner, executer, SceneEvaluator(self._config, self._judge))
+        else:
+            # 대상 계약: 첫 계획 전에 대상의 뜻을 한 번 고정한다. planner 는 읽기만 한다.
+            targets = await self._resolve_targets(channel, scenario, executer) if self._spec.target_contract == "on" else None
+            planner.targets = targets
+            for step in range(1, len(scenario.steps) + 1):
+                target = targets.get(step) if targets is not None else None
+                if targets is not None and target is not None and target.status == "fixed":
+                    # 확인할 값은 그 step 을 시작할 때 지금 값과 선언으로 고른다. 뜻은 바뀌지 않는다.
+                    target = observe(target, await executer.read_values(), self._identities)
+                    targets = targets.with_step(target)
+                    planner.targets = targets
+                    await note_decision(channel, "step_target", f"Step {step}: target {target.status}", step, **target.logged())
+                written = await planner.write(scenario, step)
+                if written.macros is None:
+                    message = (
+                        f"PLANNER-REFUSED: the step's macros were still refused after "
+                        f"{self._spec.max_rewrites} rewrites: {written.refusal}"
+                    )
+                    await self._send_verdict(channel, state, scenario, step, False, message, self._engine_error(message))
+                    continue
+                play = await self._play_with_replans(scenario, step, planner, executer, written.macros, target)
+                if play is None:
+                    message = (
+                        "PLANNER-REFUSED: the replanned macros were still refused after "
+                        f"{self._spec.max_rewrites} rewrites"
+                    )
+                    await self._send_verdict(channel, state, scenario, step, False, message, self._engine_error(message))
+                    continue
+                image = (
+                    await capture_screen(channel, f"Step {step}: capturing the screen for the evaluator", step)
+                    if self._spec.screen_images == "on"
+                    else None
+                )
+                verdict = await judge.judge(scenario, step, play, earlier_verdicts(scenario, state), image)
+                details = verdict.details()
+                if targets is not None:
+                    # 모델의 답을 대상 계약으로 거른다. 대상 불일치·미확인, 예측과 다른 움직임은 통과로 남지 않는다.
+                    read = readings(play.evidence)
+                    verdict, check = guard(verdict, target, read[0]["values"] if read else None, read[-1]["values"] if read else None)
+                    if check is not None and target is not None:
+                        logged = check.logged(target)
+                        details = {**verdict.details(), "target": logged}
+                        await note_decision(channel, "target_check", f"Step {step}: target {check.state}", step, **logged)
+                analysis = (
+                    None if verdict.passed
+                    else await self._analyse(scenario, step, play, verdict.message, verdict.evidence_sufficient)
+                )
+                await self._send_verdict(channel, state, scenario, step, verdict.passed, verdict.message, analysis, play, details)
+        state.finished = True
+        passed = all(result.passed for result in state.step_results)
+        review = None
+        if self._reviewer is not None:
+            # 정상 종료에만 한다. 취소·시간 초과로 끊긴 run 은 `service._send_terminal` 이 닫고, 그 run 을
+            # 통째로 읽으면 끊김을 게임 탓으로 읽는다.
+            review = await self._reviewer.review(scenario, state, self._reports)
+            if review is not None:
+                await note_decision(
+                    channel,
+                    "run_review",
+                    review.overview,
+                    patterns=review.patterns,
+                    insights=review.insights,
+                )
+        await channel.emit(
+            MessageType.STATUS,
+            StatusPayload(
+                status=StepStatus.COMPLETED,
+                result=RunResult.PASSED if passed else RunResult.FAILED,
+                message=f"{sum(r.passed for r in state.step_results)}/{state.total_steps} steps passed.",
+                summary=state.build_summary(),
+                analysis=review.model_dump() if review is not None else None,
+            ),
+        )
+
+    async def _send_verdict(
+        self,
+        channel: QaRunChannel,
+        state: QaRunState,
+        scenario: QaScenario,
+        step: int,
+        passed: bool,
+        message: str,
+        analysis: FailureReport | None = None,
+        play: StepPlay | None = None,
+        details: dict | None = None,
+    ) -> None:
+        """One step's verdict and, for a failed step, its analysis — kept for the run review too.
+
+        `play` is the play the verdict is about; its frames go out as `played`. A step that was never
+        played (refused macros, an unreached FREE case) passes none. `details` is the Evaluator's
+        `state_detail` and `insight` (`StepVerdict.details`); a step it did not judge has none.
+        """
+        if analysis is not None:
+            self._reports[step] = analysis
+        await send_verdict(
+            channel,
+            state,
+            step,
+            passed,
+            message,
+            analysis=analysis,
+            played=play.played() if play else None,
+            verdict=details,
+        )
+
+    async def _resolve_targets(self, channel: QaRunChannel, scenario: QaScenario, executer: Executer) -> StepContracts:
+        """대상의 뜻을 런 시작 때 한 번 고정하고 로그에 남긴다."""
+        baseline = await executer.read_values()
+        contracts = await TargetResolver(self._config, self._resolve, self._identities).resolve(scenario, baseline, version=1)
+        fixed = sum(target.status == "fixed" for target in contracts.steps.values())
+        unknown = sum(target.status == "unknown" for target in contracts.steps.values())
+        await note_decision(
+            channel,
+            "step_contract",
+            f"Step contract: {fixed} steps with a fixed target, {unknown} whose target could not be fixed",
+            **contracts.logged(),
+        )
+        return contracts
+
+    async def _play_with_replans(
+        self, scenario: QaScenario, step: int, planner: Planner, executer: Executer, macros, target: StepTarget | None = None
+    ) -> StepPlay | None:
+        """Play the step, and have the planner write it again while it is asked to and has budget left: Jev
+        chose `REPLAN` (ARTEL-1295 C), or an action got stuck under `repair="planner"`.
+
+        Every play of the step reaches the evaluator, joined (`merge_plays`), and the step's time budget runs on
+        across them. A rewrite refused to the end ends play there; what was played before it is still judged.
+        """
+        spec = self._spec
+        plays: list[StepPlay] = []
+        replans = repairs = 0
+        started = executer.now()
+        planner_repairs = spec.repair == "planner" and spec.editor == "on"
+        while True:
+            remaining = spec.step_budget_seconds - (executer.now() - started)
+            play = await executer.play(
+                step,
+                step_text(scenario.steps[step - 1]),
+                macros,
+                None if planner_repairs else self._repair(scenario, step),
+                replans < spec.max_replans_per_step,
+                budget_seconds=max(remaining, 0.0),
+                can_ask_planner=planner_repairs and repairs < spec.max_repairs_per_step,
+                target=target,
+                history=[turn for earlier in plays for turn in earlier.turns],
+            )
+            plays.append(play)
+            self._ledger.record(step, play, macros, self._developer)
+            if play.repair_request is not None:
+                repairs += 1
+                reason, lines = repair_brief(play, self._developer)
+                transition = {"trigger": "repair", "attempt": repairs, "budget": spec.max_repairs_per_step}
+            elif play.replan_requested:
+                replans += 1
+                reason, lines = play.stopped, recent_action_lines(play.turns)
+                transition = {"trigger": "replan", "attempt": replans, "budget": spec.max_replans_per_step}
+            else:
+                return merge_plays(plays)
+            # 자동 복구의 전이마다 이유·소비 예산·쓴 상태 버전을 남긴다(개선 계획 묶음 2).
+            transition |= {
+                "stopped": clip(play.stopped, MAX_REFUSAL_CHARS),
+                "state_version": play.end_state_version,
+                "seconds_left": round(max(spec.step_budget_seconds - (executer.now() - started), 0.0), 1),
+            }
+            written = await planner.replan(scenario, step, reason, lines, transition)
+            if written.macros is None:
+                plays[-1].stopped = (
+                    f"PLANNER-REFUSED: the rewritten macros were still refused after {spec.max_rewrites} rewrites "
+                    f"(asked because: {clip(play.stopped, MAX_REFUSAL_CHARS)})"
+                )
+                return merge_plays(plays)
+            macros = written.macros
+
+    def _repair(self, scenario: QaScenario, step: int):
+        """The editor for one step's play, or `None` when the run does not edit."""
+        return self._editor.for_step(scenario, step) if self._editor is not None else None
+
+    async def _analyse(
+        self, scenario: QaScenario, step: int, play: StepPlay, message: str, evidence_sufficient: bool = True
+    ) -> FailureReport | None:
+        """The failure analysis of a judged step, or `None` when the run does not analyse. A verdict the evaluator
+        could not ground in any game value is `INCONCLUSIVE` without asking the model (묶음 3): a missing observation
+        says nothing about the game."""
+        if self._analyzer is None:
+            return None
+        if not evidence_sufficient:
+            return insufficient(message, play)
+        case = scenario.steps[step - 1].case
+        missing = self._unobservable.get(case.id) if case is not None else None
+        if missing:
+            return unobservable(missing, message, play)
+        return await self._analyzer.analyze(scenario, step, play, message)
+
+    def _engine_error(self, message: str, play: StepPlay | None = None) -> FailureReport | None:
+        return engine_error(message, play) if self._analyzer is not None else None
+
+    def _unreached(self, message: str, play: StepPlay | None = None) -> FailureReport | None:
+        return unreached_report(message, play) if self._analyzer is not None else None
+
+    async def _run_free(
+        self,
+        channel: QaRunChannel,
+        scenario: QaScenario,
+        state: QaRunState,
+        planner: Planner,
+        executer: Executer,
+        scene_judge: SceneEvaluator,
+    ) -> None:
+        """Plays a FREE scenario scene by scene, round after round, until every case is reported.
+
+        `tried` holds the cases offered to a plan this round, or skipped because play could not
+        reach their scene. A round goes on while the scene on screen has untried cases — plan after
+        plan, `free_batch_size` cases at a time — or another scene with untried cases can be reached.
+        """
+        spec = self._spec
+        pending = {case.step: case for case in free_cases(scenario)}
+        context = channel.scene.scene_context
+        known = {scene.scene_name.strip().casefold() for scene in (context.scenes if context else []) if scene.scene_name}
+        resets = 0
+
+        async def settle(
+            step: int, passed: bool, message: str, analysis: FailureReport | None = None, play: StepPlay | None = None
+        ) -> None:
+            await self._send_verdict(channel, state, scenario, step, passed, message, analysis, play)
+            del pending[step]
+
+        rounds = 0
+        while pending:
+            rounds += 1
+            await note_decision(
+                channel,
+                "free_round",
+                f"FREE round {rounds}: {len(pending)} cases left, starting in {channel.scene.pulse.scene or '?'}",
+                scene=channel.scene.pulse.scene,
+                round=rounds,
+                resets=resets,
+                pending=list(pending),
+            )
+            tried: set[int] = set()
+            while pending:
+                untried = [case for case in pending.values() if case.step not in tried]
+                offered = candidates(untried, channel.scene.pulse.scene, known, spec.free_batch_size)
+                if offered:
+                    tried.update(case.step for case in offered)
+                    unplayed = await self._play_scene(
+                        channel, scenario, planner, executer, scene_judge, offered, pending, resets, settle
+                    )
+                    # Cases the plan meant to verify but play left the scene before: offered again,
+                    # in that scene, without spending a play.
+                    tried.difference_update(unplayed)
+                    continue
+                target = next_scene(untried, channel.scene.pulse.scene, known)
+                if target is None:
+                    break
+                if not await self._travel(channel, scenario, planner, executer, target, pending):
+                    tried.update(case.step for case in untried if same_scene(case.scene, target.scene))
+            if not pending:
+                return
+            if resets >= spec.free_max_resets:
+                left = list(pending.values())
+                causes: dict[str, int] = {}
+                for case in left:
+                    causes[case.cause] = causes.get(case.cause, 0) + 1
+                await note_decision(
+                    channel,
+                    "free_end",
+                    f"FREE ends after {resets} resets: {len(left)} cases unreached ("
+                    + ", ".join(f"{cause} {count}" for cause, count in sorted(causes.items()))
+                    + ")",
+                    resets=resets,
+                    causes=causes,
+                    unreached={str(case.step): case.cause for case in left},
+                )
+                for case in left:
+                    message = unreached(case.attempts, resets, case.cause, case.last_reason)
+                    await settle(case.step, False, message, self._unreached(message))
+                return
+            await note_decision(
+                channel,
+                "reset",
+                f"Resetting the game after round {rounds}: {len(pending)} cases left",
+                round=rounds,
+                pending=list(pending),
+            )
+            await reset_game(channel)
+            resets += 1
+
+    async def _play_scene(
+        self,
+        channel: QaRunChannel,
+        scenario: QaScenario,
+        planner: Planner,
+        executer: Executer,
+        scene_judge: SceneEvaluator,
+        offered: list[FreeCase],
+        pending: dict[int, FreeCase],
+        resets: int,
+        settle: Callable[..., Awaitable[None]],
+    ) -> list[int]:
+        """One plan: the planned cases played in order while the scene stays, then judged.
+
+        Returns the planned cases left unplayed because the scene changed before their turn.
+        """
+        scene = channel.scene.pulse.scene
+        plan = await planner.plan_scene(scenario, [case.step for case in offered])
+        if plan.macros is None:
+            # The plan never parsed. The scene's own cases fail as a refused step does; the cases
+            # offered only because their scene is unknown wait for another scene.
+            for case in offered:
+                if same_scene(case.scene, scene):
+                    message = (
+                        f"PLANNER-REFUSED: the scene plan was still refused after {self._spec.max_rewrites} "
+                        f"rewrites: {plan.refusal}"
+                    )
+                    await settle(case.step, False, message, self._engine_error(message))
+            return []
+        for step, reason in plan.later.items():
+            pending[step].last_reason = f"the planner left it for later in {scene or 'an unknown scene'}: {reason}"
+            pending[step].cause = "DEFERRED"
+        first_screen = screen(channel.scene.pulse)
+        played: list[tuple[int, StepPlay]] = []
+        unplayed: list[int] = []
+        for step in plan.verify:
+            if unplayed or not (same_scene(channel.scene.pulse.scene, scene) or channel.scene.pulse.scene == scene):
+                # A case before it left the scene; this one was planned for the scene it left.
+                unplayed.append(step)
+                pending[step].last_reason = f"play left {scene or 'the scene'} before the case's turn"
+                pending[step].cause = "LEFT_SCENE"
+                continue
+            pending[step].attempts += 1
+            case_id = scenario.steps[step - 1].case_id
+            play = await executer.play(step, step_text(scenario.steps[step - 1]), plan.macros.for_case(case_id))
+            played.append((step, play))
+        if not played:
+            return unplayed
+        verdicts = await scene_judge.judge(scenario, played, first_screen)
+        for step, play in played:
+            passed, message = verdicts[step]
+            case = pending[step]
+            if passed or reached(play):
+                analysis = None if passed else await self._analyse(scenario, step, play, message)
+                await settle(step, passed, message, analysis, play)
+            elif case.attempts >= self._spec.free_case_attempts:
+                last = unreached(case.attempts, resets, "GOAL_UNREACHED", message)
+                await settle(step, False, last, self._unreached(last, play), play)
+            else:
+                case.last_reason = message
+                case.cause = "GOAL_UNREACHED"
+        return unplayed
+
+    async def _travel(
+        self,
+        channel: QaRunChannel,
+        scenario: QaScenario,
+        planner: Planner,
+        executer: Executer,
+        target: FreeCase,
+        pending: dict[int, FreeCase],
+    ) -> bool:
+        """Move to `target`'s scene. `False`, with why on that scene's cases, when play does not get there."""
+        scene = target.scene or ""
+        origin = channel.scene.pulse.scene
+        written = await planner.write_travel(scenario, target.step, scene)
+        stopped = f"the move was still refused after {self._spec.max_rewrites} rewrites: {written.refusal}"
+        if written.macros is not None:
+            play = await executer.play(
+                target.step, f"Go to the scene `{scene}`.", written.macros, self._repair(scenario, target.step)
+            )
+            stopped = play.stopped
+        arrived = channel.scene.pulse.scene
+        waiting = [case.step for case in pending.values() if same_scene(case.scene, scene)]
+        if same_scene(scene, arrived):
+            await note_decision(
+                channel,
+                "travel",
+                f"Travel {origin or '?'} → {scene}: reached",
+                target.step,
+                origin=origin,
+                target=scene,
+                reached=True,
+            )
+            return True
+        for case in pending.values():
+            if same_scene(case.scene, scene):
+                case.last_reason = f"play could not reach the scene {scene} ({stopped})"
+                case.cause = "SCENE_UNREACHED"
+        await note_decision(
+            channel,
+            "travel",
+            f"Travel {origin or '?'} → {scene}: not reached, ended in {arrived or '?'} ({clip(stopped, 200)}); "
+            f"{len(waiting)} cases of {scene} wait for the next round",
+            target.step,
+            origin=origin,
+            target=scene,
+            reached=False,
+            ended_in=arrived,
+            stopped=clip(stopped, MAX_REFUSAL_CHARS),
+            deferred=waiting,
+        )
+        return False
+
+
+def reached(play: StepPlay) -> bool:
+    """Whether play got to the step's goal: `done()` held on some turn (`StepPlay.reached_goal`)."""
+    return play.reached_goal()
+
+
+# UNREACHED 보고의 첫 문장. 씬에 못 간 case 와 play 했는데 목표에 못 닿은 case 가 같은 문구였다(ARTEL-1186).
+_UNREACHED_SAYS = {
+    "GOAL_UNREACHED": "play never reached the case's goal",
+    "SCENE_UNREACHED": "play could not reach the case's scene, so it was not played",
+    "DEFERRED": "the planner kept leaving it for later, so it was not played",
+    "LEFT_SCENE": "play left the scene before the case's turn, so it was not played",
+    "NOT_PLAYED": "it was never offered to a plan, so it was not played",
+}
+
+
+def unreached(attempts: int, resets: int, cause: str, last: str) -> str:
+    return (
+        f"UNREACHED (도달 못함) {cause}: {_UNREACHED_SAYS.get(cause, cause)} — {attempts} "
+        f"{'play' if attempts == 1 else 'plays'} and {resets} {'reset' if resets == 1 else 'resets'}. "
+        f"Last: {last}"
+    )
+
+
+async def reset_game(channel: QaRunChannel) -> None:
+    """Restart the game from its first scene before the next FREE round, and wait for a reading."""
+    await channel.dispatch_actions(
+        [JsonRpcAction(id=1, method="reset_game", params=[])], "Resetting the game for the next round"
+    )
+    await channel.wait_for_reading(RESET_READING_SECONDS)
+
+
+# planner 복구 요청에 싣는 turn 수. 실패가 처음 난 turn 과 같은 실패의 기록은 이 창 밖이어도 싣는다.
+REPAIR_TURNS_SHOWN = 10
+# planner 복구 요청에 싣는 developer macro 본문의 상한.
+MAX_DEVELOPER_SOURCE_CHARS = 4_000
+
+
+def repair_brief(play: StepPlay, developer: LoadedDeveloperMacros | None = None) -> tuple[str, list[str]]:
+    """planner 에게 step 을 다시 써 달라고 할 때의 `(이유, turn 줄)`. 이유에는 막힌 action 과 그 실패들, 그리고 step 이
+    시작한 뒤 게임 값이 어떻게 바뀌었는지를 싣는다 — "준비 없이 시전부터 골랐다", "적 HP 가 그대로다" 를 planner 가 볼 수
+    있어야 action 하나가 아니라 step 을 고친다(개선 계획 묶음 2)."""
+    from app.agents.evaluator.verdict import evidence_text
+
+    request = play.repair_request or {}
+    action = request.get("action")
+    if action is None or request.get("misses") is None:
+        head = f"{request.get('reason')}."
+        failed = [turn for turn in play.turns if turn.get("outcome") == "failed"]
+    else:
+        head = f"The action `{action}` failed {request.get('misses')} times in this step. Its last failure: {request.get('reason')}"
+        failed = [turn for turn in play.turns if turn.get("picked") == action and turn.get("outcome") == "failed"]
+    first_failure = [f"turn {turn.get('turn')}: {turn.get('picked')} failed ({turn.get('reason')})" for turn in failed[:1]]
+    reason = (
+        head
+        + ("\nIts first failure: " + first_failure[0] if first_failure else "")
+        + "\n"
+        + evidence_text(play)
+        + _hidden_text(play)
+        + (
+            "\nPaths in your ```observe block that matched no object while the step played, so the decision model saw "
+            "nothing through them: " + ", ".join(play.observe_unknown)
+            if play.observe_unknown
+            else ""
+        )
+        + _unseen_text(play)
+        + _developer_text(action, developer)
+        + "\nA failure that is right — its precondition does not hold — is not the mistake; fix what makes the step stall."
+    )
+    return reason, recent_action_lines(play.turns[-REPAIR_TURNS_SHOWN:], REPAIR_TURNS_SHOWN)
+
+
+def _unseen_text(play: StepPlay) -> str:
+    """실패한 조건이 가리킨, 이 런에서 한 번도 보고되지 않은 객체. 조건이 틀렸을 수 있다는 것을 planner 가 알게 한다 — 실패
+    문구("창이 열리지 않았다")만 보면 게임을 탓하고 같은 macro 를 다시 고른다(런 184)."""
+    if not play.unseen_selectors:
+        return ""
+    return (
+        "\nA failing condition waited on objects the game never reported in this run: "
+        + ", ".join(play.unseen_selectors)
+        + ". The game reports only objects with text, behaviour or watched values, so such a condition can never hold:"
+        " the macro is wrong, not the game. Read the change from a value or an object that is reported instead."
+    )
+
+
+def _developer_text(action: str | None, developer: LoadedDeveloperMacros | None) -> str:
+    """막힌 action 이 developer macro 면 그 본문. planner 는 평소 docstring 만 읽어, 본문의 조건이 틀렸는지 볼 수 없었다(런 184)."""
+    if not action or not action.startswith(DEVELOPER_ACTION_PREFIX) or developer is None:
+        return ""
+    name = action.removeprefix(DEVELOPER_ACTION_PREFIX).split("#", 1)[0]
+    usable = developer.usable.get(name)
+    if usable is None:
+        return ""
+    return (
+        f"\nThe source of the developer macro `{name}`:\n```python\n{clip(usable.macro.source, MAX_DEVELOPER_SOURCE_CHARS)}\n```\n"
+        "When this source is what is wrong, replace it in the ```changes block with your own `def` that does its job"
+        " correctly."
+    )
+
+
+def _hidden_text(play: StepPlay) -> str:
+    """마지막으로 Jev 에게서 가려졌던 객체·static 묶음. observe 범위가 결과를 가렸는지 planner 가 보게 한다(런 169 step 4: 적과
+    플레이어가 가려진 채 턴 종료만 되풀이했다)."""
+    for turn in reversed(play.turns):
+        state = turn.get("jev_state")
+        if isinstance(state, dict) and state.get("hidden"):
+            hidden = state["hidden"]
+            objects = ", ".join(f"{name} ×{count}" for name, count in (hidden.get("objects") or {}).items())
+            statics = ", ".join(hidden.get("statics") or [])
+            parts = [part for part in (f"objects {objects}" if objects else "", f"static values {statics}" if statics else "") if part]
+            return "\nHidden from the decision model by your ```observe block when play stopped: " + "; ".join(parts)
+    return ""
+
+
+# 앞선 step 판정 한 줄에 싣는 이유의 길이.
+MAX_EARLIER_REASON_CHARS = 300
+
+
+def earlier_verdicts(scenario: QaScenario, state: QaRunState) -> list[str]:
+    """이 런에서 앞선 step 들의 판정, 한 줄씩. evaluator 가 "앞 step 이 이미 이뤘다" 와 "한 번도 안 됐다" 를 가르게 한다 —
+    런 171 step 5 는 step 4 가 1 스테이지를 이미 깼는데 그것을 몰라 시작부터 참인 값을 기본값으로 의심해 실패로 판정했다."""
+    lines = []
+    for result in state.step_results:
+        text = step_text(scenario.steps[result.step - 1]) if 0 < result.step <= len(scenario.steps) else ""
+        reason = result.message[:MAX_EARLIER_REASON_CHARS]
+        lines.append(f"step {result.step} ({text}): {'PASSED' if result.passed else 'FAILED'} — {reason}")
+    return lines

@@ -1,0 +1,66 @@
+from collections.abc import Callable
+
+from langchain_core.exceptions import OutputParserException
+from langchain_core.runnables import Runnable
+
+from app.agents.base import AgentContext
+from app.agents.game_context.errors import GameContextExtractionError
+from app.agents.game_context.prompt import (
+    build_chain_inputs,
+    build_game_context_prompt,
+)
+from app.agents.game_context.schemas import GameContext, GameContextAgentRequest
+from app.llm.chat_model import structured
+from app.llm.models import LLMModel
+
+
+_MAX_ATTEMPTS = 5
+
+StructuredFactory = Callable[[LLMModel], Runnable]
+
+
+def _default_structured_factory(model: LLMModel) -> Runnable:
+    return structured(model, GameContext)
+
+
+class GameContextAgent:
+    """Extracts a structured ``GameContext`` from one design document's text.
+
+    Single LLM pass per document; cross-document merging is the aggregation
+    layer's job, not the agent's. ``structured_factory`` is injectable so tests
+    can supply a canned runnable instead of calling a real model.
+    """
+
+    def __init__(
+        self,
+        structured_factory: StructuredFactory | None = None,
+        retry_backoff: bool = True,
+    ) -> None:
+        self._prompt = build_game_context_prompt()
+        self._structured_factory = structured_factory or _default_structured_factory
+        # `False` 면 재시도 사이에 기다리지 않는다(ARTEL-1039). 기본값 `True` 는
+        # `with_retry` 의 exponential jitter backoff 그대로이고, 시도 횟수와 마지막 오류는
+        # 어느 쪽이든 같다. 형식이 틀린 답만 내는 가짜 모델로 재시도를 다 쓰는 테스트가
+        # 그 backoff 를 실제로 기다리던 자리다.
+        self.retry_backoff = retry_backoff
+
+    async def run(
+        self,
+        request: GameContextAgentRequest,
+        context: AgentContext,
+    ) -> GameContext:
+        structured = self._structured_factory(request.model)
+        chain = (self._prompt | structured).with_retry(
+            retry_if_exception_type=(OutputParserException,),
+            stop_after_attempt=_MAX_ATTEMPTS,
+            wait_exponential_jitter=self.retry_backoff,
+        )
+        try:
+            return await chain.ainvoke(
+                build_chain_inputs(request),
+                context.trace_config("game-context-extraction"),
+            )
+        except OutputParserException as error:
+            raise GameContextExtractionError(
+                "Failed to produce valid game_context JSON."
+            ) from error

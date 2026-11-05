@@ -1,0 +1,603 @@
+import asyncio
+import json
+
+import pytest
+
+from app.qa.channel import (
+    READING_WAIT_SECONDS,
+    QaCancelled,
+    QaRunChannel,
+    with_operator_messages,
+)
+from app.qa.envelope import JsonRpcAction, MessageType
+
+
+def make_channel(
+    timeout: float = 30.0, reading_wait: float = READING_WAIT_SECONDS
+) -> tuple[QaRunChannel, list[dict]]:
+    sent: list[dict] = []
+
+    async def send(frame: dict) -> None:
+        sent.append(frame)
+
+    channel = QaRunChannel(
+        qa_try_id=7,
+        send=send,
+        action_timeout=timeout,
+        write_timeout=timeout,
+        reading_wait=reading_wait,
+    )
+    return channel, sent
+
+
+def scene_frame(scene: str = "Lobby", observables: dict | None = None) -> dict:
+    return {
+        "type": "GAME_STATE",
+        "payload": {"scene": scene, "interactables": [], "observables": observables or {}},
+    }
+
+
+def test_looking_asks_the_game_for_nothing() -> None:
+    """`look` 이 프레임을 하나도 안 보낸다.
+
+    종전에는 `scan_scene` 을 실은 ACTION 이 나갔다. 그 액션의 유일한 일이 `GAME_STATE` 를
+    만드는 것인데, ARTEL-513 이 그 채널을 끄면 오류를 답하고, 켜 두면 `PollSceneState` 가
+    이미 같은 것을 1초마다 스스로 올린다 — 어느 쪽에서도 하는 일이 없다(ARTEL-516).
+
+    두 채널 다 묻지 않고 도착한다는 것이 이 파일이 지킬 계약이다.
+    """
+
+    async def run() -> None:
+        channel, sent = make_channel(timeout=0.05)
+        channel.on_pulse(pulse_frame())
+
+        assert await channel.look(0.0) is True
+        assert sent == []
+
+    asyncio.run(run())
+
+
+def test_a_volunteered_scene_is_enough_to_look_at() -> None:
+    """스위치를 되돌린 빌드에서는 폴러가 올린 프레임이 답이다.
+
+    ARTEL-513 은 되돌릴 수 있어야 하고, 되돌리면 `GAME_STATE` 가 묻지 않아도 흐른다.
+    그때 그것을 못 본 척하면 이 도구가 거짓말하던 자리로 되돌아간다 — 판독을 세게 된 것과
+    같은 이유로 프레임도 여전히 센다.
+    """
+
+    async def run() -> None:
+        channel, sent = make_channel(timeout=0.05)
+        channel.on_game_state(scene_frame(observables={"Score": {"value": 1}}))
+
+        assert await channel.look(0.0) is True
+        assert sent == []
+        assert channel.scene.observables["Score"].current == 1
+
+    asyncio.run(run())
+
+
+def test_a_scene_transition_counts_as_a_scene_arriving() -> None:
+    """The freshness check cannot key on `updates`.
+
+    `SceneMemory` resets that counter with the scene, so a run that just moved
+    from one scene to another would have the transition reported as the game
+    having stayed silent — the one moment the agent most needs to see.
+    """
+
+    async def run() -> None:
+        channel, _ = make_channel(timeout=0.05)
+
+        channel.on_game_state(scene_frame(scene="Lobby"))
+        assert await channel.look(0.0) is True
+        channel.on_game_state(scene_frame(scene="Arena"))
+        assert await channel.look(0.0) is True
+        assert channel.scene.updates == 1, "전환이 카운터를 되돌렸다"
+        assert channel.scene.frames == 2
+
+    asyncio.run(run())
+
+
+def test_looking_reports_false_when_nothing_has_ever_arrived() -> None:
+    """No answer is a value, not an exception — the agent decides what to do.
+
+    묻지 않게 된 뒤에도 이 판정은 무디어지지 않는다. 한 배치만 기다려 보고 — 런이 막
+    시작한 창이 그 모양이다 — 그래도 빈손이면 거짓이다.
+    """
+
+    async def run() -> None:
+        # 빈손으로 끝나는 길이 재는 것이고, 그 길이는 아니다. 운영값의 상한에서 풀리는지는
+        # `test_a_still_screen_is_not_the_game_failing_to_answer` 가 잰다.
+        channel, sent = make_channel(timeout=0.05, reading_wait=0.05)
+        assert await channel.look(0.0) is False
+        assert sent == [], "빈손이어도 묻지는 않는다"
+
+    asyncio.run(run())
+
+
+def test_action_result_with_a_foreign_correlation_is_ignored() -> None:
+    async def run() -> None:
+        channel, sent = make_channel(timeout=0.05)
+
+        async def answer() -> None:
+            await asyncio.sleep(0)
+            # Belongs to some earlier action; must not resolve this wait.
+            channel.on_action_result({"correlationId": "someone-else", "payload": {}})
+
+        asyncio.create_task(answer())
+        result = await channel.dispatch_actions(
+            [JsonRpcAction(id=1, method="button_click", params=[1])], "tap"
+        )
+
+        assert result is None
+        assert sent[0]["type"] == MessageType.ACTION.value
+
+    asyncio.run(run())
+
+
+def test_action_result_matching_the_pending_action_resolves() -> None:
+    async def run() -> None:
+        channel, sent = make_channel()
+
+        async def answer() -> None:
+            await asyncio.sleep(0)
+            channel.on_action_result(
+                {
+                    "correlationId": sent[0]["messageId"],
+                    "payload": {"results": [{"id": 1, "status": "SUCCEEDED"}]},
+                }
+            )
+
+        asyncio.create_task(answer())
+        result = await channel.dispatch_actions(
+            [JsonRpcAction(id=1, method="button_click", params=[1])], "tap"
+        )
+
+        assert result is not None
+        assert result.results[0].id == 1
+
+    asyncio.run(run())
+
+
+async def _dispatch(channel: QaRunChannel, method: str) -> asyncio.Task:
+    """Start one ACTION and let it reach the socket before returning (ARTEL-664)."""
+    task = asyncio.create_task(
+        channel.dispatch_actions([JsonRpcAction(id=1, method=method, params=[])], method)
+    )
+    await asyncio.sleep(0)
+    return task
+
+
+def test_two_actions_in_flight_each_get_their_own_answer() -> None:
+    """ARTEL-664: 종전에는 나간 ACTION 하나의 `future` 를 칸 하나에 들고 있었다.
+
+    그래서 뒤에 나간 `action` 이 앞의 것의 `future` 를 덮어썼고, 앞의 `action` 은 게임이
+    답을 보냈는데도 `timeout` 까지 앉아 있다가 "게임이 답하지 않았다" 가 되었다.
+    """
+
+    async def run() -> None:
+        channel, sent = make_channel(timeout=1.0)
+
+        first = await _dispatch(channel, "button_click")
+        second = await _dispatch(channel, "capture_screen")
+
+        # 나중에 나간 것이 먼저 답한다. 순서가 아니라 `correlation` 이 짝을 정한다.
+        channel.on_action_result(
+            {"correlationId": sent[1]["messageId"], "payload": {"results": [{"id": 2}]}}
+        )
+        channel.on_action_result(
+            {"correlationId": sent[0]["messageId"], "payload": {"results": [{"id": 1}]}}
+        )
+
+        assert (await first).results[0].id == 1
+        assert (await second).results[0].id == 2
+
+    asyncio.run(run())
+
+
+def test_an_uncorrelated_answer_still_resolves_a_lone_action() -> None:
+    """`correlation` 을 안 싣는 옛 orchestration 도 그대로 돈다.
+
+    기다리는 것이 하나뿐이면 그것이 짝이라는 것이 확실하므로 푼다.
+    """
+
+    async def run() -> None:
+        channel, _ = make_channel(timeout=1.0)
+
+        pending = await _dispatch(channel, "button_click")
+        channel.on_action_result({"payload": {"results": [{"id": 1}]}})
+
+        assert (await pending).results[0].id == 1
+
+    asyncio.run(run())
+
+
+def test_an_uncorrelated_answer_is_dropped_when_two_are_waiting() -> None:
+    """짝을 알 수 없으면 아무것도 풀지 않는다.
+
+    둘이 떠 있는데 짐작으로 고르면 한 `action` 이 다른 `action` 의 답을 자기 결과로 읽는다.
+    답을 못 받고 `timeout` 이 나는 편이, 남의 답을 자기 것으로 읽는 것보다 낫다.
+    """
+
+    async def run() -> None:
+        channel, _ = make_channel(timeout=0.05)
+
+        first = await _dispatch(channel, "button_click")
+        second = await _dispatch(channel, "capture_screen")
+
+        channel.on_action_result({"payload": {"results": [{"id": 1}]}})
+
+        assert await first is None
+        assert await second is None
+
+    asyncio.run(run())
+
+
+def test_a_timed_out_action_leaves_no_waiter_behind() -> None:
+    """`timeout` 으로 빠져나간 자리가 map 에 남으면 안 된다.
+
+    남으면 그 뒤로는 기다리는 것이 늘 둘 이상으로 세어져, `correlation` 없는 답이 영영
+    아무것도 못 푼다 — 관측되는 증상은 이 이슈가 고치려던 것과 똑같다.
+    """
+
+    async def run() -> None:
+        channel, _ = make_channel(timeout=0.05)
+
+        abandoned = await channel.dispatch_actions(
+            [JsonRpcAction(id=1, method="button_click", params=[])], "tap"
+        )
+        assert abandoned is None
+
+        pending = await _dispatch(channel, "button_click")
+        channel.on_action_result({"payload": {"results": [{"id": 1}]}})
+
+        assert (await pending).results[0].id == 1
+
+    asyncio.run(run())
+
+
+def test_closing_the_channel_releases_every_action_in_flight() -> None:
+    """운영자가 런을 끊으면 떠 있던 `action` 이 전부 풀려난다(ARTEL-664).
+
+    하나만 풀면 나머지는 각자 `timeout` 을 다 살고 나서야 끝나, 이미 끝난 런이 30 초를
+    더 붙들고 있다.
+    """
+
+    async def run() -> None:
+        channel, _ = make_channel(timeout=30.0)
+
+        first = await _dispatch(channel, "button_click")
+        second = await _dispatch(channel, "capture_screen")
+
+        channel.on_cancel()
+
+        for task in (first, second):
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run())
+
+
+def test_cancel_stops_the_next_tool() -> None:
+    async def run() -> None:
+        channel, _ = make_channel()
+        channel.on_cancel()
+
+        with pytest.raises(QaCancelled):
+            await channel.look(0.0)
+
+    asyncio.run(run())
+
+
+def test_operator_messages_are_drained_once() -> None:
+    channel, _ = make_channel()
+    channel.on_chat({"payload": {"message": "메뉴로 가"}})
+
+    assert channel.drain_operator_messages() == ["메뉴로 가"]
+    assert channel.drain_operator_messages() == []
+
+
+def test_draining_does_not_erase_what_the_operator_said() -> None:
+    """Delivery is once; the record is for the whole run.
+
+    Once drained, an instruction exists only inside the text of one tool result,
+    and compaction replaces exactly that text. "It applies from now on" then quietly
+    stops being true. `render_progress_ledger` restates this list afterwards.
+    """
+    channel, _ = make_channel()
+    channel.on_chat({"payload": {"message": "메뉴로 가"}})
+    channel.on_chat({"payload": {"message": "천천히"}})
+
+    channel.drain_operator_messages()
+
+    assert channel.operator_instructions == ["메뉴로 가", "천천히"]
+
+
+def test_waiting_returns_as_soon_as_the_operator_speaks() -> None:
+    async def run() -> None:
+        channel, _ = make_channel()
+
+        async def answer() -> None:
+            await asyncio.sleep(0)
+            channel.on_chat({"payload": {"message": "상점으로 가"}})
+
+        asyncio.create_task(answer())
+        assert await channel.wait_for_operator(30.0) == ["상점으로 가"]
+        # Handed over, so the next tool result must not repeat them.
+        assert channel.drain_operator_messages() == []
+
+    asyncio.run(run())
+
+
+def test_waiting_finds_a_message_that_arrived_before_it() -> None:
+    """The operator does not wait to be asked, and their words must not be lost."""
+
+    async def run() -> None:
+        channel, _ = make_channel()
+        channel.on_chat({"payload": {"message": "그대로 진행해"}})
+
+        assert await channel.wait_for_operator(30.0) == ["그대로 진행해"]
+
+    asyncio.run(run())
+
+
+def test_waiting_returns_empty_on_silence() -> None:
+    """Timeout is an answer the agent acts on, not an exception."""
+
+    async def run() -> None:
+        channel, _ = make_channel()
+        assert await channel.wait_for_operator(0.05) == []
+
+    asyncio.run(run())
+
+
+def test_cancel_wakes_a_wait_instead_of_letting_it_sit() -> None:
+    """Nothing else would release it: a wait has no action to cancel."""
+
+    async def run() -> None:
+        channel, _ = make_channel()
+
+        async def cancel() -> None:
+            await asyncio.sleep(0)
+            channel.on_cancel()
+
+        asyncio.create_task(cancel())
+        with pytest.raises(QaCancelled):
+            await channel.wait_for_operator(30.0)
+
+    asyncio.run(run())
+
+
+def test_operator_messages_are_appended_to_a_tool_result() -> None:
+    assert with_operator_messages("scene: Lobby", []) == "scene: Lobby"
+
+    merged = with_operator_messages("scene: Lobby", ["메뉴로 가"])
+    assert "scene: Lobby" in merged
+    assert "메뉴로 가" in merged
+
+
+def test_wait_for_reading_returns_on_a_new_pulse() -> None:
+    async def run() -> None:
+        channel, sent = make_channel()
+        waiting = asyncio.create_task(channel.wait_for_reading(30.0))
+        await asyncio.sleep(0)
+        channel.on_pulse(pulse_frame())
+
+        assert await asyncio.wait_for(waiting, 0.5) == 1
+        assert sent == []
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("already_pending", [False, True])
+def test_wait_for_reading_returns_on_operator_message_without_draining(
+    already_pending: bool,
+) -> None:
+    async def run() -> None:
+        channel, _ = make_channel()
+        if already_pending:
+            channel.on_chat({"payload": {"message": "천천히"}})
+        waiting = asyncio.create_task(channel.wait_for_reading(30.0))
+        await asyncio.sleep(0)
+        if not already_pending:
+            channel.on_chat({"payload": {"message": "천천히"}})
+
+        assert await asyncio.wait_for(waiting, 0.5) == 0
+        assert channel.pending_operator_messages() == ("천천히",)
+        assert channel.drain_operator_messages() == ["천천히"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("already_cancelled", [False, True])
+def test_wait_for_reading_raises_when_cancelled(already_cancelled: bool) -> None:
+    async def run() -> None:
+        channel, _ = make_channel()
+        if already_cancelled:
+            channel.on_cancel()
+        waiting = asyncio.create_task(channel.wait_for_reading(30.0))
+        await asyncio.sleep(0)
+        if not already_cancelled:
+            channel.on_cancel()
+
+        with pytest.raises(QaCancelled):
+            await asyncio.wait_for(waiting, 0.5)
+
+    asyncio.run(run())
+
+
+def test_wait_for_reading_counts_every_pulse_that_arrived_before_it_woke() -> None:
+    # 대기 task 가 돌기 전에 둘이 도착하면 한 번 깨어나도 둘이다.
+    async def run() -> None:
+        channel, _ = make_channel()
+        waiting = asyncio.create_task(channel.wait_for_reading(30.0))
+        await asyncio.sleep(0)
+        channel.on_pulse(pulse_frame(reading=1))
+        channel.on_pulse(pulse_frame(reading=2))
+
+        assert await asyncio.wait_for(waiting, 0.5) == 2
+
+    asyncio.run(run())
+
+
+def test_wait_for_reading_ignores_a_pulse_that_arrived_before_the_call() -> None:
+    async def run() -> None:
+        channel, _ = make_channel()
+        channel.on_pulse(pulse_frame())
+        assert await channel.wait_for_reading(0.01) == 0
+
+    asyncio.run(run())
+
+
+def test_wait_for_reading_times_out_without_a_pulse() -> None:
+    async def run() -> None:
+        channel, _ = make_channel()
+        assert await channel.wait_for_reading(0.01) == 0
+
+    asyncio.run(run())
+
+
+def test_pending_operator_messages_copies_without_draining() -> None:
+    channel, _ = make_channel()
+    channel.on_chat({"payload": {"message": "천천히"}})
+    copied = channel.pending_operator_messages()
+    channel.on_chat({"payload": {"message": "메뉴로 가"}})
+
+    assert copied == ("천천히",)
+    assert channel.pending_operator_messages() == ("천천히", "메뉴로 가")
+    assert channel.drain_operator_messages() == ["천천히", "메뉴로 가"]
+
+
+# --- 판독이 흐를 때의 도착 판정 (ARTEL-516) ---------------------------------
+
+
+def pulse_frame(
+    reading: int = 1, scene: str = "Lobby", whole: bool = True, changed: list | None = None
+) -> dict:
+    """SDK 가 내는 모양 그대로. `payload` 로 한 번 더 감싸지 않는다."""
+    return {
+        "type": "PULSE",
+        "payload": {
+            "schema": 2,
+            "reading": reading,
+            "scene": scene,
+            "whole": whole,
+            "active": [],
+            "deactive": [],
+            "changed": changed or [],
+        },
+    }
+
+
+def test_looking_waits_one_batch_for_the_very_first_reading() -> None:
+    """런이 막 시작한 창. `start_readings` 는 나갔고 첫 배치는 아직이다.
+
+    여기서 안 기다리면 런의 첫 관찰이 언제나 "답하지 않았다" 가 되고, 그 한 턴은 모델
+    호출 하나다 — 한 배치를 기다리는 쪽이 싸다. 무한정 기다리지는 않는다.
+    """
+
+    async def run() -> None:
+        channel, sent = make_channel(timeout=0.05)
+
+        async def first() -> None:
+            await asyncio.sleep(0.05)
+            channel.on_pulse(pulse_frame())
+
+        asyncio.create_task(first())
+        assert await channel.look(0.0) is True
+        assert sent == []
+
+    asyncio.run(run())
+
+
+def test_acting_does_not_ride_a_scan_scene_once_readings_are_flowing() -> None:
+    """액션 배치에 `scan_scene` 을 태우지 않는다."""
+
+    async def run() -> None:
+        channel, sent = make_channel()
+        channel.on_pulse(pulse_frame())
+
+        async def answer() -> None:
+            await asyncio.sleep(0)
+            channel.on_pulse(pulse_frame(reading=2, whole=False, changed=["Score"]))
+            channel.on_action_result(
+                {"correlationId": sent[0]["messageId"], "payload": {"results": []}}
+            )
+
+        asyncio.create_task(answer())
+        result, arrived = await channel.act_and_look(
+            [JsonRpcAction(id=1, method="button_click", params=[-101])], "click"
+        )
+
+        assert result is not None
+        assert arrived is True
+        methods = [action["method"] for action in sent[0]["payload"]["actions"]]
+        assert methods == ["button_click"], "꼬리가 붙지 않는다"
+        assert "scan_scene" not in json.dumps(sent), "어디에도 나가지 않는다"
+
+    asyncio.run(run())
+
+
+def test_acting_waits_for_the_reading_that_carries_the_result() -> None:
+    """`ACTION_RESULT` 가 먼저 와도 다음 판독까지 기다린다.
+
+    판독은 1초 배치라 액션이 끝난 시점에는 그 결과가 아직 안 나갔을 수 있다. 여기서
+    안 기다리면 도구가 액션 **이전**의 화면을 그리고, 그것을 근거로 스텝이 판정된다.
+    종전에 `scan_scene` 이 같은 배치 끝에 탄 것도 같은 이유였다.
+    """
+
+    async def run() -> None:
+        channel, sent = make_channel()
+        channel.on_pulse(pulse_frame())
+
+        async def answer() -> None:
+            await asyncio.sleep(0)
+            channel.on_action_result(
+                {"correlationId": sent[0]["messageId"], "payload": {"results": []}}
+            )
+            # 결과가 실린 배치는 그 뒤에 나간다.
+            await asyncio.sleep(0.05)
+            channel.on_pulse(pulse_frame(reading=2, scene="Map", whole=True))
+
+        asyncio.create_task(answer())
+        _, arrived = await channel.act_and_look(
+            [JsonRpcAction(id=1, method="button_click", params=[-101])], "click"
+        )
+
+        assert arrived is True
+        assert channel.scene.pulse.scene == "Map", "기다린 판독을 실제로 접었다"
+
+    asyncio.run(run())
+
+
+def test_a_still_screen_is_not_the_game_failing_to_answer() -> None:
+    """움직인 것이 없으면 판독이 아예 안 나온다. 그것을 침묵으로 세지 않는다.
+
+    SDK 는 직전과 같은 판독을 붙들고 보내지 않는다(`Pulse.Take` 의 `settled`). 그래서
+    "판독이 안 왔다" 는 게임이 죽었다는 뜻이 아니라 화면이 그대로라는 뜻이고, 부르는
+    쪽이 그 둘을 갈라 읽어야 한다. 여기서 지키는 것은 **기다림이 끝난다**는 것이다.
+    """
+
+    async def run() -> None:
+        channel, sent = make_channel()
+        channel.on_pulse(pulse_frame())
+
+        async def answer() -> None:
+            await asyncio.sleep(0)
+            channel.on_action_result(
+                {"correlationId": sent[0]["messageId"], "payload": {"results": []}}
+            )
+
+        asyncio.create_task(answer())
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        result, arrived = await channel.act_and_look(
+            [JsonRpcAction(id=1, method="button_click", params=[-101])], "click"
+        )
+        waited = loop.time() - started
+
+        assert result is not None, "액션 자체는 답했다"
+        assert arrived is False, "새로 온 것이 없다"
+        # 상한에서 풀린다. 무한히 앉아 있으면 런이 데드라인에서 죽는다.
+        assert waited < READING_WAIT_SECONDS * 2
+
+    asyncio.run(run())

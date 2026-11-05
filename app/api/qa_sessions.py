@@ -1,0 +1,251 @@
+import asyncio
+import contextlib
+
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, field_validator, model_validator
+
+from app.agents.qa.arch import DEFAULT_ARCH, QaArchSpec, resolve_arch
+from app.agents.planner_executer.identities import GameIdentitySnapshot
+from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage
+from app.llm.chat_model import key_service_of
+from app.llm.credentials import LlmKey, LlmKeyService
+from app.llm.models import (
+    DEFAULT_MODEL,
+    EnabledLLMModel,
+    ReasoningConfig,
+    validate_reasoning,
+)
+from app.qa.envelope import ErrorPayload, MessageType, outbound_envelope
+from app.qa.game_functions import GameFunctionEntry
+from app.qa.run_config import RunConfig
+from app.qa.schemas import QaRunScenario, QaScenario
+from app.qa.service import QaExecutionService
+from app.sessions.store import SessionExpired
+
+
+router = APIRouter(tags=["qa"])
+
+
+class QaContext(BaseModel):
+    """QA_Run 세션이 실행할 것 (ARTEL-258).
+
+    런 단위: `scenarios`는 런의 시나리오들(각자 qa_try_id + 실행 본문)이며 순서대로 실행된다.
+    레거시 단일 시나리오 호출(qa_try_id/test_scenario_id/scenario)도 받아 1-시나리오 런으로
+    정규화한다 — Orche가 run-scoped로 바뀌기 전까지의 하위호환.
+    """
+
+    game_instance_id: int
+    qa_run_id: int | None = None
+    scenarios: list[QaRunScenario] = []
+    # 런 시작에 씬별 capability·앵커 지식(ARTEL-612)과 developer macro(ARTEL-1101)를
+    # 조회하는 데 쓰는 두 값. orchestration 은 둘을 싣는다(`WebSocketQaAgentAdapter`).
+    # 선택으로 두는 것은 둘이 빠진 호출자도 422 없이 열리게 하기 위해서다 — 그때는 조회를
+    # 건너뛴 채 런이 그대로 돈다.
+    project_id: int | None = None
+    game_build_id: int | None = None
+    game_identities: list[GameIdentitySnapshot] | None = None
+    # 이 run 이 부를 수 있는 cheat 와 behavior 의 catalog entry (ARTEL-1054). orchestration 이
+    # run 의 허용 목록으로 걸러서 보내고, 비었거나 그 mode 가 `off` 면 안 보낸다. 그때
+    # `arch.cheats` / `arch.behaviors` 도 안 오므로 tool 이 없다.
+    cheats: list[GameFunctionEntry] = []
+    behaviors: list[GameFunctionEntry] = []
+
+    # --- 레거시 단일 시나리오 (하위호환) ---
+    qa_try_id: int | None = None
+    test_scenario_id: int | None = None
+    # The approved test scenario the Agent executes: an ordered Step list (재설계).
+    scenario: QaScenario | None = None
+
+    @model_validator(mode="after")
+    def normalize(self) -> "QaContext":
+        if not self.scenarios:
+            if (
+                self.scenario is None
+                or self.qa_try_id is None
+                or self.test_scenario_id is None
+            ):
+                raise ValueError(
+                    "QA context requires scenarios[] or a single "
+                    "(qa_try_id, test_scenario_id, scenario)"
+                )
+            self.scenarios = [
+                QaRunScenario(
+                    qa_try_id=self.qa_try_id,
+                    test_scenario_id=self.test_scenario_id,
+                    scenario=self.scenario,
+                )
+            ]
+            if self.qa_run_id is None:
+                # 단일 시나리오 런의 run id는 그 try id로 대신한다(전용 run이 없으므로).
+                self.qa_run_id = self.qa_try_id
+        elif self.qa_run_id is None:
+            raise ValueError("run-scoped QA context requires qa_run_id")
+        return self
+
+
+class OpenQaSessionRequest(BaseModel):
+    context: QaContext
+    # 관리자가 끈 모델은 422 로 거절한다(`EnabledLLMModel`).
+    model: EnabledLLMModel = DEFAULT_MODEL
+    language: OutputLanguage = DEFAULT_LANGUAGE
+    # Pins this run to one prompt version (a directory under
+    # app/prompts/qa_run/), so two runs can be compared. Omit it to take
+    # QA_PROMPT_VERSION, and failing that the newest version.
+    prompt_version: str | None = None
+    reasoning: ReasoningConfig | None = None
+    # The agent's structure — loop bounds, per-run allowances, vision, middleware.
+    # Omit it for today's structure; set it to compare two structures without
+    # deploying twice. See `app/agents/qa/arch.py`.
+    arch: QaArchSpec = DEFAULT_ARCH
+    # 런을 시작한 사용자가 등록한 key. 사용자 key 로 도는 런에만 실려 온다. 없으면 공용 key 다.
+    # 세션 기록에만 두고 `run_config`·로그·응답에는 넣지 않는다(`app/llm/credentials.py`).
+    llm_key: LlmKey | None = None
+
+    @field_validator("arch", mode="before")
+    @classmethod
+    def arch_is_an_object(cls, value: object) -> object:
+        """`arch: null` 을 필드 이름과 고칠 길이 든 문장으로 거절한다 (ARTEL-1236).
+
+        빼면 지금 구조이고 `null` 은 받지 않는다. 받아 주면 "구조를 모른다" 와 "기본 구조" 가 한
+        값이 된다. pydantic 의 기본 문장 ("Input should be a valid dictionary or instance of
+        QaArchSpec") 은 orchestration 의 `agent_rejected_request` 를 거쳐 사용자에게 그대로 가는데,
+        무엇을 보내야 하는지 말하지 않는다.
+        """
+        if value is None:
+            raise ValueError(
+                "arch must be an object such as {\"vision\": \"on\"}; leave the field out for "
+                "the default structure, null is not accepted"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def validate_against_model(self) -> "OpenQaSessionRequest":
+        """Refuse a request the model cannot honour, rather than downgrading it.
+
+        Both checks are here rather than at the service so the caller gets a 422
+        naming the field, and so a run is never opened under settings it will not
+        actually use.
+        """
+        validate_reasoning(self.model, self.reasoning)
+        resolve_arch(self.arch, self.model)
+        # `gpt/` 에는 공용 key 가 없다. 첫 model 호출에서 실패하게 두면 런이 시작됐다고 보고된
+        # 뒤에 첫 턴에서 죽는다.
+        if key_service_of(self.model) is LlmKeyService.openai and (
+            self.llm_key is None or self.llm_key.service is not LlmKeyService.openai
+        ):
+            raise ValueError(
+                f"Model '{self.model}' is called with the user's own OpenAI API key; "
+                "send llm_key with service 'openai'."
+            )
+        return self
+
+
+class OpenQaSessionResponse(BaseModel):
+    session_id: str
+    # What the run will actually use, with every alias and "auto" already settled.
+    # Orchestration stores this against the try; it is the only record of what a
+    # run was executed with once the request is gone.
+    run_config: RunConfig
+
+
+def _service(app) -> QaExecutionService:
+    return app.state.qa_session_service
+
+
+def _error_frame(code: str, detail: str, qa_try_id: int = 0) -> dict:
+    """A minimal ERROR envelope for connection-level failures.
+
+    `qa_try_id` must be the real try once the session is known: Orchestration
+    rejects a frame whose qaTryId has no active try, and that rejection kills the
+    WebSocket and fails the whole run. 0 is only for the pre-session case, where
+    there is no try to name.
+    """
+    return outbound_envelope(
+        MessageType.ERROR,
+        qa_try_id=qa_try_id,
+        sequence=0,
+        payload=ErrorPayload(message=detail, code=code),
+    )
+
+
+@router.post("/qa-sessions", response_model=OpenQaSessionResponse)
+async def open_qa_session(
+    payload: OpenQaSessionRequest,
+    request: Request,
+) -> OpenQaSessionResponse:
+    session_id, run_config = await _service(request.app).open(
+        qa_run_id=payload.context.qa_run_id,
+        game_instance_id=payload.context.game_instance_id,
+        scenarios=payload.context.scenarios,
+        project_id=payload.context.project_id,
+        game_build_id=payload.context.game_build_id,
+        model=payload.model,
+        language=payload.language,
+        prompt_version=payload.prompt_version,
+        reasoning=payload.reasoning,
+        arch=payload.arch,
+        llm_key=payload.llm_key,
+        cheats=payload.context.cheats,
+        behaviors=payload.context.behaviors,
+        game_identities=payload.context.game_identities,
+    )
+    return OpenQaSessionResponse(session_id=session_id, run_config=run_config)
+
+
+@router.websocket("/qa-sessions/{session_id}")
+async def qa_session_ws(websocket: WebSocket, session_id: str) -> None:
+    service = _service(websocket.app)
+    await websocket.accept()
+
+    try:
+        qa_try_id = await service.ensure(session_id)
+    except SessionExpired:
+        await websocket.send_json(
+            _error_frame("session_expired", "Session not found or expired.")
+        )
+        await websocket.close()
+        return
+
+    # The agent sends from its own task while this one reads, so writes are
+    # serialised. Two frames interleaved on one socket is a protocol error.
+    write_lock = asyncio.Lock()
+
+    async def send(frame: dict) -> None:
+        async with write_lock:
+            await websocket.send_json(frame)
+
+    # 런을 띄우기 전에 묶는다. 런 task 는 지금의 context 를 복사해 가고, receive loop 는 이
+    # task 에서 돌며 `screen_verdict`·`screen_name` task 를 띄운다. 둘 다 사용자 key 를 쓴다.
+    await service.bind_llm_key(session_id)
+
+    # The run drives itself; this coroutine only feeds it what arrives.
+    run = asyncio.create_task(service.run(session_id, send))
+
+    try:
+        while not run.done():
+            receive = asyncio.create_task(websocket.receive_json())
+            done, _ = await asyncio.wait(
+                {receive, run}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if receive not in done:
+                receive.cancel()
+                break
+            raw = receive.result()
+            if not isinstance(raw, dict) or not service.deliver(session_id, raw):
+                await send(
+                    _error_frame(
+                        "bad_request", f"Unsupported inbound frame: {raw!r}", qa_try_id
+                    )
+                )
+    except WebSocketDisconnect:
+        run.cancel()
+        return
+    finally:
+        if not run.done():
+            run.cancel()
+
+    with contextlib.suppress(asyncio.CancelledError):
+        await run
+    await service.close(session_id)
+    await websocket.close()
+    return

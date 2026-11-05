@@ -1,0 +1,282 @@
+"""What the planner and the evaluator read, from `app/prompts/qa_planner/<version>/`.
+
+| piece          | source                                                  | read by   |
+|----------------|---------------------------------------------------------|-----------|
+| rules          | `rules.md`                                              | planner   |
+| macro grammar  | `app/agents/qa/macro/reference.py`, in `rules`          | planner   |
+| evaluator      | `evaluator.md`                                          | evaluator |
+| failure analysis | `failure_analysis.md` (v4+)                           | evaluator |
+| run review     | `run_review.md` (v4+)                                   | evaluator |
+| macro repair   | `macro_repair.md` (v4+), macro grammar in it            | editor    |
+| target resolver | `target_resolver.md` (v4+)                             | resolver  |
+| game map       | `scene_context`: scenes and what the code lets a player do | planner |
+| developer macros | the project's developer macros that parse, with their build | planner |
+| the step       | the scenario's step, the current screen                 | both      |
+
+`rules` 의 `{macro_grammar}` 자리에는 tool loop agent 가 읽는 것과 같은 macro 문법 글
+(`reference.GRAMMAR`·`NUMBER_EQUALITY`)이 들어간다. 그 글이 `skill_macro.md` 에 글자 그대로 있다는
+것은 `tests/test_qa_macro_reference.py` 가 지키므로, 두 engine 이 같은 문법 글을 읽는다. 사본을
+prompt 파일에 두지 않는 이유는 macro package 가 바뀌는 중이라 사본이 parser 와 어긋나기 때문이다.
+대신 그 글의 hash 가 `prompt_hashes["macro_grammar"]` 로 남는다.
+
+그 글은 action 의 이름만 든다 — tool loop 는 같은 이름을 tool schema 로도 받아 인자를 안다. planner 에게는 schema 가 없어
+`grammar.TOOLS` 에서 인자 목록을 뽑아 덧붙인다(`ACTION_SIGNATURES`). 런 179 에서 developer macro 를 끄자 planner 가
+`press_key` 의 `duration_seconds` 를 빠뜨려 step 4 의 세 답이 모두 거절되었다.
+"""
+
+import hashlib
+import json
+from collections.abc import Iterable
+
+from app.agents.planner_executer.developer_macros import UsableDeveloperMacro
+from app.agents.qa.macro.model import MacroDefinition
+from app.agents.qa.macro.grammar import TOOLS, ToolSpec
+from app.agents.qa.macro.reference import GRAMMAR, NUMBER_EQUALITY
+from app.prompts import load_prompt, resolve_version, roles_in
+from app.qa.pulse import PulseMemory
+from app.qa.scene_context import SceneCapability, SceneContext
+from app.qa.schemas import QaScenario, QaStep
+
+PROMPT_AGENT = "qa_planner"
+RULES_ROLE = "rules"
+# 계약 모드(knob `actions="contract"`)의 planner 규칙. v4 부터 있다.
+CONTRACT_RULES_ROLE = "rules_contract"
+# 행동 지침 모드의 planner 규칙. v4 부터 있다.
+GUIDANCE_RULES_ROLE = "rules_guidance"
+EVALUATOR_ROLE = "evaluator"
+# FREE 시나리오의 씬 계획과 씬 판정(ARTEL-1149). v3 부터 있다.
+SCENE_RULES_ROLE = "scene_rules"
+SCENE_EVALUATOR_ROLE = "scene_evaluator"
+# 실패 분석과 런 리뷰(ARTEL-1267). v4 부터 있다. 둘 다 `app/agents/evaluator/` 가 읽는다.
+FAILURE_ANALYSIS_ROLE = "failure_analysis"
+RUN_REVIEW_ROLE = "run_review"
+# 런 중 macro 수정(ARTEL-1288). v4 부터 있다. `app/agents/editor/` 가 읽는다.
+MACRO_REPAIR_ROLE = "macro_repair"
+# step 의 대상 계약을 런 시작 때 정하는 해석. v4 부터 있다. `target.TargetResolver` 가 읽는다.
+TARGET_RESOLVER_ROLE = "target_resolver"
+
+MACRO_GRAMMAR_PLACEHOLDER = "macro_grammar"
+
+
+def _signature(spec: ToolSpec) -> str:
+    # parser 의 거절 문장(`It takes ...`)과 같은 꼴로 적는다.
+    parameters = ", ".join(
+        f"{parameter.name}: {parameter.declared_type.value}" + ("" if parameter.required else f" = {parameter.default!r}")
+        for parameter in spec.parameters
+    )
+    return f"- `{spec.name}({parameters})`"
+
+
+ACTION_SIGNATURES = "**The actions and their arguments.**\n" + "\n".join(_signature(spec) for spec in TOOLS)
+MACRO_GRAMMAR = f"{GRAMMAR}\n\n{ACTION_SIGNATURES}\n\n{NUMBER_EQUALITY}"
+_FILLS = {MACRO_GRAMMAR_PLACEHOLDER: MACRO_GRAMMAR}
+# 런마다 다른 값으로 채우는 자리. `static_pieces` 는 이것을 hash 하지 않는다 — 언어는 `RunConfig.language` 로
+# 따로 기록된다. `prompt_text` 를 부르는 쪽이 값을 넘긴다.
+LANGUAGE_PLACEHOLDER = "language_directive"
+# planner 의 ```summary(사람이 읽는 계획 요약)를 쓸 언어의 이름(`Korean`). v4 부터.
+SUMMARY_LANGUAGE_PLACEHOLDER = "summary_language"
+RUN_PLACEHOLDERS = frozenset({LANGUAGE_PLACEHOLDER, SUMMARY_LANGUAGE_PLACEHOLDER})
+
+# Lines per scene, and characters per line, of the game map.
+MAX_CAPABILITIES_PER_SCENE = 15
+MAX_LINE_CHARS = 200
+
+
+def static_pieces(version: str | None) -> tuple[str, dict[str, str]]:
+    """The resolved prompt version and the hash of every piece a run of it reads."""
+    resolved = resolve_version(PROMPT_AGENT, version)
+    files = {role: load_prompt(PROMPT_AGENT, role, resolved) for role in roles_in(PROMPT_AGENT, resolved)}
+    hashes = {role: prompt.body_sha256 for role, prompt in files.items()}
+    for name in sorted({name for prompt in files.values() for name in prompt.placeholders} - RUN_PLACEHOLDERS):
+        hashes[name] = hashlib.sha256(_FILLS[name].encode()).hexdigest()
+    return resolved, hashes
+
+
+def prompt_text(role: str, version: str, **run_fills: str) -> str:
+    """One prompt file's text, its placeholders filled.
+
+    Prompt bodies double their literal braces (`app/prompts/loader.py`); formatting turns them
+    back into one. `run_fills` carries the run-level values (`RUN_PLACEHOLDERS`); a role whose
+    body names one that the caller did not pass raises `KeyError` rather than printing `{name}`.
+    """
+    prompt = load_prompt(PROMPT_AGENT, role, version)
+    fills = {**_FILLS, **run_fills}
+    return prompt.body.format(**{name: fills[name] for name in prompt.placeholders})
+
+
+def screen(pulse: PulseMemory) -> str:
+    """The current screen, as the tool loop's agent reads it whole (`PulseMemory.render`)."""
+    return pulse.render(since=0, advance=False) or "(the game has sent no reading yet)"
+
+
+def step_text(item: QaStep) -> str:
+    """What the step asks a player to do. A FREE step has no `action`; its test case's step is it."""
+    if item.action.strip():
+        return item.action.strip()
+    if item.case and item.case.test_step:
+        return item.case.test_step.strip()
+    return "(no action)"
+
+
+def this_step(scenario: QaScenario, step: int) -> str:
+    """The step as JSON: what to do, and for a test case's last step the result to verify."""
+    item = scenario.steps[step - 1]
+    following = scenario.steps[step].case_id if step < len(scenario.steps) else None
+    shown: dict = {"step": step, "do": step_text(item)}
+    if item.hint:
+        shown["try"] = item.hint.strip()
+    if item.input:
+        shown["via"] = item.input.strip()
+    if item.case_id is not None:
+        if item.case and item.case.precondition:
+            shown["precondition"] = item.case.precondition
+        if following != item.case_id:
+            shown["verify"] = item.case.expected if item.case else ""
+    return json.dumps(shown, ensure_ascii=False, indent=2)
+
+
+def case_view(scenario: QaScenario, step: int) -> dict:
+    """One FREE case as the scene planner and the scene evaluator read it."""
+    item = scenario.steps[step - 1]
+    case = item.case
+    shown: dict = {"case_id": item.case_id}
+    if case and case.scene:
+        shown["scene"] = case.scene
+    if case and case.precondition:
+        shown["precondition"] = case.precondition
+    shown["do"] = step_text(item)
+    shown["verify"] = case.expected if case else ""
+    return shown
+
+
+def candidate_list(scenario: QaScenario, steps: list[int]) -> str:
+    """The candidate cases of a scene plan, as JSON."""
+    return json.dumps([case_view(scenario, step) for step in steps], ensure_ascii=False, indent=2)
+
+
+def travel_step(step: int, scene: str) -> str:
+    """A FREE scenario's move to another scene, written as an ordinary step for the rules prompt."""
+    return json.dumps(
+        {"step": step, "do": f"Go to the scene `{scene}`.", "verify": f"The game shows the scene `{scene}`."},
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def game_map(context: SceneContext | None) -> str | None:
+    """Each scene of the build and what its code lets a player do there, or `None`.
+
+    The planner writes for screens it has not seen yet; without the scene names it guessed them —
+    two models wrote `scene() == "MapScene"` from a button called `MapSceneButton`; the scene is
+    `Map_scene` (PoC).
+    """
+    if context is None or not context.scenes:
+        return None
+    lines = [
+        "Scenes in this build — the exact names `scene()` will return. Use no other scene name:",
+        "  " + ", ".join(scene.scene_name or "?" for scene in context.scenes),
+        "",
+        "What the build's code lets a player do in each scene (from a static scan, not yet "
+        "verified in play; `when` is the code's own condition):",
+    ]
+    for scene in context.scenes:
+        doable = scene.capabilities
+        lines.append(f"[{scene.scene_name}]" + ("" if doable else " (nothing doable found)"))
+        if scene.scene_summary:
+            lines.append("  " + _clip(scene.scene_summary))
+        lines.extend("  - " + _clip(_capability(c)) for c in doable[:MAX_CAPABILITIES_PER_SCENE])
+        if len(doable) > MAX_CAPABILITIES_PER_SCENE:
+            lines.append(f"  ({len(doable) - MAX_CAPABILITIES_PER_SCENE} more)")
+    return "\n".join(lines)
+
+
+def developer_macro_list(usable: Iterable[UsableDeveloperMacro]) -> str | None:
+    """프로젝트의 developer macro: 호출 모양, 기준 build, docstring. 없으면 `None`.
+
+    build 로 거르지 않으므로 이 런의 build 가 아닌 build 를 기준으로 쓴 macro 도 실린다. 그런
+    macro 에는 그 사실만 적는다 — 쓸지는 planner 가 화면과 docstring 으로 정한다. 고르는 법과
+    reuse-first 규칙은 `qa_planner/v2/rules.md` 에 있고, 이 글은 그와 같은 말만 짧게 한다.
+    """
+    usable = list(usable)
+    if not usable:
+        return None
+    lines = [
+        "Developer macros of this project, written by its developers. Read them before you write "
+        "an action, and select the ones this step needs in the ```developer block, one per line "
+        "— the name alone, or a call with its arguments:"
+    ]
+    for item in usable:
+        macro = item.macro
+        build = macro.build_version + (f" ({macro.build_label})" if macro.build_label else "")
+        written = f"written against build {build}"
+        if macro.other_build:
+            written += ", a different build from this run's"
+        lines.append(f"- `{_call(item.definition)}` — {written}")
+        docstring = item.definition.entry.docstring or ""
+        lines.extend(f"    {line}" if line else "" for line in docstring.splitlines())
+    return "\n".join(lines)
+
+
+def registered_action_list(usable: Iterable[UsableDeveloperMacro]) -> str | None:
+    """행동 지침 모드의 등록 행동: 이름, 대상, 기준 build, docstring. 고를 수 없는 것은 이유만 적는다."""
+    usable = list(usable)
+    if not usable:
+        return None
+    lines = [
+        "Registered actions of this project, written with their developers' code. Choose the ones this step "
+        "needs in the ```developer block, one name per line. You do not pick their objects: the executer offers "
+        "one option per object on the screen and the decision model picks one."
+    ]
+    for item in usable:
+        macro = item.macro
+        build = macro.build_version + (f" ({macro.build_label})" if macro.build_label else "")
+        written = f"written against build {build}" + (", a different build from this run's" if macro.other_build else "")
+        parameters = item.definition.entry.parameters
+        if item.contract_error is not None:
+            lines.append(f"- `{macro.name}` — not available: its registered contract cannot be read")
+            continue
+        if item.contract is not None and item.contract.holds:
+            acts = "acts on one object holding " + ", ".join(
+                f"`{member}` ({param})" for param, member in item.contract.holds.items()
+            )
+        elif item.contract is not None or not parameters:
+            acts = "acts on no chosen object"
+        else:
+            lines.append(f"- `{macro.name}` — not available: it takes an object but has no contract")
+            continue
+        lines.append(f"- `{macro.name}` — {acts}; {written}")
+        docstring = item.definition.entry.docstring or ""
+        lines.extend(f"    {line}" if line else "" for line in docstring.splitlines())
+    return "\n".join(lines)
+
+
+def _call(definition: MacroDefinition) -> str:
+    parameters = []
+    for parameter in definition.entry.parameters:
+        text = f"{parameter.name}: {parameter.declared_type.value}"
+        if parameter.default is not None:
+            text += f" = {parameter.default.value!r}"
+        parameters.append(text)
+    return f"{definition.name}({', '.join(parameters)})"
+
+
+def _capability(capability: SceneCapability) -> str:
+    action = capability.interaction or "?"
+    if capability.input_key:
+        action += f" {capability.input_key}"
+    if capability.control_label:
+        action += f' "{capability.control_label}"'
+    where = capability.control_path or capability.control_selector_hint
+    if where:
+        action += f" ({where})"
+    text = f"{action} — {capability.summary}" if capability.summary else action
+    if capability.given_text:
+        text += f"  when {capability.given_text}"
+    if capability.repeat_until_done:
+        text += "  (repeat until done)"
+    return text
+
+
+def _clip(text: str) -> str:
+    text = " ".join(text.replace("`", "").split())
+    return text if len(text) <= MAX_LINE_CHARS else text[:MAX_LINE_CHARS] + "…"

@@ -1,0 +1,147 @@
+from typing import Literal
+
+from pydantic import BaseModel, Field, field_validator
+from app.agents.planner_executer.identities import GameIdentitySnapshot
+
+from app.llm.credentials import LlmKey
+from app.qa.envelope import QaChatTurn
+from app.qa.game_functions import CaseFunctions, GameFunctionEntry
+from app.qa.run_config import RunConfig
+
+
+class CaseReview(BaseModel):
+    """사람이 이 TC 의 판정을 정한 기록 한 건 (ARTEL-1257). orchestration 이 최근 몇 건만 넘긴다."""
+
+    ai_passed: bool | None
+    human_passed: bool | None
+    case_version_changed: bool | None = None
+    case_snapshot: str | None = None
+    note: str | None = None
+    game_build_version: str | None = None
+    decided_at: str | None = None
+
+
+class QaCaseRef(BaseModel):
+    """실행 계약에서 스텝에 동봉되는 TC 리졸브(재설계 2026-08-07).
+
+    필드명은 TC 스펙(CSV: 씬/사전조건/테스트스텝/기대결과/근거)을 미러링한다. 판정 기준은
+    `precondition`(구간 진입 시 충족 검증)과 `expected`(구간 끝 판정)다.
+    """
+
+    id: int
+    scene: str | None = None
+    precondition: str | None = None
+    test_step: str | None = None
+    expected: str = ""
+    # 이 TC 에서 쓸 수 있는 cheat 와 behavior (ARTEL-1054). 없으면 run 이 받은 것 전부다.
+    # run 의 목록을 좁히기만 한다(`app/qa/game_functions.py` 의 `allowed_names`).
+    functions: CaseFunctions | None = None
+    # 사람이 이 TC 의 판정을 정한 최근 기록 (ARTEL-1257). 없으면 계획 글이 종전과 같다.
+    reviews: list[CaseReview] | None = None
+    # 이 TC 가 묻는 값의 이름(ARTEL-1279). SDK 의 `watch` 가 푸는 `Type::member` 문법이고, 런이
+    # 시작할 때 시나리오의 이름을 모아 한 번 보낸다. orchestration 은 `test_case.metadata.observe`
+    # 를 그대로 싣고 해석하지 않는다. 없으면 분석이 구운 watch list 만으로 읽는다.
+    observe: list[str] | None = None
+
+
+class QaStep(BaseModel):
+    """시나리오 스텝 하나 = 행위 하나. `case_id`가 있으면 그 스텝은 해당 TC 검증 구간에 속한다
+    (연속 동일 case_id = 한 TC 구간). 없으면 단순 행위(판정 없음). `case`는 case_id의 TC 리졸브."""
+
+    action: str = ""
+    case_id: int | None = None
+    hint: str | None = None
+    input: str | None = None
+    case: QaCaseRef | None = None
+
+
+class QaScenario(BaseModel):
+    """Agent가 실행하는 시나리오 = 순서 있는 Step 리스트(재설계). Orche 실행 계약과 동일 형태."""
+
+    title: str = ""
+    description: str = ""
+    steps: list[QaStep] = Field(default_factory=list)
+    # `ORDERED` 는 위 스텝을 순서대로 실행한다. `FREE` 는 스텝 하나가 TC 하나이고 `case_id` 가
+    # 겹치지 않는 TC 묶음이라, 순서와 방법을 agent 가 정한다(ARTEL-1029). 이 필드를 모르는
+    # orchestration 은 보내지 않으므로 없으면 `ORDERED` 다.
+    execution_mode: Literal["ORDERED", "FREE"] = "ORDERED"
+
+    @field_validator("execution_mode", mode="before")
+    @classmethod
+    def _null_is_ordered(cls, value: object) -> object:
+        # Jackson 이 빈 값을 생략하지 않고 `null` 로 보내는 경우도 없는 것과 같게 읽는다.
+        return "ORDERED" if value is None else value
+
+
+class QaCaseAttemptResult(BaseModel):
+    attempt_id: str
+    case_id: int
+    verdict: Literal["PASSED", "FAILED", "INCONCLUSIVE", "INTERRUPTED"]
+    message: str
+
+
+class QaStepResult(BaseModel):
+    """스텝 하나의 판정(2단 판정 2026-08-08). **모든 스텝**에 성공/실패를 남긴다.
+
+    검증 스텝(`is_verification`=구간의 마지막 스텝)은 기대결과 충족 여부, 그 외 스텝은
+    그 행위를 수행/성립했는지를 판정한다. `case_id`는 이 스텝이 속한 TC(없으면 단순 행위).
+    """
+
+    step: int
+    passed: bool
+    message: str
+    case_id: int | None = None
+    is_verification: bool = False
+
+
+class QaRunScenario(BaseModel):
+    """런 안의 시나리오 하나 = 자기 qa_try_id + 실행 본문(스텝 리스트) (ARTEL-258).
+
+    qa_try는 시나리오당이라 각 시나리오가 자기 `qa_try_id`를 들고 다닌다 — 프레임은 실행
+    중인 시나리오의 try로 stamp된다. `scenario`는 그 시나리오의 실행 본문(재설계 Step 리스트).
+    """
+
+    qa_try_id: int
+    test_scenario_id: int
+    scenario: QaScenario
+
+
+class QaSessionRecord(BaseModel):
+    """QA_Run 세션 하나 = 런의 시나리오들을 순차 실행 (ARTEL-258/259).
+
+    세션은 **런 단위**(WS 유지). qa_try·채널은 시나리오당이고, 시나리오 사이는 ResetPolicy가
+    게임을 초기화한다. `run_config`는 open에서 확정한다 — 세션이 열리는 순간부터 귀속 가능해야
+    하므로 여기서 한 번 결정하고 재결정하지 않는다.
+    """
+
+    # Frozen at session open (from POST /qa-sessions context).
+    qa_run_id: int
+    game_instance_id: int
+    # 이 런이 무엇을 도는지 orchestration 에 되물을 수 있게 하는 두 값 (ARTEL-612).
+    # 씬 맥락 조회가 경로에 둘 다 요구한다. **선택이다** — 없으면 조회를 하지 않고 런은
+    # 블록 없이 돈다. orchestration 은 세션 open 에 둘을 싣는다.
+    project_id: int | None = None
+    game_build_id: int | None = None
+    # None은 이전 프로토콜이고 []는 확정된 빈 snapshot이다. 최신 선언으로 바꾸지 않는다.
+    game_identities: list[GameIdentitySnapshot] | None = None
+    # The run's scenarios, executed in order — each carries its own qa_try_id.
+    scenarios: list[QaRunScenario]
+    # Settled at open, not at run start: the run has to be attributable from the
+    # moment the session exists, and the open response is what carries it back to
+    # Orchestration. Nothing here is re-decided later.
+    run_config: RunConfig
+    # Operator conversation (run-scoped). Trimmed to the most recent turns on every
+    # append: the whole record is rewritten to Redis each turn, so it cannot grow
+    # without bound, and only the recent turns are what steer the next decision.
+    chat: list[QaChatTurn] = Field(default_factory=list)
+    # 런을 시작한 사용자의 LLM API key. 사용자 key 로 도는 런에만 있다.
+    #
+    # `run_config` 에 두지 않는다 — 그것은 orchestration 으로 돌아가 try 에 영구히 남는다.
+    # 여기 있는 동안은 세션 TTL 만큼 Redis 에 있고, 세션이 닫히면 기록과 함께 지워진다.
+    # `repr` 에서 빼서 기록을 찍는 로그에 key 가 남지 않게 한다.
+    llm_key: LlmKey | None = Field(default=None, repr=False)
+    # session open 의 `context.cheats` / `context.behaviors` (ARTEL-1054). orchestration 이 이미
+    # run 의 허용 목록으로 걸러서 보낸다. 런 중에는 바뀌지 않는다 — SDK 가 런 중에 등록한 function
+    # 은 `pulse` 에는 보여도 여기에 없어 tool 이 거절한다.
+    cheats: list[GameFunctionEntry] = Field(default_factory=list)
+    behaviors: list[GameFunctionEntry] = Field(default_factory=list)

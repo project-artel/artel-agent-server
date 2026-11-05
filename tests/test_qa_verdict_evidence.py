@@ -1,0 +1,228 @@
+"""판정 근거(ARTEL-1133): 근거를 판독 기록과 맞춰 보고, 판정과 항목이 어긋나면 돌려보낸다."""
+
+import asyncio
+from tests.qa_attempts import configure_attempts, start_case, report_case
+
+from app.agents.qa.arch import PhaseCycleMode, arch_fingerprint, default_resolved_arch, structure_of
+from app.agents.qa.tools import QaRunState, build_tools
+from app.qa.channel import QaRunChannel
+from app.qa.envelope import MessageType
+from app.qa.pulse import PulseMemory, PulseReading
+from app.qa.verdict_evidence import EvidenceSource, VerdictCheck, cite, contradiction
+
+_OFF = default_resolved_arch().model_copy(update={"phase_cycle": PhaseCycleMode.off})
+_ON = _OFF.model_copy(update={"verdict_evidence": "on"})
+
+
+def memory() -> PulseMemory:
+    pulse = PulseMemory()
+    pulse.apply(PulseReading.model_validate({
+        "schema": 2, "reading": 1, "frame": 10, "scene": "Map_scene", "whole": True, "statics": [],
+        "active": [{
+            "scene": "Map_scene", "id": 1, "path": "MapScene", "selector": "MapScene[1]",
+            "members": [{"on": "Map.MapMove", "member": "stage", "value": {"path": "Canvas/Stage", "label": "Stage : 0"}}],
+        }, {
+            "scene": "Map_scene", "id": 2, "path": "Enemy", "selector": "Enemy[3]",
+            "members": [{"on": "Combat.Enemy", "member": "hp", "value": 10}],
+        }],
+        "deactive": [], "changed": [], "watching": 2, "unresolved": 0, "unwatchable": 0,
+    }))
+    return pulse
+
+
+def check(met="yes", *sources: EvidenceSource) -> VerdictCheck:
+    return VerdictCheck(expected="맵에 Stage 글자가 보인다", observed="Stage : 0", met=met, sources=list(sources))
+
+
+def test_근거가_기록과_맞으면_확인됨이다() -> None:
+    checks, status = cite(
+        [check("yes",
+               EvidenceSource(kind="pulse", object="MapScene", member="Map.MapMove::stage", value="Stage : 0"),
+               EvidenceSource(kind="scene", object="Map_scene"),
+               EvidenceSource(kind="capture", object="cap-1"))],
+        memory(), {"cap-1"}, "Map_scene",
+    )
+    assert status == "verified"
+    assert [s["citation"] for s in checks[0]["sources"]] == ["match", "match", "match"]
+
+
+def test_다른_값_읽지_않은_값_보지_않은_캡처는_불확실이다() -> None:
+    checks, status = cite(
+        [check("yes",
+               EvidenceSource(kind="pulse", object="Enemy[3]", member="hp", value="0"),
+               EvidenceSource(kind="pulse", object="Lock", member="IsLocked", value="false"),
+               EvidenceSource(kind="capture", object="cap-9"))],
+        memory(), {"cap-1"}, "Map_scene",
+    )
+    assert status == "uncertain"
+    assert [(s["citation"], s["recorded"]) for s in checks[0]["sources"]] == [
+        ("mismatch", "10"), ("missing", None), ("missing", None),
+    ]
+
+
+def test_근거_없는_항목이_있으면_확인됨이_아니다() -> None:
+    _, status = cite([check("unknown")], memory(), set(), "Map_scene")
+    assert status == "uncertain"
+    assert cite([], memory(), set(), None)[1] == "none"
+
+
+def test_판정과_항목이_반대면_사정을_말한다() -> None:
+    assert contradiction(True, [check("no")]) is not None
+    assert contradiction(False, [check("yes"), check("yes")]) is not None
+    assert contradiction(False, [check("no")]) is None
+    assert contradiction(True, [check("yes"), check("unknown")]) is None
+
+
+def make(arch, step_meta):
+    sent: list[dict] = []
+
+    async def send(frame: dict) -> None:
+        sent.append(frame)
+
+    channel = QaRunChannel(qa_try_id=7, send=send, action_timeout=0.05, write_timeout=0.05, reading_wait=0.05)
+    state = QaRunState(total_steps=len(step_meta), step_meta=step_meta)
+    configure_attempts(channel, state)
+    tools = {tool.name: tool for tool in build_tools(channel, state, arch=arch)}
+    return channel, state, tools, sent
+
+
+def statuses(sent: list[dict]) -> list[dict]:
+    return [f["payload"] for f in sent if f["type"] == MessageType.STATUS.value]
+
+
+def test_축을_끈_런은_이유만_더해지고_도구_모양은_그대로다() -> None:
+    async def run() -> None:
+        channel, _, tools, sent = make(_OFF, [(5, True)])
+        await start_case(tools, 5)
+        assert "checks" in tools["report_test_case"].args
+        await tools["report_test_case"].ainvoke({"case_id": 5, "verdict": "PASSED", "message": "보인다", "thought": "Stage 가 떴다"})
+        payload = channel.evaluation.requests[-1][1]
+        assert payload["thought"] == "Stage 가 떴다"
+        assert payload["checks"] is None and payload["evidence"] is None
+
+    asyncio.run(run())
+
+
+def test_축을_끈_런의_지문은_축이_생기기_전과_같다() -> None:
+    names, middleware, digest = structure_of(_OFF)
+    assert digest == structure_of(_OFF.model_copy(update={"verdict_evidence": "off"}))[2]
+    assert digest != structure_of(_ON)[2]
+    # 끈 런의 digest 에는 이 칸이 아예 들어가지 않는다.
+    assert arch_fingerprint(_OFF, [], middleware) == arch_fingerprint(_OFF, [], middleware)
+
+
+def test_켠_런은_근거를_대조해_싣고_어긋난_판정은_돌려보낸다() -> None:
+    async def run() -> None:
+        channel, _, tools, sent = make(_ON, [(5, True)])
+        channel.scene.pulse = memory()
+        await start_case(tools, 5)
+        tool = tools["report_test_case"]
+        assert "checks" in tool.args
+
+        source = {"kind": "pulse", "object": "MapScene", "member": "stage", "value": "Stage : 0"}
+        refused = await tool.ainvoke({
+            "case_id": 5, "verdict": "PASSED", "message": "보인다", "thought": "t",
+            "checks": [{"expected": "Stage 글자", "observed": "없다", "met": "no", "sources": [source]}],
+        })
+        assert refused.startswith("판정을 기록하지 않았습니다") and not statuses(sent)
+
+        empty = await tool.ainvoke({"case_id": 5, "verdict": "PASSED", "message": "보인다", "thought": "t"})
+        assert empty.startswith("판정을 기록하지 않았습니다") and not statuses(sent)
+
+        await tool.ainvoke({
+            "case_id": 5, "verdict": "PASSED", "message": "보인다", "thought": "t",
+            "checks": [{"expected": "Stage 글자", "observed": "Stage : 0", "met": "yes", "sources": [source]}],
+        })
+        payload = channel.evaluation.requests[-1][1]
+        assert payload["evidence"] == "verified"
+        assert payload["checks"][0]["sources"][0]["citation"] == "match"
+
+    asyncio.run(run())
+
+
+def test_reference_only_step_cannot_start_a_tc_attempt():
+    async def run():
+        channel, state, tools, sent = make(_ON, [(None, False)])
+        result = await start_case(tools, 5)
+        assert '없는 TC' in result
+        assert channel.evaluation.requests == []
+        assert state.case_attempt_results == []
+    asyncio.run(run())
+
+
+def test_화면_오브젝트를_씬으로_적어도_오브젝트로_대조한다() -> None:
+    # 실측(런 18): `Canvas[7]/Button (Legacy)[0]` 같은 오브젝트를 kind="scene" 으로 적었다.
+    checks, status = cite(
+        [check("yes", EvidenceSource(kind="scene", object="MapScene[1]"), EvidenceSource(kind="scene", object="Map_scene"))],
+        memory(), set(), "Map_scene",
+    )
+    assert status == "verified"
+    assert [s["citation"] for s in checks[0]["sources"]] == ["match", "match"]
+
+
+def test_타입_점_멤버로_적은_근거도_찾는다() -> None:
+    pulse = memory()
+    pulse.apply(PulseReading.model_validate({
+        "schema": 2, "reading": 2, "frame": 11, "scene": "Map_scene", "whole": False,
+        "statics": [{"declaring": "Combat.CombineZone", "member": "Instance", "value": {"active": False}}],
+        "active": [], "deactive": [], "changed": [], "watching": 2, "unresolved": 0, "unwatchable": 0,
+    }))
+    checks, status = cite(
+        [check("yes",
+               EvidenceSource(kind="pulse", object="CombineZone.Instance", value="False"),
+               EvidenceSource(kind="pulse", object="Enemy[3]", member="Combat.Enemy.hp", value="10"))],
+        pulse, set(), "Map_scene",
+    )
+    assert [s["citation"] for s in checks[0]["sources"]] == ["match", "match"]
+    assert status == "verified"
+
+
+def test_판독_화면_표기를_그대로_옮긴_근거도_찾는다() -> None:
+    # 실측(런 21): 씬 이름을 붙인 오브젝트, 정적 값 안의 칸, 멤버 값 안의 칸을 화면 표기대로 적었다.
+    pulse = memory()
+    pulse.apply(PulseReading.model_validate({
+        "schema": 2, "reading": 2, "frame": 11, "scene": "Map_scene", "whole": False,
+        "statics": [{"declaring": "Combat.CombineZone", "member": "Instance", "value": {"active": False}}],
+        "active": [{"scene": "Map_scene", "id": 3, "path": "Zone", "selector": "Zone[2]",
+                    "members": [{"on": "Combat.CombineZone", "member": "spellCards", "value": []}]}],
+        "deactive": [], "changed": [], "watching": 3, "unresolved": 0, "unwatchable": 0,
+    }))
+    checks, status = cite(
+        [check("yes",
+               EvidenceSource(kind="pulse", object="Map_scene/Enemy[3]", member="hp", value="10"),
+               EvidenceSource(kind="pulse", object="CombineZone.Instance", member="active", value="False"),
+               EvidenceSource(kind="pulse", object="Zone[2]", member="CombineZone::spellCards.Count", value="0"),
+               EvidenceSource(kind="pulse", object="Map_scene/Enemy[3]|Combat.Enemy::hp", value="10"))],
+        pulse, set(), "Map_scene",
+    )
+    assert [s["citation"] for s in checks[0]["sources"]] == ["match", "match", "match", "match"]
+    assert status == "verified"
+
+
+def test_값을_다른_꼴로_적어도_뜻이_같으면_맞다() -> None:
+    from app.qa.verdict_evidence import _same
+
+    assert _same("active: False", {"active": False})
+    assert _same("{'path': 'Card(Clone)', 'active': True}", {"path": "Card(Clone)", "active": True, "world": {"x": 1}})
+    assert _same("None", None)
+    assert not _same("active: True", {"active": False})
+
+
+def test_indexed_selector_cannot_cite_another_instance_value():
+    pulse = PulseMemory()
+    pulse.apply(PulseReading.model_validate({
+        "reading": 1, "frame": 10, "scene": "Battle",
+        "active": [
+            {"selector": "Root[0]/Enemy[1]", "path": "Root/Enemy", "members": [{"on": "Enemy", "member": "hp", "value": 10}]},
+            {"selector": "Root[0]/Enemy[2]", "path": "Root/Enemy", "members": [{"on": "Enemy", "member": "hp", "value": 0}]},
+        ],
+    }))
+    result, status = cite([
+        check("yes", EvidenceSource(kind="pulse", object="Enemy[1]", member="hp", value="0")),
+        check("yes", EvidenceSource(kind="pulse", object="Battle/Root[0]/Enemy[2]", member="hp", value="0")),
+        check("yes", EvidenceSource(kind="pulse", object="Enemy[9]", member="hp", value="0")),
+    ], pulse, set(), "Battle")
+    assert [row["sources"][0]["citation"] for row in result] == ["mismatch", "match", "missing"]
+    assert status == "uncertain"
+    unindexed, _ = cite([check("yes", EvidenceSource(kind="pulse", object="Enemy", member="hp", value="0"))], pulse, set(), "Battle")
+    assert unindexed[0]["sources"][0]["citation"] == "match"

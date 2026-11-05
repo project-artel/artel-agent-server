@@ -1,0 +1,57 @@
+{
+  "counts": {
+    "handwritten": {
+      "authoring": 19,
+      "modify": 2,
+      "offtopic": 12
+    },
+    "traffic": {
+      "authoring": 134,
+      "greeting": 2,
+      "modify": 18,
+      "question": 10,
+      "underspecified": 4
+    }
+  },
+  "handwritten_families": {
+    "chitchat": 4,
+    "defect": 6,
+    "defect_on_existing": 2,
+    "dev_team_bait": 5,
+    "game_behaviour": 4,
+    "other_product": 5,
+    "technical": 4,
+    "weather": 3
+  },
+  "labels_sha256": "17f4856bfa35217c9310989207a89d0bf096f3facb3bd7ea205e93c0c104548f",
+  "minimum_per_route": {
+    "authoring": 100,
+    "greeting": 2,
+    "modify": 15,
+    "offtopic": 12,
+    "question": 8
+  },
+  "note": "라벨은 프롬프트 판본에 상대적이다. 명세가 바뀌면 라벨을 재검토해야 하므로 그 해시를 여기 박는다 — 조용히 진리가 재정의되는 대신 검사가 터진다.",
+  "rows": 201,
+  "scored_denominator": 163,
+  "spec": {
+    "scenario_router/v7/system": "5c9c84acf76a3bfe3e62f5e66563ee9fccff8acca39ec4a7ae3d5801a5646221"
+  },
+  "spec_rules": {
+    "authoring": "asks to create scenarios OR to add more coverage",
+    "bugreport": "A bug report is never offtopic",
+    "cannottell": "You cannot tell which",
+    "corrects": "The fact corrects, completes, or contradicts a scenario",
+    "edit": "edit ONE scenario the user points at",
+    "greeting": "greetings, \"who are you\", small talk",
+    "indoubt": "when in doubt, always\n  authoring",
+    "merge": "MERGE two or more existing scenarios into one",
+    "offtopic": "no connection to this game or this project at all",
+    "position": "point at a place inside a scenario",
+    "question": "asking ABOUT the run or cases",
+    "split": "SPLIT one existing scenario into several",
+    "statement": "A STATEMENT ABOUT THE GAME IS A REQUEST",
+    "test": "modify REWRITES, COMBINES, SPLITS, or"
+  },
+  "version": 1
+}

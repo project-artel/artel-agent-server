@@ -1,0 +1,452 @@
+"""한 QA 런이 도구 호출 사이에 들고 가는 상태.
+
+각 도구를 몇 번 썼는지, 어떤 지식을 이미 스쳐 봤는지, 아직 보고되지 않은 스텝이
+무엇인지가 여기 모인다. 도구가 각자 세지 않고 이 객체에 묻는 이유는, 세는 자리가
+도구마다 흩어지면 도구가 늘 때마다 하나씩 빠지기 때문이다.
+"""
+
+from dataclasses import dataclass
+from typing import Any
+
+from app.agents.qa.macro.book import MacroBook
+from app.agents.qa.macro.lift import DispatchRecord
+from app.agents.qa.macro.session import MacroSession
+from app.qa.jev import JevClient
+from app.qa.envelope import ActionResultItem, JsonRpcAction
+from app.qa.failure_site import FailureSite
+from app.qa.provider_error import ProviderFailure
+from app.qa.game_functions import CaseFunctions, UsedCheat
+from app.qa.schemas import QaStepResult, QaCaseAttemptResult
+
+
+@dataclass(frozen=True)
+class PendingCapture:
+    """A captured screen waiting to be put in front of the model."""
+
+    capture_id: str
+    url: str
+    mime_type: str
+    caption: str
+    # False for a `target_id` capture, which is one element cropped at 512px
+    # rather than the whole screen.
+    #
+    # Only the caption distinguished the two before, and a `screen_capture`
+    # run that skips its automatic capture whenever anything is pending would
+    # skip it exactly on the turn the model asked for a close-up — the one turn
+    # where the two pictures show different things and both are worth having.
+    whole_screen: bool = True
+
+
+def capture_from_action_result(
+    item: ActionResultItem, what: str, whole_screen: bool = True
+) -> PendingCapture | None:
+    """The `PendingCapture` an `ACTION_RESULT` describes, or `None` if it has none.
+
+    `None` covers all three ways a capture comes back with no image to read: the
+    action failed, or it succeeded with no `returnValue`, or with one that carries
+    no `url`. The caller says what to do about it, because the two callers say
+    different things — the tool answers the model in words, the vision middleware
+    logs and lets the turn go on without a picture.
+
+    Here rather than in either caller because both need the same reading of the
+    same payload, and a second copy is how the caption and the `clipped` note
+    drift apart.
+    """
+    if not item.success:
+        return None
+    captured = item.returnValue if isinstance(item.returnValue, dict) else {}
+    url = captured.get("url")
+    if not url:
+        return None
+
+    caption = f"This is {what} right now."
+    if captured.get("clipped"):
+        # Worth saying out loud: a cropped-off element is itself a finding, and
+        # the agent would otherwise read the partial image as the whole thing.
+        caption += " Part of it is off the edge of the screen."
+
+    return PendingCapture(
+        capture_id=str(captured.get("captureId") or ""),
+        url=url,
+        mime_type=str(captured.get("mimeType") or "image/jpeg"),
+        caption=caption,
+        whole_screen=whole_screen,
+    )
+
+
+class QaRunState:
+    """What the loop has done so far, for the tools that need to know."""
+
+    def __init__(
+        self,
+        total_steps: int,
+        step_meta: list[tuple[int | None, bool]] | None = None,
+        step_texts: list[str] | None = None,
+        execution_mode: str = "ORDERED",
+        step_functions: list[CaseFunctions | None] | None = None,
+    ) -> None:
+        self.total_steps = total_steps
+        # `QaScenario.execution_mode`. `FREE` 이면 스텝 하나가 TC 하나이고 보고가 순서 없이
+        # 온다 — `report_step` 의 답과 압축 원장이 "다음 스텝" 대신 남은 TC 번호를 말한다.
+        self.execution_mode = execution_mode
+        # 스텝별 그 TC 의 `functions`, 1번 스텝이 0번 자리(ARTEL-1054). `None` 은 TC 가 없거나
+        # TC 가 `functions` 를 안 적은 것이고, 그때는 run 이 받은 cheat·behavior 전부다.
+        self.step_functions: list[CaseFunctions | None] = step_functions or []
+        # 지난 `report_step` 뒤에 보낸 cheat. 다음 `report_step` 이 `STATUS` 에 싣고 비운다.
+        # 보내지 않고 거절한 호출은 안 든다.
+        self.used_cheats: list[UsedCheat] = []
+        # 상한을 세는 것은 시도다. 게임이 매번 거절해도 루프에 끝이 있어야 한다 — 위
+        # `captures_attempted` 와 같은 이유다.
+        self.cheats_attempted = 0
+        self.behavior_calls_attempted = 0
+        # 시나리오가 각 스텝에 적은 행위 문장, 1번 스텝이 0번 자리. macro 초안의 docstring 이
+        # 이것을 싣는다(`draft_for_step`). 비면 문장을 모르는 것이고 초안은 번호만 적는다.
+        self.step_texts: list[str] = step_texts or []
+        # 스텝별 (case_id, is_verification). report_step이 각 판정에 이를 붙이고, TC 판정(파생)은
+        # `case_units`가 이 표로 구간을 잘라 그 구간 검증 스텝의 판정으로 정한다. 비면 단일-계층
+        # 폴백(case_id/is_verification 미상) — 구식 호출자·테스트 호환용.
+        self.step_meta: list[tuple[int | None, bool]] = step_meta or []
+        self.step_results: list[QaStepResult] = []
+        self.case_attempt_results: list[QaCaseAttemptResult] = []
+        # FREE 시나리오에서 `report_case(overwrite=True)` 로 판정을 한 번 뒤집은 스텝(ARTEL-1029).
+        # 한 TC 는 한 번만 덮어쓴다.
+        self.overwritten_steps: set[int] = set()
+        # FREE 시나리오에서 스텝마다 TC 의 expected 문장, 1번 스텝이 0번 자리. 미도달 판정기가
+        # agent 의 message 와 함께 읽는다(`app/qa/reach.py`).
+        self.step_expected: list[str] = []
+        # 실패 판정이 미도달인지 묻는 판정기. FREE run 에만 runner 가 단다. None 이면 묻지 않는다.
+        self.unreached_judge: object | None = None
+        # 스텝마다 미도달이라 돌려보낸 횟수.
+        self.unreached_refusals: dict[int, int] = {}
+        self.finished = False
+        # run 이 예외나 timeout 으로 멈췄을 때 `run_with_deadline` 이 채운다. 취소와
+        # "닫지 않고 멈춤" 은 예외가 아니므로 `None` 으로 남는다.
+        self.failure_site: FailureSite | None = None
+        # 런을 멈출 제공사 오류(ARTEL-1370). `run_with_deadline` 이 예외를 가를 때 채운다. 이것이 있으면
+        # run 루프는 이 시나리오를 미판정으로 닫고 남은 시나리오를 돌리지 않는다.
+        self.provider_failure: ProviderFailure | None = None
+        # The observation the agent last saw, so the next look is a diff.
+        self.watermark = 0
+        # 마지막 행위가 끝난 Unity 프레임. 판독의 창이 여기서 시작한다 — 타이머가 아니라
+        # 행위가 경계다(ARTEL-621). `None` 은 아직 아무 행위도 없었거나, 그 필드를 모르는
+        # 옛 SDK 다.
+        self.last_action_frame: int | None = None
+        # 지난 모델 호출까지 `fold_context` 가 `fold` 한 block 의 `key`. 다음 호출이 같은 block 을
+        # 다시 `fold` 해야 프롬프트 앞이 그대로라 `cache` 가 맞는다
+        # (`app/agents/qa/runner.py` 의 `_fold_context_for`).
+        self.folded_blocks: frozenset[str] = frozenset()
+        # How many times `finish_run` was reached. The first attempt made with
+        # steps still unreported is pushed back on; a second one closes the run
+        # regardless, so a game that genuinely cannot go on is never trapped.
+        self.finish_attempts = 0
+        # Attempts, not successes. A game whose SDK does not know the capture action
+        # refuses every one of them, and counting only what worked would leave that
+        # loop unbounded — the cap has to bind on the failing case too.
+        self.captures_attempted = 0
+        # Attempts again, and for the same reason: a search Orchestration refuses
+        # every time would otherwise be a loop with no bound on it.
+        self.knowledge_searches_attempted = 0
+        # Attempts for the knowledge writes too. A write is answered since
+        # ARTEL-332, so successes COULD be counted now — the cap still counts
+        # attempts because silence is a third outcome (see
+        # `QaRunChannel.write_knowledge`) and a budget that only bound confirmed
+        # writes would be unbounded against an Orchestration that never answers.
+        self.knowledge_records_attempted = 0
+        self.knowledge_updates_attempted = 0
+        self.knowledge_forgets_attempted = 0
+        # Attempts once more. A report the far side drops still cost the run a
+        # call, and a cap that only counted accepted ones would not bound the
+        # loop where every report is being rejected.
+        self.issues_attempted = 0
+        # What `search_knowledge` has actually shown the agent, id -> summary.
+        # A correction or a deletion may only name an id from here. An agent free
+        # to pass any id could rewrite or erase an entry it never read, and on the
+        # far side that id resolves to a real row — Orchestration cannot tell the
+        # difference, so the check only exists if it exists here.
+        self.knowledge_seen: dict[str, str] = {}
+        # Entries this run deleted and has not written a replacement for, as
+        # printable labels, oldest first.
+        #
+        # `update_knowledge` is what correcting an entry should be, but a run may
+        # still delete and then record, and this is the only thing that knows one
+        # is halfway through doing so. It is what lets a failing `record_knowledge`
+        # say what is missing instead of reporting a bare failure, and what exempts
+        # a replacement write from the write cap.
+        self.knowledge_deleted_unreplaced: list[str] = []
+        # Entries shown only as a one-line neighbour, id -> summary. NEVER popped.
+        #
+        # Kept apart from `knowledge_seen` because the two license different
+        # things. `seen` means read in full and is what `update_knowledge` and
+        # `forget_knowledge` require — deletion is the most destructive thing the
+        # agent does, and a 120-character line is not having read the entry.
+        # `glimpsed` is enough to assert a relation or to expand from, neither of
+        # which destroys anything and both of which a summary can justify.
+        self.knowledge_glimpsed: dict[str, str] = {}
+        self.knowledge_links_attempted = 0
+        self.knowledge_unlinks_attempted = 0
+        self.knowledge_expands_attempted = 0
+        # 이 런이 content map 에 적어 만든 `capability_observation` 의 id → 무엇에 대한
+        # 문장이었나 (ARTEL-644).
+        #
+        # `inferred` 를 적을 때 `based_on` 에 실을 수 있는 값이 이것뿐이고, 저쪽은 **이 런의**
+        # observation 이 아니면 거절한다. 그래서 이 표가 없으면 모델이 지어낸 id 를 싣고 왕복
+        # 하나를 거절로 쓴다 — `knowledge_seen` 이 있는 이유와 같다.
+        self.capability_observations: dict[str, str] = {}
+        # 이 런에게 실제로 줄로 찍힌 content map 행의 `capability_key` → 그 요약.
+        #
+        # `report_step` 의 `capability_key` 가 이 표와 씬 맥락 블록을 함께 본다. 없는 키는
+        # 떨군다 — `knowledge_seen` 이 있는 이유와 같고, 여기서 안 하면 아무 데서도 안 된다.
+        # 이 런이 무엇을 받았는지 아는 곳이 여기뿐이기 때문이다.
+        #
+        # `list_scene_capabilities` 가 낸 페이지의 줄만 들어온다. 씬 맥락 블록 쪽은 여기 안
+        # 쌓는다 — 그 블록은 `SceneMemory.render` 가 그리고 그 자리에 런 상태가 없어서, 대신
+        # `report_step` 이 지금 서 있는 씬의 조회 결과를 직접 본다.
+        self.capability_keys_listed: dict[str, str] = {}
+        # `report_step` 이 `learned` 를 안 받아 연속으로 되돌려 보낸 횟수.
+        #
+        # 상한이 필요한 이유가 phase 거절과 같다(`app/agents/qa/tools/phase.py` 의
+        # `MAX_CONSECUTIVE_REFUSALS`). 되돌려 보낸 뒤 모델이 또 빠뜨리면 왕복만 탄다.
+        self.verdict_memory_refusals = 0
+        # 게임의 `PERFORMANCE` 를 orchestration 에서 읽는 것 (ARTEL-1223). `ToolContext` 가 처음
+        # 쓸 때 만든다 — 그때 `qa_try_id` 와 orchestration 주소를 안다.
+        self.performance = None
+        # 이 런의 phase 상태 기계, 또는 `None`. `build_tools` 가 `arch.phase_cycle` 을 보고
+        # 채운다 — `off` 와 `in_verdict` 에서는 끝까지 `None` 이다.
+        self.phase_cycle = None
+        # 이 런이 `record_new_capability` 로 만든 행의 id → 그 요약.
+        #
+        # 그 행들은 `capability_key` 가 NULL 이라(키의 산식에 넣을 `entry_id` 가 없다) 나중에
+        # verdict 를 찍는 유일한 길이 id 다.
+        self.capability_rows_written: dict[str, str] = {}
+        # 이 런이 실제로 보낸 조작. method → 마지막으로 보낸 인자.
+        #
+        # `capability_observation.action_params` 에 재현이 앉는 자리이고, 그 값을 모델에게
+        # 받아 적으면 안 된다 — JSON-RPC 인자는 모델이 지어내기 쉬운 모양이고 저쪽은 그것을
+        # 읽지 않고 그대로 저장한다. 모델은 "무엇으로 눌렀나" 만 말하고 인자는 이 표가 낸다.
+        self.dispatched_action_params: dict[str, list[Any]] = {}
+        # 이 런의 macro 초안과 등록된 정의, 그리고 무엇을 읽었나 (ARTEL-925).
+        #
+        # 사전 셋을 여기 흩뿌리지 않는 이유는 초안의 수명주기 — 쓰고·읽고·고치고·
+        # 등록한다 — 가 규칙을 들고 있기 때문이다. 그 규칙이 `MacroBook` 에 있으면 tool
+        # 없이 단위 테스트가 되고, 여기 흩어 놓으면 tool 을 통해서만 재어진다.
+        self.macros = MacroBook()
+        # `checkpoint` 에서 멈춰 선 macro 호출. `resume_macro` 가 이것을 잇거나 버린다.
+        # 하나뿐이다 — 게임을 모는 쪽이 둘이 되면 안 되므로, 멈춘 것이 있는 동안
+        # `run_macro` 는 새 macro 를 안 부른다.
+        self.paused_macro: MacroSession | None = None
+        # macro 의 `decide` 와 `ask` 가 쓰는 Jev client. 처음 쓸 때 만들고, 연결을 런 끝까지
+        # 다시 쓴다. 닫는 것은 `QaRunner` 의 `finally` 다.
+        self.jev: JevClient | None = None
+        # agent 가 손으로 부른 action tool, 부른 순서대로(ARTEL-915). `dispatched_action_params`
+        # 는 method 마다 마지막 한 벌만 남겨 순서도 tool 도 없다 — 그쪽은 capability 의 재현
+        # 칸이 쓰는 것이라 뜻을 안 바꾸고, 이 기록을 옆에 둔다. macro 초안이 여기서 나온다.
+        self.dispatches: list[DispatchRecord] = []
+        # macro 초안을 이미 내민 step. 같은 step 을 다시 판정해도 초안을 또 만들지 않는다.
+        self.drafted_steps: set[int] = set()
+        # step 마다 내민 초안의 이름. 통과한 판정에만 초안이 붙으므로 `drafted_steps` 의
+        # 부분집합이다. `decline_macro_draft` 가 받은 `name` 이 그 step 에 내민 `draft` 인지
+        # 여기서 본다.
+        self.offered_drafts: dict[int, str] = {}
+        # `decline_macro_draft` 로 거절한 `draft` 이름 → 그 `reason`. 등록한 것은 `macros` 에
+        # 남고, 거절한 것은 여기 남는다 — 둘 다 없는 `draft` 가 답을 못 받은 것이다.
+        self.declined_drafts: dict[str, str] = {}
+        # 마지막 action 의 결과 데이터. 기록하는 쪽이 그 action 이 게임에 닿았는지 본다.
+        self.last_outcome = None
+        # Handed to the vision middleware on the next model call. The tool cannot
+        # return the image itself — an image block on a tool result is rejected by
+        # the chat/completions API every model here is reached through.
+        self._pending_captures: list[PendingCapture] = []
+        # 이 런에서 모델 앞에 놓인 캡처의 id(ARTEL-1133). 판정이 근거로 댄 캡처가 실제로 본
+        # 사진인지 이것과 맞춰 본다. `cites_captures` 는 `verdict_evidence` 를 켠 런에서 켜지고,
+        # 그때만 사진 설명에 id 를 적어 모델이 인용할 수 있게 한다.
+        self.shown_captures: set[str] = set()
+        self.cites_captures = False
+        # `verdict_evidence` 런의 판정 도구가 `_record_verdict` 에 넘기는 기대 항목, 그리고 판정과
+        # 항목이 어긋나 돌려보낸 연속 횟수.
+        self.pending_checks: list | None = None
+        self.evidence_refusals = 0
+        self.current_case_id: int | None = None
+        self.case_reviews: dict[int, list[dict]] = {}
+        # Set by `compact_context`, read and cleared by the compaction middleware
+        # before the next model call. A flag rather than the tool doing the work
+        # itself: the tool runs inside the tools node, where its own AIMessage is
+        # already in state, and rewriting the message list from there would strand
+        # that call without its result. See `app/agents/qa/compaction.py`.
+        self.compaction_requested = False
+        # How many compactions this run has been through. Read by the thrash guard
+        # and reported at the end of the run.
+        self.compactions = 0
+
+    def remember_glimpsed(self, neighbours) -> None:
+        """Record neighbour lines the agent was shown.
+
+        Without this the agent is printed ids it then cannot use at all — every
+        graph tool refuses an endpoint the run has not been shown. An id-less
+        neighbour is skipped rather than stored under the empty string, for the
+        same reason an id-less hit is.
+        """
+        for neighbour in neighbours:
+            if neighbour.id:
+                self.knowledge_glimpsed[neighbour.id] = neighbour.summary
+
+    def remember_dispatch(self, actions: list[JsonRpcAction]) -> None:
+        """이 런이 게임에 보낸 조작을 method 별로 마지막 것만 남긴다.
+
+        마지막 것만인 이유는 이 값이 쓰이는 자리 때문이다 — verdict 를 적는 tool 이
+        "`button_click` 으로 눌렀다" 는 모델의 말에 인자를 채워 주는 것이고, 그 말이 가리키는
+        것은 방금 보낸 것이다. 전부 쌓아 두면 어느 것이 그 말의 대상인지 이쪽이 못 고른다.
+        """
+        for action in actions:
+            self.dispatched_action_params[action.method] = list(action.params)
+
+    def case_id_at(self, step: int | None) -> int | None:
+        """그 스텝이 속한 TC. 범위 밖이거나 TC 가 없으면 `None`."""
+        if step is None or not 0 <= step - 1 < len(self.step_meta):
+            return None
+        return self.step_meta[step - 1][0]
+
+    def case_functions_at(self, step: int | None) -> CaseFunctions | None:
+        """그 스텝의 TC 가 적은 `functions`. 없으면 `None` 이고 그것은 "전부" 다."""
+        if step is None or not 0 <= step - 1 < len(self.step_functions):
+            return None
+        return self.step_functions[step - 1]
+
+    def knows_of(self, knowledge_id: str) -> bool:
+        """Whether this run has been shown this entry at all, in full or as a line."""
+        return knowledge_id in self.knowledge_seen or knowledge_id in self.knowledge_glimpsed
+
+    def remember_listed_capabilities(self, capabilities) -> None:
+        """`list_scene_capabilities` 가 방금 찍어 준 줄의 키를 기억한다.
+
+        키 없는 행은 건너뛴다. 그 행은 agent 가 만든 것이고 `capability_key` 가 NULL 이라
+        지목할 값이 애초에 없다 — id 없는 이웃을 빈 문자열 아래 안 쌓는 것과 같다.
+        """
+        for capability in capabilities:
+            if capability.capability_key:
+                self.capability_keys_listed[capability.capability_key] = capability.summary
+
+    def was_shown_capability_key(self, capability_key: str) -> bool:
+        """이 런이 이 키를 줄로 받은 적이 있나.
+
+        `list_scene_capabilities` 결과만 본다. 씬 맥락 블록은 `report_step` 이 지금 서 있는
+        씬의 조회 결과로 따로 본다 — 블록을 그리는 자리에 런 상태가 없기 때문이다.
+        """
+        return capability_key in self.capability_keys_listed
+
+    @property
+    def knowledge_writes_attempted(self) -> int:
+        """Records and corrections against one allowance.
+
+        Capped together because they fail together: either one spends the run's
+        steps putting content into the knowledge base instead of reaching a
+        verdict, which is the whole reason `max_records_per_run` exists.
+        """
+        return self.knowledge_records_attempted + self.knowledge_updates_attempted
+
+    def unreported_steps(self) -> list[int]:
+        """Scenario steps with no verdict yet, in order.
+
+        Lives here rather than in the ledger that prints it because it is derived
+        from `step_results`, and a second derivation elsewhere is how the ledger
+        and the run come to disagree about what is left.
+        """
+        reported = {result.step for result in self.step_results}
+        return [step for step in range(1, self.total_steps + 1) if step not in reported]
+
+    def step_of_case(self, case_id: int) -> int | None:
+        """FREE 시나리오에서 `case_id` 가 몇 번 스텝인지. 없으면 None."""
+        for index, (step_case_id, _) in enumerate(self.step_meta):
+            if step_case_id == case_id:
+                return index + 1
+        return None
+
+    def case_of_step(self, step: int) -> int | None:
+        """`step` 의 case_id. 표 밖이면 None."""
+        if 0 <= step - 1 < len(self.step_meta):
+            return self.step_meta[step - 1][0]
+        return None
+
+    def verdict_of(self, step: int) -> QaStepResult | None:
+        """`step` 의 마지막 판정. 아직 없으면 None."""
+        for result in reversed(self.step_results):
+            if result.step == step:
+                return result
+        return None
+
+    def case_units(self) -> list[dict]:
+        """연속 동일 case_id = 한 TC 구간. **TC 판정 = 그 구간의 검증(마지막) 스텝 판정**(2단 판정).
+
+        `step_meta`(권위)로 구간을 자르고, 각 구간의 검증 스텝 판정을 `step_results`에서 찾아
+        TC의 passed/message로 삼는다. 중간 스텝의 성공/실패는 각 스텝에 그대로 남아있고(steps),
+        TC 판정과 별개다 — 중간이 실패해도 검증이 통과하면 TC는 통과다.
+        """
+        by_step = {result.step: result for result in self.step_results}
+        units: list[dict] = []
+        prev_cid: int | None = None
+        for index, (cid, is_verification) in enumerate(self.step_meta, start=1):
+            if cid is None:
+                prev_cid = None
+                continue
+            if not units or cid != prev_cid:
+                units.append(
+                    {"case_no": len(units) + 1, "case_id": cid, "steps": [], "verify_step": None}
+                )
+            unit = units[-1]
+            unit["steps"].append(index)
+            if is_verification:
+                unit["verify_step"] = index
+            prev_cid = cid
+        for unit in units:
+            # 검증 스텝(없으면 구간 마지막 스텝)의 판정이 곧 TC 판정.
+            decisive = unit["verify_step"] or (unit["steps"][-1] if unit["steps"] else None)
+            result = by_step.get(decisive) if decisive else None
+            unit["passed"] = bool(result and result.passed)
+            unit["message"] = result.message if result else ""
+        return units
+
+    def build_summary(self) -> dict:
+        """TC 검증 시도를 집계한다. 참고 step을 실패 판정으로 계산하지 않는다."""
+        # 별도 planner_executer engine은 기존 step 결과를 쓴다. QA tool은 이 목록에 쓰지 않는다.
+        if self.step_results and not self.case_attempt_results:
+            cases = self.case_units()
+            passed = sum(result.passed for result in self.step_results)
+            cases_passed = sum(unit["passed"] for unit in cases)
+            return {
+                "steps": {"total": self.total_steps, "passed": passed, "failed": self.total_steps - passed,
+                          "items": [result.model_dump() for result in self.step_results]},
+                "cases": {"total": len(cases), "passed": cases_passed, "failed": len(cases) - cases_passed, "items": cases},
+            }
+        outcomes = self.case_attempt_results
+        case_ids = {identifier for identifier, _ in self.step_meta if identifier is not None}
+        latest = {result.case_id: result for result in outcomes}
+        cases = [{"case_id": identifier,
+                  "verdict": latest[identifier].verdict if identifier in latest else "UNTESTED",
+                  "passed": latest[identifier].verdict == "PASSED" if identifier in latest else None,
+                  "message": latest[identifier].message if identifier in latest else ""}
+                 for identifier in sorted(case_ids)]
+        return {
+            "steps": {"total": 0, "passed": 0, "failed": 0, "items": []},
+            "cases": {"total": len(cases),
+                      "passed": sum(case["verdict"] == "PASSED" for case in cases),
+                      "failed": sum(case["verdict"] == "FAILED" for case in cases),
+                      "inconclusive": sum(case["verdict"] == "INCONCLUSIVE" for case in cases),
+                      "untested": sum(case["verdict"] == "UNTESTED" for case in cases),
+                      "items": cases},
+            "attempts": [result.model_dump() for result in outcomes],
+        }
+
+    def add_pending_capture(self, capture: PendingCapture) -> None:
+        self._pending_captures.append(capture)
+
+    def saw_capture(self, capture_id: str, caption: str) -> str:
+        """모델 앞에 놓인 캡처를 적고, 그 사진에 붙일 설명을 돌려준다."""
+        if capture_id:
+            self.shown_captures.add(capture_id)
+        if self.cites_captures and capture_id:
+            return f"{caption} (capture {capture_id})"
+        return caption
+
+    def take_pending_captures(self) -> list[PendingCapture]:
+        pending = self._pending_captures
+        self._pending_captures = []
+        return pending

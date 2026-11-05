@@ -1,0 +1,661 @@
+import asyncio
+
+import pytest
+from langchain_core.runnables import RunnableLambda
+from langchain_core.tracers.context import collect_runs
+
+from app.agents import (
+    AgentContext,
+    OutputLanguage,
+    ScenarioAgent,
+    ScenarioAgentRequest,
+    ScenarioAgentResult,
+    ScenarioGenerationError,
+    ScenarioPlan,
+)
+from app.agents.scenario.cases import NO_TEST_CASE_LIST_NOTICE, render_test_case_list
+from app.agents.scenario.schemas import (
+    AuthoredStep,
+    CaseGuard,
+    ReviewedCases,
+    ScenarioAgentResult,
+    SceneExit,
+    TestCaseListItem,
+)
+from app.agents.scenario.prompt import (
+    LANGUAGE_DIRECTIVES,
+    build_first_message,
+    build_system_prompt,
+)
+from app.llm.chat_model import select_structured_method
+from app.prompts import load_prompt
+from app.llm.models import ReasoningConfig
+from app.sessions.channel import ScenarioChannel
+
+
+def _result(message: str = "Authored two scenarios.") -> ScenarioAgentResult:
+    return ScenarioAgentResult(
+        message=message,
+        scenarios=[
+            ScenarioPlan(
+                title="Login reward flow",
+                description="Verify the login reward flow.",
+                steps=[
+                    AuthoredStep(action="Open the login reward popup", case_id=11),
+                    AuthoredStep(action="Observe the reward is granted", case_id=11),
+                    AuthoredStep(action="Return to the lobby"),
+                    AuthoredStep(action="Confirm the reward badge shows", case_id=12),
+                ],
+            ),
+            ScenarioPlan(
+                title="Shop purchase flow",
+                description="Verify the shop purchase flow.",
+                steps=[
+                    AuthoredStep(action="Buy an item and confirm gold drops", case_id=21)
+                ],
+            ),
+        ],
+    )
+
+
+def _canned_factory(result: ScenarioAgentResult):
+    """A factory whose agent returns the graph state create_agent would produce.
+
+    create_agent's final state carries the parsed schema under
+    ``structured_response``; the agent reads exactly that key.
+    """
+
+    def factory(*, model, tools, system_prompt, reasoning=None):
+        return RunnableLambda(
+            lambda _inputs: {"messages": [], "structured_response": result}
+        )
+
+    return factory
+
+
+def _channel() -> ScenarioChannel:
+    async def send(_frame: dict) -> None:
+        return None
+
+    return ScenarioChannel(send)
+
+
+def _request(**overrides) -> ScenarioAgentRequest:
+    base = {
+        "user_input": "Author scenarios for login rewards and the shop.",
+        "game_context": {"constraints": ["Reward can be claimed once per day."]},
+        "unity_context": {"states": [{"key": "login_reward.claimed"}]},
+    }
+    base.update(overrides)
+    return ScenarioAgentRequest(**base)
+
+
+_CTX = AgentContext(session_id="session-1")
+
+
+def test_agent_context_builds_trace_config() -> None:
+    context = AgentContext(
+        session_id="session-1", metadata={"environment": "test", "session_id": "wrong"}
+    )
+
+    assert context.trace_config("scenario-generation") == {
+        "run_name": "scenario-generation",
+        "tags": ["agent"],
+        "metadata": {"environment": "test", "session_id": "session-1"},
+    }
+
+
+def test_scenario_agent_names_and_tags_its_trace() -> None:
+    """The run LangSmith shows carries the name, tag and session id."""
+    agent = ScenarioAgent(agent_factory=_canned_factory(_result()))
+
+    with collect_runs() as collected:
+        asyncio.run(agent.run(_request(), _CTX, _channel()))
+
+    (root,) = collected.traced_runs
+    assert root.name == "scenario-generation"
+    assert root.tags == ["agent"]
+    assert root.extra["metadata"]["session_id"] == "session-1"
+
+
+def test_scenario_agent_returns_multi_scenario_result() -> None:
+    result = _result()
+    agent = ScenarioAgent(agent_factory=_canned_factory(result))
+
+    out = asyncio.run(agent.run(_request(), _CTX, _channel()))
+
+    assert isinstance(out, ScenarioAgentResult)
+    assert out.message == "Authored two scenarios."
+    assert [plan.title for plan in out.scenarios] == [
+        "Login reward flow",
+        "Shop purchase flow",
+    ]
+    assert [step.case_id for step in out.scenarios[0].steps] == [11, 11, None, 12]
+
+
+def test_scenario_agent_raises_when_no_structured_response() -> None:
+    """A loop that ended without a plan is a generation failure, not empty output."""
+
+    def factory(*, model, tools, system_prompt, reasoning=None):
+        return RunnableLambda(lambda _inputs: {"messages": [], "structured_response": None})
+
+    agent = ScenarioAgent(agent_factory=factory)
+
+    with pytest.raises(ScenarioGenerationError):
+        asyncio.run(agent.run(_request(), _CTX, _channel()))
+
+
+def test_scenario_agent_binds_the_search_tool() -> None:
+    """The turn is a tool loop: the case-search tool must reach the model."""
+    seen: dict[str, list[str]] = {}
+
+    def factory(*, model, tools, system_prompt, reasoning=None):
+        seen["tools"] = [tool.name for tool in tools]
+        seen["system_prompt"] = system_prompt
+        return RunnableLambda(
+            lambda _inputs: {"messages": [], "structured_response": _result()}
+        )
+
+    agent = ScenarioAgent(agent_factory=factory)
+    asyncio.run(agent.run(_request(), _CTX, _channel()))
+
+    # 목록이 없으면 검색으로 폴백한다. 미커버 도구는 목록 유무와 무관하게 늘 붙는다 —
+    # 커버 상태는 목록이 답할 수 없는 질문이고 대화 중에 바뀐다.
+    assert seen["tools"] == [
+        "submit_scenario",
+        "list_uncovered_cases",
+        "search_test_cases",
+        "find_path",
+    ]
+    # The system prompt is the resolved v4 text, every placeholder substituted.
+    assert "search_test_cases" in seen["system_prompt"]
+    assert "{" not in seen["system_prompt"]
+
+
+def test_empty_scenarios_is_a_valid_result() -> None:
+    """No matching cases: the agent returns a message and an empty plan list."""
+    result = ScenarioAgentResult(message="No matching cases yet.", scenarios=[])
+    agent = ScenarioAgent(agent_factory=_canned_factory(result))
+
+    out = asyncio.run(agent.run(_request(), _CTX, _channel()))
+
+    assert out.scenarios == []
+    assert out.message == "No matching cases yet."
+
+
+def test_scenario_result_parses_string_case_id_as_int() -> None:
+    """Search hits carry string ids; a step's case_id stores them as ints (spec)."""
+    parsed = ScenarioAgentResult.model_validate(
+        {
+            "message": "ok",
+            "scenarios": [
+                {
+                    "title": "t",
+                    "description": "d",
+                    "steps": [
+                        {"action": "do", "case_id": "7"},
+                        {"action": "verify", "case_id": "8"},
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert [step.case_id for step in parsed.scenarios[0].steps] == [7, 8]
+
+
+def test_scenario_result_scenario_id_edit_vs_add() -> None:
+    """scenario_id: an id (string coerced to int) means edit; absent means add."""
+    parsed = ScenarioAgentResult.model_validate(
+        {
+            "message": "ok",
+            "scenarios": [
+                {
+                    "scenario_id": "5",
+                    "title": "edit",
+                    "description": "d",
+                    "steps": [{"action": "a", "case_id": 1}],
+                },
+                {"title": "add", "description": "d", "steps": [{"action": "b", "case_id": 2}]},
+            ],
+        }
+    )
+
+    assert parsed.scenarios[0].scenario_id == 5
+    assert parsed.scenarios[1].scenario_id is None
+
+
+def test_first_message_carries_current_scenarios() -> None:
+    """The run's existing scenarios reach the prompt so the agent can edit by id."""
+    message = build_first_message(
+        _request(
+            current_scenarios=[
+                ScenarioPlan(
+                    scenario_id=42,
+                    title="Checkout flow",
+                    description="Verify checkout.",
+                    steps=[
+                        AuthoredStep(action="Add to cart", case_id=1),
+                        AuthoredStep(action="Confirm checkout succeeds", case_id=2),
+                    ],
+                )
+            ]
+        )
+    )
+
+    assert "Checkout flow" in message
+    assert "42" in message
+    # The placeholder was resolved (not left literal) in the rendered prompt.
+    assert "{current_scenarios}" not in message
+
+
+def test_first_message_empty_current_scenarios_renders_empty_list() -> None:
+    """A fresh run renders the current-scenarios block as an empty JSON list."""
+    message = build_first_message(_request())
+
+    assert "[]" in message
+
+
+def test_system_prompt_uses_requested_language_directive() -> None:
+    ko_body, _ = build_system_prompt(_request(locale=OutputLanguage.ko))
+    en_body, version = build_system_prompt(_request(locale=OutputLanguage.en))
+
+    assert LANGUAGE_DIRECTIVES[OutputLanguage.ko] in ko_body
+    assert LANGUAGE_DIRECTIVES[OutputLanguage.en] in en_body
+    assert "한국어" in ko_body
+    assert "English" in en_body
+    # v13 is the newest scenario prompt version and the default (ARTEL-668).
+    assert version == "v9"
+
+
+def test_first_message_carries_the_run_goal_and_context() -> None:
+    message = build_first_message(_request())
+
+    assert "Author scenarios for login rewards and the shop." in message
+    assert "login_reward.claimed" in message
+
+
+def test_language_directives_cover_every_language() -> None:
+    assert set(LANGUAGE_DIRECTIVES) == set(OutputLanguage)
+
+
+def test_select_structured_method_by_model() -> None:
+    assert select_structured_method("openai/gpt-6-luna") == "json_schema"
+    assert select_structured_method("google/gemma-4-31b-it:free") == "json_mode"
+
+
+# ── The test case list (ARTEL-319) ─────────────────────────────────────────────
+#
+# Three promises, and none of them fails loudly when broken. A turn with the list
+# that still gets the search tool just spends turns re-finding what it holds; a
+# render that reorders costs the prompt cache and nothing else; a clipped body
+# produces a plausible wrong step. So each one is pinned here.
+
+
+def _test_case_list() -> list[TestCaseListItem]:
+    return [
+        TestCaseListItem(
+            id=11,
+            scene="로그인",
+            step="게스트 계정으로 로그인에 성공한다",
+            precondition="앱을 최초 실행한 상태",
+            expected_value="임시 계정이 발급되고 로비로 진입한다",
+            verification_status="VERIFIED",
+        ),
+        TestCaseListItem(
+            id=57,
+            scene="스테이지",
+            step="힌트를 쓰면 글자 하나가 공개된다",
+            precondition=None,
+            expected_value="보유 수량이 1 줄고 글자가 표시된다",
+            verification_status="DRAFT",
+        ),
+    ]
+
+
+def test_turn_with_the_list_gets_no_tools_and_the_cases_in_its_prompt() -> None:
+    """With the cases in context, a search could only return what it already has."""
+    seen: dict[str, object] = {}
+
+    def factory(*, model, tools, system_prompt, reasoning=None):
+        seen["tools"] = [tool.name for tool in tools]
+        seen["system_prompt"] = system_prompt
+        return RunnableLambda(
+            lambda _inputs: {"messages": [], "structured_response": _result()}
+        )
+
+    agent = ScenarioAgent(agent_factory=factory)
+    asyncio.run(agent.run(_request(test_case_list=_test_case_list()), _CTX, _channel()))
+
+    # 검색도 경로 조회도 회수한다 — 케이스 목록이 씬의 출구까지 싣고 오므로 둘 다
+    # 이미 쥔 것을 다시 묻는 왕복이 된다. 미커버 도구만 남는다(세션 중 변한다).
+    assert seen["tools"] == ["submit_scenario", "list_uncovered_cases"]
+    prompt = seen["system_prompt"]
+    assert "id 11" in prompt and "id 57" in prompt
+    assert "게스트 계정으로 로그인에 성공한다" in prompt
+    assert NO_TEST_CASE_LIST_NOTICE not in prompt
+
+
+def test_empty_test_case_list_keeps_the_search_path() -> None:
+    """The fallback is also the rollback: orchestration can stop sending one."""
+    seen: dict[str, object] = {}
+
+    def factory(*, model, tools, system_prompt, reasoning=None):
+        seen["tools"] = [tool.name for tool in tools]
+        seen["system_prompt"] = system_prompt
+        return RunnableLambda(
+            lambda _inputs: {"messages": [], "structured_response": _result()}
+        )
+
+    agent = ScenarioAgent(agent_factory=factory)
+    asyncio.run(agent.run(_request(test_case_list=[]), _CTX, _channel()))
+
+    assert seen["tools"] == [
+        "submit_scenario",
+        "list_uncovered_cases",
+        "search_test_cases",
+        "find_path",
+    ]
+    # Not a blank section: an empty block reads as "this project has no cases",
+    # and the agent would stop rather than search.
+    assert NO_TEST_CASE_LIST_NOTICE in seen["system_prompt"]
+
+
+def test_render_test_case_list_carries_state_and_exits() -> None:
+    """The material for ordering has to reach the prompt, not just the wire.
+
+    These fields were being sent by orchestration and dropped here: the model had
+    no such fields, so pydantic discarded them while the prompt told the agent to
+    order by them. Ordering silently fell back to re-reading the sentence.
+    """
+    rendered = render_test_case_list(
+        [
+            TestCaseListItem(
+                id=7,
+                scene="Map_scene",
+                step="Return 키를 누른다",
+                precondition="Map_scene 화면인 상태",
+                expected_value="배경이 갱신된다",
+                verification_status="DRAFT",
+                state_before=[
+                    CaseGuard(variable="StagePosition", operator=">=", value="3")
+                ],
+                state_after={"position": "+1"},
+                exits=[SceneExit(scene="TurnBattleScene", by="Return")],
+            )
+        ]
+    )
+
+    assert "needs: StagePosition >= 3" in rendered
+    assert "leaves: position +1" in rendered
+    assert "to TurnBattleScene: Return" in rendered
+
+
+def test_render_test_case_list_marks_exception_cases() -> None:
+    """An exception case is marked in its head; a functional case carries no mark."""
+    rendered = render_test_case_list(
+        [
+            TestCaseListItem(id=1, scene="광산 안", step="상자를 연다", expected_value="동전 50개",
+                             verification_status="DRAFT"),
+            TestCaseListItem(id=2, scene="광산 안", step="상자를 연다", precondition="열쇠가 없다",
+                             expected_value="잠겨 있다", verification_status="DRAFT", kind="EXCEPTION"),
+        ]
+    )
+
+    assert "[id 1 · 광산 안 · DRAFT] 상자를 연다" in rendered
+    assert "[id 2 · 광산 안 · DRAFT · exception] 상자를 연다" in rendered
+
+
+def test_render_test_case_list_says_when_nothing_is_pressed() -> None:
+    """"Nothing to press" and "not known" are different answers.
+
+    Half the map's edges are transitions the game makes by itself. Reading that as
+    "not known" sends whoever runs this hunting for a control that was never there.
+    """
+    rendered = render_test_case_list(
+        [
+            TestCaseListItem(
+                id=8,
+                scene="StoryScene",
+                step="아무 키나 누른다",
+                expected_value="대사가 넘어간다",
+                verification_status="DRAFT",
+                exits=[SceneExit(scene="Map_scene")],
+            )
+        ]
+    )
+
+    assert "to Map_scene: (goes on its own)" in rendered
+
+
+def test_render_test_case_list_preserves_arrival_order() -> None:
+    """Orchestration sorts by id; re-sorting here would move the cached prefix."""
+    reversed_entries = list(reversed(_test_case_list()))
+    rendered = render_test_case_list(reversed_entries)
+
+    assert rendered.index("id 57") < rendered.index("id 11")
+
+
+def test_render_test_case_list_prints_bodies_whole() -> None:
+    """Unlike a search hit, these are the material steps are written from."""
+    long_expected = "가" * 900
+    rendered = render_test_case_list(
+        [
+            TestCaseListItem(
+                id=1,
+                scene="상점",
+                step="구매",
+                precondition="보석 100개 이상",
+                expected_value=long_expected,
+                verification_status="VERIFIED",
+            )
+        ]
+    )
+
+    assert long_expected in rendered
+    assert "truncated" not in rendered
+    assert "precondition: 보석 100개 이상" in rendered
+
+
+# ── Authoring without cases on explicit request (v6) ──────────────────────────
+#
+# The unlock is prompt-only, so what is pinned here is the prompt text and the
+# shape it asks for. Whether a given model honours it is not testable offline;
+# what is testable is that the default rule survived beside it, that the unlock
+# names the null `case_id`, and that a result made entirely of ungrounded steps
+# is a valid one to hand downstream.
+
+
+
+def test_a_scenario_of_ungrounded_steps_is_a_valid_result() -> None:
+    """All-null `case_id` survives the contract: orchestration stores steps whole
+    and resolves a `case` only where an id is present."""
+    plan = ScenarioPlan(
+        title="튜토리얼 첫 진입",
+        description="케이스 없이 작성한 흐름 초안.",
+        steps=[
+            AuthoredStep(action="게임을 처음 실행한다"),
+            AuthoredStep(action="시작 버튼을 누른다"),
+            AuthoredStep(action="튜토리얼 첫 대사가 뜨는지 확인한다"),
+        ],
+    )
+    result = ScenarioAgentResult(
+        message="기존 테스트 케이스와 연결되지 않은 초안이에요.", scenarios=[plan]
+    )
+
+    agent = ScenarioAgent(agent_factory=_canned_factory(result))
+    returned = asyncio.run(agent.run(_request(), _CTX, _channel()))
+
+    assert [step.case_id for step in returned.scenarios[0].steps] == [None, None, None]
+
+
+# ── 흐름 단위 분할과 브리지 (ARTEL-420, v7) ───────────────────────────────────
+#
+# 분할 품질은 오프라인에서 셀 수 없다. 셀 수 있는 것은 기준이 프롬프트에 하나로
+# 적혀 있는지, 그리고 v6이 들고 있던 규칙이 그 옆에서 살아남았는지다.
+
+
+
+def test_system_prompt_with_the_list_is_byte_identical_across_turns() -> None:
+    """The prompt cache only pays off while this block does not move."""
+    request = _request(test_case_list=_test_case_list())
+    first, _ = build_system_prompt(request)
+    second, _ = build_system_prompt(request)
+
+    assert first == second
+    # And a placeholder left unsubstituted would silently ship "{test_case_list}".
+    assert "{" not in first
+
+
+# --- 전 건 판정 (ARTEL-404) ---------------------------------------------------
+
+
+def test_reviewed_uses_in_and_out_on_the_wire() -> None:
+    """와이어 키는 `in`/`out`이다.
+
+    `in`이 파이썬 예약어라 필드명은 `included`/`excluded`이고 별칭으로 내보낸다. 이 별칭이
+    빠지면 orche가 판정을 못 읽고, 못 읽으면 **검사가 조용히 꺼진다** — 실패가 아니라 무동작으로
+    나타나므로 눈에 띄지 않는다.
+    """
+    reviewed = ReviewedCases(included=[1, 2], excluded=[3])
+
+    assert reviewed.model_dump(by_alias=True) == {"in": [1, 2], "out": [3]}
+
+
+def test_reviewed_parses_from_wire_names() -> None:
+    assert ReviewedCases(**{"in": [7], "out": [8]}).included == [7]
+
+
+def test_result_without_reviewed_is_none_not_empty() -> None:
+    """판정이 없을 때 빈 객체가 아니라 None이어야 한다.
+
+    orche는 None을 "검사 건너뜀"으로 읽는다. 빈 객체를 보내면 "전량을 판정했는데 하나도 안
+    골랐다"가 되어, 케이스가 있는 프로젝트에서는 전량이 검토 누락으로 잡힌다.
+    """
+    assert ScenarioAgentResult(message="…").reviewed is None
+
+
+def test_uncovered_is_a_tool_not_a_prompt_block() -> None:
+    """미커버는 프롬프트에 싣지 않는다.
+
+    저작할수록 줄어드는 값이라 세션 오픈 스냅샷은 둘째 턴부터 틀리고, 매 턴 다시 실으면 턴
+    메시지가 붓거나(더 나쁘게는 system에 있으면) 전량 목록 캐시를 통째로 버린다. 물어볼 때만
+    내는 도구가 맞다.
+    """
+    body, _ = build_system_prompt(_request())
+
+    assert "list_uncovered_cases" in body
+    assert "{uncovered_case_ids}" not in body
+
+
+def test_v6_unlocks_caseless_authoring_and_keeps_the_default_rule() -> None:
+    v6 = load_prompt("scenario", "system", "v6").body
+    v5 = load_prompt("scenario", "system", "v5").body
+
+    # The defaults are unchanged — the unlock is an exception, not a replacement.
+    assert "**Do NOT invent.**" in v6
+    assert "Ground every step in the cases above." in v6
+    # v5's exhaustive in/out verdict survives too, and the unlock says which side
+    # an uncovered case lands on: `in` is a promise some step carries the id.
+    assert "judge EVERY case in the list above" in v6
+    assert "no id may go to `reviewed.in` on its account" in v6
+    # An ungrounded step carries no id: guessing one would file a verdict against
+    # a case the step never exercises.
+    assert "Leave `case_id` null on EVERY step" in v6
+    # v5 has no such section, which is the whole reason v6 exists.
+    assert "WITHOUT TEST CASES" not in v5
+
+
+def test_v7_pins_splitting_to_reachability_and_keeps_v6_intact() -> None:
+    v7 = load_prompt("scenario", "system", "v7").body
+    v6 = load_prompt("scenario", "system", "v6").body
+
+    # 나누느냐 잇느냐를 도달 가능성 하나로 환원한다.
+    assert "it is the NEXT STEP, not the next scenario" in v7
+    assert "two that exclude each other do not" in v7
+    # 이미 덮인 구간은 지나가되 다시 세지 않는다 — 앞부분 통째 복사를 막는 규칙.
+    assert "Leave their `case_id` null" in v7
+    assert "Coverage counts a case once it is carried anywhere" in v7
+    # v6의 케이스 없는 저작 예외와 근거 규칙은 그대로 남는다.
+    assert "WHEN THE USER ASKS FOR A SCENARIO WITHOUT TEST CASES" in v7
+    assert "**Do NOT invent.**" in v7
+    assert "judge EVERY case in the list above" in v7
+    # v6에는 기준이 "흐름이 여럿이면 나눠라" 한 줄뿐이라 요청 하나가 흐름 하나로 읽혔다.
+    assert "it is the NEXT STEP, not the next scenario" not in v6
+
+
+def test_scenario_agent_hands_the_reasoning_budget_to_the_model() -> None:
+    """**추론 예산이 모델까지 닿는다.**
+
+    QA 런은 켜고 저작은 안 켜고 있었다. 배선이 끊기면 요청은 성공하는데 모델은 예산을 못
+    받으므로, 값이 factory 에 도착했는지를 여기서 본다 — 조용히 없이 도는 것이 이 자리의
+    실패 방식이다.
+    """
+    seen: dict = {}
+
+    def factory(*, model, tools, system_prompt, reasoning=None):
+        seen["reasoning"] = reasoning
+        return RunnableLambda(
+            lambda _inputs: {"messages": [], "structured_response": _result()}
+        )
+
+    budget = ReasoningConfig(max_tokens=4_096)
+    asyncio.run(
+        ScenarioAgent(agent_factory=factory).run(
+            _request(reasoning=budget), _CTX, _channel()
+        )
+    )
+    assert seen["reasoning"] == budget
+
+
+def test_scenario_agent_runs_without_a_reasoning_budget() -> None:
+    """안 주면 없이 간다 — 지금까지의 저작이 그랬고, 그 길이 안 막혀야 한다."""
+    seen: dict = {}
+
+    def factory(*, model, tools, system_prompt, reasoning=None):
+        seen["reasoning"] = reasoning
+        return RunnableLambda(
+            lambda _inputs: {"messages": [], "structured_response": _result()}
+        )
+
+    asyncio.run(ScenarioAgent(agent_factory=factory).run(_request(), _CTX, _channel()))
+    assert seen["reasoning"] is None
+
+
+def test_scenario_agent_structures_the_transcript_when_the_loop_declines() -> None:
+    """thinking 이 켜지면 `tool_choice` 강제가 auto 로 낮춰져(Bedrock 제약) 모델이
+    구조화 답 없이 턴을 끝낼 수 있다 — 실측(런 16, Haiku): 10,545 token 을 생각하고
+    도구도 본문도 없이 멈췄다. 그 기록을 버리지 않고 `structured()` 로 한 번 더
+    계약 모양을 받는다."""
+    from langchain_core.messages import AIMessage
+
+    import app.agents.scenario.agent as agent_module
+
+    thought = AIMessage(
+        content=[
+            {"type": "reasoning_content", "reasoning_content": {"text": "타이틀 확인 시나리오 하나면 된다."}},
+        ]
+    )
+
+    def factory(*, model, tools, system_prompt, reasoning=None):
+        return RunnableLambda(lambda _inputs: {"messages": [thought], "structured_response": None})
+
+    salvaged = _result()
+    seen: dict[str, str] = {}
+
+    class _FakeChain:
+        async def ainvoke(self, prompt):
+            seen["prompt"] = prompt
+            return salvaged
+
+    original = agent_module.structured
+    agent_module.structured = lambda model, schema: _FakeChain()
+    try:
+        agent = ScenarioAgent(agent_factory=factory)
+        out = asyncio.run(agent.run(_request(), _CTX, _channel()))
+    finally:
+        agent_module.structured = original
+
+    assert out is salvaged
+    # 기록의 생각이 글로 펴져 넘어간다 — thinking block 을 그대로 되보내지 않는다.
+    assert "타이틀 확인 시나리오 하나면 된다." in seen["prompt"]

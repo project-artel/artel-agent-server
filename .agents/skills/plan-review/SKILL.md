@@ -117,3 +117,10 @@ For NONPASS, list only blockers with concrete plan changes.
 - Do not expand scope during review.
 - Prefer explicit, localized, testable implementation steps.
 - Heavy review is the final gate before implementation.
+
+## Project Writing Style
+
+Before writing the result, follow [writing-style.md](../../docs/writing-style.md).
+Use its natural Korean prose and concrete-title rules while preserving required
+templates, paths, metadata, and machine-readable verdicts. Pass the same rules
+to any reviewer subagents invoked by this skill.

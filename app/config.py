@@ -1,0 +1,314 @@
+from functools import lru_cache
+
+from typing import Literal
+
+from pydantic import AliasChoices, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    app_name: str = "Artel Agent Server"
+    app_version: str = "0.2.0"
+    environment: str = Field(default="local", validation_alias="APP_ENV")
+    # 채팅이 말을 거는 곳. **provider 이름을 달지 않는다** — 이 값은 OpenRouter 를
+    # 가리킬 수도, 여러 provider 를 함께 서빙하는 gateway 를 가리킬 수도 있다.
+    # 이름에 provider 를 박아 두면 다른 곳을 가리키는 순간 그 이름이 거짓이 되고,
+    # 읽는 사람은 설정이 아니라 이름을 믿는다.
+    #
+    # `OPENROUTER_*` 를 함께 받는 것은 하위호환이다. 이 필드를 옮기는 배포와
+    # 옮기지 않은 배포가 같은 이미지로 돌 수 있어야 한다. 새 이름이 우선한다.
+    llm_base_url: str = Field(
+        default="https://openrouter.ai/api/v1",
+        validation_alias=AliasChoices("LLM_BASE_URL", "OPENROUTER_BASE_URL"),
+    )
+    # Provider keys are not settings. The OpenRouter key and the Bedrock API key
+    # are entered on the admin page, stored encrypted by the orchestration server,
+    # and read from `GET {orchestration_base_url}/internal/settings/llm` (see
+    # app/llm/api_key.py). `OPENROUTER_API_KEY`, `LLM_API_KEY` and `BEDROCK_API_KEY`
+    # in the environment are ignored.
+    #
+    # How long a fetched pair of keys is trusted before the next model call asks
+    # again. A provider rejecting a key, or `POST /internal/llm-cache/invalidate`,
+    # drops it sooner. The fetch timeout bounds how long one call can wait when
+    # orchestration is down; the last keys that loaded answer after that.
+    llm_key_cache_ttl_seconds: float = 30.0
+    llm_key_fetch_timeout_seconds: float = 3.0
+    # Jev 를 OpenRouter 를 거치지 않고 TypeSafe 에서 직접 부를 때의 주소다. TypeSafe key 가
+    # 저장돼 있을 때만 쓴다(`app/llm/decision.py`). 경로 `/v1/systemone` 은 코드에 있다.
+    typesafe_base_url: str = "https://api.typesafe.ai"
+    openrouter_site_url: str | None = None
+    openrouter_app_title: str = "Artel Agent Server"
+    # Per-request ceiling on a model call, and how many times the client retries.
+    #
+    # Not tuning knobs — the difference between a slow answer and no answer. The
+    # OpenAI client defaults to 600 s with 2 retries, so a stalled upstream holds
+    # one request for up to 30 minutes while every caller, including a person
+    # watching a chat, waits with nothing to read. That happened: an authoring
+    # turn was still "requesting" 500 s in and the only way out was reloading the
+    # page (ARTEL-510).
+    #
+    # 180 s is above the slowest authoring turn measured (a 66-case project ran
+    # ~70 s) with room for a reasoning model, and far below a wait a person
+    # accepts without being told something is wrong.
+    # 입구 라우터를 어느 모델로 돌릴까. **롤백이 이 한 줄이다.**
+    #
+    # `haiku` 는 종전 그대로(범용 대화 모델에 분류를 맡긴다). `jev` 는 갈래를 고르는 일만
+    # 하는 결정 전용 모델이다 — 실측(실제 사용자 말 163줄, ARTEL-944)에서 지연 중앙값
+    # 1,702ms → 240ms, 판정당 $0.0020140 → $0.0001152, 정확도 95.7% → 98.2%.
+    #
+    # 기본값을 `jev` 로 옮긴 근거(실측 2026-10-06, 정답표 163줄 + 트립와이어 33줄):
+    #
+    #                       haiku            jev
+    #   맞음               155/163 95.1%   161/163 98.8%
+    #   답을 낸 자리        95.7%           100.0%
+    #   거절·여분·겉흠      0·3·4           0·0·0
+    #   수정 요청           14/17           17/17
+    #   질문                9/10            10/10
+    #   지연 중앙값         1,868ms         242ms
+    #
+    # 트립와이어가 `haiku` 에서 못 잡던 것을 하나 찾았다 — "이거 서버 문제 아니야? 개발팀에
+    # 물어봐야 하나" 를 `offtopic` 으로 끊는다. v6:68-69 가 이름으로 금지한 동작이고
+    # (never send the user to "the dev team") run 68 과 같은 종류다.
+    #
+    # 남은 미지는 **문맥**이다. 이 측정은 문맥 없이 했고 `JevScenarioRouter` 는 아직
+    # `context_hint` 를 안 쓴다. 운영 라우터는 직전 대화를 받으므로 그 조건의 성적은
+    # ARTEL-942 에서 함께 잰다. 되돌릴 일이 생기면 이 한 줄을 `haiku` 로 바꾼다.
+    scenario_router_engine: Literal["haiku", "jev"] = "jev"
+    # 결정 모델 호출의 한도. 실측 p90 이 340ms 라 느슨하게 잡아도 10초면 넉넉하고, 이보다
+    # 길게 두면 입구가 막힌 채로 모든 갈래가 기다린다.
+    scenario_router_timeout_seconds: float = 10.0
+
+    openrouter_timeout_seconds: float = 180.0
+    openrouter_max_retries: int = 1
+
+    # LangSmith tracing. Disabled unless both the flag and the key are set, so
+    # a deploy without credentials degrades to "no traces" instead of failing.
+    langsmith_tracing: bool = False
+    langsmith_api_key: str | None = None
+    langsmith_endpoint: str = "https://api.smith.langchain.com"
+    langsmith_project: str | None = None
+
+    # Applied to the root logger at startup; see app/logging_config.py.
+    log_level: str = "INFO"
+
+    # What build this is, injected by the image build (see Dockerfile/Jenkinsfile).
+    # These are what makes a past run reproducible: the agent's structure is code,
+    # so it is identified by its commit and redeployed from its image rather than
+    # kept as a parallel copy in the tree. Unset in local runs, and reported as
+    # null rather than guessed — a wrong sha is worse than a missing one.
+    git_sha: str | None = None
+    image_tag: str | None = None
+
+    # `redis` keeps sessions in Redis. `memory` keeps them in this process, with no Redis
+    # connection at all, and loses them on restart (the desktop bundle runs this way).
+    session_store: Literal["redis", "memory"] = "redis"
+    redis_url: str = "redis://localhost:6379/0"
+    session_ttl_seconds: int = 3600
+    history_max_turns: int = 100_000
+    # 저작 B·E 가 프롬프트로 읽는 과거 대화의 크기 상한(ARTEL-942). 위의 턴 수 상한은 Redis 에
+    # 쌓이는 개수만 묶고 크기는 안 묶는다 — 기본값이 사실상 무제한이고, 한 번에 수만 자를 붙여
+    # 넣는 입력도 있다. 그래서 프롬프트에 넣을 때 글자 수로 한 번 더 묶는다.
+    #
+    # 실측(런 80~84): Agent 답 최대 723자·평균 344자, 사용자 말 최대 38자, 실제 대화 20개(10턴)
+    # 4,104자. 전체 상한은 그 10턴의 약 두 배, 한 메시지 상한은 가장 긴 답의 약 세 배다. 넘치면
+    # 오래된 대화부터 빠지고 잘렸다고 표시된다 — 압축(요약)은 하지 않는다.
+    scenario_history_max_chars: int = 8_000
+    scenario_history_message_max_chars: int = 2_000
+
+    # Default prompt version per agent, matching a directory under
+    # app/prompts/<agent>/. Unset means the highest version present, so a new
+    # version ships by being added; pin one here to hold an agent back or to
+    # run a candidate. A value naming a directory that does not exist fails at
+    # startup.
+    qa_prompt_version: str | None = None
+    # 같은 TC 의 사람 판정 기록을 QA 첫 메시지에 싣는가(ARTEL-1257). 영향 실측에서 실은 런과 안 실은
+    # 런을 같은 시나리오로 비교하려고 둔 스위치다. 끄면 orchestration 이 보내도 첫 메시지가 기록 없는 런과 같다.
+    qa_human_review: bool = True
+    # fact·rule 선언(`facts.json`·`rules.json`)이 있는 디렉터리. 있으면 orchestration 에 등록된 선언 대신 이것을 읽는다(로컬 덮어쓰기).
+    qa_facts_dir: str | None = None
+    # Versioned separately from `qa_prompt_version`: the summarizing prompt is a
+    # different call to a different model, and rolling one back must not roll
+    # back the other.
+    qa_compaction_prompt_version: str | None = None
+    # Compaction of the QA run's conversation; see app/agents/qa/compaction.py.
+    # `enabled` is a kill switch rather than a feature flag: a run that breaks on
+    # compaction has to be recoverable without a deploy.
+    #
+    # The trigger is a fraction of the model's `max_input_tokens`, measured over
+    # the messages as `fold_context` leaves them — what is actually sent.
+    #
+    # `keep_messages` bounds how many messages survive verbatim, NOT how large
+    # they are. If runs ever show compaction firing on consecutive turns, the fix
+    # is a fractional keep, which bounds the preserved tail by size instead.
+    #
+    # `min_new_messages` is the thrash guard, and it is about cost rather than
+    # correctness: each compaction pays for a summary call and then invalidates
+    # the whole Anthropic prompt cache, since it rewrites the prefix that cache
+    # is keyed on.
+    #
+    # `trim_tokens` is how much history the summarizer itself reads. LangChain
+    # defaults to 4000, which drops most of a QA run before the summary is even
+    # written.
+    #
+    # The summarizer model is fixed rather than "whatever the run uses": the job
+    # is compression, and paying a frontier model's rate for it on every trigger
+    # buys nothing the run can use. It is a plain string rather than an `LLMModel`
+    # because the catalog lives in the orchestration server and is not reachable
+    # while settings load. `resolve_run_config` checks it against the catalog when
+    # a QA session opens, so a typo fails the open with the setting's name in it.
+    qa_compaction_enabled: bool = True
+    qa_compaction_trigger_fraction: float = 0.9
+    qa_compaction_keep_messages: int = 20
+    qa_compaction_min_new_messages: int = 4
+    qa_compaction_trim_tokens: int = 8000
+    # 압축을 어느 모델로 하나. **비우면 그 런이 쓰는 모델을 따른다.**
+    #
+    # 예전에는 한 슬러그로 고정돼 있었다(`openai/gpt-5.6-luna`). 런은 Bedrock 으로
+    # 도는데 압축만 OpenRouter 로 나가는 상태가 되면, 그쪽 credit 이 없을 때 압축이
+    # **조용히 실패한다** — 실제로 그렇게 됐다. 압축은 컨텍스트가 창을 넘기 전에 접는
+    # 유일한 안전판이라, 그것이 안 도는 채로 도는 런은 길어지면 provider 가 거절해서
+    # 통째로 죽는다.
+    #
+    # 런의 모델을 따르면 그 의존이 사라진다. 값싼 모델로 고정하고 싶은 배치는 여전히
+    # 슬러그를 적으면 된다.
+    qa_compaction_model: str | None = None
+    scenario_prompt_version: str | None = None
+    # Model for the scenario router's one-shot classification. Empty means the
+    # catalog's `DEFAULT_MODEL`, an OpenRouter slug, so a default install needs no
+    # AWS credential and a catalog change cannot leave a stale slug here. An
+    # operator who has Bedrock credentials can set the `bedrock/...` catalog value
+    # to keep the cheaper Haiku route. Checked against the catalog by
+    # `router_model()` when the router runs, not here: the catalog is fetched from
+    # the orchestration server and settings load first.
+    router_model: str = ""
+
+    # 입구 라우터(워크플로 재편 Step 1). 끄면 예전 그대로 모든 입력이 루프로 간다 —
+    # 실험의 롤백 스위치다.
+    scenario_router_enabled: bool = True
+    # 한 저작 턴의 절대 천장(워크플로 재편 ⑥ — 토큰 가드). recursion_limit 은 케이스 수로
+    # 자라는 작업량 한도고, 이것은 **케이스 수와 무관한 폭주 방지선**이다. 정상 판(계측:
+    # 전량 20~40호출)을 안 건드리는 여유값이며, 최적값은 재계측 실측에서 조정한다.
+    # 본선 워크플로(B→C→D). 끄면 저작이 현행 루프로 간다 — 롤백 스위치.
+    scenario_workflow_enabled: bool = True
+    # 구 루프 갈래(수정·미분류)의 스위치. 서비스에서는 켠다(비싸게라도 동작해야 하니).
+    # 실험 중에는 꺼서 — 루프로 갈 요청을 **기록만 남기고 끊는다**. 워크플로가 못 받는
+    # 요청이 얼마나, 어떤 모양으로 오는지는 이 기록이 곧 Step 3(E 갈래)의 재료다.
+    scenario_loop_enabled: bool = True
+    # 한 메시지에 요청이 여럿이면 나눠서 차례로 처리하고 한 답으로 모은다(ARTEL-1086). 기본으로 켠다(ARTEL-1272).
+    # 저작 · 수정 갈래에도 걸리므로 문제가 생기면 이것만 끌 수 있게 남긴다.
+    scenario_single_request_enabled: bool = True
+    scenario_max_model_calls: int = 40
+    scenario_max_tool_calls: int = 30
+    game_context_prompt_version: str | None = None
+    knowledge_query_prompt_version: str | None = None
+    # 화면 제안을 판정하는 agent 의 프롬프트 (ARTEL-656). QA 런의 프롬프트와 따로
+    # 버전을 매긴다 — 서로 다른 파일에 서로 다른 속도로 살고, 한쪽을 되돌리는 것이
+    # 다른 쪽을 되돌리면 안 된다.
+    screen_verdict_prompt_version: str | None = None
+    # `screen` 에 이름을 짓는 agent 의 프롬프트 (ARTEL-909). 판정의 것과 따로 버전을
+    # 매긴다 — 두 호출은 서로 다른 것을 묻고, 한쪽 문구를 되돌리는 것이 다른 쪽을
+    # 되돌리면 안 된다.
+    screen_name_prompt_version: str | None = None
+
+    # Stamped onto every `test-case.v1` record. Spec discovery is deterministic
+    # today — no prompt is loaded and no model is called — so both are `None`
+    # unless an operator sets them. They are configuration rather than constants
+    # because a stored test case has to say what produced it, and the day a
+    # wording pass is added the records already have somewhere to say so.
+    spec_prompt_version: str | None = None
+    spec_model: str | None = None
+
+    # Embeddings. The slug is configuration rather than a constant because
+    # swapping the model must not be a code change — but it is not a free swap
+    # either: embedding_dimensions is pinned into Orchestration's vector(N)
+    # column, so changing either value means a migration and a full re-index.
+    #
+    # openai/text-embedding-3-large scored best on the Korean retrieval set the
+    # model was chosen with (ARTEL-184): 34/34 top-1, MRR 1.0. 1024 is a
+    # Matryoshka truncation of its native 3072, which cost nothing measurable on
+    # that set and keeps the vector under pgvector's 2000-dimension ceiling for
+    # HNSW and IVFFlat indexes — 3072 would force halfvec on the storage side.
+    embedding_model: str = "openai/text-embedding-3-large"
+    # Embeddings authenticate on their own. Chat can move to another gateway or
+    # provider for cost reasons — AWS Bedrock, a proxy, a second account — but
+    # the embedding model must not move with it: `embedding_dimensions` is
+    # pinned into Orchestration's vector(N) column, and a different model fills
+    # that column from a different vector space. The stored items and the new
+    # ones would then be compared without error and with wrong answers, which
+    # is worse than having no search at all.
+    #
+    # Unset, both fall back to the chat credentials, so nothing changes for a
+    # deployment that has not split them.
+    # Bedrock 호출이 갈 리전. 모델 값의 `us.` 접두가 inference profile 을 정하고,
+    # 이 값은 어느 엔드포인트에 말을 거는지를 정한다. 둘은 다른 축이다.
+    bedrock_region: str = "us-west-2"
+
+    # 답이 안 오는 호출은 기다림이 아니라 실패로 끝나야 한다. botocore 는 기본 60초를
+    # 쓰고 재시도를 우리 뜻과 무관하게 정하는데, 저작 한 판이 그 한 번에 죽었다 —
+    # 실측(2026-09-03)에서 Bedrock 이 4.2만 token 을 2.7초에 답하던 시간대에 호출
+    # 하나가 60초를 넘겨 멈췄고, 턴 전체가 결과 없이 끝났다.
+    #
+    # **토막이 오는 동안은 시간이 안 흐른다.** 답을 토막으로 받으므로(`streaming`) 이 한도의
+    # 뜻은 "다음 토막이 이만큼 안 온다"이지 "답이 이만큼 안 끝난다"가 아니다. 그래서 답의 길이와
+    # 무관하고, 진짜로 멈춘 연결만 걸린다.
+    #
+    # 일찍 끊고 다시 걸려고 45초까지 좁혔다가 되돌린 값이다. 스트리밍이 끊기면 botocore 는 그
+    # 호출을 다시 걸지 못한다 — 실측(2026-09-03)에서 재시도 넷을 남겨 둔 채 턴이 53초에 끝났다.
+    # 다시 걸어 주지 않는다면 좁혀서 얻을 것이 없다.
+    bedrock_timeout_seconds: float = 120.0
+    bedrock_max_attempts: int = 3
+
+    # `claude/` 모델 호출의 한도. 답을 streaming 으로 받으므로 이 값은 다음 chunk 를 기다리는
+    # 시간이다. Bedrock 과 같은 120초로 둔다. 재시도는 anthropic SDK 기본값인 2회다.
+    anthropic_timeout_seconds: float = 120.0
+    anthropic_max_retries: int = 2
+
+    embedding_base_url: str | None = None
+    embedding_api_key: str | None = None
+    embedding_dimensions: int = 1024
+    # One request's worth of texts. LangChain still slices the batch into
+    # chunks of this size, so raising it raises what one request carries.
+    embedding_batch_limit: int = 100_000
+
+    # Knowledge items per /knowledge-queries call. Each item is its own model
+    # call, so this bounds fan-out, not payload size.
+    knowledge_query_batch_limit: int = 100_000
+
+    # Required for any model call: the provider keys and the model catalog are
+    # read from here. It is also where LLM usage records are shipped. Unset,
+    # usage collection is off, no key is found (OpenRouter answers 401, Bedrock
+    # falls to the AWS credential chain), and the catalog is unavailable.
+    orchestration_base_url: str | None = None
+    # A batch leaves once either bound is hit. The size keeps a busy QA run from
+    # holding a long backlog; the interval keeps a quiet process from holding a
+    # short one until shutdown. Neither is a correctness bound: the endpoint has
+    # no idempotency key, so nothing is ever resent.
+    llm_usage_flush_size: int = 20
+    llm_usage_flush_interval_seconds: float = 5.0
+    # Ceiling on records held while Orchestration is unreachable. Past it the
+    # oldest go, because an outage must cost accuracy rather than the process.
+    llm_usage_max_buffer: int = 1_000_000
+    # The model catalog is read from `GET {orchestration_base_url}/internal/llm-models`
+    # (see app/llm/catalog.py). The TTL is how long a fetched catalog is trusted, so
+    # an administrator turning a model off takes effect within it. The timeout bounds
+    # how long one request waits when orchestration is down; the last catalog that
+    # loaded keeps answering after that.
+    model_catalog_ttl_seconds: float = 30.0
+    model_catalog_fetch_timeout_seconds: float = 3.0
+
+    # /extract source fetch guards. allowed_hosts empty = no host restriction
+    # (rely on the caller passing presigned URLs to the expected bucket).
+    extract_max_bytes: int = 2 * 1024 * 1024 * 1024
+    extract_timeout_seconds: float = 3600.0
+    extract_allowed_hosts: list[str] = Field(default_factory=list)
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
