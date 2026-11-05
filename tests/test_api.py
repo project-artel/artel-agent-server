@@ -29,7 +29,7 @@ def test_openapi_contract_describes_the_agent_server_api() -> None:
     assert schema["info"] == {
         "title": "Artel Agent Server API",
         "description": "API contract for Artel scenario generation, QA execution, and bug report workflows.",
-        "version": "0.1.0",
+        "version": "0.2.0",
     }
     assert "/health" in schema["paths"]
     assert schema["paths"]["/health"]["get"]["tags"] == ["system"]
