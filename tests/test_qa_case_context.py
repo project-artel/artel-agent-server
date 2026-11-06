@@ -10,11 +10,11 @@ from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.agents.qa.case_context import (
-    TC_LEDGER_ID, QaCaseContextMiddleware, detail_block, fold_case_details, render_case_ledger,
+    TC_LEDGER_ID, QaCaseContextMiddleware, detail_block, fold_case_details, render_case_ledger, CONTEXT_FOLD_BATCH, SUPERSEDED_LEDGER, is_ledger,
 )
 from app.agents.qa.runner import _plan
 from app.qa.evaluation import CaseAttempt
-from app.qa.schemas import QaCaseRef, QaScenario, QaStep
+from app.qa.schemas import QaCaseAttemptResult, QaCaseRef, QaScenario, QaStep
 from test_qa_case_evaluation import setup_tools
 from test_qa_compaction import FakeSummarizer, build_middleware
 from test_qa_run_compacted import ScriptedModel
@@ -117,7 +117,7 @@ def test_unchanged_ledger_does_not_rewrite_graph_messages():
         channel, state, tools = setup()
         middleware = QaCaseContextMiddleware(state, channel)
         first = await middleware.abefore_model({"messages": [HumanMessage(content="start")]}, None)
-        assert first["messages"][0].id == TC_LEDGER_ID
+        assert is_ledger(first["messages"][0])
         assert await middleware.abefore_model(first, None) is None
     asyncio.run(run())
 
@@ -153,15 +153,18 @@ def test_real_graph_restores_ids_and_current_spec_after_repeated_lossy_compactio
         assert len(captured) == 7
         assert all("AUTHORITATIVE TC LEDGER" not in text and "original expected" not in text for text in summary_inputs)
         for index, messages in enumerate(captured):
-            ledgers = [m for m in messages if "AUTHORITATIVE TC LEDGER" in str(m.content)]
-            assert len(ledgers) == 1
+            # 장부는 덧붙이기만 한다. 접기 전까지 지난 장부가 남을 수 있지만 그 수는 묶음 크기를 넘지 않고,
+            # 모델이 따를 것은 가장 새 장부 하나다.
+            ledgers = [m for m in messages if is_ledger(m) and m.content != SUPERSEDED_LEDGER]
+            assert 1 <= len(ledgers) <= CONTEXT_FOLD_BATCH
+            ledgers = ledgers[-1:]
             document = ledger_document(ledgers[0].content)
             assert document["all_case_ids"] == [17, 18, 22, 99]
             current = [None, 17, 17, None, 17, 17, 17][index]
             assert document["current_case_id"] == current
             if current:
                 assert f"original expected {current}" in ledgers[0].content
-        last_ledger = next(m for m in captured[-1] if "AUTHORITATIVE TC LEDGER" in str(m.content))
+        last_ledger = [m for m in captured[-1] if is_ledger(m) and m.content != SUPERSEDED_LEDGER][-1]
         assert ledger_document(last_ledger.content)["reported_ids"] == [17]
         assert any("original expected 22" in str(message.content) for message in captured[-1])
     asyncio.run(run())
@@ -186,4 +189,29 @@ def test_TC_상세와_ledger가_크면_자동_compaction_실행():
             assert update is not None
             assert model.calls == 1
             assert "large TC specification" in message.content
+    asyncio.run(run())
+
+
+def test_ledger_is_appended_and_earlier_messages_stay_until_a_batch_folds():
+    """장부가 바뀌어도 앞 메시지는 그대로다 — 프롬프트 캐시가 깨지지 않는다. 쌓이면 한 번에 접는다."""
+    async def run():
+        channel, state, tools = setup()
+        middleware = QaCaseContextMiddleware(state, channel)
+        messages = [HumanMessage(content="start")]
+        changed_before_batch = []
+        for turn in range(CONTEXT_FOLD_BATCH + 1):
+            update = await middleware.abefore_model({"messages": messages}, None)
+            assert update is not None, "진행 상태가 바뀌었으니 새 장부가 붙어야 한다"
+            appended = [m for m in update["messages"] if m.id not in {x.id for x in messages}]
+            replaced = [m for m in update["messages"] if m.id in {x.id for x in messages}]
+            if turn < CONTEXT_FOLD_BATCH:
+                changed_before_batch.extend(replaced)
+            messages = [next((r for r in replaced if r.id == m.id), m) for m in messages] + appended
+            messages.append(AIMessage(content=f"turn {turn}"))
+            # 장부가 바뀌게 진행 상태를 고친다.
+            verdict = "PASSED" if turn % 2 == 0 else "FAILED"
+            state.case_attempt_results.append(QaCaseAttemptResult(attempt_id=f"a{turn}", case_id=17, verdict=verdict, message=f"m{turn}"))
+        assert changed_before_batch == []
+        ledgers = [m for m in messages if is_ledger(m)]
+        assert [m.content == SUPERSEDED_LEDGER for m in ledgers][:-1] == [True] * (len(ledgers) - 1)
     asyncio.run(run())

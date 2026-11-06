@@ -658,6 +658,11 @@ class QaRunner:
         # view 의 function 줄을 1번 step 의 TC 기준으로 둔다. 다음부터는 tool 이 옮긴다.
         if arch.cheats == "on" or arch.behaviors == "on":
             focus(ToolContext(channel, state, arch), 1)
+        # 지금 화면을 첫 메시지에 싣는다. 없으면 모델이 첫 턴을 `observe_scene` 하나에 쓴다 — 시나리오마다 호출 하나와
+        # 2초(런 63 다섯 시나리오 중 넷). 이어 시작하면 화면은 앞 시나리오에서 넘겨받아 이미 있고, 되돌린 뒤에도 판독이
+        # 와 있으면 있다. 도구 결과와 같은 자리(`answer`)로 그려 워터마크도 거기서 옮긴다.
+        if channel.scene.pulse.seen or channel.scene.frames > 0:
+            first_message += "\n\n## Current screen\n\n" + ToolContext(channel, state, arch).answer("", [])
 
         # The whole starting context in one place. Reading a run afterwards means
         # knowing what the model was actually given, and the prompt is assembled
@@ -730,6 +735,11 @@ class QaRunner:
             stream_mode="updates",
         ):
             await self._log_reasoning(channel, update)
+            # `finish_run` 을 다른 도구와 한 턴에 부르면 `return_direct` 가 듣지 않는다 — `create_agent` 는 그 턴의
+            # 도구가 **모두** `return_direct` 일 때만 끝낸다. 그러면 모델을 한 번 더 불러 마무리 글을 받는다(런 63:
+            # 시나리오 경계마다 7초, 9만 토큰). 끝났으면 다음 모델 호출 전에 여기서 나온다.
+            if state.finished:
+                break
 
     @staticmethod
     def _text_of(message) -> str:

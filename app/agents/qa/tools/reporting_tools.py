@@ -188,7 +188,10 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             channel.drain_operator_messages(),
         )
 
-    @tool(description="QA 실행을 종료한다. TC 판정은 report_test_case로 기록한다. 참고 step의 완료 여부는 검사하지 않는다. 아직 판단하지 못한 TC와 그 이유는 summary에 설명한다.")
+    # `return_direct` 로 이 호출에서 루프를 끝낸다. 끝낸 뒤 모델을 한 번 더 불러 마무리 글을 받으면, 대화 전체를
+    # 다시 보내 시나리오마다 수 초와 그만큼의 비용이 든다(런 60: 9만 토큰, 8초). 단계 제한을 받지 않는 tool 이고
+    # 늘 `finished` 를 세우므로 여기서 끝내도 런이 열린 채 남지 않는다.
+    @tool(description="QA 실행을 종료한다. TC 판정은 report_test_case로 기록한다. 참고 step의 완료 여부는 검사하지 않는다. 아직 판단하지 못한 TC와 그 이유는 summary에 설명한다.", return_direct=True)
     async def finish_run(passed: bool, summary: str, thought: str) -> str:
         state.finished = True
         await channel.emit(MessageType.STATUS, StatusPayload(status=StepStatus.COMPLETED,
