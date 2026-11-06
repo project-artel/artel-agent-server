@@ -26,6 +26,7 @@ from app.agents.qa.context import (
     fold_context,
 )
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
+from app.agents.qa.question_policy import USER_QUESTION_POLICY
 from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.tools.game_function_tools import focus
 from app.agents.qa.tools.tool_context import ToolContext
@@ -310,8 +311,9 @@ def _plan(scenario: QaScenario) -> str:
         "Do not report individual steps or treat their completion as a quality verdict. "
         "Call start_test_case(case_id) BEFORE verifying a case, then report_test_case with PASSED, FAILED or INCONCLUSIVE. "
         "Start a new attempt for each re-verification; earlier attempts remain in history. "
-        "Use INCONCLUSIVE when you cannot establish the actual outcome. Ask the user with ask_user if you do not know how to proceed. "
+        "Use INCONCLUSIVE when you cannot establish the actual outcome. "
         "TC failures create issues automatically. report_issue is only for defects unrelated to a TC.\n"
+        + USER_QUESTION_POLICY + "\n"
         + (HUMAN_REVIEW_RULE if any("human_review" in case for case in cases.values()) else "")
         + "Read original specifications with get_test_case(case_id); start_test_case returns them too. "
         "The TC ledger preserves all IDs and current progress even after compaction.\n"
@@ -630,9 +632,10 @@ class QaRunner:
         system_prompt += (
             "\nCurrent reporting contract: report_step, report_case and wait_for_operator are unavailable. "
             "Steps are optional reference guidance, never required verdicts. Use start_test_case before a TC attempt "
-            "and report_test_case after it. Use ask_user to pause for a human answer. "
+            "and report_test_case after it. "
             "This contract replaces any step-reporting instructions in the preceding prompt."
         )
+        system_prompt += "\n" + USER_QUESTION_POLICY
         if arch.macros == "on":
             system_prompt += (
                 "\nCurrent macro contract: intermediate dialogue history is not collected or returned. "
