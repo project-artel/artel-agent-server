@@ -36,7 +36,7 @@ from app.agents.scenario.ordering import UnreachableClimb, unreachable_climbs
 from app.agents.scenario import trace
 from app.agents.scenario.replier import ASK_WHICH, ScenarioReplier
 from app.agents.scenario.requests import combine, looks_multiple, split_requests
-from app.agents.scenario.router import PreviousTurn, Route, ScenarioRouter
+from app.agents.scenario.router import PreviousTurn, Route, RouteVerdict, ScenarioRouter
 from app.agents.scenario.workflow import run_authoring_workflow, run_modify_workflow
 from app.agents.scenario.schemas import (
     ScenarioAgentRequest,
@@ -218,6 +218,7 @@ class ScenarioAgent:
             getattr(get_settings(), "scenario_single_request_enabled", True)
             and self._router is not None
             and request.current_route is None
+            and request.route is None
             and looks_multiple(request.user_input)
         ):
             await channel.report("splitting")
@@ -241,9 +242,14 @@ class ScenarioAgent:
         # **입구 라우팅**(워크플로 재편 Step 1). 케이스 전량을 싣기 전에 갈래를 가른다 —
         # 현행의 낭비는 "안녕하세요"에도 74k 가 나가던 것이다. 모르면 AUTHORING 이고,
         # 그 갈래는 아래 루프 그대로라 오분류가 무동작이 되지 않는다.
-        if self._router is not None and request.current_route is None:
-            verdict = await self._router.route(
-                request.user_input, context_hint=_hint(request), previous=_previous_turn(request)
+        if request.current_route is None and (request.route is not None or self._router is not None):
+            # 부르는 쪽이 route 를 정했으면 다시 맞히지 않는다.
+            verdict = (
+                RouteVerdict(route=Route(request.route))
+                if request.route is not None
+                else await self._router.route(
+                    request.user_input, context_hint=_hint(request), previous=_previous_turn(request)
+                )
             )
             if verdict.route in (Route.MODIFY, Route.ASK) and not any(
                 scenario.scenario_id is not None for scenario in request.current_scenarios

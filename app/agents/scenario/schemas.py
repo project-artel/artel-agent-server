@@ -235,6 +235,8 @@ class ScenarioAgentRequest(BaseModel):
     # "not yet routed" — the agent routes once and re-enters with the branch set,
     # so a re-entry (e.g. the slim question turn) is never routed twice.
     current_route: str | None = None
+    # 부르는 쪽이 정한 route. 있으면 라우터를 부르지 않는다. MCP 는 작성인지 수정인지 알고 보낸다.
+    route: Literal["authoring", "modify"] | None = None
     # What every value starts as when the game boots (flows-off experiment).
     # The flow calculation used to be the only holder of this fact; with flows
     # off nothing carried it, and the model could not even tell whether the

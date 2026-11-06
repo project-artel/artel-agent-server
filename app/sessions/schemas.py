@@ -54,6 +54,8 @@ class SessionRecord(BaseModel):
     # Output locale for generated scenarios. Default keeps records saved
     # before this field was introduced deserializing as Korean.
     locale: OutputLanguage = DEFAULT_LANGUAGE
+    # 이번 턴에 부르는 쪽이 정한 route. 같은 세션에 콘솔과 MCP 가 번갈아 말할 수 있어 턴마다 갈아 끼운다.
+    route: Literal["authoring", "modify"] | None = None
     # What the session's LLM spend is booked against. Optional because
     # Orchestration may not be sending it yet; then the usage record carries a
     # null reference instead of the wrong one.

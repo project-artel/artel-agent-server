@@ -9,7 +9,7 @@ import asyncio
 import app.agents.scenario.workflow as wf
 from app.agents.scenario.agent import ScenarioAgent
 from app.agents.scenario.router import Route
-from app.agents.scenario.schemas import AuthoredStep, ProposedCase, ScenarioAgentResult
+from app.agents.scenario.schemas import AuthoredStep, ProposedCase, ScenarioAgentResult, ScenarioPlan
 from tests.test_agents_scenario import _CTX, _request
 from tests.test_scenario_free_mode import _cases
 from tests.test_scenario_router import _FakeChannel
@@ -118,6 +118,55 @@ def test_the_case_route_goes_to_the_case_node(monkeypatch) -> None:
     out = asyncio.run(agent.run(_request(user_input="상점 TC 만들어줘"), _CTX, _FakeChannel()))
 
     assert out.message == "초안"
+
+
+class _RouterMustNotRun:
+    async def route(self, *args, **kwargs):
+        raise AssertionError("route 를 받은 말은 라우터를 부르지 않는다")
+
+
+def _agent_with_fake_workflows(monkeypatch) -> ScenarioAgent:
+    async def fake_authoring(request, context, channel):
+        return ScenarioAgentResult(message="작성", scenarios=[])
+
+    async def fake_modify(request, context, channel):
+        return ScenarioAgentResult(message="수정", scenarios=[])
+
+    monkeypatch.setattr("app.agents.scenario.agent.run_authoring_workflow", fake_authoring)
+    monkeypatch.setattr("app.agents.scenario.agent.run_modify_workflow", fake_modify)
+    return ScenarioAgent(agent_factory=lambda **kwargs: None, router=_RouterMustNotRun())
+
+
+def test_a_given_authoring_route_skips_the_router_and_the_split(monkeypatch) -> None:
+    agent = _agent_with_fake_workflows(monkeypatch)
+
+    out = asyncio.run(agent.run(
+        _request(user_input="상점 짜줘 그리고 창고도 짜줘", route="authoring"), _CTX, _FakeChannel(),
+    ))
+
+    assert out.message == "작성"
+
+
+def test_a_given_modify_route_goes_to_the_modify_workflow(monkeypatch) -> None:
+    agent = _agent_with_fake_workflows(monkeypatch)
+    scenario = ScenarioPlan(
+        scenario_id=7, title="상점", description="상점을 연다",
+        steps=[AuthoredStep(action="연다", case_id=1, step_source="CASE")],
+    )
+
+    out = asyncio.run(agent.run(
+        _request(user_input="상점 시나리오를 고쳐 줘", route="modify", current_scenarios=[scenario]), _CTX, _FakeChannel(),
+    ))
+
+    assert out.message == "수정"
+
+
+def test_a_modify_route_with_nothing_to_change_goes_to_authoring(monkeypatch) -> None:
+    agent = _agent_with_fake_workflows(monkeypatch)
+
+    out = asyncio.run(agent.run(_request(user_input="고쳐 줘", route="modify"), _CTX, _FakeChannel()))
+
+    assert out.message == "작성"
 
 
 def test_the_first_line_is_the_models_when_everything_was_saved(monkeypatch) -> None:

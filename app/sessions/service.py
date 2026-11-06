@@ -1,4 +1,5 @@
 import uuid
+from typing import Literal
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
@@ -61,6 +62,7 @@ class SessionService:
         model: LLMModel = DEFAULT_MODEL,
         reasoning: ReasoningConfig | None = None,
         locale: OutputLanguage = DEFAULT_LANGUAGE,
+        route: Literal["authoring", "modify"] | None = None,
         test_scenario_id: int | None = None,
         run_id: int | None = None,
         project_id: int | None = None,
@@ -81,6 +83,7 @@ class SessionService:
             model=model,
             reasoning=reasoning,
             locale=locale,
+            route=route,
             test_scenario_id=test_scenario_id,
             run_id=run_id,
             project_id=project_id,
@@ -117,8 +120,10 @@ class SessionService:
         test_case_list: list | None = None,
         starting_values: dict[str, str] | None = None,
         declined_cases: list[str] | None = None,
+        route: Literal["authoring", "modify"] | None = None,
     ) -> ScenarioAgentResult:
         record = await self._load(session_id)
+        record.route = route
         # 계약이 바뀐 턴에만 온다. 기억(history)은 그대로 두고 TC 목록만 갈아 끼운다.
         if test_case_list is not None:
             record.test_case_list = test_case_list
@@ -192,6 +197,7 @@ class SessionService:
             model=record.model,
             reasoning=record.reasoning,
             locale=record.locale,
+            route=record.route,
             run_id=record.run_id,
             project_id=record.project_id,
             app_user_id=record.app_user_id,

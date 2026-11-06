@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import logging
+from typing import Literal
 
 import openai
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
@@ -52,6 +53,7 @@ class OpenSessionRequest(BaseModel):
     # 추론 예산. 안 보내면 안 켠다 — 지금까지의 저작이 그랬다. 모델이 그 설정을 못 받으면
     # `validate_reasoning` 이 거절한다(조용히 낮추지 않는다, QA 런과 같은 규칙이다).
     reasoning: ReasoningConfig | None = None
+    route: Literal["authoring", "modify"] | None = None
     # Applies to the whole session, including the first turn (run from the stored
     # pending input when the WS connects), so it must be set here, not only on the
     # per-turn message below.
@@ -87,6 +89,7 @@ class TurnMessage(BaseModel):
     model: EnabledLLMModel | None = None
     # Optional mid-session locale switch; None keeps the session's locale.
     locale: OutputLanguage | None = None
+    route: Literal["authoring", "modify"] | None = None
     # The run's current scenarios at this turn (ARTEL-206 Step 6), refreshed by
     # the orchestration server so edits target the right existing scenario_id.
     current_scenarios: list[ScenarioPlan] = Field(default_factory=list)
@@ -147,6 +150,7 @@ async def open_session(
         model=payload.model,
         reasoning=payload.reasoning,
         locale=payload.locale,
+        route=payload.route,
         test_scenario_id=payload.test_scenario_id,
         run_id=payload.run_id,
         project_id=payload.project_id,
@@ -326,6 +330,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                         turn.test_case_list,
                         turn.starting_values,
                         turn.declined_cases,
+                        turn.route,
                     )
                 )
                 continue
