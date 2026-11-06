@@ -615,7 +615,9 @@ def drive(
 
 
 def scene_views(messages: list[BaseMessage]) -> list[str]:
-    """화면이 모델에게 닿는 유일한 자리 — 도구 결과. 라이브 꼬리는 ARTEL-621 이 없앴다.
+    """화면이 모델에게 닿는 자리 — 첫 메시지와 도구 결과. 라이브 꼬리는 ARTEL-621 이 없앴다.
+
+    첫 메시지는 런이 시작할 때 이미 와 있는 화면을 싣는다. 없으면 모델이 첫 턴을 `observe_scene` 에 쓴다.
 
     `fold` 된 것도 센다. `fold_context` 는 씬 뷰 마커 사이를 자리표로 바꾸므로,
     그런 메시지에는 시작 마커가 남지 않는다 — 그런데 블록은 그 마커 밖에 있어 그대로
@@ -624,7 +626,7 @@ def scene_views(messages: list[BaseMessage]) -> list[str]:
     return [
         str(m.content)
         for m in messages
-        if isinstance(m, ToolMessage)
+        if isinstance(m, (ToolMessage, HumanMessage))
         and (
             SCENE_VIEW_START_PREFIX in str(m.content)
             or FOLDED_VIEW_PREFIX in str(m.content)
@@ -643,8 +645,8 @@ def test_the_block_rides_under_the_scene_view_the_model_reads(
     """
     model, _channel = drive(monkeypatch, ["BattleScene"], context())
 
-    # 두 번째 호출이 받은 것. 씬 뷰가 아직 하나뿐이라 `fold` 가 손대지 않은 상태다.
-    views = scene_views(model.received[1])
+    # 첫 호출이 받은 것. 런이 시작할 때 와 있던 화면을 첫 메시지가 싣는다. 씬 뷰가 하나뿐이라 `fold` 가 손대지 않은 상태다.
+    views = scene_views(model.received[0])
     assert len(views) == 1
     first = views[0]
     assert "scene: BattleScene" in first
@@ -695,8 +697,10 @@ def test_the_block_survives_the_fold_that_swallows_the_view_it_sits_under(
         if isinstance(m, ToolMessage) and FOLDED_VIEW_PREFIX in str(m.content)
     ]
     assert folded, "가장 새 씬 뷰 말고는 `fold` 돼 있어야 한다"
-    assert any(SCENE_CONTEXT_START in view for view in folded)
-    assert any("[41] 전투 중 ESC 는 아무것도 하지 않는다" in view for view in folded)
+    # 블록은 그 씬을 처음 그린 자리에 있다. 런이 시작할 때 화면이 와 있으면 첫 메시지다.
+    carriers = [str(m.content) for m in sent if isinstance(m, HumanMessage)] + folded
+    assert any(SCENE_CONTEXT_START in view for view in carriers)
+    assert any("[41] 전투 중 ESC 는 아무것도 하지 않는다" in view for view in carriers)
 
 
 def test_the_block_follows_the_scene_when_the_scene_changes(
@@ -714,7 +718,9 @@ def test_the_block_follows_the_scene_when_the_scene_changes(
 
     views = scene_views(model.received[-1])
     assert len(views) >= 2
-    first, second = views[0], views[1]
+    # 앞 씬의 블록은 그 씬을 처음 그린 자리(첫 메시지)에, 뒤 씬의 블록은 그 씬으로 바뀐 뒤 처음 그린 도구 결과에 있다.
+    first = views[0]
+    second = next(view for view in views[1:] if SCENE_CONTEXT_START in view)
 
     assert "전투 중 ESC 는 아무것도 하지 않는다" in first
     assert "여기서는 저장이 되지 않는다" not in first

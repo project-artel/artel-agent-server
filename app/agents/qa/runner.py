@@ -26,6 +26,7 @@ from app.agents.qa.context import (
     fold_context,
 )
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
+from app.agents.qa.question_policy import USER_QUESTION_POLICY
 from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.tools.game_function_tools import focus
 from app.agents.qa.tools.tool_context import ToolContext
@@ -310,8 +311,9 @@ def _plan(scenario: QaScenario) -> str:
         "Do not report individual steps or treat their completion as a quality verdict. "
         "Call start_test_case(case_id) BEFORE verifying a case, then report_test_case with PASSED, FAILED or INCONCLUSIVE. "
         "Start a new attempt for each re-verification; earlier attempts remain in history. "
-        "Use INCONCLUSIVE when you cannot establish the actual outcome. Ask the user with ask_user if you do not know how to proceed. "
+        "Use INCONCLUSIVE when you cannot establish the actual outcome. "
         "TC failures create issues automatically. report_issue is only for defects unrelated to a TC.\n"
+        + USER_QUESTION_POLICY + "\n"
         + (HUMAN_REVIEW_RULE if any("human_review" in case for case in cases.values()) else "")
         + "Read original specifications with get_test_case(case_id); start_test_case returns them too. "
         "The TC ledger preserves all IDs and current progress even after compaction.\n"
@@ -630,9 +632,10 @@ class QaRunner:
         system_prompt += (
             "\nCurrent reporting contract: report_step, report_case and wait_for_operator are unavailable. "
             "Steps are optional reference guidance, never required verdicts. Use start_test_case before a TC attempt "
-            "and report_test_case after it. Use ask_user to pause for a human answer. "
+            "and report_test_case after it. "
             "This contract replaces any step-reporting instructions in the preceding prompt."
         )
+        system_prompt += "\n" + USER_QUESTION_POLICY
         if arch.macros == "on":
             system_prompt += (
                 "\nCurrent macro contract: intermediate dialogue history is not collected or returned. "
@@ -655,6 +658,11 @@ class QaRunner:
         # view 의 function 줄을 1번 step 의 TC 기준으로 둔다. 다음부터는 tool 이 옮긴다.
         if arch.cheats == "on" or arch.behaviors == "on":
             focus(ToolContext(channel, state, arch), 1)
+        # 지금 화면을 첫 메시지에 싣는다. 없으면 모델이 첫 턴을 `observe_scene` 하나에 쓴다 — 시나리오마다 호출 하나와
+        # 2초(런 63 다섯 시나리오 중 넷). 이어 시작하면 화면은 앞 시나리오에서 넘겨받아 이미 있고, 되돌린 뒤에도 판독이
+        # 와 있으면 있다. 도구 결과와 같은 자리(`answer`)로 그려 워터마크도 거기서 옮긴다.
+        if channel.scene.pulse.seen or channel.scene.frames > 0:
+            first_message += "\n\n## Current screen\n\n" + ToolContext(channel, state, arch).answer("", [])
 
         # The whole starting context in one place. Reading a run afterwards means
         # knowing what the model was actually given, and the prompt is assembled
@@ -727,6 +735,9 @@ class QaRunner:
             stream_mode="updates",
         ):
             await self._log_reasoning(channel, update)
+            # 종료가 성공한 뒤에는 다음 모델 호출 전에 stream을 끝낸다.
+            if state.finished:
+                break
 
     @staticmethod
     def _text_of(message) -> str:

@@ -809,6 +809,7 @@ def test_a_step_a_macro_asked_about_still_has_to_be_reported() -> None:
     `QaRunState.unreported_steps` 가 판정 없는 시나리오 step 을 세므로 거기 그대로 남는다.
     """
     channel, state, tools, sent = make(total_steps=3)
+    state.step_meta = [(None, False), (2, True), (None, False)]
     with_cards(channel)
     source = (
         "def look() -> None:\n"
@@ -836,7 +837,8 @@ def test_a_step_a_macro_asked_about_still_has_to_be_reported() -> None:
             {"passed": True, "summary": "done", "thought": "t"}
         )
     )
-    assert state.finished
+    assert "Test cases without a saved verdict: 2." in pushed_back
+    assert not state.finished
     assert state.case_attempt_results == []
 
 

@@ -60,7 +60,7 @@ from collections.abc import AsyncIterator, Iterator, Sequence
 from typing import Any
 
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, SystemMessage
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from pydantic import PrivateAttr
 
@@ -174,7 +174,7 @@ class ClaudeApiChat(ChatAnthropic):
                 ):
                     message = _without_thinking(message)
                 prepared.append(message)
-        return prepared, hashes[-1]
+        return _with_system_breakpoint(prepared), hashes[-1]
 
     def _invalidated(self, message: AIMessage, prefix_hash: str) -> bool:
         for signature in _signatures(message):
@@ -231,6 +231,29 @@ class ClaudeApiChat(ChatAnthropic):
             yield chunk
         if answer is not None:
             self._remember(answer, request_hash)
+
+
+def _with_system_breakpoint(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """시스템 프롬프트 끝에 캐시 경계를 하나 둔다.
+
+    top-level `cache_control` 은 요청 맨 끝 하나에만 경계를 놓는다. 그러면 뒤가 조금만 바뀌어도 늘 같은
+    도구 정의와 시스템 프롬프트(QA 에서 약 3.9만 토큰)까지 캐시에서 빠지고 매번 다시 쓴다. 여기 경계를 두면
+    그 부분은 뒤가 바뀌어도 읽기로 처리된다. 도구는 시스템 프롬프트보다 앞에 오므로 함께 덮인다.
+    """
+    if not messages or not isinstance(messages[0], SystemMessage):
+        return messages
+    content = messages[0].content
+    if isinstance(content, str):
+        if not content:
+            return messages
+        blocks: list[Any] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+    elif isinstance(content, list) and content and isinstance(content[-1], dict) and content[-1].get("type") == "text":
+        if "cache_control" in content[-1]:
+            return messages
+        blocks = [*content[:-1], {**content[-1], "cache_control": {"type": "ephemeral"}}]
+    else:
+        return messages
+    return [messages[0].model_copy(update={"content": blocks}), *messages[1:]]
 
 
 def _merge(
