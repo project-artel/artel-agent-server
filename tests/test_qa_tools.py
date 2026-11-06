@@ -1216,6 +1216,50 @@ def test_a_still_screen_is_reported_as_still_not_as_silence() -> None:
     asyncio.run(run())
 
 
+def test_actions_that_keep_changing_nothing_are_told_to_stop_repeating() -> None:
+    """아무것도 안 바뀐 행위가 셋 이어지면 같은 방식을 멈추라고, 여덟이면 케이스를 닫고 넘어가라고 말한다.
+
+    판독이 끊긴 채 같은 클릭을 27번 한 런이 있었다. 모델은 매번 "그대로" 만 받았다. 움직인 행위는 수를 지운다.
+    """
+
+    async def run() -> None:
+        channel, state, tools, sent = make(timeout=1.0)
+        channel.on_pulse(reading(objects=[start_button()]))
+
+        async def click(moves: bool) -> str:
+            before = len(actions(sent))
+
+            async def reply() -> None:
+                for _ in range(50):
+                    if len(actions(sent)) > before:
+                        break
+                    await asyncio.sleep(0)
+                channel.on_action_result(
+                    {
+                        "correlationId": actions(sent)[-1]["messageId"],
+                        "payload": {"results": [{"id": 1, "success": True}]},
+                    }
+                )
+                if moves:
+                    channel.on_pulse(reading(reading_id=2, objects=[start_button()]))
+
+            asyncio.create_task(reply())
+            return await tools["click_button"].ainvoke({"step": 1, "thought": "누른다", "target_id": -101})
+
+        bodies = [await click(moves=False) for _ in range(3)]
+        assert "in a row changed nothing" not in bodies[1]
+        assert "3 actions in a row changed nothing. Do not repeat them." in bodies[2]
+
+        for _ in range(5):
+            last = await click(moves=False)
+        assert "8 actions in a row changed nothing. Stop here: report the current test case as INCONCLUSIVE" in last
+
+        await click(moves=True)
+        assert state.still_streak == 0
+
+    asyncio.run(run())
+
+
 def test_a_game_that_reports_nothing_is_told_so() -> None:
     """두 채널 다 조용하면 그렇게 말한다. 이 판정을 무디게 만들지 않았다.
 
