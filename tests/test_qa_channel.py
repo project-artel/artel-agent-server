@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 
 import pytest
@@ -35,6 +36,25 @@ def scene_frame(scene: str = "Lobby", observables: dict | None = None) -> dict:
         "type": "GAME_STATE",
         "payload": {"scene": scene, "interactables": [], "observables": observables or {}},
     }
+
+
+def test_pulse_chunks_apply_only_after_the_complete_reading_arrives() -> None:
+    channel, _ = make_channel()
+    original = json.dumps(
+        {"type": "PULSE", "whole": True, "frame": 22, "scene": "전투"},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    split = original.index("전".encode()) + 1
+
+    for index, data in enumerate((original[:split], original[split:])):
+        channel.on_pulse_chunk({"payload": {
+            "id": "reading", "index": index, "count": 2,
+            "data": base64.b64encode(data).decode("ascii"),
+        }})
+        assert channel.scene.pulse.readings == index
+
+    assert channel.scene.pulse.scene == "전투"
+    assert channel.scene.pulse.frame == 22
 
 
 def test_looking_asks_the_game_for_nothing() -> None:
