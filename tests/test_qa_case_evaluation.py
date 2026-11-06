@@ -36,7 +36,7 @@ def test_finish_requires_a_saved_verdict_for_each_case_but_not_each_step():
         state.case_attempt_results.append(QaCaseAttemptResult(
             attempt_id="1", case_id=42, verdict="INCONCLUSIVE", message="증거 부족"
         ))
-        assert "TC: 43" in await tools["finish_run"].ainvoke(finish)
+        assert "Test cases without a saved verdict: 43." in await tools["finish_run"].ainvoke(finish)
         assert not state.finished
         channel.emit.assert_not_awaited()
         state.case_attempt_results.append(QaCaseAttemptResult(
@@ -58,9 +58,32 @@ def test_finish_rejects_empty_case_ledger():
         channel.emit = AsyncMock()
         state.step_meta = [(None, False)] * 3
         result = await tools["finish_run"].ainvoke({"passed": True, "summary": "관찰", "thought": "종료"})
-        assert "실행에 전달된 TC가 없습니다" in result
+        assert "no test cases were assigned" in result
         assert not state.finished
         channel.emit.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_ordered_case_skip_warns_without_blocking_the_attempt():
+    async def run():
+        channel, state, tools = setup_tools()
+        state.step_meta[2] = (43, True)
+        attempt = CaseAttempt(id=uuid4())
+        channel.evaluation.start = AsyncMock(return_value=attempt)
+        args = {"case_id": 43, "thought": "검증"}
+
+        result = await tools["start_test_case"].ainvoke(args)
+        assert "Earlier test cases still need verdicts: 42." in result
+        channel.evaluation.start.assert_awaited_once_with(43)
+        assert state.current_case_id == 43
+
+        state.execution_mode = "FREE"
+        assert "Earlier test cases" not in await tools["start_test_case"].ainvoke(args)
+        state.execution_mode = "ORDERED"
+        state.case_attempt_results.append(QaCaseAttemptResult(
+            attempt_id="1", case_id=42, verdict="FAILED", message="기대 결과 불충족"
+        ))
+        assert "Earlier test cases" not in await tools["start_test_case"].ainvoke(args)
     asyncio.run(run())
 
 

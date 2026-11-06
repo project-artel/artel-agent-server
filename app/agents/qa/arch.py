@@ -495,7 +495,7 @@ from app.llm.models import LLMModel, get_model_spec
 # v50은 TC snapshot context와 ACT 관찰 허용에 PULSE events·adapter 조각을 함께 적용한다.
 # v51은 같은 TC의 이전 검증 과정과 사람 설명을 조회하는 도구를 추가한다.
 # 과거 기록은 출처와 함께 참고로 읽으며 현재 실행의 판정을 대체하지 않는다.
-# v52: `finish_run`은 대상 TC가 없거나 아직 판정이 저장되지 않은 TC가 있으면 실행을 닫지 않는다.
+# v52: `finish_run`은 모든 대상 TC의 판정을 요구한다. `start_test_case`는 ORDERED에서 앞선 미판정 TC를 안내한다.
 QA_ARCH_LABEL = "v52-require-tc-verdicts"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so

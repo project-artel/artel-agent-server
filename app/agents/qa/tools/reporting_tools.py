@@ -29,6 +29,9 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
     cheat_starts: dict[int, int] = {}
     pending_reports: dict[int, tuple] = {}
 
+    def reported_case_ids() -> set[int]:
+        return {result.case_id for result in state.case_attempt_results if result.verdict != "INTERRUPTED"}
+
     def draft_for_attempt(case_id: int, start: int) -> str:
         step = state.step_of_case(case_id)
         if arch.macros != "on" or step is None:
@@ -55,22 +58,29 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
     async def get_test_case(case_id: int, thought: str) -> str:
         return render_case(case_id, state, channel)
 
-    @tool(description="TC 검증 전에 호출하고 실행 당시 TC 원문을 읽는다. case_id는 시나리오의 TC ID다. 같은 TC를 재검증할 때도 새 시도를 시작한다. step은 참고 절차이며 각 step을 보고할 의무는 없다.")
+    @tool(description="Start a verification attempt for a scenario test case and read its snapshot. Start a new attempt when retesting the same case. In ORDERED scenarios, this tool warns about earlier cases without verdicts. Reference steps do not require separate verdicts.")
     async def start_test_case(case_id: int, thought: str) -> str:
         step = state.step_of_case(case_id)
         if step is None:
-            return "이 시나리오에 없는 TC입니다."
+            return "This test case is not assigned to the scenario."
         stopped = await stop_not_allowed_before(ctx, step, starting_case=True)
         try:
             attempt = await channel.evaluation.start(case_id)
         except httpx.HTTPError:
-            return "TC 검증 시작을 저장하지 못했습니다. 같은 start_test_case 호출로 재시도하세요."
+            return "Could not save the start of the verification attempt. Retry the same start_test_case call."
         state.current_case_id = case_id
         dispatch_starts.setdefault(case_id, len(state.dispatches))
         cheat_starts.setdefault(case_id, len(state.used_cheats))
         if arch.cheats == "on" or arch.behaviors == "on":
             focus(ctx, step)
-        return _answer(f"TC {case_id} 검증 시도를 시작했습니다: {attempt.id}. 검증 후 report_test_case를 호출하세요." + stopped
+        warning = ""
+        if state.execution_mode == "ORDERED":
+            earlier = dict.fromkeys(cid for cid, _ in state.step_meta[:step - 1] if cid is not None)
+            reported = reported_case_ids()
+            skipped = [str(cid) for cid in earlier if cid not in reported]
+            if skipped:
+                warning = f"\nWarning: Earlier test cases still need verdicts: {', '.join(skipped)}."
+        return _answer(f"Started verification attempt {attempt.id} for test case {case_id}. Call report_test_case after verification." + warning + stopped
                        + "\n" + render_case(case_id, state, channel), channel.drain_operator_messages())
 
     @tool(description="시작한 TC 검증 시도의 결과를 PASSED/FAILED/INCONCLUSIVE로 보고한다. step별 판정은 하지 않는다. 반복 검증은 새 시도로 보존한다. TC 실패 issue는 자동 생성된다. 판단할 증거가 부족하면 INCONCLUSIVE를 사용한다.")
@@ -187,22 +197,22 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             channel.drain_operator_messages(),
         )
 
-    @tool(description="모든 대상 TC의 판정을 report_test_case로 저장한 뒤 QA 실행을 종료한다. 증거가 부족한 TC는 INCONCLUSIVE로 보고한다. 참고 step은 별도로 판정하지 않는다.")
+    @tool(description="Close the QA run after recording a verdict for every assigned test case with report_test_case. Report INCONCLUSIVE when evidence is insufficient. Reference steps do not require separate verdicts.")
     async def finish_run(passed: bool, summary: str, thought: str) -> str:
         case_ids = dict.fromkeys(case_id for case_id, _ in state.step_meta if case_id is not None)
         if not case_ids:
-            return "종료를 거부했습니다. 실행에 전달된 TC가 없습니다. 운영자에게 TC 연결을 확인해 달라고 요청하세요."
-        reported = {result.case_id for result in state.case_attempt_results if result.verdict != "INTERRUPTED"}
+            return "Cannot finish the run because no test cases were assigned. Ask the operator to check the test case assignment."
+        reported = reported_case_ids()
         missing = [str(case_id) for case_id in case_ids if case_id not in reported]
         if missing:
             return (
-                f"종료를 거부했습니다. 판정이 저장되지 않은 TC: {', '.join(missing)}. "
-                "검증 후 report_test_case로 판정하세요. 증거가 부족하면 INCONCLUSIVE로 기록하세요."
+                f"Cannot finish the run. Test cases without a saved verdict: {', '.join(missing)}. "
+                "Record each verdict with report_test_case. Use INCONCLUSIVE when evidence is insufficient."
             )
         state.finished = True
         await channel.emit(MessageType.STATUS, StatusPayload(status=StepStatus.COMPLETED,
             result=RunResult.PASSED if passed else RunResult.FAILED, message=summary, summary=state.build_summary()))
-        return "QA 실행을 종료했습니다."
+        return "The QA run is closed."
 
     @tool(description=load_tool_description("reply_to_operator").body)
     async def reply_to_operator(message: str, thought: str, step: int | None = None) -> str:
