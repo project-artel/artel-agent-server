@@ -197,6 +197,7 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             channel.drain_operator_messages(),
         )
 
+    # 판정이 빠져 있으면 tool 결과를 모델에 돌려보내고, 종료가 성공하면 runner가 finished를 확인한다.
     @tool(description="Close the QA run after recording a verdict for every assigned test case with report_test_case. Report INCONCLUSIVE when evidence is insufficient. Reference steps do not require separate verdicts.")
     async def finish_run(passed: bool, summary: str, thought: str) -> str:
         case_ids = dict.fromkeys(case_id for case_id, _ in state.step_meta if case_id is not None)
