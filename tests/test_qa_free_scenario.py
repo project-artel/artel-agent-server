@@ -138,6 +138,6 @@ def test_free_attempts_arrive_out_of_order_and_retries_do_not_overwrite():
         from app.agents.qa.case_context import render_case_ledger
         assert '"without_report_ids": [\n    22' in render_case_ledger(state, channel)
         before = len(channel.evaluation.requests)
-        assert '없는 TC' in await start_case(tools, 99)
+        assert 'This test case is not assigned to the scenario.' in await start_case(tools, 99)
         assert len(channel.evaluation.requests) == before
     asyncio.run(run())

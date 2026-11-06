@@ -41,6 +41,7 @@ from app.qa.schemas import QaCaseRef, QaScenario, QaStep
 from app.qa.channel import KNOWLEDGE_SEARCH_TIMEOUT_SECONDS, QaRunChannel
 from app.qa.envelope import KnowledgeSearchHit, LogCategory, MessageType
 from app.qa.scene import SCENE_VIEW_START_PREFIX
+from tests.qa_attempts import configure_attempts
 
 
 # phase gate 를 끈다. 이 파일은 tool 하나하나가 무엇을 하는지 보는 자리이고, gate 는 그 위층
@@ -1804,13 +1805,14 @@ def test_a_run_searches_knowledge_and_carries_on_to_its_verdict(
                     }
                 ]
             },
+            {"tool_calls": [{"name": "start_test_case", "args": {"case_id": 1, "thought": "검증 시작"}, "id": "start-1"}]},
             {
                 "tool_calls": [
                     {
                         "name": "report_test_case",
                         "args": {
-                            "step": 1,
-                            "performed": True, "passed": True,
+                            "case_id": 1,
+                            "verdict": "PASSED",
                             "message": "문서대로 버튼이 비활성이다",
                             "thought": "판정",
                         },
@@ -1873,6 +1875,7 @@ def test_a_run_searches_knowledge_and_carries_on_to_its_verdict(
     # 대기는 이 테스트가 재는 것이 아니므로 짧게 준다.
     channel = QaRunChannel(qa_try_id=1, send=send, reading_wait=0.05)
     state = QaRunState(total_steps=1)
+    configure_attempts(channel, state)
     scenario = QaScenario(
         title="구매 실패 확인",
         description="골드가 모자랄 때 구매가 막히는지 확인한다.",
@@ -1983,13 +1986,14 @@ def test_a_run_corrects_an_entry_by_deleting_it_and_recording_the_new_one(
                     }
                 ]
             },
+            {"tool_calls": [{"name": "start_test_case", "args": {"case_id": 1, "thought": "검증 시작"}, "id": "start-1"}]},
             {
                 "tool_calls": [
                     {
                         "name": "report_test_case",
                         "args": {
-                            "step": 1,
-                            "performed": True, "passed": True,
+                            "case_id": 1,
+                            "verdict": "PASSED",
                             "message": "구매가 가능했다",
                             "thought": "판정",
                         },
@@ -2031,6 +2035,7 @@ def test_a_run_corrects_an_entry_by_deleting_it_and_recording_the_new_one(
     # 기다리면 쓰기 하나에 5초가 들고, 답 없는 쓰기가 무엇을 돌려주는지는 같다.
     channel = QaRunChannel(qa_try_id=1, send=send, write_timeout=0.05)
     state = QaRunState(total_steps=1)
+    configure_attempts(channel, state)
     scenario = QaScenario(
         title="구매 규칙 확인",
         description="구매 조건이 문서대로인지 확인한다.",
@@ -2110,13 +2115,14 @@ def test_a_run_corrects_an_entry_in_place_with_the_update_tool(
                     }
                 ]
             },
+            {"tool_calls": [{"name": "start_test_case", "args": {"case_id": 1, "thought": "검증 시작"}, "id": "start-1"}]},
             {
                 "tool_calls": [
                     {
                         "name": "report_test_case",
                         "args": {
-                            "step": 1,
-                            "performed": True, "passed": True,
+                            "case_id": 1,
+                            "verdict": "PASSED",
                             "message": "구매가 가능했다",
                             "thought": "판정",
                         },
@@ -2158,6 +2164,7 @@ def test_a_run_corrects_an_entry_in_place_with_the_update_tool(
     # 기다리면 쓰기 하나에 5초가 들고, 답 없는 쓰기가 무엇을 돌려주는지는 같다.
     channel = QaRunChannel(qa_try_id=1, send=send, write_timeout=0.05)
     state = QaRunState(total_steps=1)
+    configure_attempts(channel, state)
     scenario = QaScenario(
         title="구매 규칙 확인",
         description="구매 조건이 문서대로인지 확인한다.",
