@@ -67,7 +67,7 @@ from app.agents.qa.macro.model import MacroDefinition
 from app.agents.qa.macro.runner import _apply_read_member, run_macro
 from app.qa.channel import QaCancelled, QaRunChannel
 from app.qa.envelope import LogCategory, LogPayload, MessageType
-from app.qa.jev import JevClient, JevError
+from app.qa.jev import JevChoice, JevClient, JevError
 from app.agents.planner_executer.facts import NO_FACTS, GameFacts
 from app.qa.state_set import (
     EVERYTHING,
@@ -559,7 +559,12 @@ class Executer:
                 recent = recent_action_lines(earlier + play.turns[:-1])
                 if recent:
                     record["recent_actions"] = recent
-                record["picked"] = picked = await self._pick(record["question"], options, recent, state)
+                choice = await self._pick(record["question"], options, recent, state)
+                record["picked"] = picked = choice.choice
+                if choice.confidence is not None:
+                    record["confidence"] = choice.confidence
+                if choice.probabilities is not None:
+                    record["probabilities"] = choice.probabilities
                 target = None
                 instance = instances.get(picked)
                 if instance is not None:
@@ -1208,7 +1213,7 @@ class Executer:
         options: dict[str, str],
         recent: list[str] | None = None,
         state: dict[str, Any] | None = None,
-    ) -> str:
+    ) -> JevChoice:
         """Jev 가 고른 action. `recent` 가 있으면 state 에 `recent_actions` 로 함께 간다 — 화면이 안 움직인
         turn 은 화면만으로는 첫 turn 과 같아, 방금 무엇을 했고 그것이 입력을 보냈는지를 Jev 가 알아야
         같은 수를 되풀이하지 않는다(ARTEL-1288, 런 153)."""
@@ -1216,7 +1221,7 @@ class Executer:
         if recent:
             state["recent_actions"] = recent
         try:
-            return await self._jev.choose(
+            return await self._jev.choose_scored(
                 question,
                 {**options, NONE_FITS: NONE_FITS_DESCRIPTION},
                 state,

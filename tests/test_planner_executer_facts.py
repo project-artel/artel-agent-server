@@ -61,7 +61,7 @@ def test_declarations_are_read_and_the_ones_breaking_the_rules_are_left_out(tmp_
            {"name": "no_scope", "source": {"member": "X.y"}, "type": "integer", "means": "x"}]
     rules = [*RULES, {"name": "dangling", "says": "Uses mana.", "facts": ["mana"]}]
     declared = _declare(tmp_path, bad, rules)
-    assert [fact.name for fact in declared.facts] == ["cards_in_hand", "spells_in_flight", "player_hp"]
+    assert [fact.name for fact in declared.facts] == ["cards_in_hand", "player_hp", "spells_in_flight"]  # 이름순
     assert [rule.name for rule in declared.rules] == ["cast_uses_cards"]
     assert declared.revision and declared.revision == _declare(tmp_path, bad, rules).revision
     assert load_game_facts(None) == NO_FACTS and load_game_facts(str(tmp_path / "missing")) == NO_FACTS
@@ -200,7 +200,7 @@ def test_declared_sources_are_watched_by_their_declared_path_once(tmp_path) -> N
     from app.agents.planner_executer.facts import watch_facts, watch_name
 
     declared = _declare(tmp_path)
-    assert [watch_name(fact) for fact in declared.facts] == ["Hand::cards.Count", "Spell::active", "Player::hp"]
+    assert [watch_name(fact) for fact in declared.facts] == ["Hand::cards.Count", "Player::hp", "Spell::active"]
     asked: list = []
 
     def answer(params):
@@ -213,7 +213,7 @@ def test_declared_sources_are_watched_by_their_declared_path_once(tmp_path) -> N
         return await watch_facts(fake.channel, declared)
 
     missing = asyncio.run(go())
-    assert asked == [[["Hand::cards.Count", "Spell::active", "Player::hp"]]]
+    assert asked == [[["Hand::cards.Count", "Player::hp", "Spell::active"]]]
     assert missing == [{"name": "Player::hp", "reason": "no such member"}]
 
 
@@ -230,3 +230,81 @@ def test_a_guidance_naming_a_fact_the_block_does_not_list_is_refused(tmp_path) -
 
     written, sent = _write(tmp_path, ANSWER.replace("```facts\ncards_in_hand\n```\n", ""), facts="on")
     assert written.macros is None and "does not list" in written.refusal
+
+
+def test_declarations_are_read_from_orchestration_and_a_failure_reads_none() -> None:
+    import httpx
+
+    from app.agents.planner_executer.facts import fetch_game_facts
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/internal/projects/3/game-facts"
+        return httpx.Response(200, json={
+            "facts": [
+                {"name": "cards_in_hand", "scope": "objects", "member": "CardManager.myCards.Count", "type": "integer",
+                 "unit": "cards", "means": "Cards in hand.", "version": 2},
+                {"name": "Bad Name", "scope": "objects", "member": "X.y", "type": "integer", "unit": None, "means": "?", "version": 1},
+            ],
+            "rules": [
+                {"name": "draws_two", "says": "Each turn draws two cards.", "facts": ["cards_in_hand"], "version": 1},
+                {"name": "orphan", "says": "Names a fact that is not there.", "facts": ["word_hp"], "version": 1},
+            ],
+        })
+
+    async def go(transport: httpx.MockTransport):
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await fetch_game_facts(3, base_url="http://orch", client=client)
+
+    declared = asyncio.run(go(httpx.MockTransport(handler)))
+    assert declared.origin == "orchestration" and declared.revision
+    # 규칙에 어긋난 fact 와 선언되지 않은 fact 를 가리키는 rule 은 로컬 선언처럼 빠진다.
+    assert [fact.name for fact in declared.facts] == ["cards_in_hand"]
+    assert declared.get("cards_in_hand").member == "CardManager.myCards.Count"
+    assert [rule.name for rule in declared.rules] == ["draws_two"]
+    assert asyncio.run(go(httpx.MockTransport(lambda request: httpx.Response(503)))) is NO_FACTS
+
+
+def test_a_local_facts_directory_overrides_orchestration(tmp_path, monkeypatch) -> None:
+    from app.agents.planner_executer import facts as facts_module
+    from app.config import get_settings
+
+    _declare(tmp_path)
+    called: list = []
+
+    async def fetch(project_id, *args, **kwargs):
+        called.append(project_id)
+        return NO_FACTS
+
+    monkeypatch.setattr(facts_module, "fetch_game_facts", fetch)
+    monkeypatch.setattr(get_settings(), "qa_facts_dir", str(tmp_path))
+    local = asyncio.run(facts_module.resolve_game_facts(5))
+    assert local.origin == "local" and local.facts and called == []
+
+    monkeypatch.setattr(get_settings(), "qa_facts_dir", None)
+    asyncio.run(facts_module.resolve_game_facts(5))
+    assert called == [5]
+
+
+def test_the_service_reads_declarations_once_per_run_only_when_facts_is_on(tmp_path, monkeypatch) -> None:
+    from app.agents.qa.arch import QaArchSpec
+    from app.agents.planner_executer.arch import PlannerExecuterArchSpec
+    from tests.test_planner_executer_developer_macros import _serve
+
+    declared = _declare(tmp_path)
+    asked: list = []
+
+    async def resolve(project_id):
+        asked.append(project_id)
+        return declared
+
+    async def no_macros(project_id, game_build_id):
+        return ()
+
+    monkeypatch.setattr("app.qa.service.resolve_game_facts", resolve)
+    seen, _ = _serve(monkeypatch, QaArchSpec(engine="planner_executer", planner=PlannerExecuterArchSpec(facts="on")), no_macros)
+    assert asked == [5]
+    assert [options["facts"] for options in seen] == [declared, declared]
+
+    asked.clear()
+    seen, _ = _serve(monkeypatch, QaArchSpec(engine="planner_executer"), no_macros)
+    assert asked == [] and all("facts" not in options for options in seen)

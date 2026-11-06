@@ -113,7 +113,8 @@ class PlannerExecuterRunner:
         self._developer = developer
         assert config.arch.planner is not None, "resolve_arch fills `planner` for this engine"
         self._spec = config.arch.planner
-        # 개발자가 선언한 fact·rule. 테스트는 넘기고, 런은 `qa_facts_dir` 에서 한 번 읽는다.
+        # 개발자가 선언한 fact·rule. 런은 service 가 orchestration(또는 `qa_facts_dir`)에서 읽어 넘긴다. 넘기지 않았으면
+        # `qa_facts_dir` 만 본다.
         if facts is None:
             facts = load_game_facts(get_settings().qa_facts_dir) if self._spec.facts == "on" else NO_FACTS
         self._facts = facts
@@ -164,8 +165,9 @@ class PlannerExecuterRunner:
             await note_decision(
                 channel, "game_facts",
                 f"Game facts: {len(self._facts.facts)} facts, {len(self._facts.rules)} rules"
-                + (f" (revision {self._facts.revision})" if self._facts.revision else " (none loaded)"),
-                None, revision=self._facts.revision or None, facts=[fact.name for fact in self._facts.facts],
+                + (f" from {self._facts.origin} (revision {self._facts.revision})" if self._facts.revision else " (none loaded)"),
+                None, revision=self._facts.revision or None, origin=self._facts.origin or None,
+                facts=[fact.name for fact in self._facts.facts],
                 rules=[rule.name for rule in self._facts.rules],
             )
             await watch_facts(channel, self._facts)
