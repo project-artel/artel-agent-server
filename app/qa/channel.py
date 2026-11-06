@@ -802,7 +802,7 @@ class QaRunChannel:
             not isinstance(group_id, str)
             or type(index) is not int
             or type(count) is not int
-            or not 2 <= count <= 6
+            or count < 2
             or not 0 <= index < count
         ):
             self._pulse_chunks = None
@@ -815,8 +815,8 @@ class QaRunChannel:
 
         data = base64.b64decode(payload["data"], validate=True)
         buffer = assembly[3]
-        if not data or len(data) > 175 * 1024 or len(buffer) + len(data) > 1024 * 1024:
-            raise ValueError("PULSE chunk exceeds the reassembly budget")
+        if not data or len(data) > 175 * 1024:
+            raise ValueError("Invalid PULSE chunk size")
         buffer.extend(data)
         if index + 1 < count:
             self._pulse_chunks = (group_id, count, index + 1, buffer)
