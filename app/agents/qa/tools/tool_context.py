@@ -230,6 +230,7 @@ class ToolContext:
             )
         else:
             change = ScreenChange.moved
+        body += _stall_note(state, change)
         return ActionOutcome(
             text=_answer(body, messages, screen=screen),
             screen=change,
@@ -279,4 +280,39 @@ def _press_sentence(landing: PressLanding, value: dict) -> str:
     # 성공처럼 읽혀서, 화면을 확인하지 않고 넘어가게 만든다 — 고치려던 것보다 나쁜
     # 자리에 데려다 놓는 셈이다.
     return f"{value.get('reached')} 에 보냄 — 반응했는지는 화면으로 확인할 것"
+
+
+# 아무것도 안 바뀐 행위가 이만큼 이어지면 같은 방식을 멈추라고 말한다. 셋은 클릭 하나를 좌표를 바꿔 두 번
+# 더 해 본 것이다 — 그 이상은 방식이 틀린 것이다. 여덟이면 이 케이스를 미판정으로 닫고 넘어가라고 한다.
+# 로그에서 하나의 케이스에 아무 일도 안 일어난 입력이 27번 이어진 일이 있었다(판독이 끊긴 채 모든 행위가
+# "그대로"로 읽혔다). 그 사이 모델은 매번 같은 답을 받고 같은 일을 했다.
+STALL_RETHINK = 3
+STALL_GIVE_UP = 8
+
+
+def _stall_note(state: QaRunState, change: ScreenChange) -> str:
+    """아무것도 안 바뀐 행위가 이어진 수를 세고, 문턱을 넘으면 답에 붙일 말을 낸다.
+
+    움직인 행위가 수를 0 으로 돌린다. 모르는 행위(`unknown`)는 세지도 지우지도 않는다 — 판독을 안 보내는
+    빌드에서 멀쩡한 조작을 멈춤으로 세지 않는다.
+    """
+    if change == ScreenChange.moved:
+        state.still_streak = 0
+        return ""
+    if change != ScreenChange.still:
+        return ""
+    state.still_streak += 1
+    count = state.still_streak
+    if count >= STALL_GIVE_UP:
+        return (
+            f"\n\n{count} actions in a row changed nothing. Stop here: report the current test case as "
+            "INCONCLUSIVE with what you tried and what you saw, then go on to the next one."
+        )
+    if count >= STALL_RETHINK:
+        return (
+            f"\n\n{count} actions in a row changed nothing. Do not repeat them. Find out why first — inspect the "
+            "target and the state it needs, check that readings are still arriving — then try a different way "
+            "(another target id instead of coordinates, a different input), or reset_game if the game looks stuck."
+        )
+    return ""
 
