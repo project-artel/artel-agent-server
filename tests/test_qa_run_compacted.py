@@ -245,7 +245,9 @@ def test_compaction_off_leaves_both_the_middleware_and_the_tool_out(
     all — the agent would spend calls on it and get nothing."""
     model = ScriptedModel(
         turns=[
+            {"tool_calls": [{"name": "start_test_case", "args": {"case_id": 1, "thought": "검증 시작"}, "id": "start-1"}]},
             verdict("1", 1),
+            {"tool_calls": [{"name": "start_test_case", "args": {"case_id": 2, "thought": "검증 시작"}, "id": "start-2"}]},
             verdict("2", 2),
             {
                 "tool_calls": [

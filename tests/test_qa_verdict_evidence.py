@@ -144,7 +144,7 @@ def test_reference_only_step_cannot_start_a_tc_attempt():
     async def run():
         channel, state, tools, sent = make(_ON, [(None, False)])
         result = await start_case(tools, 5)
-        assert '없는 TC' in result
+        assert 'This test case is not assigned to the scenario.' in result
         assert channel.evaluation.requests == []
         assert state.case_attempt_results == []
     asyncio.run(run())

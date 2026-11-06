@@ -735,9 +735,7 @@ class QaRunner:
             stream_mode="updates",
         ):
             await self._log_reasoning(channel, update)
-            # `finish_run` 을 다른 도구와 한 턴에 부르면 `return_direct` 가 듣지 않는다 — `create_agent` 는 그 턴의
-            # 도구가 **모두** `return_direct` 일 때만 끝낸다. 그러면 모델을 한 번 더 불러 마무리 글을 받는다(런 63:
-            # 시나리오 경계마다 7초, 9만 토큰). 끝났으면 다음 모델 호출 전에 여기서 나온다.
+            # 종료가 성공한 뒤에는 다음 모델 호출 전에 stream을 끝낸다.
             if state.finished:
                 break
 

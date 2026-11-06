@@ -1411,16 +1411,16 @@ def test_tc_outcomes_use_http_and_do_not_close_the_run(verdict):
 def test_attempts_accumulate_and_summary_uses_latest_case_outcome():
     async def run():
         channel, state, tools, sent = make(total_steps=3)
-        for case_id, passed in [(1, False), (1, True), (2, False)]:
+        for case_id, passed in [(1, False), (1, True), (2, False), (3, True)]:
             await start_case(tools, case_id)
             await report_case(tools, case_id, passed)
         await tools['finish_run'].ainvoke({'passed': False, 'summary': '검증 종료', 'thought': '끝'})
         summary = sent[-1]['payload']['summary']
-        assert state.finished and len(summary['attempts']) == 3
-        assert len({r['attempt_id'] for r in summary['attempts']}) == 3
-        assert summary['cases']['passed'] == 1
+        assert state.finished and len(summary['attempts']) == 4
+        assert len({r['attempt_id'] for r in summary['attempts']}) == 4
+        assert summary['cases']['passed'] == 2
         assert summary['cases']['failed'] == 1
-        assert summary['cases']['untested'] == 1
+        assert summary['cases']['untested'] == 0
         assert summary['steps']['failed'] == 0
     asyncio.run(run())
 
@@ -1428,9 +1428,13 @@ def test_attempts_accumulate_and_summary_uses_latest_case_outcome():
 def test_unreported_reference_steps_do_not_block_finish_or_become_failures():
     async def run():
         _, state, tools, sent = make(total_steps=3)
+        state.step_meta = [(1, True), (None, False), (None, False)]
+        await start_case(tools, 1)
+        await report_case(tools, 1)
         await tools['finish_run'].ainvoke({'passed': False, 'summary': '사용자 종료', 'thought': '종료'})
         assert state.finished
-        assert sent[-1]['payload']['summary']['cases']['untested'] == 3
+        assert sent[-1]['payload']['summary']['cases']['passed'] == 1
+        assert sent[-1]['payload']['summary']['cases']['untested'] == 0
         assert sent[-1]['payload']['summary']['steps']['failed'] == 0
     asyncio.run(run())
 

@@ -496,9 +496,8 @@ from app.llm.models import LLMModel, get_model_spec
 # v51은 같은 TC의 이전 검증 과정과 사람 설명을 조회하는 도구를 추가한다.
 # 과거 기록은 출처와 함께 참고로 읽으며 현재 실행의 판정을 대체하지 않는다.
 # v52는 사용자 질문을 게임 의도·기대 결과·사람의 게임 내 작업 확인으로 제한한다.
-# 공통 system 계약·TC plan·tool 설명이 바뀌므로 같은 prompt 판본에서도 구조를 구분한다.
-# tool 인자와 middleware는 그대로여서 fingerprint는 유지한다.
-QA_ARCH_LABEL = "v52-game-question-policy"
+# v53은 모든 대상 TC의 판정이 저장된 뒤 종료를 허용하고, ORDERED에서 앞선 미판정 TC를 안내한다.
+QA_ARCH_LABEL = "v53-require-tc-verdicts"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
