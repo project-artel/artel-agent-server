@@ -187,8 +187,18 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
             channel.drain_operator_messages(),
         )
 
-    @tool(description="QA 실행을 종료한다. TC 판정은 report_test_case로 기록한다. 참고 step의 완료 여부는 검사하지 않는다. 아직 판단하지 못한 TC와 그 이유는 summary에 설명한다.")
+    @tool(description="모든 대상 TC의 판정을 report_test_case로 저장한 뒤 QA 실행을 종료한다. 증거가 부족한 TC는 INCONCLUSIVE로 보고한다. 참고 step은 별도로 판정하지 않는다.")
     async def finish_run(passed: bool, summary: str, thought: str) -> str:
+        case_ids = dict.fromkeys(case_id for case_id, _ in state.step_meta if case_id is not None)
+        if not case_ids:
+            return "종료를 거부했습니다. 실행에 전달된 TC가 없습니다. 운영자에게 TC 연결을 확인해 달라고 요청하세요."
+        reported = {result.case_id for result in state.case_attempt_results if result.verdict != "INTERRUPTED"}
+        missing = [str(case_id) for case_id in case_ids if case_id not in reported]
+        if missing:
+            return (
+                f"종료를 거부했습니다. 판정이 저장되지 않은 TC: {', '.join(missing)}. "
+                "검증 후 report_test_case로 판정하세요. 증거가 부족하면 INCONCLUSIVE로 기록하세요."
+            )
         state.finished = True
         await channel.emit(MessageType.STATUS, StatusPayload(status=StepStatus.COMPLETED,
             result=RunResult.PASSED if passed else RunResult.FAILED, message=summary, summary=state.build_summary()))

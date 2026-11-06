@@ -10,8 +10,9 @@ from app.agents.qa.tools.reporting_tools import build_reporting_tools
 from app.agents.qa.tools.state import QaRunState
 from app.agents.qa.tools.tool_context import ToolContext
 from app.qa.channel import QaRunChannel
+from app.qa.envelope import MessageType
 from app.qa.evaluation import ActiveRunClock, CaseAttempt, run_with_active_deadline
-from app.qa.schemas import QaScenario, QaStep, QaCaseRef
+from app.qa.schemas import QaCaseAttemptResult, QaScenario, QaStep, QaCaseRef
 
 
 def setup_tools():
@@ -21,17 +22,45 @@ def setup_tools():
     return channel, state, {tool.name: tool for tool in build_reporting_tools(ToolContext(channel, state, arch))}
 
 
-def test_step_reporting_is_not_exposed_and_steps_do_not_block_finish():
+def test_finish_requires_a_saved_verdict_for_each_case_but_not_each_step():
     async def run():
         channel, state, tools = setup_tools()
+        channel.emit = AsyncMock()
         assert "report_step" not in tools
         assert "report_case" not in tools
-        await tools["finish_run"].ainvoke({"passed": False, "summary": "검증하지 못함", "thought": "사용자 종료"})
+        finish = {"passed": False, "summary": "검증하지 못함", "thought": "종료"}
+        state.step_meta[2] = (43, True)
+        assert "42, 43" in await tools["finish_run"].ainvoke(finish)
+        assert not state.finished
+        channel.emit.assert_not_awaited()
+        state.case_attempt_results.append(QaCaseAttemptResult(
+            attempt_id="1", case_id=42, verdict="INCONCLUSIVE", message="증거 부족"
+        ))
+        assert "TC: 43" in await tools["finish_run"].ainvoke(finish)
+        assert not state.finished
+        channel.emit.assert_not_awaited()
+        state.case_attempt_results.append(QaCaseAttemptResult(
+            attempt_id="2", case_id=43, verdict="PASSED", message="기대 결과 확인"
+        ))
+        await tools["finish_run"].ainvoke(finish)
         assert state.finished
+        assert channel.emit.await_args.args[0] == MessageType.STATUS
         summary = state.build_summary()
         assert summary["steps"]["failed"] == 0
         assert summary["cases"]["failed"] == 0
-        assert summary["cases"]["untested"] == 1
+        assert summary["cases"]["untested"] == 0
+    asyncio.run(run())
+
+
+def test_finish_rejects_empty_case_ledger():
+    async def run():
+        channel, state, tools = setup_tools()
+        channel.emit = AsyncMock()
+        state.step_meta = [(None, False)] * 3
+        result = await tools["finish_run"].ainvoke({"passed": True, "summary": "관찰", "thought": "종료"})
+        assert "실행에 전달된 TC가 없습니다" in result
+        assert not state.finished
+        channel.emit.assert_not_awaited()
     asyncio.run(run())
 
 
