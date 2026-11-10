@@ -498,7 +498,8 @@ from app.llm.models import LLMModel, get_model_spec
 # v52는 사용자 질문을 게임 의도·기대 결과·사람의 게임 내 작업 확인으로 제한한다.
 # v53은 모든 대상 TC의 판정이 저장된 뒤 종료를 허용하고, ORDERED에서 앞선 미판정 TC를 안내한다.
 # 새 prompt는 Game Function 호출을 합치고, 읽기 전용 결과를 TC 판정 근거로 쓴다.
-QA_ARCH_LABEL = "v54-unified-game-functions"
+# v55의 every_call은 orchestration이 받은 최신 영상 프레임을 먼저 읽는다.
+QA_ARCH_LABEL = "v55-every-call-stream"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

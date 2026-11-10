@@ -14,17 +14,16 @@ flowchart LR
     viewer["보는 사람의 브라우저"]
 
     agent <-->|"/internal/qa-sessions/{id} — QA 봉투 30 종"| orch
-    agent -->|"REST — LLM 사용량, scene context"| orch
-    orch <-->|"/ws/sdk — ACTION · ACTION_RESULT · PULSE · WebRTC signalling"| sdk
-    orch <-->|"/ws/viewer"| viewer
-    sdk -.->|"WebRTC media, P2P"| viewer
+    agent -->|"내부 HTTP · LLM 사용량 · scene context · 최신 JPEG"| orch
+    orch <-->|"/ws/sdk · ACTION · ACTION_RESULT · PULSE · JPEG_WS"| sdk
+    orch <-->|"/ws/viewer · JPEG_WS"| viewer
 ```
 
 - **이 서버는 게임에 직접 말을 걸지 않음.** 모든 조작과 관측이 orchestration 을 거침
 - 그래서 여기서 보내는 `ACTION` 은 SDK 의 action 이 아니라 orchestration 이 번역할 요청임.
   SDK 쪽 계약은 `artel-sdk/docs/protocol.md`, 스트리밍은
   `artel-orchestration-server/docs/streaming-protocol.md`
-- 이 서버가 orchestration 에 거는 HTTP 는 둘뿐이고 나머지는 전부 WebSocket 봉투임
+- `every_call`은 QA 시도의 최신 스트리밍 JPEG를 내부 API에서 읽고, 프레임을 받을 수 없으면 SDK에 화면 캡처를 요청한다.
 - 봉투의 타입 목록과 함정은 [`docs/qa-protocol.md`](qa-protocol.md)
 
 ## agent 여섯

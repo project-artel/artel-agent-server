@@ -8,6 +8,8 @@ screenshots because every old image is resent on every turn.
 import asyncio
 import base64
 from contextlib import contextmanager
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -31,6 +33,35 @@ from app.qa.schemas import QaStepResult, QaCaseAttemptResult
 from app.qa.envelope import LogCategory, MessageType
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake image body"
+
+
+@pytest.mark.parametrize("status", [200, 204, 404])
+def test_every_call_prefers_live_jpeg_and_falls_back_to_sdk(monkeypatch, status):
+    state = SimpleNamespace(take_pending_captures=lambda: [])
+    arch = SimpleNamespace(screen_capture=ScreenCaptureMode.every_call)
+    middleware = QaCaptureVisionMiddleware(state, SimpleNamespace(qa_try_id=42), arch)
+    auto_capture = AsyncMock(return_value=None)
+    monkeypatch.setattr(middleware, "_auto_capture", auto_capture)
+    monkeypatch.setattr(vision_module, "get_settings", lambda: SimpleNamespace(orchestration_base_url="http://orch"))
+    jpeg = b"\xff\xd8\xff" + b"frame"
+    requests = []
+
+    def respond(request):
+        requests.append(str(request.url))
+        return httpx.Response(status, content=jpeg if status == 200 else b"")
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs))
+
+    held = asyncio.run(middleware._current_screen())
+
+    assert requests == ["http://orch/internal/qa-tries/42/stream-frame"]
+    if status == 200:
+        assert held is not None and base64.b64decode(held.encoded) == jpeg
+        auto_capture.assert_not_awaited()
+    else:
+        assert held is None
+        auto_capture.assert_awaited_once()
 
 
 @contextmanager
