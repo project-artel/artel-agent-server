@@ -229,6 +229,10 @@ def resolve_run_config(
     prompt = load_prompt(PROMPT_AGENT, SYSTEM_ROLE, prompt_version)
     tools, _middleware, fingerprint = structure_of(resolved_arch, execution_mode, prompt.version)
     hashes = {SYSTEM_ROLE: prompt.body_sha256}
+    if "call_game_function" in tools:
+        hashes["tool_call_game_function"] = load_prompt(
+            PROMPT_AGENT, "tool_call_game_function", prompt.version,
+        ).body_sha256
     hashes["qa_history_tool"] = load_prompt(
         "qa_history", "tool_read_test_case_history", "v1"
     ).body_sha256

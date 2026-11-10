@@ -110,6 +110,8 @@ class ToolContext:
         step: int,
         screen: bool = True,
         describe: DescribeResult | None = None,
+        *,
+        observation: bool = False,
     ) -> ActionOutcome:
         """`_act` 를 돌리고 그 결과를 `state.last_outcome` 에 남긴다.
 
@@ -122,8 +124,9 @@ class ToolContext:
         없고 runner 는 문장이 아니라 데이터를 본다. view 는 `run_macro` 가 답할 때
         `answer` 가 한 번 붙인다.
         """
-        outcome = await self._act(actions, summary, step, screen, describe)
-        self.state.last_outcome = outcome
+        outcome = await self._act(actions, summary, step, screen, describe, observation=observation)
+        if not observation:
+            self.state.last_outcome = outcome
         return outcome
 
     async def _act(
@@ -133,6 +136,8 @@ class ToolContext:
         step: int,
         screen: bool,
         describe: DescribeResult | None = None,
+        *,
+        observation: bool = False,
     ) -> ActionOutcome:
         """`run` 과 같은 일을 하되, 문장과 **그 문장이 되기 전의 데이터**를 함께 낸다.
 
@@ -146,7 +151,8 @@ class ToolContext:
         _answer = self.answer
         # 무엇을 어떤 인자로 보냈는지 남긴다. capability 에 verdict 를 적을 때 재현이
         # 여기서 나온다 — 모델은 method 이름만 말하고 인자는 이 기록이 낸다(ARTEL-644).
-        state.remember_dispatch(actions)
+        if not observation:
+            state.remember_dispatch(actions)
         result, looked = await channel.act_and_look(actions, summary, step)
         await self.performance().refresh_summary()
         messages = channel.drain_operator_messages()
@@ -198,7 +204,8 @@ class ToolContext:
 
         # 이 행위가 끝난 프레임. 그보다 뒤에 잡힌 판독만이 이 행위의 결과다(ARTEL-621).
         # 없으면 그 필드를 모르는 옛 SDK 이고, 렌더가 종전의 창으로 돌아간다.
-        state.last_action_frame = result.frame
+        if not observation:
+            state.last_action_frame = result.frame
 
         # 화면 자체는 `_answer` 가 붙인다. 여기서 그리면 같은 것이 두 번 실린다. 아래
         # 갈래들이 하는 일은 그 화면을 **어떻게 읽을지**를 말하는 것뿐이다.
