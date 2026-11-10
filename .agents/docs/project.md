@@ -17,6 +17,16 @@ Fill this document during project initialization. Agents must verify commands ag
 - External systems: GitHub repository `project-artel/artel-agent-server`; Jira project `ARTEL` via the `mcp-atlassian` MCP server; Insomnia collection repository `project-artel/insomnia-api`; LangSmith tracing (opt-in, see README)
 - Persistent data: None yet.
 
+## QA Agent runtime reference maintenance
+
+Check `references/qa-agent-runtime.md` in the
+[`artel-test-cases` skill](https://github.com/project-artel/artel-skills/tree/main/skills/artel-test-cases)
+when changing the QA Agent's structure. Update the reference if the change affects
+what a TC author can assume about run context, available actions, observations, or
+verdict evidence. Link the companion `artel-skills` PR from the Agent PR and state
+any required SDK, Agent, or run configuration. If the guidance still applies,
+record that the reference was checked in the Agent PR.
+
 ## API 표면과 신뢰 경계
 
 이 서버에는 공개 표면이 없다. 업무 라우트는 전부 orchestration만 부르는
