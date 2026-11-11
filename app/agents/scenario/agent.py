@@ -268,7 +268,7 @@ class ScenarioAgent:
                 # 저작 없이 끝나지만 문구는 필요하다. 라우터가 문구까지 만들던 구조는 라우터가
                 # 자유 텍스트를 낼 수 있을 때만 서므로(결정 모델은 못 쓴다), 문구를 못 받았으면
                 # 문구 노드에 맡기고 그마저 실패하면 고정 문구로 떨어진다.
-                message = verdict.reply or await self._replier.write(verdict.route, request.user_input)
+                message = verdict.reply or await self._replier.write(verdict.route, request.user_input, request.model)
                 return ScenarioAgentResult(message=message or _CANNED[verdict.route], scenarios=[])
             if verdict.route is Route.AUTHORING and get_settings().scenario_workflow_enabled:
                 # **본선 워크플로**(Step 2): B 묶기·순서(전량 1회) → C 병렬 문장(묶음만)

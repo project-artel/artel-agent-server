@@ -62,9 +62,11 @@ class _RecordingReplier:
     def __init__(self, reply: str) -> None:
         self.reply = reply
         self.calls: list[tuple[Route, str]] = []
+        self.models: list[str] = []
 
-    async def write(self, route: Route, user_input: str) -> str:
+    async def write(self, route: Route, user_input: str, model: str) -> str:
         self.calls.append((route, user_input))
+        self.models.append(model)
         return self.reply
 
 
@@ -82,6 +84,33 @@ def test_offtopic_gets_a_polite_decline() -> None:
     assert out.message  # 라우터가 문구를 안 만들면 `ScenarioReplier` 가 쓴 문구가 나간다
     assert replier.calls == [(Route.OFFTOPIC, "오늘 날씨 어때")]
     assert out.message == "날씨는 제가 도와드리기 어려워요."
+
+
+def test_reply_node_writes_with_the_session_model() -> None:
+    """문구 노드는 세션이 고른 모델로 쓴다(ARTEL-1426). 예전처럼 Haiku 로 고정하면 사용자 key 대화의 답 한 줄만
+    공용 key 로 나간다."""
+    replier = _RecordingReplier("안녕하세요")
+    agent = ScenarioAgent(agent_factory=_capturing_factory({}), router=_fixed_router(Route.GREETING), replier=replier)
+    request = _request(user_input="안녕").model_copy(update={"model": "claude/claude-sonnet-5-5"})
+
+    asyncio.run(agent.run(request, _CTX, _channel()))
+
+    assert replier.models == ["claude/claude-sonnet-5-5"]
+
+
+def test_reply_node_calls_the_model_it_is_given() -> None:
+    from app.agents.scenario.replier import ScenarioReplier
+
+    seen: list[str] = []
+
+    async def caller(prompt: str, model: str) -> str:
+        seen.append(model)
+        return "반가워요"
+
+    reply = asyncio.run(ScenarioReplier(caller).write(Route.GREETING, "안녕", "openai/gpt-6-luna"))
+
+    assert reply == "반가워요"
+    assert seen == ["openai/gpt-6-luna"]
 
 
 def test_question_goes_to_the_question_node_not_the_loop(monkeypatch) -> None:
