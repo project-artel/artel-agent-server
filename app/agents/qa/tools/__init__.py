@@ -25,6 +25,10 @@ from app.agents.qa.tools.history_tools import build_history_tools
 from app.agents.qa.tools.game_function_tools import (
     build_behavior_tools,
     build_cheat_tools,
+    build_unified_function_tools,
+    function_kind,
+    is_read_only,
+    uses_unified_functions,
     with_behavior_endings,
 )
 from app.agents.qa.tools.knowledge_tools import build_knowledge_tools
@@ -88,10 +92,12 @@ def build_tools(
     # 게임이 등록한 function 의 tool (ARTEL-1054). 맨 뒤라서 두 축이 꺼진 run 은 목록도 순서도
     # 종전 그대로다. `run_cheat` 와 `start_behavior` 는 게임을 움직이므로 `phase.py` 표에서 `ACT`
     # 이고, `stop_behavior` 와 `extend_behavior` 는 표에 없어 아래 gate 를 지나간다.
-    if ctx.arch.cheats == "on":
-        tools.extend(build_cheat_tools(ctx))
-    if ctx.arch.behaviors == "on":
-        tools.extend(build_behavior_tools(ctx))
+    cheats = build_cheat_tools(ctx) if ctx.arch.cheats == "on" else []
+    behaviors = build_behavior_tools(ctx) if ctx.arch.behaviors == "on" else []
+    if (cheats or behaviors) and uses_unified_functions(prompt_version):
+        tools.extend(build_unified_function_tools(ctx, cheats, behaviors, prompt_version))
+    else:
+        tools.extend(cheats + behaviors)
 
     # 검사하는 자리가 여기 하나다. tool 은 `phase.py` 의 표에서 자기 phase 를 선언만 한다 —
     # tool 마다 스스로 세게 하면 tool 이 늘 때마다 하나씩 빠진다(`state.py` 의 docstring 이
@@ -103,7 +109,7 @@ def build_tools(
     cycle = build_phase_cycle(ctx.arch.phase_cycle, frozenset(one.name for one in tools))
     state.phase_cycle = cycle
     if cycle is not None:
-        tools = [_phase_gated(one, cycle) for one in tools]
+        tools = [_phase_gated(one, cycle, ctx) for one in tools]
     # gate 바깥에서 감싼다. gate 가 거절한 호출의 결과에도 끝난 behavior 의 소식이 붙는다.
     if ctx.arch.behaviors == "on":
         tools = [with_behavior_endings(one, ctx) for one in tools]
@@ -125,7 +131,7 @@ def _serialized(tool: BaseTool, lock: asyncio.Lock) -> BaseTool:
     return tool.model_copy(update={"coroutine": guarded})
 
 
-def _phase_gated(tool: BaseTool, cycle: PhaseCycle) -> BaseTool:
+def _phase_gated(tool: BaseTool, cycle: PhaseCycle, ctx: ToolContext) -> BaseTool:
     """자리에 안 맞으면 실행 대신 거절 문자열을 내는 같은 tool.
 
     이름도 설명도 `args` 도 그대로다. 바꾸는 것은 실행되는 함수 하나뿐이라 모델이 받는 tool
@@ -144,13 +150,26 @@ def _phase_gated(tool: BaseTool, cycle: PhaseCycle) -> BaseTool:
     name = tool.name
 
     async def guarded(*args, **kwargs):
-        refusal = cycle.refusal_for(name)
+        phase_tool = name
+        before = (ctx.state.cheats_attempted, ctx.state.behavior_calls_attempted)
+        if name == "call_game_function":
+            function = kwargs.get("name", "")
+            kind = function_kind(ctx, function, kwargs.get("kind"))
+            if kind is None:
+                return await inner(*args, **kwargs)
+            if is_read_only(ctx, kind, function):
+                phase_tool = "inspect_object"
+        refusal = cycle.refusal_for(phase_tool)
         if refusal is not None:
             return refusal
         result = await inner(*args, **kwargs)
+        if name == "call_game_function" and before == (
+            ctx.state.cheats_attempted, ctx.state.behavior_calls_attempted,
+        ):
+            cycle.hold()
         # 돈 뒤에 넘긴다. 예외로 끝난 호출은 phase 를 안 옮긴다 — 실패한 조작으로 `ACT` 가
         # 끝났다고 치면 그 다음 판정이 아무것도 안 일어난 화면을 판정한다.
-        cycle.advance(name)
+        cycle.advance(phase_tool)
         return result
 
     return tool.model_copy(update={"coroutine": guarded})

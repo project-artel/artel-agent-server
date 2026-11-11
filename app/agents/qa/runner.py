@@ -213,16 +213,19 @@ def _macro_discovery(arch: ResolvedArch, channel: QaRunChannel) -> str:
     return context.macro_section() if context is not None else ""
 
 
-def _game_functions(arch: ResolvedArch, channel: QaRunChannel) -> str:
+def _game_functions(arch: ResolvedArch, channel: QaRunChannel, prompt_version: str = "v43") -> str:
     """첫 메시지 끝에 붙는, 이 run 이 부를 수 있는 cheat 와 behavior 의 catalog (ARTEL-1054).
 
     축이 켜진 쪽만 적는다. 둘 다 꺼진 run 은 빈 문자열이라 첫 메시지가 종전 그대로다. 첫
     메시지인 이유는 `_macro_discovery` 와 같다.
     """
     catalog = channel.game_functions
+    from app.agents.qa.tools.game_function_tools import uses_unified_functions
+
     return render_catalog(
         catalog.cheats if arch.cheats == "on" else None,
         catalog.behaviors if arch.behaviors == "on" else None,
+        unified=uses_unified_functions(prompt_version),
     )
 
 
@@ -644,7 +647,7 @@ class QaRunner:
                 "instruction promising a list of text shown during a macro."
             )
         first_message = (
-            _plan(scenario) + _macro_discovery(arch, channel) + _game_functions(arch, channel)
+            _plan(scenario) + _macro_discovery(arch, channel) + _game_functions(arch, channel, prompt.version)
         )
         # 사람 판정 기록이 첫 메시지에 실제로 실렸는지 남긴다(ARTEL-1257 영향 실측).
         reviewed = [step.case.id for step in scenario.steps if step.case is not None and step.case.reviews]

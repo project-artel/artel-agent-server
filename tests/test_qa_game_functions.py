@@ -73,6 +73,7 @@ def make(
     step_functions: list[CaseFunctions | None] | None = None,
     step_meta: list[tuple[int | None, bool]] | None = None,
     total_steps: int = 2,
+    prompt_version: str = "v43",
 ):
     sent: list[dict] = []
 
@@ -93,7 +94,7 @@ def make(
     )
     arch = _arch(cheats, behaviors)
     configure_attempts(channel, state)
-    tools = {one.name: one for one in build_tools(channel, state, arch=arch)}
+    tools = {one.name: one for one in build_tools(channel, state, arch=arch, prompt_version=prompt_version)}
     return channel, state, tools, sent, arch
 
 
@@ -162,8 +163,8 @@ def test_both_axes_default_to_off_and_add_no_tool() -> None:
 def test_the_tools_join_the_end_of_the_list_in_a_fixed_order() -> None:
     """목록의 순서가 계약이다. 축이 꺼진 run 의 목록은 앞부분 그대로 남는다."""
     off_tools = list(structure_of(_resolved())[0])
-    both = list(structure_of(_resolved(cheats="on", behaviors="on"))[0])
-    only_behaviors = list(structure_of(_resolved(behaviors="on"))[0])
+    both = list(structure_of(_resolved(cheats="on", behaviors="on"), prompt_version="v43")[0])
+    only_behaviors = list(structure_of(_resolved(behaviors="on"), prompt_version="v43")[0])
 
     # `compact_context` 는 `structure_of` 가 `build_tools` 뒤에 붙인다. 새 tool 은 `build_tools` 의
     # 맨 뒤, 그 앞이다.
@@ -181,6 +182,62 @@ def test_the_tools_join_the_end_of_the_list_in_a_fixed_order() -> None:
         "extend_behavior",
         "compact_context",
     ]
+    unified = list(structure_of(_resolved(cheats="on", behaviors="on"), prompt_version="v44")[0])
+    assert unified == off_tools[:-1] + [
+        "call_game_function", "stop_behavior", "extend_behavior", "compact_context",
+    ]
+
+
+def test_unified_read_only_call_uses_wire_guard_and_records_observation() -> None:
+    async def run() -> None:
+        catalog = GameFunctionCatalog(
+            cheats=[GameFunctionEntry(name="get_xp", readOnly=True)],
+            behaviors=[GameFunctionEntry(name="get_xp")],
+        )
+        channel, state, tools, sent, _ = make(catalog=catalog, prompt_version="v44")
+        tool = tools["call_game_function"]
+        payload = {"step": 1, "name": "get_xp", "thought": "read XP"}
+        assert "ambiguous" in await tool.ainvoke(payload)
+        assert not actions(sent)
+        state.current_case_id = 1
+        channel.evaluation.attempts[1] = "attempt-1"
+        state.last_action_frame = 23
+        assert "outside the active test case" in await tool.ainvoke({**payload, "kind": "cheat", "step": 3})
+        reply = answer(channel, sent, {"id": 1, "success": True, "returnValue": {"message": "xp=7"}})
+        result = await tool.ainvoke({**payload, "kind": "cheat"})
+        await reply
+        action = actions(sent)[0]["payload"]["actions"][0]
+        assert action["method"] == "invoke_cheat"
+        assert action["params"][0]["requireReadOnly"] is True
+        assert "query-1 — xp=7" in result
+        assert state.function_observations == {"query-1": ("attempt-1", "xp=7")}
+        assert state.last_action_frame == 23
+        assert "invoke_cheat" not in state.dispatched_action_params
+
+    asyncio.run(run())
+
+
+def test_unified_setup_and_running_functions_keep_legacy_wire_results() -> None:
+    async def run() -> None:
+        channel, _, tools, sent, _ = make(prompt_version="v44")
+        call = tools["call_game_function"]
+        reply = answer(channel, sent, {"id": 1, "success": True, "returnValue": {"message": "gold=5"}})
+        setup = await call.ainvoke(
+            {"step": 1, "name": "give_gold", "thought": "setup", "arguments": {"amount": 5}},
+        )
+        await reply
+        assert "gold=5" in setup
+        reply = answer(channel, sent, {"id": 1, "success": True, "returnValue": {"behaviorId": 7}})
+        running = await call.ainvoke({"step": 1, "name": "flee", "thought": "start", "max_seconds": 15})
+        await reply
+        assert "started as #7" in running
+        setup_action, running_action = [frame["payload"]["actions"][0] for frame in actions(sent)]
+        assert setup_action["method"] == "invoke_cheat"
+        assert "requireReadOnly" not in setup_action["params"][0]
+        assert running_action["method"] == "start_behavior"
+        assert running_action["params"][0]["maxSeconds"] == 15
+
+    asyncio.run(run())
 
 
 def test_the_call_budget_grows_only_for_an_axis_that_is_on() -> None:
@@ -772,7 +829,8 @@ def test_session_open_takes_the_catalog_and_the_two_arch_keys() -> None:
         config = response.json()["run_config"]
         assert config["arch"]["cheats"] == "on"
         tools = config["tools"]
-        assert tools.index("run_cheat") < tools.index("start_behavior")
+        assert "call_game_function" in tools
+        assert not {"run_cheat", "start_behavior"} & set(tools)
         assert {"stop_behavior", "extend_behavior"} <= set(tools)
 
         record = asyncio.run(service._load(response.json()["session_id"]))

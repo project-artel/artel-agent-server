@@ -66,6 +66,20 @@ def test_근거_없는_항목이_있으면_확인됨이_아니다() -> None:
     assert cite([], memory(), set(), None)[1] == "none"
 
 
+def test_읽기_전용_조회는_해당_시도의_기록값과_대조한다() -> None:
+    before = EvidenceSource(kind="query", object="query-1", value="xp=7")
+    after = EvidenceSource(kind="query", object="query-2", value="xp=8")
+    recorded = {"query-1": "xp=7", "query-2": "xp=8"}
+    assert cite([check("yes", before, after)], memory(), set(), None, recorded)[1] == "verified"
+    altered = after.model_copy(update={"value": "xp=9"})
+    wrong, status = cite([check("yes", altered)], memory(), set(), None, recorded)
+    assert status == "uncertain"
+    assert wrong[0]["sources"][0]["citation"] == "mismatch"
+    missing, status = cite([check("yes", before)], memory(), set(), None, {})
+    assert status == "uncertain"
+    assert missing[0]["sources"][0]["citation"] == "missing"
+
+
 def test_판정과_항목이_반대면_사정을_말한다() -> None:
     assert contradiction(True, [check("no")]) is not None
     assert contradiction(False, [check("yes"), check("yes")]) is not None

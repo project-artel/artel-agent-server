@@ -106,7 +106,13 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         cited_checks, evidence = None, None
         if checks:
             pulse = channel.scene.pulse
-            cited_checks, evidence = cite(checks, pulse, state.shown_captures, pulse.scene or channel.scene.scene)
+            queries = {
+                key: message for key, (owner, message) in state.function_observations.items()
+                if owner == str(attempt_id)
+            }
+            cited_checks, evidence = cite(
+                checks, pulse, state.shown_captures, pulse.scene or channel.scene.scene, queries,
+            )
         citations = [entry for entry in dict.fromkeys(used_knowledge_ids) if state.knows_of(entry)]
         rejected_citations = len(set(used_knowledge_ids) - set(citations))
         if pending is None:
