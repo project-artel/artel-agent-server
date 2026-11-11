@@ -21,7 +21,7 @@ import asyncio
 import pytest
 
 from app.agents.scenario import jev_criteria as spec
-from app.agents.scenario.router import JevScenarioRouter, Route, ScenarioRouter
+from app.agents.scenario.router import JevScenarioRouter, Route, RouteVerdict, ScenarioRouter
 from app.prompts import resolve_version
 
 
@@ -106,6 +106,40 @@ def test_a_failed_call_falls_back_to_authoring_instead_of_killing_the_turn() -> 
     made._decide = boom  # type: ignore[method-assign]
     verdict = asyncio.run(made.route("전투도 짜줘"))
     assert verdict.route is Route.AUTHORING
+
+
+def test_a_failed_jev_hands_the_turn_to_the_session_model() -> None:
+    """Jev 가 실패하면 세션이 고른 model 이 같은 갈래를 고른다(ARTEL-1426). 곧장 저작으로 보내지 않는다."""
+    asked: list[tuple[str, str | None]] = []
+
+    async def session_model(prompt: str, model: str | None = None) -> RouteVerdict:
+        asked.append((prompt, model))
+        return RouteVerdict(route=Route.GREETING)
+
+    made = JevScenarioRouter(caller=session_model)
+
+    async def boom(_: str) -> dict:
+        raise RuntimeError("결정 모델 죽음")
+
+    made._decide = boom  # type: ignore[method-assign]
+    verdict = asyncio.run(made.route("안녕", model="claude/claude-sonnet-5-5"))
+
+    assert verdict.route is Route.GREETING
+    assert [model for _, model in asked] == ["claude/claude-sonnet-5-5"]
+    assert "안녕" in asked[0][0]
+
+
+def test_when_the_session_model_also_fails_the_turn_goes_to_authoring() -> None:
+    async def also_broken(prompt: str, model: str | None = None) -> RouteVerdict:
+        raise RuntimeError("세션 model 도 죽음")
+
+    made = JevScenarioRouter(caller=also_broken)
+
+    async def boom(_: str) -> dict:
+        raise RuntimeError("결정 모델 죽음")
+
+    made._decide = boom  # type: ignore[method-assign]
+    assert asyncio.run(made.route("전투도 짜줘", model="openai/gpt-6-luna")).route is Route.AUTHORING
 
 
 def test_an_unknown_route_name_falls_back_instead_of_raising() -> None:

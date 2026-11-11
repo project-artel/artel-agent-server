@@ -243,7 +243,10 @@ class ScenarioAgent:
         # 그 갈래는 아래 루프 그대로라 오분류가 무동작이 되지 않는다.
         if self._router is not None and request.current_route is None:
             verdict = await self._router.route(
-                request.user_input, context_hint=_hint(request), previous=_previous_turn(request)
+                request.user_input,
+                context_hint=_hint(request),
+                previous=_previous_turn(request),
+                model=request.model,
             )
             if verdict.route in (Route.MODIFY, Route.ASK) and not any(
                 scenario.scenario_id is not None for scenario in request.current_scenarios

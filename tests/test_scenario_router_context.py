@@ -81,7 +81,7 @@ def test_previous_turn_is_none_without_a_reply() -> None:
 
 
 def _fixed(route: Route) -> ScenarioRouter:
-    async def caller(prompt: str) -> RouteVerdict:
+    async def caller(prompt: str, model: str | None = None) -> RouteVerdict:
         return RouteVerdict(route=route)
 
     return ScenarioRouter(caller=caller)

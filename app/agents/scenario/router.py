@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.llm.decision import JEV_MODEL, decide
-from app.llm.chat_model import build_chat_model
+from app.llm.chat_model import structured
 from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig, get_model_spec
 from app.prompts import load_prompt
 
@@ -75,7 +75,8 @@ def router_model() -> LLMModel:
         raise ValueError(f"router_model (ROUTER_MODEL): {error}") from error
     return configured
 
-RouterCall = Callable[[str], Awaitable[RouteVerdict]]
+# 프롬프트와, 그 판정을 맡을 model. model 이 None 이면 `router_model()` 이다.
+RouterCall = Callable[[str, LLMModel | None], Awaitable[RouteVerdict]]
 
 
 _OPTIONS = re.compile(r"\((?:보기|Options): ([^)]*)\)")
@@ -101,11 +102,12 @@ class PreviousTurn:
     assistant: str
 
 
-async def _call_model(prompt: str) -> RouteVerdict:
+async def _call_model(prompt: str, model: LLMModel | None = None) -> RouteVerdict:
     # 추론 끔(max_tokens=0) — 669토큰짜리 분류에 추론이 지연 13초·출력 수백 토큰을
     # 쓰던 실측(2026-09-09). 라우터가 느리면 모든 갈래가 그만큼 늦게 시작한다.
-    chat = build_chat_model(router_model(), ReasoningConfig(max_tokens=0))
-    chain = chat.with_structured_output(RouteVerdict, method="json_schema")
+    # `model` 은 세션이 고른 model 이다(ARTEL-1426). 사용자가 고른 model · key 로 대화하는 동안에는 판정도 그것으로
+    # 한다. 어느 provider 든 같은 모양으로 답하게 `structured` 가 방식을 고른다.
+    chain = structured(model or router_model(), RouteVerdict, ReasoningConfig(max_tokens=0))
     return await chain.ainvoke(prompt)
 
 
@@ -116,17 +118,21 @@ class ScenarioRouter:
         self._caller = caller or _call_model
 
     async def route(
-        self, user_input: str, context_hint: str = "", previous: PreviousTurn | None = None
+        self,
+        user_input: str,
+        context_hint: str = "",
+        previous: PreviousTurn | None = None,
+        model: LLMModel | None = None,
     ) -> RouteVerdict:
         # `previous` 는 결정 전용 모델이 칸으로 받는 같은 문맥이다. 이 라우터는 산문 하나로 받으므로
-        # `context_hint` 만 읽는다.
+        # `context_hint` 만 읽는다. `model` 은 세션이 고른 model 이다(ARTEL-1426) — 없으면 `router_model()`.
         # 분류 문구는 버전 파일에 있다 (`app/prompts/scenario_router/`) — 잠금과
         # 버전 기록을 다른 프롬프트와 같은 방식으로 받기 위해서다.
         prompt = load_prompt("scenario_router", "system").body.format(
             user_input=user_input, context_hint=context_hint or "(none)"
         )
         try:
-            verdict = await self._caller(prompt)
+            verdict = await self._caller(prompt, model)
         except Exception as error:  # noqa: BLE001 — 라우터 실패가 턴을 죽이면 안 된다
             logger.warning("[scenario] router failed — falling back to authoring: %s", error)
             return RouteVerdict(route=Route.AUTHORING)
@@ -240,7 +246,11 @@ class JevScenarioRouter(ScenarioRouter):
         return answer["answers"]
 
     async def route(
-        self, user_input: str, context_hint: str = "", previous: PreviousTurn | None = None
+        self,
+        user_input: str,
+        context_hint: str = "",
+        previous: PreviousTurn | None = None,
+        model: LLMModel | None = None,
     ) -> RouteVerdict:
         # 산문 문맥(`context_hint`)은 읽지 않는다 — 같은 내용을 `previous` 로 칸을 나눠 받는다.
         try:
@@ -248,8 +258,14 @@ class JevScenarioRouter(ScenarioRouter):
             picked = Route(answers["route"]["choice"])
             target = answers["target"]["choice"]
         except Exception as error:  # noqa: BLE001 — 라우터 실패가 턴을 죽이면 안 된다
-            logger.warning("[scenario] jev router failed — falling back to authoring: %s", error)
-            return RouteVerdict(route=Route.AUTHORING)
+            if model is None:
+                logger.warning("[scenario] jev router failed — falling back to authoring: %s", error)
+                return RouteVerdict(route=Route.AUTHORING)
+            # **Jev 가 못 하면 세션이 고른 model 이 판정한다**(ARTEL-1426). 예전에는 곧장 저작으로 보내서, "안녕" 에도
+            # 케이스 전량을 싣는 저작 턴이 돌았다. 고른 model 은 산문 라우터의 프롬프트(직전 대화 포함)를 받는다.
+            # 그것마저 실패하면 산문 라우터가 저작으로 보낸다.
+            logger.warning("[scenario] jev router failed — routing with the session model %s: %s", model, error)
+            return await super().route(user_input, context_hint=context_hint, previous=previous, model=model)
 
         if picked is Route.MODIFY and target != _ASK_WHEN_TARGET_IS_NOT:
             # 직전 질문의 보기를 그대로 골랐으면 그 질문이 가리킨 시나리오에 대한 답이다. 대상을 되묻지 않는다 —

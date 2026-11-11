@@ -26,7 +26,7 @@ def _case_list() -> list[TestCaseListItem]:
 
 
 def _fixed_router(route: Route, reply: str = "") -> ScenarioRouter:
-    async def caller(prompt: str) -> RouteVerdict:
+    async def caller(prompt: str, model: str | None = None) -> RouteVerdict:
         assert "User message:" in prompt  # 프롬프트 조립이 살아 있는지까지 겸사겸사
         return RouteVerdict(route=route, reply=reply)
 
@@ -162,7 +162,7 @@ def test_workflow_off_falls_back_to_the_loop_with_full_context(monkeypatch) -> N
 
 
 def test_router_failure_falls_back_to_authoring() -> None:
-    async def broken(prompt: str) -> RouteVerdict:
+    async def broken(prompt: str, model: str | None = None) -> RouteVerdict:
         raise RuntimeError("router down")
 
     verdict = asyncio.run(ScenarioRouter(caller=broken).route("아무 말"))
