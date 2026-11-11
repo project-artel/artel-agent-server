@@ -1219,14 +1219,15 @@ def test_a_still_screen_is_reported_as_still_not_as_silence() -> None:
 def test_actions_that_keep_changing_nothing_are_told_to_stop_repeating() -> None:
     """아무것도 안 바뀐 행위가 셋 이어지면 같은 방식을 멈추라고, 여덟이면 케이스를 닫고 넘어가라고 말한다.
 
-    판독이 끊긴 채 같은 클릭을 27번 한 런이 있었다. 모델은 매번 "그대로" 만 받았다. 움직인 행위는 수를 지운다.
+    `pulse`가 끊긴 채 같은 클릭을 27번 한 run에서 모델은 매번 "그대로"만 받았다.
     """
 
     async def run() -> None:
-        channel, state, tools, sent = make(timeout=1.0)
+        channel, state, tools, sent = make(total_steps=2, timeout=1.0)
         channel.on_pulse(reading(objects=[start_button()]))
+        await start_case(tools)
 
-        async def click(moves: bool) -> str:
+        async def click(moves: bool, step: int = 1) -> str:
             before = len(actions(sent))
 
             async def reply() -> None:
@@ -1244,7 +1245,7 @@ def test_actions_that_keep_changing_nothing_are_told_to_stop_repeating() -> None
                     channel.on_pulse(reading(reading_id=2, objects=[start_button()]))
 
             asyncio.create_task(reply())
-            return await tools["click_button"].ainvoke({"step": 1, "thought": "누른다", "target_id": -101})
+            return await tools["click_button"].ainvoke({"step": step, "thought": "누른다", "target_id": -101})
 
         bodies = [await click(moves=False) for _ in range(3)]
         assert "in a row changed nothing" not in bodies[1]
@@ -1254,7 +1255,16 @@ def test_actions_that_keep_changing_nothing_are_told_to_stop_repeating() -> None
             last = await click(moves=False)
         assert "8 actions in a row changed nothing. Stop here: report the current test case as INCONCLUSIVE" in last
 
-        await click(moves=True)
+        await start_case(tools)
+        assert state.still_streak == 8
+        await tools["report_test_case"].ainvoke(
+            {"case_id": 1, "verdict": "INCONCLUSIVE", "message": "화면 변화 없음", "thought": "판정"}
+        )
+        await start_case(tools, case_id=2)
+        assert "in a row changed nothing" not in await click(moves=False, step=2)
+        assert state.still_streak == 1
+
+        await click(moves=True, step=2)
         assert state.still_streak == 0
 
     asyncio.run(run())

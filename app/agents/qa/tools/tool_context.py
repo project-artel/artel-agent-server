@@ -284,7 +284,7 @@ def _press_sentence(landing: PressLanding, value: dict) -> str:
 
 # 아무것도 안 바뀐 행위가 이만큼 이어지면 같은 방식을 멈추라고 말한다. 셋은 클릭 하나를 좌표를 바꿔 두 번
 # 더 해 본 것이다 — 그 이상은 방식이 틀린 것이다. 여덟이면 이 케이스를 미판정으로 닫고 넘어가라고 한다.
-# 로그에서 하나의 케이스에 아무 일도 안 일어난 입력이 27번 이어진 일이 있었다(판독이 끊긴 채 모든 행위가
+# 로그에서 하나의 케이스에 아무 일도 안 일어난 입력이 27번 이어진 일이 있었다(`pulse`가 끊긴 채 모든 행위가
 # "그대로"로 읽혔다). 그 사이 모델은 매번 같은 답을 받고 같은 일을 했다.
 STALL_RETHINK = 3
 STALL_GIVE_UP = 8
@@ -293,8 +293,8 @@ STALL_GIVE_UP = 8
 def _stall_note(state: QaRunState, change: ScreenChange) -> str:
     """아무것도 안 바뀐 행위가 이어진 수를 세고, 문턱을 넘으면 답에 붙일 말을 낸다.
 
-    움직인 행위가 수를 0 으로 돌린다. 모르는 행위(`unknown`)는 세지도 지우지도 않는다 — 판독을 안 보내는
-    빌드에서 멀쩡한 조작을 멈춤으로 세지 않는다.
+    화면을 바꾼 행위는 수를 0으로 돌린다. `pulse`를 보내지 않는 빌드의 조작을 멈춤으로 세지
+    않도록 `unknown`은 횟수를 그대로 둔다.
     """
     if change == ScreenChange.moved:
         state.still_streak = 0
