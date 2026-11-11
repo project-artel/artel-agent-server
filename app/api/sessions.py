@@ -3,7 +3,7 @@ import contextlib
 import logging
 
 import openai
-from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, ValidationError
 
 from app.agents import (
@@ -18,6 +18,8 @@ from app.agents import (
     TestCaseListItem,
 )
 from app.llm.catalog import ModelCatalogUnavailableError
+from app.llm.chat_model import key_service_of
+from app.llm.credentials import LlmKey, LlmKeyService
 from app.llm.models import DEFAULT_MODEL, EnabledLLMModel, ReasoningConfig, validate_reasoning
 from app.sessions.channel import ScenarioChannel
 from app.sessions.service import SessionService
@@ -69,6 +71,23 @@ class OpenSessionRequest(BaseModel):
     # The run's current scenarios at open (ARTEL-206 Step 6); lets the agent edit
     # existing scenarios by echoing their `scenario_id`. Empty for a fresh run.
     current_scenarios: list[ScenarioPlan] = Field(default_factory=list)
+    # 사용자가 고른 model 을 부를 key(ARTEL-1426). 사용자 · 프로젝트 key 로 도는 세션에만 실려 온다. 없으면 공용 key 다.
+    llm_key: LlmKey | None = Field(default=None, repr=False)
+
+
+def _missing_key(model: str, llm_key: LlmKey | None) -> str | None:
+    """`gpt/` 는 공용 key 가 없다. 열고 나서 첫 model 호출에서 죽게 두지 않고 먼저 거절한다(QA 세션과 같은 규칙).
+
+    pydantic validator 로 두지 않는다. 그 422 는 요청 본문을 `input` 으로 되돌려 보내 key 가 응답과 로그에 남는다.
+    """
+    if key_service_of(model) is LlmKeyService.openai and (
+        llm_key is None or llm_key.service is not LlmKeyService.openai
+    ):
+        return (
+            f"Model '{model}' is called with the user's own OpenAI API key; "
+            "send llm_key with service 'openai'."
+        )
+    return None
 
 
 class OpenSessionResponse(BaseModel):
@@ -95,6 +114,8 @@ class TurnMessage(BaseModel):
     test_case_list: list[TestCaseListItem] | None = None
     starting_values: dict[str, str] | None = None
     declined_cases: list[str] | None = None
+    # `model` 과 함께 오는 key(ARTEL-1426). model 을 바꾸는 턴에만 뜻이 있다 — model 이 없으면 세션의 key 를 그대로 쓴다.
+    llm_key: LlmKey | None = Field(default=None, repr=False)
 
 
 def _service(app) -> SessionService:
@@ -134,6 +155,9 @@ async def open_session(
     # **못 켜는 모델이면 열 때 거절한다.** 이 검사는 `build_chat_model` 도 하지만 그것은
     # 턴 도중이라, 사용자는 세션이 열린 뒤에야 실패를 본다. QA 런과 같은 자리로 당긴다.
     validate_reasoning(payload.model, payload.reasoning)
+    missing = _missing_key(payload.model, payload.llm_key)
+    if missing is not None:
+        raise HTTPException(status_code=422, detail=missing)
     session_id = await _service(request.app).open(
         unity_context=payload.unity_context,
         game_context=payload.game_context,
@@ -152,6 +176,7 @@ async def open_session(
         project_id=payload.project_id,
         app_user_id=payload.app_user_id,
         current_scenarios=payload.current_scenarios,
+        llm_key=payload.llm_key,
     )
     return OpenSessionResponse(session_id=session_id)
 
@@ -314,6 +339,10 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                 except ModelCatalogUnavailableError as error:
                     await send(_error_event("model_catalog_unavailable", str(error)))
                     continue
+                missing = _missing_key(turn.model, turn.llm_key) if turn.model is not None else None
+                if missing is not None:
+                    await send(_error_event("bad_request", missing))
+                    continue
                 current = asyncio.create_task(
                     service.run_turn(
                         session_id,
@@ -326,6 +355,7 @@ async def session_ws(websocket: WebSocket, session_id: str) -> None:
                         turn.test_case_list,
                         turn.starting_values,
                         turn.declined_cases,
+                        turn.llm_key,
                     )
                 )
                 continue
