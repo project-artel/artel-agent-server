@@ -24,6 +24,7 @@ from app.agents.planner_executer.decisions import (
     clip,
     note_decision,
 )
+from app.agents.planner_executer.inputs import InputsReader
 from app.agents.planner_executer.developer_macros import (
     NO_DEVELOPER_MACROS,
     LoadedDeveloperMacros,
@@ -317,6 +318,7 @@ class Planner:
         developer: LoadedDeveloperMacros = NO_DEVELOPER_MACROS,
         ledger: ActionLedger | None = None,
         facts: GameFacts = NO_FACTS,
+        inputs: InputsReader | None = None,
     ) -> None:
         self._config = config
         # 개발자가 선언한 fact·rule. `facts="on"` 일 때만 요청에 싣고 ```facts 블록을 읽는다.
@@ -348,6 +350,10 @@ class Planner:
         self.targets: StepContracts | None = None
         # 지금 쓰는 답에 붙일 화면 한 장. `_write` 가 매번 새로 찍는다.
         self._image: ScreenImage | None = None
+        # 이 빌드가 읽는 입력(SDK `list_inputs`). `_write`·`plan_scene` 이 매번 새로 묻는다 — Input System action 은
+        # 씬마다 바뀐다.
+        self._inputs_reader = inputs if inputs is not None else InputsReader(channel)
+        self._inputs: str | None = None
         self._model = None
         # 요청의 앞부분 중 런 동안 바뀌지 않는 것(게임 지도, developer macro 목록, 시나리오 제목). Claude 호출이 그 끝에
         # cache 경계를 둔다(`prompt_messages`). 요청을 만들 때마다 다시 정한다.
@@ -405,6 +411,7 @@ class Planner:
         candidates = list(by_case)
         feedback = ""
         plan = ScenePlan([], {}, None, "nothing was written")
+        self._inputs = await self._inputs_reader.read()
         for attempt in range(self._spec.max_rewrites + 1):
             await self._channel.note(
                 f"Scene {self._channel.scene.pulse.scene or '?'}: the planner is planning {len(steps)} cases"
@@ -463,6 +470,7 @@ class Planner:
         self._stable_prefix = self._run_context(scenario)
         return (
             self._stable_prefix
+            + (f"{self._inputs}\n\n" if self._inputs else "")
             + f"Scene on screen: {self._channel.scene.pulse.scene or '(unknown)'}\n\n"
             + f"Candidate cases:\n{candidate_list(scenario, steps)}\n\n"
             + f"Current screen:\n{screen(self._channel.scene.pulse)}\n"
@@ -491,6 +499,7 @@ class Planner:
             if self._spec.screen_images == "on"
             else None
         )
+        self._inputs = await self._inputs_reader.read()
         for attempt in range(self._spec.max_rewrites + 1):
             await self._channel.note(
                 f"{label}: the planner is writing macros"
@@ -632,6 +641,7 @@ class Planner:
         return (
             self._stable_prefix
             + self._ledger.lessons(self._channel.scene.pulse)
+            + (f"{self._inputs}\n\n" if self._inputs else "")
             + f"Write step {step} now:\n{shown}\n\n"
             + planner_note(
                 self.targets, step, step_text(scenario.steps[step]) if self.targets is not None and step < len(scenario.steps) else None

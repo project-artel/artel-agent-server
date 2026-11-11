@@ -37,6 +37,7 @@ from app.agents.planner_executer.developer_macros import (
     NO_DEVELOPER_MACROS,
     LoadedDeveloperMacros,
 )
+from app.agents.planner_executer.inputs import InputsReader
 from app.agents.planner_executer.macros import DeveloperAction, RegisteredMacros, StepMacros, parse_step
 from app.agents.qa.macro.parser import imported_names
 from app.agents.planner_executer.planner import Ask, _text, extract_code, normalize_paths
@@ -78,6 +79,7 @@ class MacroEditor:
         registered: RegisteredMacros,
         ask: Ask | None = None,
         developer: LoadedDeveloperMacros = NO_DEVELOPER_MACROS,
+        inputs: InputsReader | None = None,
     ) -> None:
         self._config = config
         self._channel = channel
@@ -87,6 +89,10 @@ class MacroEditor:
         self._system = prompt_text(MACRO_REPAIR_ROLE, config.prompt_version)
         self._ask = ask or self._ask_model
         self._model = None
+        # 이 빌드가 읽는 입력(SDK `list_inputs`). editor 는 매크로가 게임을 움직이지 못했을 때 불리고, 그 원인이 게임이 읽지
+        # 않는 키일 때가 많다. 그래서 planner 와 같은 절을 다시 쓸 때마다 새로 읽어 싣는다.
+        self._inputs_reader = inputs if inputs is not None else InputsReader(channel)
+        self._inputs: str | None = None
 
     def for_step(self, scenario: QaScenario, step: int) -> Repair:
         """The callable the executer takes for one step."""
@@ -121,6 +127,7 @@ class MacroEditor:
         }
         feedback = ""
         repaired = Repaired(macros.source, None, "nothing was written")
+        self._inputs = await self._inputs_reader.read()
         for attempt in range(self._spec.max_rewrites + 1):
             await self._channel.note(
                 f"Step {step}: the editor is rewriting the macros around `{action}`"
@@ -209,7 +216,9 @@ class MacroEditor:
             + (self._developer_sources(macros, action) if is_developer else "")
             + f"How its last {len(shown_turns)} runs went:\n"
             + "\n".join(evidence_lines(shown_turns))
-            + f"\n\nCurrent screen:\n{screen(self._channel.scene.pulse)}\n"
+            + "\n\n"
+            + (f"{self._inputs}\n\n" if self._inputs else "")
+            + f"Current screen:\n{screen(self._channel.scene.pulse)}\n"
             + (f"\n{feedback}\n" if feedback else "")
         )
 
