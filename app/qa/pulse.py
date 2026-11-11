@@ -454,6 +454,7 @@ class PulseReading(BaseModel):
     #
     # 없으면 없는 대로 돈다. 이 필드를 모르는 SDK 에서는 종전처럼 전량 판독까지 잔상이 남는다.
     gone: list[str] = Field(default_factory=list)
+    offscreen: list[str] = Field(default_factory=list)
     # Written even when empty: an empty list and a missing field are different
     # claims, and the reading means the first.
     changed: list[str] = Field(default_factory=list)
@@ -963,6 +964,11 @@ class PulseMemory(BaseModel):
         # 판독이 말한 것만 지운다. 통에 안 왔다는 이유로 지우면 판독이 잘린 창에서 살아 있는
         # 객체를 잃는다 — 안 걸은 것과 없는 것은 걷는 쪽만 가릴 수 있고, 그래서 이 목록이
         # 생겼다(ARTEL-651).
+        for key in reading.offscreen:
+            self.held.pop(key, None)
+            self.off_at.pop(key, None)
+            self.gone_at.pop(key, None)
+
         for key in reading.gone:
             self.held.pop(key, None)
             # 꺼진 채로 파괴된 것이다. 두 번 말하지 않는다 — `gone` 이 더 센 말이다.
