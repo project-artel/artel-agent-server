@@ -24,8 +24,8 @@ from tests.conftest import MODEL_CATALOG_FIXTURE
 
 BASE_URL = "http://orchestration:8081"
 
+# Bedrock 행 셋(10 · 140 · 150)은 ARTEL-1438 에서 걷었다. 남은 행은 순번을 그대로 갖는다.
 SEED_IDS = [
-    "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
     "openai/gpt-6.1-sol",
     "openai/gpt-6-astra",
     "openai/gpt-6-luna",
@@ -38,8 +38,6 @@ SEED_IDS = [
     "moonshotai/kimi-k3",
     "z-ai/glm-5.3-flash",
     "qwen/qwen3.7-max",
-    "bedrock/us.anthropic.claude-haiku-5-5",
-    "bedrock/us.openai.gpt-6.1-sol",
     "claude/claude-opus-5-5",
     "claude/claude-sonnet-5-5",
     "claude/claude-haiku-5-5",
@@ -50,8 +48,8 @@ SEED_IDS = [
     "gpt/gpt-5.6-terra",
 ]
 
-CLAUDE_IDS = SEED_IDS[15:19]
-GPT_IDS = SEED_IDS[19:]
+CLAUDE_IDS = SEED_IDS[12:16]
+GPT_IDS = SEED_IDS[16:]
 
 
 class FakeClock:
@@ -89,17 +87,14 @@ def answer(rows):
 # --- the fixture mirrors the seed ----------------------------------------------
 
 
-def test_fixture_mirrors_the_twenty_three_seed_rows_in_order() -> None:
+def test_fixture_mirrors_the_twenty_seed_rows_in_order() -> None:
     rows = fixture_rows()
 
     assert [row["id"] for row in rows] == SEED_IDS
-    assert [row["sortOrder"] for row in rows] == list(range(10, 240, 10))
+    assert [row["sortOrder"] for row in rows] == [n for n in range(10, 240, 10) if n not in (10, 140, 150)]
+    assert not any(row["id"].startswith("bedrock/") for row in rows)
     disabled = [row["id"] for row in rows if not row["enabled"]]
-    assert disabled == [
-        "bedrock/us.anthropic.claude-haiku-5-5",
-        "bedrock/us.openai.gpt-6.1-sol",
-        *CLAUDE_IDS,
-    ]
+    assert disabled == CLAUDE_IDS
 
 
 def test_claude_api_rows_parse_with_effort_reasoning_and_pricing() -> None:
@@ -165,13 +160,13 @@ def test_gpt_모델은_호출_경로별_이름과_단가를_사용한다() -> No
 def test_parsing_builds_specs_with_id_enabled_reasoning_and_pricing() -> None:
     catalog = parse_model_catalog(fixture_rows())
 
-    haiku = catalog["bedrock/us.anthropic.claude-haiku-5-5"]
-    assert haiku.id == "bedrock/us.anthropic.claude-haiku-5-5"
+    haiku = catalog["claude/claude-haiku-5-5"]
+    assert haiku.id == "claude/claude-haiku-5-5"
     assert haiku.enabled is False
     assert haiku.provider is LLMProvider.anthropic
-    assert haiku.supports_strict_json is False
+    assert haiku.supports_strict_json is True
     assert haiku.max_input_tokens == 872_000
-    assert haiku.input_modalities == ("text", "image")
+    assert haiku.input_modalities == ("text", "image", "file")
     assert haiku.reasoning is ReasoningKind.effort
     assert haiku.reasoning_efforts == tuple(ReasoningEffort)
     assert haiku.pricing == ModelPricing(
@@ -179,8 +174,8 @@ def test_parsing_builds_specs_with_id_enabled_reasoning_and_pricing() -> None:
         output_per_mtok=0.50,
         cache_write_per_mtok=0.125,
         cache_read_per_mtok=0.01,
-        as_of="2026-10-13",
-        source="Anthropic Claude Haiku 5.5 overview",
+        as_of="2026-10-14",
+        source="Anthropic model table (claude-api skill, cached 2026-10-06)",
         long_context_threshold_tokens=100_000,
         long_context_input_per_mtok=0.50,
         long_context_output_per_mtok=2.50,
@@ -190,7 +185,7 @@ def test_parsing_builds_specs_with_id_enabled_reasoning_and_pricing() -> None:
 
     assert haiku.reasoning_default_tokens is None
 
-    sol = catalog["bedrock/us.openai.gpt-6.1-sol"]
+    sol = catalog["openai/gpt-6.1-sol"]
     assert sol.provider is LLMProvider.openai
     assert sol.max_input_tokens == 922_000
     assert sol.input_modalities == ("text", "image", "file")
@@ -198,27 +193,28 @@ def test_parsing_builds_specs_with_id_enabled_reasoning_and_pricing() -> None:
 
 
 def test_a_token_budget_row_parses_its_default_budget() -> None:
-    """Haiku 4.5 reasons on a token budget and has no provider default, so the
-    catalog's `reasoning.defaultTokens` is what turns reasoning on when a request
-    leaves it unset."""
-    haiku = parse_model_catalog(fixture_rows())["bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"]
+    """A row that reasons on a token budget carries its range and default budget. No seed row does
+    since the Bedrock rows went (ARTEL-1438), so the row is built here."""
+    row = {
+        **fixture_rows()[0],
+        "id": "anthropic/claude-budget",
+        "provider": "anthropic",
+        "reasoning": {
+            "kind": "max_tokens",
+            "efforts": None,
+            "minTokens": 1024,
+            "maxTokens": 32000,
+            "step": None,
+            "defaultTokens": 4096,
+        },
+    }
+    budget = parse_model_catalog([row])["anthropic/claude-budget"]
 
-    assert haiku.enabled is True
-    assert haiku.supports_strict_json is True
-    assert haiku.max_input_tokens == 183_616
-    assert haiku.reasoning is ReasoningKind.max_tokens
-    assert haiku.reasoning_efforts is None
-    assert haiku.reasoning_min_tokens == 1_024
-    assert haiku.reasoning_max_tokens == 32_000
-    assert haiku.reasoning_default_tokens == 4_096
-    assert haiku.pricing == ModelPricing(
-        input_per_mtok=1.00,
-        output_per_mtok=5.00,
-        cache_write_per_mtok=1.25,
-        cache_read_per_mtok=0.10,
-        as_of="2026-09-03",
-        source="AWS 콘솔, Claude Haiku 4.5 / us-west-2 / on-demand",
-    )
+    assert budget.reasoning is ReasoningKind.max_tokens
+    assert budget.reasoning_efforts is None
+    assert budget.reasoning_min_tokens == 1_024
+    assert budget.reasoning_max_tokens == 32_000
+    assert budget.reasoning_default_tokens == 4_096
 
 
 def test_null_reasoning_and_null_pricing_parse_as_none() -> None:
@@ -239,7 +235,7 @@ def test_parsing_orders_by_sort_order_and_skips_an_unreadable_row() -> None:
 
     catalog = parse_model_catalog(rows)
 
-    assert list(catalog) == ["bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", "openai/gpt-6.1-sol"]
+    assert list(catalog) == ["openai/gpt-6.1-sol", "openai/gpt-6-astra"]
 
 
 def test_a_body_that_is_not_an_array_is_refused() -> None:
@@ -371,7 +367,7 @@ def test_usage_pricing_never_raises_when_the_catalog_is_unavailable(monkeypatch)
     monkeypatch.setattr(catalog_module, "_installed", Unavailable())
 
     cost = _estimate_cost(
-        "bedrock/us.anthropic.claude-haiku-5-5",
+        "claude/claude-haiku-5-5",
         input_tokens=1000,
         output_tokens=10,
         cached_input_tokens=0,

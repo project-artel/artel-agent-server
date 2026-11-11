@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel, Field
 
 import httpx
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 
 from app.agents.base import AgentContext
 from app.config import get_settings
@@ -45,7 +45,6 @@ from app.agents.scenario.progress import (
     THINKING,
     WRITING,
 )
-from app.llm.chat_model import CACHE_POINT
 from app.prompts import load_prompt
 from app.agents.scenario.cases import render_game_shape, render_test_case_list
 from app.agents.scenario.schemas import (
@@ -63,7 +62,7 @@ from app.agents.scenario.schemas import (
     TestCaseListItem,
     free_steps,
 )
-from app.llm.chat_model import build_chat_model
+from app.llm.chat_model import build_chat_model, prompt_messages
 from app.llm.models import LLMModel, ReasoningConfig
 
 if TYPE_CHECKING:
@@ -755,20 +754,21 @@ async def _score_groups(request: ScenarioAgentRequest, groups: list[Group]) -> l
 
 
 async def _call(model: LLMModel, reasoning: ReasoningConfig | None, schema, prompt: tuple[str, str]):
-    """공통 prefix 는 system + 캐시 경계로, 고유분은 human 으로.
+    """공통 prefix 는 system 으로, 고유분은 human 으로.
 
     `cache_prompt=True`(끝-경계)를 안 쓰는 이유: 단발 호출에서는 끝-경계가 전부 쓰고
     아무도 안 읽는다(run 52~54 실측 — 읽기 0, 입력의 99%가 1.25배 쓰기). 경계를
-    prefix 뒤에 직접 놓으면 같은 prefix 의 다음 호출이 0.1배로 되읽는다. 1,024 token
-    미만 prefix 는 경계가 조용히 무시된다 — 손해 없음.
+    prefix 뒤에 직접 놓으면 같은 prefix 의 다음 호출이 0.1배로 되읽는다.
+
+    경계를 놓는 표기는 provider 마다 다르다. 예전에는 Bedrock 의 `cachePoint` block 을 모든 model 에
+    실었는데(ARTEL-1438 에서 Bedrock 을 걷으며 바꿨다), 사용자가 고른 Claude API · OpenAI model 에 그 block 이
+    가면 모르는 content 다. `prompt_messages` 가 Claude API 에는 `cache_control` 경계를 놓고, 다른 provider 에는
+    경계 없이 보낸다(OpenRouter · OpenAI 는 prefix 를 스스로 cache 한다).
     """
     prefix, tail = prompt
     chat = build_chat_model(model, reasoning)
     chain = chat.with_structured_output(schema, method="json_schema")
-    messages = [
-        SystemMessage(content=[{"type": "text", "text": prefix}, CACHE_POINT]),
-        HumanMessage(content=tail),
-    ]
+    messages = prompt_messages(model, prefix, tail)
     return await chain.ainvoke(messages)
 
 

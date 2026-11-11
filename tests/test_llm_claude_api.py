@@ -56,8 +56,6 @@ class _FixedKeys:
     def get_anthropic_key(self) -> str | None:
         return self.anthropic
 
-    def get_bedrock_key(self) -> str | None:
-        return None
 
     def get_openrouter_key_or_placeholder(self) -> str:
         return "missing"

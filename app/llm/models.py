@@ -10,7 +10,7 @@ class LLMProvider(StrEnum):
 
     Kept identical to the slug prefix so a catalog row's provider can be checked
     against its id by reading, and so `build_chat_model`'s Anthropic-only cache
-    branch and `_bedrock`'s provider branch cannot drift.
+    branch cannot drift from it.
     """
 
     openai = "openai"
@@ -39,8 +39,8 @@ class ReasoningConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     effort: ReasoningEffort | None = None
-    # 0 = **추론을 끈다.** None(미지정)과 다르다 — 미지정은 카탈로그 기본 예산으로
-    # 켜진다(Bedrock 경로). 라우터처럼 판단이 얕은 호출이 끄는 데 쓴다: 669토큰
+    # 0 = **추론을 끈다.** None(미지정)과 다르다 — 미지정은 provider 의 기본값을
+    # 따른다. 라우터처럼 판단이 얕은 호출이 끄는 데 쓴다: 669토큰
     # 분류에 추론이 13초·수백 토큰을 쓰던 실측(2026-09-09)이 이 값의 이유다.
     max_tokens: int | None = Field(default=None, ge=0)
 
@@ -94,10 +94,10 @@ class ModelSpec:
 
     `app/llm/catalog.py` 가 `GET /internal/llm-models` 응답으로 만든다. 값은 row 를
     추가하는 migration 에서 serving provider 의 catalog 와 대조한다 — OpenRouter 의
-    `GET /api/v1/models`, `bedrock/` row 는 AWS model card.
+    `GET /api/v1/models`, `claude/` · `gpt/` row 는 각 provider 의 model 문서.
     """
 
-    # OpenRouter slug, 또는 `bedrock/` 뒤에 Bedrock inference profile ID.
+    # OpenRouter slug, 또는 `claude/` · `gpt/` 뒤에 그 provider 의 model id.
     id: str
     provider: LLMProvider
     # True when the model advertises `structured_outputs` (strict json_schema).
@@ -160,7 +160,7 @@ class ModelSpec:
     # 사용자가 고르지 않았을 때 켤 예산. **provider 기본값이 없는 모델에만 쓴다.**
     #
     # OpenRouter 의 GPT-5.6 은 파라미터를 생략하면 자기 기본값(medium)으로 추론한다.
-    # Bedrock 의 Anthropic 은 생략하면 아예 안 한다 — `budget_tokens` 가 필수이고
+    # 예전 Bedrock 의 Anthropic 은 생략하면 아예 안 했다 — `budget_tokens` 가 필수이고
     # 그것을 안 주면 `thinking` 을 켤 수 없다. 그래서 같은 "안 골랐다"가 두 모델에서
     # 정반대로 작동했고, 한쪽만 추론하는 상태로 둘을 비교하고 있었다.
     #
@@ -206,7 +206,7 @@ def require_enabled_model(model: str) -> str:
     return model
 
 
-# 모델 id. OpenRouter slug 이거나 `bedrock/` 뒤에 Bedrock inference profile ID 를 붙인
+# 모델 id. OpenRouter slug 이거나 `claude/` · `gpt/` 뒤에 그 provider 의 model id 를 붙인
 # 문자열이다. id 목록은 orchestration server 의 `llm_model` 테이블에 있으므로 enum 이
 # 아니라, pydantic 이 값을 읽을 때 catalog 와 대조하는 문자열이다. 꺼진 row 도 통과한다.
 LLMModel = Annotated[str, AfterValidator(require_known_model)]

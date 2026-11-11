@@ -27,11 +27,11 @@ class Settings(BaseSettings):
         default="https://openrouter.ai/api/v1",
         validation_alias=AliasChoices("LLM_BASE_URL", "OPENROUTER_BASE_URL"),
     )
-    # Provider keys are not settings. The OpenRouter key and the Bedrock API key
+    # Provider keys are not settings. The OpenRouter key and the Claude API key
     # are entered on the admin page, stored encrypted by the orchestration server,
     # and read from `GET {orchestration_base_url}/internal/settings/llm` (see
-    # app/llm/api_key.py). `OPENROUTER_API_KEY`, `LLM_API_KEY` and `BEDROCK_API_KEY`
-    # in the environment are ignored.
+    # app/llm/api_key.py). `OPENROUTER_API_KEY` and `LLM_API_KEY` in the environment
+    # are ignored.
     #
     # How long a fetched pair of keys is trusted before the next model call asks
     # again. A provider rejecting a key, or `POST /internal/llm-cache/invalidate`,
@@ -169,7 +169,7 @@ class Settings(BaseSettings):
     qa_compaction_trim_tokens: int = 8000
     # 압축을 어느 모델로 하나. **비우면 그 런이 쓰는 모델을 따른다.**
     #
-    # 예전에는 한 슬러그로 고정돼 있었다(`openai/gpt-5.6-luna`). 런은 Bedrock 으로
+    # 예전에는 한 슬러그로 고정돼 있었다(`openai/gpt-5.6-luna`). 런은 다른 경로로
     # 도는데 압축만 OpenRouter 로 나가는 상태가 되면, 그쪽 credit 이 없을 때 압축이
     # **조용히 실패한다** — 실제로 그렇게 됐다. 압축은 컨텍스트가 창을 넘기 전에 접는
     # 유일한 안전판이라, 그것이 안 도는 채로 도는 런은 길어지면 provider 가 거절해서
@@ -180,10 +180,9 @@ class Settings(BaseSettings):
     qa_compaction_model: str | None = None
     scenario_prompt_version: str | None = None
     # Model for the scenario router's one-shot classification. Empty means the
-    # catalog's `DEFAULT_MODEL`, an OpenRouter slug, so a default install needs no
-    # AWS credential and a catalog change cannot leave a stale slug here. An
-    # operator who has Bedrock credentials can set the `bedrock/...` catalog value
-    # to keep the cheaper Haiku route. Checked against the catalog by
+    # catalog's `DEFAULT_MODEL`, an OpenRouter slug, so a catalog change cannot
+    # leave a stale slug here. The scenario chat passes the session model instead
+    # when it has one (ARTEL-1426). Checked against the catalog by
     # `router_model()` when the router runs, not here: the catalog is fetched from
     # the orchestration server and settings load first.
     router_model: str = ""
@@ -236,7 +235,7 @@ class Settings(BaseSettings):
     # HNSW and IVFFlat indexes — 3072 would force halfvec on the storage side.
     embedding_model: str = "openai/text-embedding-3-large"
     # Embeddings authenticate on their own. Chat can move to another gateway or
-    # provider for cost reasons — AWS Bedrock, a proxy, a second account — but
+    # provider for cost reasons — a proxy, a second account — but
     # the embedding model must not move with it: `embedding_dimensions` is
     # pinned into Orchestration's vector(N) column, and a different model fills
     # that column from a different vector space. The stored items and the new
@@ -245,27 +244,9 @@ class Settings(BaseSettings):
     #
     # Unset, both fall back to the chat credentials, so nothing changes for a
     # deployment that has not split them.
-    # Bedrock 호출이 갈 리전. 모델 값의 `us.` 접두가 inference profile 을 정하고,
-    # 이 값은 어느 엔드포인트에 말을 거는지를 정한다. 둘은 다른 축이다.
-    bedrock_region: str = "us-west-2"
-
-    # 답이 안 오는 호출은 기다림이 아니라 실패로 끝나야 한다. botocore 는 기본 60초를
-    # 쓰고 재시도를 우리 뜻과 무관하게 정하는데, 저작 한 판이 그 한 번에 죽었다 —
-    # 실측(2026-09-03)에서 Bedrock 이 4.2만 token 을 2.7초에 답하던 시간대에 호출
-    # 하나가 60초를 넘겨 멈췄고, 턴 전체가 결과 없이 끝났다.
-    #
-    # **토막이 오는 동안은 시간이 안 흐른다.** 답을 토막으로 받으므로(`streaming`) 이 한도의
-    # 뜻은 "다음 토막이 이만큼 안 온다"이지 "답이 이만큼 안 끝난다"가 아니다. 그래서 답의 길이와
-    # 무관하고, 진짜로 멈춘 연결만 걸린다.
-    #
-    # 일찍 끊고 다시 걸려고 45초까지 좁혔다가 되돌린 값이다. 스트리밍이 끊기면 botocore 는 그
-    # 호출을 다시 걸지 못한다 — 실측(2026-09-03)에서 재시도 넷을 남겨 둔 채 턴이 53초에 끝났다.
-    # 다시 걸어 주지 않는다면 좁혀서 얻을 것이 없다.
-    bedrock_timeout_seconds: float = 120.0
-    bedrock_max_attempts: int = 3
-
     # `claude/` 모델 호출의 한도. 답을 streaming 으로 받으므로 이 값은 다음 chunk 를 기다리는
-    # 시간이다. Bedrock 과 같은 120초로 둔다. 재시도는 anthropic SDK 기본값인 2회다.
+    # 시간이지 답 전체의 시간이 아니다 — 답의 길이와 무관하고 진짜로 멈춘 연결만 걸린다.
+    # 120초는 예전 Bedrock 경로가 실측으로 정한 값이다. 재시도는 anthropic SDK 기본값인 2회다.
     anthropic_timeout_seconds: float = 120.0
     anthropic_max_retries: int = 2
 
@@ -282,8 +263,8 @@ class Settings(BaseSettings):
 
     # Required for any model call: the provider keys and the model catalog are
     # read from here. It is also where LLM usage records are shipped. Unset,
-    # usage collection is off, no key is found (OpenRouter answers 401, Bedrock
-    # falls to the AWS credential chain), and the catalog is unavailable.
+    # usage collection is off, no key is found (OpenRouter answers 401), and the
+    # catalog is unavailable.
     orchestration_base_url: str | None = None
     # A batch leaves once either bound is hit. The size keeps a busy QA run from
     # holding a long backlog; the interval keeps a quiet process from holding a

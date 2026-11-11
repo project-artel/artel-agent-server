@@ -6,8 +6,7 @@ the model with the parser's sentences, up to `max_rewrites` times; an answer sti
 that is returned with the refusal, and the runner fails the step without playing it.
 
 The call goes through `build_chat_model` like the tool loop's, so it takes the route the model id
-names — `claude/` to the Claude API, `gpt/` to the OpenAI API, `bedrock/` to Bedrock, anything else
-to OpenRouter — with the user's key when the session bound one and the platform key otherwise,
+names — `claude/` to the Claude API, `gpt/` to the OpenAI API, anything else to OpenRouter — with the user's key when the session bound one and the platform key otherwise,
 and its usage reaches Orchestration under the run's scope.
 """
 

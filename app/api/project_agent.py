@@ -9,7 +9,6 @@ import uuid
 
 import anthropic
 import openai
-from botocore.exceptions import BotoCoreError, ClientError
 from collections.abc import Awaitable, Callable
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -22,6 +21,7 @@ from app.agents.project_agent import ProjectAgent, ProjectAgentRequest, ProjectA
 from app.llm.chat_model import (
     ClaudeApiKeyMissingError,
     GptApiKeyMissingError,
+    RetiredModelError,
     key_service_of,
 )
 from app.llm.credentials import LlmKeyService, bind_llm_key
@@ -73,10 +73,9 @@ router = APIRouter(tags=["project-agent"], route_class=_ProjectAgentRoute)
 _PROVIDER_ERRORS = (
     openai.APIError,
     anthropic.APIError,
-    BotoCoreError,
-    ClientError,
     ClaudeApiKeyMissingError,
     GptApiKeyMissingError,
+    RetiredModelError,
 )
 
 
@@ -84,6 +83,8 @@ def classify_provider_error(error: Exception) -> str:
     """The cause code of a provider failure."""
     if isinstance(error, (ClaudeApiKeyMissingError, GptApiKeyMissingError)):
         return LLM_KEY_MISSING
+    if isinstance(error, RetiredModelError):
+        return LLM_MODEL_UNAVAILABLE
     if isinstance(error, (openai.APIStatusError, anthropic.APIStatusError)):
         status = error.status_code
         if status in (401, 403):

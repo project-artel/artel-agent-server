@@ -63,8 +63,8 @@ def router_model() -> LLMModel:
 
     Fixed regardless of the session's model, since the classification is shallow
     and wants the cheapest option: the first case of mixing models per node. The
-    default is the catalog's `DEFAULT_MODEL`, an OpenRouter slug; a Bedrock model
-    is used only when an operator sets it.
+    default is the catalog's `DEFAULT_MODEL`, an OpenRouter slug. The prose router
+    uses the session model instead when it is given one (ARTEL-1426).
     """
     configured = get_settings().router_model
     if not configured:

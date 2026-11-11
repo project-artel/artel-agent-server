@@ -45,7 +45,7 @@ ReplyCall = Callable[[str, LLMModel], Awaitable[str]]
 
 
 def _as_text(content: object) -> str:
-    """Bedrock 은 본문을 **블록 리스트**로 돌려준다 — 문자열만 받으면 조용히 빈 문구가 된다.
+    """Anthropic 계열은 본문을 **블록 리스트**로 돌려준다 — 문자열만 받으면 조용히 빈 문구가 된다.
 
     실측(2026-10-06): 문자열만 처리했을 때 여섯 건이 전부 폴백으로 떨어졌고, 로그만 보면
     "모델이 빈 답을 줬다" 로 보였다. 모델은 답했고 받는 쪽이 못 읽었다.
