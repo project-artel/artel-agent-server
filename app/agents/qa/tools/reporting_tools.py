@@ -208,7 +208,7 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
     @tool(description="Close the QA run after recording a verdict for every assigned test case with report_test_case. Report INCONCLUSIVE when evidence is insufficient. Reference steps do not require separate verdicts.")
     async def finish_run(passed: bool, summary: str, thought: str) -> str:
         case_ids = dict.fromkeys(case_id for case_id, _ in state.step_meta if case_id is not None)
-        if not case_ids:
+        if not case_ids and not state.executes_steps_without_cases:
             return "Cannot finish the run because no test cases were assigned. Ask the operator to check the test case assignment."
         reported = reported_case_ids()
         missing = [str(case_id) for case_id in case_ids if case_id not in reported]

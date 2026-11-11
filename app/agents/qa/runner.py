@@ -26,7 +26,7 @@ from app.agents.qa.context import (
     fold_context,
 )
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
-from app.agents.qa.question_policy import USER_QUESTION_POLICY
+from app.agents.qa.question_policy import ORDERED_ACTION_POLICY, USER_QUESTION_POLICY
 from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.tools.game_function_tools import focus
 from app.agents.qa.tools.tool_context import ToolContext
@@ -298,6 +298,13 @@ def _plan(scenario: QaScenario) -> str:
                 item["human_review"] = reviews
             cases[step.case_id] = item
     document = {"test_cases": list(cases.values()), "reference_steps": references}
+    if scenario.execution_mode == "ORDERED" and references and not cases:
+        actions = json.dumps([_action_line(step) for step in scenario.steps], ensure_ascii=False, indent=2)
+        return (
+            f"Scenario: {scenario.title} — {scenario.description}\n\n"
+            "Execute the scenario actions below in order using the game tools.\n"
+            f"{actions}\n\nObserve the screen and begin."
+        )
     payload = json.dumps(document, ensure_ascii=False, indent=2)
     if count_tokens_approximately([{"role": "user", "content": payload}]) > TC_DETAIL_BUDGET:
         document = {"test_cases": [
@@ -651,7 +658,9 @@ class QaRunner:
             "and report_test_case after it. "
             "This contract replaces any step-reporting instructions in the preceding prompt."
         )
-        system_prompt += "\n" + USER_QUESTION_POLICY
+        system_prompt += "\n" + (
+            ORDERED_ACTION_POLICY if state.executes_steps_without_cases else USER_QUESTION_POLICY
+        )
         if arch.macros == "on":
             system_prompt += (
                 "\nCurrent macro contract: intermediate dialogue history is not collected or returned. "

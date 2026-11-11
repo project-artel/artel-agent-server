@@ -14,6 +14,15 @@ USER_QUESTION_POLICY = (
     "This question policy overrides any earlier instruction to ask whenever progress is unclear."
 )
 
+ORDERED_ACTION_POLICY = (
+    "This ORDERED scenario has no assigned test cases. Perform the listed actions in order with the game tools "
+    "and observe their outcomes. Use ask_user only to clarify game intent or request a necessary manual "
+    "game-side action unavailable through your tools. For a tool refusal or error, follow the tool contract "
+    "and try permitted alternatives. Call finish_run with passed=true once all actions are complete. "
+    "If you cannot complete them, call finish_run with passed=false. Summarize what you executed and where "
+    "and why you stopped if blocked. Do not call test-case tools or ask for test cases to be assigned."
+)
+
 ASK_USER_DESCRIPTION = (
     "TC 원문과 사용 가능한 관찰·도구를 확인한 뒤에도 게임 의도·기대 결과가 불명확하거나 "
     "도구로 수행할 수 없는 사람의 게임 내 작업이 꼭 필요할 때만 질문한다. "

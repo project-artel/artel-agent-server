@@ -4,8 +4,11 @@ import asyncio
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
+import pytest
+
 from app.agents.qa.arch import default_resolved_arch, PhaseCycleMode
-from app.agents.qa.runner import _plan
+from app.agents.qa.compaction import render_progress_ledger
+from app.agents.qa.runner import _plan, _step_plan
 from app.agents.qa.tools.reporting_tools import build_reporting_tools
 from app.agents.qa.tools.state import QaRunState
 from app.agents.qa.tools.tool_context import ToolContext
@@ -52,11 +55,42 @@ def test_finish_requires_a_saved_verdict_for_each_case_but_not_each_step():
     asyncio.run(run())
 
 
-def test_finish_rejects_empty_case_ledger():
+@pytest.mark.parametrize(("passed", "result_value"), [(True, "PASSED"), (False, "FAILED")])
+def test_ordered_scenario_without_cases_keeps_its_actions_and_closes(passed, result_value):
+    scenario = QaScenario(steps=[QaStep(action="시작 클릭"), QaStep(action="설정 열기")])
+    actions = [step.action for step in scenario.steps]
+    plan = _plan(scenario)
+    assert "Execute the scenario actions below in order" in plan
+    assert plan.index(actions[0]) < plan.index(actions[1])
+    assert "reference_steps" not in plan
+
     async def run():
         channel, state, tools = setup_tools()
         channel.emit = AsyncMock()
-        state.step_meta = [(None, False)] * 3
+        state.step_meta = _step_plan(scenario)
+        state.step_texts = actions
+        state.total_steps = len(actions)
+        ledger = render_progress_ledger(state, channel)
+        assert "1. 시작 클릭\n  2. 설정 열기" in ledger
+        assert "report_test_case" not in ledger
+        result = await tools["finish_run"].ainvoke({"passed": passed, "summary": "실행 결과", "thought": "종료"})
+        assert result == "The QA run is closed."
+        assert state.finished
+        event, payload = channel.emit.await_args.args
+        assert event == MessageType.STATUS
+        assert payload.result.value == result_value
+        assert payload.summary["cases"]["total"] == 0
+        assert payload.summary["attempts"] == []
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(("mode", "step_meta"), [("ORDERED", []), ("FREE", [(None, False)])])
+def test_finish_rejects_runs_without_cases_or_ordered_actions(mode, step_meta):
+    async def run():
+        channel, state, tools = setup_tools()
+        channel.emit = AsyncMock()
+        state.execution_mode = mode
+        state.step_meta = step_meta
         result = await tools["finish_run"].ainvoke({"passed": True, "summary": "관찰", "thought": "종료"})
         assert "no test cases were assigned" in result
         assert not state.finished
