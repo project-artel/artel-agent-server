@@ -22,6 +22,9 @@ class FakeGame:
         self.reading = 0
         self.sent: list[dict] = []
         self.actions: list[tuple[str, list]] = []
+        # 게임을 바꾸지 않는 질의(`list_inputs`). `old_sdk` 면 옛 SDK 처럼 `Unsupported method` 로 거절한다.
+        self.queries: list[str] = []
+        self.old_sdk = False
         # (method, first param) -> reaction that changes this game. ("press", selector) reacts
         # to a press aimed at that selector.
         self.reactions: dict[tuple[str, Any], Callable[["FakeGame"], None]] = {}
@@ -74,6 +77,18 @@ class FakeGame:
             first = params[0] if params else None
             # `watch` 처럼 목록을 첫 param 으로 보내는 action 도 `refuse`·`reactions` 의 key 가 되게 한다.
             first = tuple(first) if isinstance(first, list) else first
+            if method == "list_inputs":
+                # planner 가 step 마다 묻는 읽기 전용 질의다. 게임을 바꾸는 action 기록에 섞지 않는다.
+                self.queries.append(method)
+                if self.old_sdk:
+                    results.append({"id": action["id"], "success": False, "error": f"Unsupported method: {method}"})
+                elif (method, None) in self.refuse:
+                    results.append({"id": action["id"], "success": False, "error": "The SDK failed to list inputs."})
+                elif method in self.answers:
+                    results.append({"id": action["id"], "success": True, "returnValue": self.answers[method](params)})
+                else:
+                    results.append({"id": action["id"], "success": True})
+                continue
             self.actions.append((method, params))
             if (method, first) in self.refuse:
                 results.append(
@@ -156,4 +171,10 @@ class FakeGame:
         )
 
     def frames(self, kind: str) -> list[dict]:
-        return [frame for frame in self.sent if frame["type"] == kind]
+        """보낸 frame 중 `kind` 인 것. planner 의 `list_inputs` 질의만 실은 `ACTION` 은 게임을 바꾸지 않으므로 뺀다."""
+        return [frame for frame in self.sent if frame["type"] == kind and not _only_queries(frame)]
+
+
+def _only_queries(frame: dict) -> bool:
+    actions = frame.get("payload", {}).get("actions") if frame["type"] == "ACTION" else None
+    return bool(actions) and all(action["method"] == "list_inputs" for action in actions)

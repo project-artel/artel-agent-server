@@ -49,10 +49,12 @@ from pydantic import BaseModel, ConfigDict, Field
 #   를 낸다. 실패 step 은 원인을 가르고(knob `analysis`) 런 리뷰를 쓴다.
 # prompt 는 qa_planner v4 를 읽는다.
 # pe4는 editor 복구에서 행동 계약을 보존하고 PulseMemory 판정에 시작·끝 관측값을 전달한다.
-# pe5: macro 의 `actionable()` 이 SDK 가 보이지 않는다고 보고한 대상(`pulse` 의 `visible` 이 false — 로딩 화면 같은 덮개 뒤,
-# 투명, mask 밖)을 거짓으로 읽는다(ARTEL-1436). planner 가 읽는 macro 문법 글의 Waiting 절에 그 말을 더해, 덮개가 걷히기 전에
-# 누르지 않도록 `wait_until(actionable(...))` 를 쓰게 한다. `visible` 을 보내지 않는 옛 SDK 에서는 `actionable()` 이 그대로다.
-PLANNER_EXECUTER_LABEL = "pe5-actionable-visible"
+# pe5(ARTEL-1432): planner(step·scene 계획)와 editor 가 매크로를 쓸 때 SDK `list_inputs` 로 이 빌드가 읽는 키·Input Manager
+# 이름·켜진 Input System action 의 키를 읽는다(`inputs.py`). macro 문법 글에 키 이름 규칙과 입력을 읽는 방식별 action(`KEY_INPUT_RULES`)을 더했다. parser 는
+# Unity `KeyCode` 이름이 아닌 키를 거절한다. planner 가 읽는 것이 바뀌어 label 을 올린다.
+# pe6(ARTEL-1436): `actionable()`은 SDK가 `visible: false`로 보고한 대상을 거짓으로 읽는다.
+# Planner는 덮개가 걷힐 때까지 `wait_until(actionable(...))`로 기다린다. `visible`이 없으면 기존 판정을 유지한다.
+PLANNER_EXECUTER_LABEL = "pe6-actionable-visible"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1
