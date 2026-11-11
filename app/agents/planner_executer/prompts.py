@@ -31,6 +31,7 @@ from collections.abc import Iterable
 from app.agents.planner_executer.developer_macros import UsableDeveloperMacro
 from app.agents.qa.macro.model import MacroDefinition
 from app.agents.qa.macro.grammar import TOOLS, ToolSpec
+from app.agents.qa.macro.key_codes import KEY_INPUT_RULES
 from app.agents.qa.macro.reference import GRAMMAR, NUMBER_EQUALITY
 from app.prompts import load_prompt, resolve_version, roles_in
 from app.qa.pulse import PulseMemory
@@ -68,7 +69,9 @@ def _signature(spec: ToolSpec) -> str:
 
 
 ACTION_SIGNATURES = "**The actions and their arguments.**\n" + "\n".join(_signature(spec) for spec in TOOLS)
-MACRO_GRAMMAR = f"{GRAMMAR}\n\n{ACTION_SIGNATURES}\n\n{NUMBER_EQUALITY}"
+# 키 이름 규칙과 입력을 읽는 방식별 action(ARTEL-1432). `GRAMMAR` 에 넣지 않는 것은 그 글이 `qa_run` 의 `skill_macro.md` 에
+# 글자 그대로 있어야 해서다 — 바꾸면 prompt 새 버전이 든다. 여기 더한 글은 `prompt_hashes["macro_grammar"]` 에 기록된다.
+MACRO_GRAMMAR = f"{GRAMMAR}\n\n{ACTION_SIGNATURES}\n\n{KEY_INPUT_RULES}\n\n{NUMBER_EQUALITY}"
 _FILLS = {MACRO_GRAMMAR_PLACEHOLDER: MACRO_GRAMMAR}
 # 런마다 다른 값으로 채우는 자리. `static_pieces` 는 이것을 hash 하지 않는다 — 언어는 `RunConfig.language` 로
 # 따로 기록된다. `prompt_text` 를 부르는 쪽이 값을 넘긴다.

@@ -13,6 +13,7 @@ import ast
 from collections.abc import Mapping
 
 from app.agents.qa.macro.errors import MacroRejection
+from app.agents.qa.macro.key_codes import KEY_INPUT_RULES
 from app.agents.qa.macro.model import MacroDefinition
 from app.agents.qa.macro.parser import imported_names, macro_definition_from_source
 from app.agents.qa.macro.reference import GRAMMAR, NUMBER_EQUALITY
@@ -40,6 +41,7 @@ DEVELOPER_MACRO_RULES = (
     "done (the slot is filled, the target is taken), with the input under that `if`. `find` "
     "refuses a name that matches more than one object and a loop has no `break`, so without "
     "the check every match gets the input, and a second press can undo the first.",
+    KEY_INPUT_RULES,
     "Publishing checks the source statically — parsing, the rules above, and imports. It "
     "does not run the macro in the game, so passing does not mean it works there; a QA "
     "run finds that out.",
