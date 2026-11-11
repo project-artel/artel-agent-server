@@ -405,6 +405,14 @@ class QaRunState:
             unit["message"] = result.message if result else ""
         return units
 
+    @property
+    def executes_steps_without_cases(self) -> bool:
+        return (
+            self.execution_mode == "ORDERED"
+            and bool(self.step_meta)
+            and all(case_id is None for case_id, _ in self.step_meta)
+        )
+
     def build_summary(self) -> dict:
         """TC 검증 시도를 집계한다. 참고 step을 실패 판정으로 계산하지 않는다."""
         # 별도 planner_executer engine은 기존 step 결과를 쓴다. QA tool은 이 목록에 쓰지 않는다.
