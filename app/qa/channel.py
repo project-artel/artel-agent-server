@@ -7,6 +7,8 @@ the other, so the tools in `app/agents/qa/tools/` can simply `await`.
 """
 
 import asyncio
+import base64
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -189,6 +191,7 @@ class QaRunChannel:
         self._reading_wait = reading_wait
         self._search_timeout = search_timeout
         self._sequence = 0
+        self._pulse_chunks: tuple[str, int, int, bytearray] | None = None
         # 나간 ACTION `frame` 의 messageId → 그 답을 기다리는 `future` (ARTEL-664).
         #
         # 칸 하나가 아니라 map 인 것은, `action` 이 둘 동시에 나가면 뒤의 것이 앞의 것의
@@ -792,12 +795,45 @@ class QaRunChannel:
         # 워터마크가 있어서 늦게 도착해도 다음 렌더가 그 변화를 여전히 보고한다.
         self.scene.apply(GameState.model_validate(raw.get("payload") or {}))
 
+    def on_pulse_chunk(self, raw: dict) -> None:
+        payload = raw["payload"]
+        group_id, index, count = payload["id"], payload["index"], payload["count"]
+        if (
+            not isinstance(group_id, str)
+            or type(index) is not int
+            or type(count) is not int
+            or count < 2
+            or not 0 <= index < count
+        ):
+            self._pulse_chunks = None
+            raise ValueError("Invalid PULSE chunk header")
+
+        assembly = (group_id, count, 0, bytearray()) if index == 0 else self._pulse_chunks
+        self._pulse_chunks = None
+        if assembly is None or assembly[:3] != (group_id, count, index):
+            return
+
+        data = base64.b64decode(payload["data"], validate=True)
+        buffer = assembly[3]
+        if not data or len(data) > 175 * 1024:
+            raise ValueError("Invalid PULSE chunk size")
+        buffer.extend(data)
+        if index + 1 < count:
+            self._pulse_chunks = (group_id, count, index + 1, buffer)
+            return
+
+        document = json.loads(buffer)
+        if not isinstance(document, dict) or document.get("type") != "PULSE":
+            raise ValueError("Invalid reassembled PULSE")
+        self.on_pulse({"payload": document})
+
     def on_pulse(self, raw: dict) -> None:
         """판독 하나를 씬 메모리 위에 얹는다.
 
         `on_game_state` 와 달리 풀어 줄 future 가 없다. 판독은 무엇을 물어서 오는 것이
         아니라 게임이 도는 동안 계속 도착하는 관측이고, 도구가 그것을 기다리지 않는다.
         """
+        self._pulse_chunks = None
         reading = PulseReading.model_validate(raw.get("payload") or {})
         self.scene.pulse.apply(reading)
         self.game_errors.apply(raw.get("payload"))
