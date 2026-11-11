@@ -12,7 +12,7 @@ import re
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import wrap_model_call
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
 from app.agents.qa.arch import ResolvedArch, withheld_skills
@@ -375,6 +375,7 @@ def middleware_names_for(arch: ResolvedArch) -> tuple[str, ...]:
     # 자동 모드가 이 호출에만 붙이는 그림은 보지 않는다.
     if fold_kinds_for(arch):
         names.append("fold_context")
+    names.append("latest_pulse_context")
     # Only when the run can see. On a text-only run it would have nothing to
     # inject.
     if arch.vision:
@@ -422,10 +423,22 @@ def build_middleware(
         "fold_context": lambda: _fold_context_for(
             fold_kinds_for(arch), arch.fold_threshold_chars, state, channel
         ),
+        "latest_pulse_context": lambda: _latest_pulse_context_for(channel),
         "capture_vision": lambda: QaCaptureVisionMiddleware(state, channel, arch),
         "log_token_usage": lambda: _log_token_usage,
     }
     return [builders[name]() for name in middleware_names_for(arch)]
+
+
+def _latest_pulse_context_for(channel: QaRunChannel):
+    @wrap_model_call(name="latest_pulse_context")
+    async def latest_pulse_context(request, handler):
+        content = channel.scene.pulse.render_latest_context()
+        if content is not None:
+            request = request.override(messages=[HumanMessage(content=content), *request.messages])
+        return await handler(request)
+
+    return latest_pulse_context
 
 
 def _fold_context_for(
