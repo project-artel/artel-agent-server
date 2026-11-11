@@ -28,17 +28,17 @@ Evidence = Literal["verified", "uncertain", "none"]
 class EvidenceSource(BaseModel):
     """판정이 근거로 댄 것 하나."""
 
-    kind: Literal["pulse", "capture", "scene"] = Field(
-        description="pulse: an object (or one of its values) in the pulse view · capture: a screenshot · scene: ONLY the scene name"
+    kind: Literal["pulse", "capture", "scene", "query"] = Field(
+        description="pulse: object or value · capture: screenshot · scene: scene name · query: read-only Game Function result"
     )
     object: str | None = Field(
         default=None,
-        description="pulse: the object's path or selector as the view prints it (with no member, its presence or text is checked) · capture: the capture id · scene: the scene name",
+        description="pulse: object path or selector · capture: capture id · scene: scene name · query: the printed query-N id",
     )
     member: str | None = Field(
         default=None, description="pulse only: the member, `Type::member` or `member`, as the view prints it"
     )
-    value: str | None = Field(default=None, description="pulse only: the value you read, as printed")
+    value: str | None = Field(default=None, description="pulse or query: the value you read, as printed")
 
 
 class VerdictCheck(BaseModel):
@@ -203,7 +203,8 @@ def _pulse_values(source: EvidenceSource, pulse: PulseMemory) -> list[Any] | Non
 
 
 def cite(
-    checks: list[VerdictCheck], pulse: PulseMemory, captures: set[str], scene: str | None
+    checks: list[VerdictCheck], pulse: PulseMemory, captures: set[str], scene: str | None,
+    queries: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], Evidence]:
     """근거마다 기록과 맞춰 본 결과와, 판정 전체의 근거 상태.
 
@@ -219,6 +220,12 @@ def cite(
             if source.kind == "capture":
                 citation: Citation = "match" if (source.object or "") in captures else "missing"
                 recorded = source.object if citation == "match" else None
+            elif source.kind == "query":
+                recorded = (queries or {}).get(source.object or "")
+                citation = (
+                    "missing" if recorded is None else
+                    "match" if source.value == recorded and source.member is None else "mismatch"
+                )
             elif source.kind == "scene" and (scene is None or _plain(source.object or "") == _plain(scene)
                                              or _pulse_values(source, pulse) is None):
                 # 실측(2026-10-20 런 18): 모델이 화면 위 오브젝트를 `scene` 으로 적었다. 씬 이름이 아니고 판독

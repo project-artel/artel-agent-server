@@ -54,6 +54,7 @@ class GameFunctionEntry(BaseModel):
     params: list[GameFunctionParam] = Field(default_factory=list)
     target: GameFunctionTarget | None = None
     group: str | None = None
+    read_only: bool = Field(default=False, alias="readOnly", strict=True)
 
     @property
     def is_static(self) -> bool:
@@ -264,7 +265,8 @@ def _catalog_line(entry: GameFunctionEntry) -> str:
 
 
 def render_catalog(
-    cheats: list[GameFunctionEntry] | None, behaviors: list[GameFunctionEntry] | None
+    cheats: list[GameFunctionEntry] | None, behaviors: list[GameFunctionEntry] | None,
+    *, unified: bool = False,
 ) -> str:
     """첫 user message 끝에 붙는 catalog. 축이 꺼진 쪽은 `None` 으로 받아 안 적는다.
 
@@ -272,6 +274,18 @@ def render_catalog(
     prompt 접두로 남으므로 매 호출 다시 쓰지 않는다.
     """
     sections: list[str] = []
+    if unified:
+        if cheats is None and behaviors is None:
+            return ""
+        lines = [
+            f"{_catalog_line(entry)} (kind={kind}; {purpose})"
+            for kind, entries in (("cheat", cheats), ("behavior", behaviors))
+            for entry in entries or []
+            for purpose in [
+                "running" if kind == "behavior" else "read-only" if entry.read_only else "setup"
+            ]
+        ]
+        return "\n\nGame Functions for `call_game_function`:\n" + ("\n".join(lines) or "None.")
     if cheats is not None:
         if cheats:
             lines = "\n".join(_catalog_line(entry) for entry in cheats)

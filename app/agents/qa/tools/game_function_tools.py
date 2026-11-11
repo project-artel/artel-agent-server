@@ -10,12 +10,12 @@
 tool 결과로만 돌아간다.
 """
 
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.tools.tool_context import ToolContext
-from app.prompts import load_tool_description
+from app.prompts import load_prompt, load_tool_description, resolve_version, roles_in
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import ActionResultItem, JsonRpcAction
 from app.qa.game_functions import (
@@ -110,6 +110,64 @@ def _value(item: ActionResultItem) -> dict:
     return item.returnValue if isinstance(item.returnValue, dict) else {}
 
 
+def uses_unified_functions(prompt_version: str | None) -> bool:
+    version = resolve_version("qa_run", prompt_version)
+    return "tool_call_game_function" in roles_in("qa_run", version)
+
+
+def function_kind(
+    ctx: ToolContext, name: str, kind: FunctionKind | None,
+) -> FunctionKind | None:
+    matches: list[FunctionKind] = []
+    if ctx.arch.cheats == "on" and ctx.channel.game_functions.entry("cheat", name):
+        matches.append("cheat")
+    if ctx.arch.behaviors == "on" and ctx.channel.game_functions.entry("behavior", name):
+        matches.append("behavior")
+    if kind is not None:
+        return kind if kind in matches else None
+    return matches[0] if len(matches) == 1 else None
+
+
+def is_read_only(ctx: ToolContext, kind: FunctionKind | None, name: str) -> bool:
+    entry = ctx.channel.game_functions.entry("cheat", name) if kind == "cheat" else None
+    return entry is not None and entry.read_only
+
+
+def build_unified_function_tools(
+    ctx: ToolContext, cheats: list[BaseTool], behaviors: list[BaseTool], prompt_version: str | None,
+) -> list[BaseTool]:
+    calls = {
+        kind: entries[0].coroutine
+        for kind, entries in (("cheat", cheats), ("behavior", behaviors))
+        if entries
+    }
+
+    @tool(description=load_prompt("qa_run", "tool_call_game_function", prompt_version).body)
+    async def call_game_function(
+        step: int, name: str, thought: str, arguments: dict[str, Any] = {},
+        target: str | None = None, kind: Literal["cheat", "behavior"] | None = None,
+        max_seconds: int | None = None,
+    ) -> str:
+        selected = function_kind(ctx, name, kind)
+        if selected is None:
+            return f"`{name}` is unavailable or ambiguous. For a duplicate name, specify its catalog kind."
+        current_case = ctx.state.current_case_id
+        if current_case is not None and ctx.state.case_id_at(step) != current_case:
+            return f"Step {step} is outside the active test case {current_case}. Nothing was sent."
+        if selected == "cheat" and max_seconds is not None:
+            return "Only a running function accepts `max_seconds`. Nothing was sent."
+        invoke = calls[selected]
+        assert invoke is not None
+        if selected == "behavior":
+            return await invoke(
+                step, name, thought, arguments, target,
+                DEFAULT_BEHAVIOR_SECONDS if max_seconds is None else max_seconds,
+            )
+        return await invoke(step, name, thought, arguments, target)
+
+    return [call_game_function, *behaviors[1:]]
+
+
 def build_cheat_tools(ctx: ToolContext) -> list[BaseTool]:
     # 아래 tool 이 closure 로 잡는 것. 되묶는 이유는 `tool_context.py` 에 있다.
     state, arch = ctx.state, ctx.arch
@@ -127,6 +185,10 @@ def build_cheat_tools(ctx: ToolContext) -> list[BaseTool]:
         # 인자 이름이 wire 의 `args` 가 아닌 `arguments` 인 이유: `@tool` 이 `args` 라는 인자를
         # `v__args` 로 바꿔 받아서 함수에 닿지 않는다. `run_macro` 도 같은 이름을 쓴다.
         focus(ctx, step)
+        read_only = is_read_only(ctx, "cheat", name)
+        case_id = state.current_case_id
+        if read_only and case_id is not None and state.case_id_at(step) != case_id:
+            return f"Step {step} is outside the active test case {case_id}. Nothing was sent."
         if state.cheats_attempted >= arch.max_cheats_per_run:
             return (
                 f"You have used all {arch.max_cheats_per_run} cheat calls this run allows. "
@@ -140,12 +202,20 @@ def build_cheat_tools(ctx: ToolContext) -> list[BaseTool]:
             return why
         state.cheats_attempted += 1
         answered: list[ActionResultItem] = []
+        payload = {"name": name, "args": dict(arguments), "target": resolved}
+        if read_only:
+            payload["requireReadOnly"] = True
 
         def describe(item: ActionResultItem) -> str:
             answered.append(item)
             if not item.success:
                 return _failed(item)
             message = _value(item).get("message")
+            attempt = ctx.channel.evaluation.attempts.get(case_id) if case_id is not None else None
+            if read_only and isinstance(message, str) and 0 < len(message) <= 2000 and attempt is not None:
+                observation = f"query-{state.cheats_attempted}"
+                state.function_observations[observation] = (str(attempt), message)
+                return f"{observation} — {message}"
             return f"ok — {message}" if message else "ok"
 
         outcome = await ctx.act(
@@ -153,21 +223,23 @@ def build_cheat_tools(ctx: ToolContext) -> list[BaseTool]:
                 JsonRpcAction(
                     id=1,
                     method="invoke_cheat",
-                    params=[{"name": name, "args": dict(arguments), "target": resolved}],
+                    params=[payload],
                 )
             ],
-            f"Cheat {name}",
+            f"Reading {name}" if read_only else f"Cheat {name}",
             step,
             describe=describe,
+            observation=read_only,
         )
-        state.used_cheats.append(
-            UsedCheat(
-                name=name,
-                args=dict(arguments),
-                target=resolved,
-                success=bool(answered) and answered[0].success,
+        if not read_only:
+            state.used_cheats.append(
+                UsedCheat(
+                    name=name,
+                    args=dict(arguments),
+                    target=resolved,
+                    success=bool(answered) and answered[0].success,
+                )
             )
-        )
         return outcome.text
 
     return [run_cheat]
