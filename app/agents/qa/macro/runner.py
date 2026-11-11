@@ -57,6 +57,7 @@ from typing import Any, Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.agents.qa.macro.binding import (
+    COVERED,
     FoundObject,
     LateSelector,
     MacroMemories,
@@ -1156,6 +1157,9 @@ class _Runner:
         # 기다린 적이 없으면 `pulse` 가 0 인 것은 화면에 대해 아무것도 말하지 않는다.
         if waited_here > 0 and readings == 0:
             reason += " No pulse arrived, so the screen did not change at all."
+        # 끝까지 덮여 있었으면 그렇다고 말한다. 배선이 없는 것과 덮인 것은 할 일이 다르다(ARTEL-1436).
+        if COVERED in observed:
+            reason += f" {observed[COVERED]}"
         return MacroFailure(
             WAIT_TIMEOUT,
             reason,
@@ -1185,10 +1189,12 @@ class _Runner:
         # `applied` 가 비어 있으면 들어선 자리가 틀렸다는 말이다. 하나라도 나갔으면
         # 하다가 어긋난 것이고, agent 가 할 일이 다르다.
         code = REQUIRE_FAILED if self.result.applied else SCENE_MISMATCH
+        # 덮여서 거짓이면 그 말을 붙인다. 로딩 화면이 걷히기 전에 읽었으면 `wait_until` 이 할 일이다(ARTEL-1436).
+        covered = f" {observed[COVERED]} Wait for it with `wait_until`." if COVERED in observed else ""
         self.stop(
             MacroFailure(
                 code,
-                f"{statement.source} is false. {statement.remedy}",
+                f"{statement.source} is false. {statement.remedy}{covered}",
                 {"expected": statement.source, "observed": _printable(observed)},
             ),
             place,
