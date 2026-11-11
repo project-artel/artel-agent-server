@@ -22,6 +22,7 @@ class MessageType(StrEnum):
     # 0.1초마다 뜬 판독을 1초에 모아 보낸 것(ARTEL-401). orchestration 이 변환 없이
     # 중계하므로(ARTEL-414) payload 는 SDK 가 쓴 문서 그대로다.
     PULSE = "PULSE"
+    PULSE_CHUNK = "PULSE_CHUNK"
     CANCEL = "CANCEL"
     # The answer to a KNOWLEDGE_SEARCH, correlated by that frame's messageId.
     KNOWLEDGE_SEARCH_RESULT = "KNOWLEDGE_SEARCH_RESULT"
