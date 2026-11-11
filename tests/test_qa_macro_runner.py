@@ -38,6 +38,7 @@ from app.agents.qa.macro.model import (
     MacroParameter,
     MacroPredicateCondition,
     MacroReaderCall,
+    MacroReaderCondition,
     MacroReaderOperand,
     MacroRequireStatement,
     MacroReturnStatement,
@@ -2650,3 +2651,106 @@ def test_arithmetic_over_a_reader_drives_a_require(hp: int, passed: bool) -> Non
     if not passed:
         assert result.failure.code == SCENE_MISMATCH
         assert result.failure.payload["observed"]["lost()"] == "0.25"
+
+
+# --- `actionable()` 과 `pulse` 의 `visible` (ARTEL-1436) ----------------------------
+
+LOADING_BUTTON = "Root[0]/Canvas[1]/Start[2]"
+WIRED = {"clicks": [{"on": "Title", "method": "Begin"}]}
+
+
+def start_button(visible: bool | None) -> SceneMemory:
+    """배선된 시작 버튼 하나. `visible` 이 None 이면 그 키를 안 보내는 옛 SDK 다."""
+    obj = card(LOADING_BUTTON, instance_id=70, offers=WIRED)
+    if visible is not None:
+        obj["visible"] = visible
+    return scene_with(obj, scene="Title")
+
+
+def actionable_start() -> MacroRequireStatement:
+    return MacroRequireStatement(
+        source=f'require(actionable(selector("{LOADING_BUTTON}")), "Start is not pressable.")',
+        condition=MacroReaderCondition(
+            call=MacroReaderCall(reader="actionable", target=MacroSelectorTarget(selector=LOADING_BUTTON))
+        ),
+        remedy="Start is not pressable.",
+    )
+
+
+@pytest.mark.parametrize(
+    ("visible", "passed"),
+    [(True, True), (None, True), (False, False)],
+    ids=["visible", "old SDK", "covered"],
+)
+def test_actionable_is_false_only_when_the_sdk_says_the_object_is_not_visible(
+    visible: bool | None, passed: bool
+) -> None:
+    result = run_model(FakeHost(start_button(visible)), actionable_start())
+
+    assert result.passed is passed
+
+
+def test_a_require_failing_on_a_covered_object_says_it_is_covered() -> None:
+    result = run_model(FakeHost(start_button(False)), actionable_start())
+
+    assert result.failure.code == SCENE_MISMATCH
+    assert "the game reports it not visible" in result.failure.reason
+    assert "Wait for it with `wait_until`." in result.failure.reason
+    assert "covered" in result.failure.payload["observed"]
+
+
+def test_a_require_failing_on_an_unwired_object_does_not_claim_it_is_covered() -> None:
+    obj = card(LOADING_BUTTON, instance_id=70, offers=None)
+    obj["visible"] = False
+    result = run_model(FakeHost(scene_with(obj, scene="Title")), actionable_start())
+
+    assert not result.passed
+    assert "not visible" not in result.failure.reason
+
+
+def covered_then(*deltas: dict) -> SceneMemory:
+    """덮인 시작 버튼에서 델타 `pulse` 를 차례로 접은 memory."""
+    memory = start_button(False)
+    for delta in deltas:
+        memory.pulse.apply(
+            PulseReading.model_validate(
+                {"scene": "Title", "whole": False, "active": [{"selector": LOADING_BUTTON, "id": 70, **delta}]}
+            )
+        )
+    return memory
+
+
+def test_a_delta_without_visible_keeps_the_last_value() -> None:
+    """SDK 는 바뀔 때만 보낸다. 안 실린 델타가 덮임을 지우면 덮인 버튼을 누른다."""
+    memory = covered_then({})
+
+    (held,) = memory.pulse.held.values()
+    assert held.visible is False
+
+
+def test_wait_until_actionable_waits_for_the_cover_to_go() -> None:
+    """로딩 화면이 걷히는 `pulse` 까지 기다린다."""
+    host = PulseHost(
+        start_button(False),
+        [
+            (MacroPulseWait(1, 0.5), covered_then({})),
+            (MacroPulseWait(1, 0.5), covered_then({}, {"visible": True})),
+        ],
+    )
+    condition = actionable_start().condition
+    result = run_model(host, wait_for(condition, source="wait_until(actionable(start), 30, remedy)"))
+
+    assert result.passed, result.failure
+    assert result.waits == [
+        "m step 1 of 1: `wait_until(actionable(start), 30, remedy)` was true after 1.0s (2 pulses)"
+    ]
+
+
+def test_wait_until_actionable_timeout_says_the_object_stayed_covered() -> None:
+    host = PulseHost(start_button(False), [(MacroPulseWait(0, 4.0), None)])
+    condition = actionable_start().condition
+    result = run_model(host, wait_for(condition, seconds=4))
+
+    assert result.failure.code == WAIT_TIMEOUT
+    assert "the game reports it not visible" in result.failure.reason
+    assert result.failure.payload["observed"]["actionable(Root[0]/Canvas[1]/Start[2])"] == "False"

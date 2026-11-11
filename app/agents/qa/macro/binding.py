@@ -629,8 +629,8 @@ def read(memories: MacroMemories, scope: MacroScope, call: MacroReaderCall) -> A
     found = resolve_target(memories, scope, call.target)
     if reader == "actionable":
         # `offers` 가 그 선이다. `id` 는 거의 모든 객체에 실리므로 그것으로 가르면
-        # 아무것도 안 걸러진다.
-        return bool(found.record.offers)
+        # 아무것도 안 걸러진다. 배선이 있어도 덮여 있으면 누름이 덮개에 떨어진다(ARTEL-1436).
+        return bool(found.record.offers) and found.record.visible is not False
     if reader == "text":
         return found.record.text
     if reader == "member":
@@ -1038,7 +1038,36 @@ def operand_value(
     value = read(memories, scope, operand.call)
     if observed is not None:
         observed[describe(operand.call)] = value
+        _note_covered(memories, scope, operand.call, value, observed)
     return value
+
+
+# `observed` 에서 가려진 대상을 말하는 키. `wait_until` 의 `not found` 처럼 reader 이름이 아닌 키다.
+COVERED = "covered"
+
+
+def _note_covered(
+    memories: MacroMemories,
+    scope: MacroScope,
+    call: MacroReaderCall,
+    value: Any,
+    observed: dict[str, Any],
+) -> None:
+    """`actionable()` 이 거짓인 이유가 덮임이면 `observed` 에 그 말을 적는다(ARTEL-1436).
+
+    `actionable(x)` 가 false 라는 것만으로는 배선이 없는 것인지 덮인 것인지 갈리지 않는다. 앞의 것은
+    macro 를 고칠 일이고 뒤의 것은 기다릴 일이라, `require`·`wait_until` 의 실패 문장이 이것을 싣는다.
+    """
+    if call.reader != "actionable" or value is not False:
+        return
+    record = resolve_target(memories, scope, call.target).record
+    if not record.offers or record.visible is not False:
+        return
+    observed[COVERED] = (
+        f"{describe(call)} is false because the object is wired to be pressed but the game "
+        "reports it not visible: something is drawn over it (a loading screen, a panel), it is "
+        "faded out, or it is clipped. A press now lands on whatever covers it."
+    )
 
 
 def _literal_value(literal: MacroLiteral) -> Any:
@@ -1094,6 +1123,7 @@ def evaluate(
     value = read(memories, scope, condition.call)
     if observed is not None:
         observed[describe(condition.call)] = value
+        _note_covered(memories, scope, condition.call, value, observed)
     shape = shape_of(value)
     if shape is MacroShape.bool_:
         return bool(value)

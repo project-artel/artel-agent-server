@@ -362,6 +362,9 @@ class PulseObject(BaseModel):
     # 왔다는 사실 자체가 "이번에 바뀌었다" 이고, 아래 `text_at` 이 그것을 적는다.
     text: str | None = None
     offers: dict[str, Any] | None = None
+    # 포인터로 겨누는 객체가 지금 보이는가(ARTEL-1435). 덮개 뒤, 투명, mask 밖이면 false. SDK 가 클릭이나 포인터 offer 가
+    # 있는 객체에만, 바뀔 때만 싣는다. `None` 은 "모른다" 다 — 옛 SDK 이거나 키로만 누르는 객체다.
+    visible: bool | None = None
     # uGUI·엔진 컴포넌트·UI Toolkit 의 상태. 어느 멤버에도 없는 값이라 SDK 의 adapter 가 읽어 객체
     # 항목에 조각으로 싣는다(ARTEL-1282). 조각은 바뀔 때 통째로 다시 온다.
     ui: dict[str, Any] | None = None
@@ -545,6 +548,8 @@ class _HeldObject(BaseModel):
     # 이 객체가 화면에 띄우고 있는 글자(ARTEL-678).
     text: str | None = None
     offers: dict[str, Any] | None = None
+    # `PulseObject.visible` 의 마지막 값. 델타에 안 실리면 이어받는다 — SDK 는 바뀔 때만 보낸다.
+    visible: bool | None = None
     # True when the object last arrived under `active`.
     live: bool = True
     members: dict[str, PulseMember] = Field(default_factory=dict)
@@ -946,6 +951,8 @@ class PulseMemory(BaseModel):
                     tag=obj.tag or (was.tag if was else None),
                     text=obj.text if obj.text is not None else (was.text if was else None),
                     offers=obj.offers or (was.offers if was else None),
+                    # false 도 값이라 `or` 로 잇지 않는다.
+                    visible=obj.visible if obj.visible is not None else (was.visible if was else None),
                     live=live,
                     members=dict(was.members) if was else {},
                     recent=dict(was.recent) if was else {},
