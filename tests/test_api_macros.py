@@ -2,6 +2,7 @@
 
 from fastapi.testclient import TestClient
 
+from app.agents.planner_executer.prompts import ACTION_SIGNATURES
 from app.agents.qa.macro.reference import GRAMMAR, NUMBER_EQUALITY
 from app.main import app
 
@@ -35,11 +36,19 @@ def test_grammar_is_the_qa_grammar_with_developer_rules() -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert body["grammar"] == GRAMMAR + "\n\n" + NUMBER_EQUALITY
+    assert body["grammar"] == GRAMMAR + "\n\n" + ACTION_SIGNATURES + "\n\n" + NUMBER_EQUALITY
     assert body["rules"] and all(isinstance(rule, str) for rule in body["rules"])
     joined = "\n".join(body["rules"])
     for must_say in ("-> None", "docstring", "from macros import", "#id"):
         assert must_say in joined
+
+
+def test_grammar_lists_the_arguments_of_each_action() -> None:
+    # MCP 실측에서 정적 검사 거절 42개 중 41개가 `press_key("Escape")` 처럼 `duration_seconds` 를 빠뜨린 것이었다(ARTEL-1441).
+    grammar = client.get("/internal/macros/grammar").json()["grammar"]
+
+    press_key = next(line for line in grammar.splitlines() if line.startswith("- `press_key("))
+    assert "duration_seconds: float" in press_key
 
 
 def test_a_valid_macro_returns_definition_parameters_and_docstring() -> None:

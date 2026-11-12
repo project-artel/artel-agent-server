@@ -12,6 +12,7 @@ developer macro source 를 모아 요청에 실어 준 `imports` 만 본다. 이
 import ast
 from collections.abc import Mapping
 
+from app.agents.planner_executer.prompts import ACTION_SIGNATURES
 from app.agents.qa.macro.errors import MacroRejection
 from app.agents.qa.macro.key_codes import KEY_INPUT_RULES
 from app.agents.qa.macro.model import MacroDefinition
@@ -49,7 +50,10 @@ DEVELOPER_MACRO_RULES = (
 
 
 def developer_macro_grammar() -> str:
-    return f"{GRAMMAR}\n\n{NUMBER_EQUALITY}"
+    # `GRAMMAR` 는 action 이름만 든다. tool loop 는 인자를 tool schema 로 받지만 MCP 로 macro 를 쓰는 agent 에게는
+    # schema 가 없어, planner 와 같은 인자 목록을 싣는다. 2026-11-11 MCP 실측에서 정적 검사 거절 42개 중 41개가
+    # `press_key` 의 `duration_seconds` 누락이었다(ARTEL-1441).
+    return f"{GRAMMAR}\n\n{ACTION_SIGNATURES}\n\n{NUMBER_EQUALITY}"
 
 
 def check_developer_macro(
