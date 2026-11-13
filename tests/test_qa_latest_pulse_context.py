@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from langchain_core.messages import HumanMessage, ToolMessage
 
 from app.agents.qa.runner import _latest_pulse_context_for
-from app.llm.claude_api import PER_CALL_KEY
+from app.llm.cache_boundary import PER_CALL_KEY
 from app.qa.pulse import PulseMemory, PulseReading
 
 

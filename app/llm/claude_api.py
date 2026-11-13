@@ -64,6 +64,8 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, Syst
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from pydantic import PrivateAttr
 
+from app.llm.cache_boundary import first_per_call, with_breakpoint
+
 THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 
 # How many thinking block signatures one client remembers. One QA run makes a few
@@ -72,9 +74,6 @@ THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 # entry is a signature and a 64-character hash.
 MAX_REMEMBERED_SIGNATURES = 20_000
 
-# 이번 호출에만 붙고 대화에 저장되지 않는 메시지의 표시. `additional_kwargs` 에 둔다 — langchain 의
-# Anthropic · OpenAI 변환은 사람 메시지의 `additional_kwargs` 를 요청에 싣지 않는다.
-PER_CALL_KEY = "artel_per_call"
 
 
 def forces_a_tool(tool_choice: Any) -> bool:
@@ -260,36 +259,16 @@ def _with_system_breakpoint(messages: list[BaseMessage]) -> list[BaseMessage]:
     return [messages[0].model_copy(update={"content": blocks}), *messages[1:]]
 
 
-def per_call(message: BaseMessage) -> BaseMessage:
-    """`message` 를 이번 호출에만 붙는 메시지로 표시한다. Claude 경로는 그 앞에 cache 경계를 둔다."""
-    return message.model_copy(update={"additional_kwargs": {**message.additional_kwargs, PER_CALL_KEY: True}})
-
-
 def _with_stored_breakpoint(messages: list[BaseMessage]) -> list[BaseMessage]:
-    """저장된 대화의 끝, 곧 첫 `per_call` 메시지 바로 앞에 cache 경계를 하나 둔다.
-
-    top-level `cache_control` 은 요청 맨 끝에 경계를 놓는다. 끝이 이번 호출에만 붙는 메시지면 그 경계로 쓴
-    cache 는 그 메시지를 품고 있어 다음 호출의 접두가 되지 못하고, 다음 호출은 시스템 경계까지만 읽고 대화를
-    전부 다시 쓴다(`prompt_messages` 의 PE 엔진 런 154~160 과 같은 이유). 저장된 끝에 경계를 두면 다음
-    호출이 그 경계까지 읽는다. 시스템 · 여기 · top-level 로 경계는 셋이고, API 한도는 넷이다.
-    """
-    first = next((index for index, message in enumerate(messages) if message.additional_kwargs.get(PER_CALL_KEY)), None)
+    """첫 `per_call` 메시지 바로 앞, 저장된 대화의 끝에 cache 경계를 하나 둔다. 이유는 `app.llm.cache_boundary`."""
+    first = first_per_call(messages)
     # 답 메시지에는 달지 않는다. 마지막 블록이 경계를 받지 못하는 thinking 일 수 있다.
-    if not first or isinstance(messages[first - 1], (SystemMessage, AIMessage)):
+    if first is None or isinstance(messages[first - 1], (SystemMessage, AIMessage)):
         return messages
-    target = messages[first - 1]
-    content = target.content
-    if isinstance(content, str):
-        if not content:
-            return messages
-        blocks: list[Any] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
-    elif isinstance(content, list) and content and isinstance(content[-1], dict):
-        if "cache_control" in content[-1]:
-            return messages
-        blocks = [*content[:-1], {**content[-1], "cache_control": {"type": "ephemeral"}}]
-    else:
+    content = with_breakpoint(messages[first - 1].content)
+    if content is None:
         return messages
-    return [*messages[: first - 1], target.model_copy(update={"content": blocks}), *messages[first:]]
+    return [*messages[: first - 1], messages[first - 1].model_copy(update={"content": content}), *messages[first:]]
 
 
 def _merge(

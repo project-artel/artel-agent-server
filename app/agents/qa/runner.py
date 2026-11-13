@@ -33,7 +33,7 @@ from app.agents.qa.tools.tool_context import ToolContext
 from app.agents.qa.vision import QaCaptureVisionMiddleware
 from app.config import get_settings
 from app.llm.chat_model import build_chat_model
-from app.llm.claude_api import per_call
+from app.llm.cache_boundary import per_call
 from app.llm.models import get_model_spec
 from app.prompts import load_prompt, load_skill, skill_descriptions, skill_names
 from app.qa.channel import QaCancelled, QaRunChannel
@@ -444,8 +444,8 @@ def _latest_pulse_context_for(channel: QaRunChannel):
         content = channel.scene.pulse.render_latest_context()
         if content is not None:
             # 끝에 붙인다. 요약은 행동마다 바뀌어서, 앞에 두면 그 뒤 대화 전체가 매 호출 `cache` 에서
-            # 빠지고 다시 쓰인다. 저장하지 않는 이번 호출만의 메시지라 `per_call` 로 표시해, Claude
-            # 경로가 그 앞에 `cache` 경계를 두게 한다(`app/llm/claude_api.py`).
+            # 빠지고 다시 쓰인다. 저장하지 않는 이번 호출만의 메시지라 `per_call` 로 표시해, Anthropic
+            # 모델이면 그 앞에 `cache` 경계를 둔다(`app/llm/cache_boundary.py`).
             request = request.override(messages=[*request.messages, per_call(HumanMessage(content=content))])
         return await handler(request)
 

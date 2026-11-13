@@ -1,4 +1,4 @@
-"""Claude API 요청의 캐시 경계. 시스템 프롬프트 끝, 그리고 이번 호출에만 붙는 메시지 바로 앞."""
+"""Anthropic 요청의 캐시 경계. 시스템 프롬프트 끝, 그리고 이번 호출에만 붙는 메시지 바로 앞."""
 
 import json
 
@@ -6,12 +6,12 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
+from app.llm.cache_boundary import PER_CALL_KEY, per_call
+from app.llm.chat_model import _OpenRouterAnthropicChat
 from app.llm.claude_api import (
-    PER_CALL_KEY,
     ClaudeApiChat,
     _with_stored_breakpoint,
     _with_system_breakpoint,
-    per_call,
 )
 
 
@@ -91,3 +91,34 @@ def test_OpenAI_요청에도_표시는_실리지_않는다(use_responses_api) ->
     payload = model._get_request_payload([HumanMessage(content="start"), per_call(HumanMessage(content="latest pulse"))])
 
     assert PER_CALL_KEY not in json.dumps(payload)
+
+
+# --- OpenRouter 로 부르는 Anthropic 모델 ------------------------------------------
+
+
+def _openrouter() -> _OpenRouterAnthropicChat:
+    return _OpenRouterAnthropicChat(model="anthropic/claude-sonnet-5.5", api_key="sk-or-test", base_url="https://openrouter.ai/api/v1")
+
+
+def test_OpenRouter_Anthropic_은_요청_본문의_tool_메시지에_경계를_단다() -> None:
+    payload = _openrouter()._get_request_payload([*_stored(), per_call(HumanMessage(content="latest pulse"))])
+
+    tool, summary = payload["messages"][-2:]
+    assert tool["role"] == "tool"
+    assert tool["content"] == [{"type": "text", "text": "scene view", "cache_control": CACHED}]
+    assert summary == {"role": "user", "content": "latest pulse"}
+    assert PER_CALL_KEY not in json.dumps(payload)
+
+
+def test_OpenRouter_Anthropic_은_per_call_메시지가_없으면_본문을_바꾸지_않는다() -> None:
+    plain = ChatOpenAI(model="anthropic/claude-sonnet-5.5", api_key="sk-or-test", base_url="https://openrouter.ai/api/v1")
+
+    assert _openrouter()._get_request_payload(_stored()) == plain._get_request_payload(_stored())
+
+
+def test_OpenRouter_Anthropic_은_답_메시지에는_경계를_달지_않는다() -> None:
+    messages = [*_stored()[:3], per_call(HumanMessage(content="latest pulse"))]
+
+    payload = _openrouter()._get_request_payload(messages)
+
+    assert "cache_control" not in json.dumps(payload)
