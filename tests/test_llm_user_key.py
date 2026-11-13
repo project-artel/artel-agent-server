@@ -39,7 +39,6 @@ from tests.test_qa_prompt_version import open_request
 OPENROUTER_MODEL = "openai/gpt-6-luna"
 CLAUDE_MODEL = "claude/claude-sonnet-5-5"
 GPT_MODEL = "gpt/gpt-6.1-sol"
-BEDROCK_MODEL = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
 GPT_MODELS = ["gpt/gpt-6.1-sol", "gpt/gpt-6-astra", "gpt/gpt-6-luna", "gpt/gpt-5.6-terra"]
 
 USER_ANTHROPIC = LlmKey(service=LlmKeyService.anthropic, api_key="sk-ant-user")
@@ -57,8 +56,6 @@ class _PlatformKeys:
     def get_anthropic_key(self) -> str | None:
         return self.anthropic
 
-    def get_bedrock_key(self) -> str | None:
-        return None
 
     def get_openrouter_key_or_placeholder(self) -> str:
         return self.openrouter
@@ -97,7 +94,6 @@ def test_routes_pair_with_key_services() -> None:
     assert key_service_of(GPT_MODEL) is LlmKeyService.openai
     assert key_service_of(OPENROUTER_MODEL) is LlmKeyService.openrouter
     assert key_service_of("anthropic/claude-sonnet-5.5") is LlmKeyService.openrouter
-    assert key_service_of(BEDROCK_MODEL) is None
 
 
 def test_without_a_bound_key_every_route_keeps_the_platform_key() -> None:

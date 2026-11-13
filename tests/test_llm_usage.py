@@ -179,8 +179,8 @@ def test_cost_is_omitted_when_openrouter_did_not_report_one() -> None:
     assert record["inputTokens"] == 12043
 
 
-def test_a_bedrock_call_is_priced_from_the_catalog_when_nobody_billed_it() -> None:
-    """Bedrock 은 청구액을 안 싣는다. 그 자리를 카탈로그 단가가 메운다.
+def test_a_claude_api_call_is_priced_from_the_catalog_when_nobody_billed_it() -> None:
+    """Claude API 는 청구액을 안 싣는다. 그 자리를 카탈로그 단가가 메운다.
 
     `cached_input_tokens` 는 `input_tokens` 에 **포함된** 값이라 정가에서 빼고 캐시 단가로
     다시 센다. 안 빼면 캐시로 아낀 만큼이 두 번 청구된 것으로 나온다.
@@ -194,7 +194,7 @@ def test_a_bedrock_call_is_priced_from_the_catalog_when_nobody_billed_it() -> No
             UsageCallback(buffer),
             _chat_result(
                 cost=None,
-                model="bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                model="claude/claude-haiku-5-5",
             ),
         )
 
@@ -203,7 +203,7 @@ def test_a_bedrock_call_is_priced_from_the_catalog_when_nobody_billed_it() -> No
     (record,) = sender.payloads[0]["records"]
     # input 12,043 중 10,240 이 캐시 읽기, 정가 대상은 1,803. 캐시 쓰기 512, 출력 318.
     expected = (
-        1_803 * 1.00 + 10_240 * 0.10 + 512 * 1.25 + 318 * 5.00
+        1_803 * 0.10 + 10_240 * 0.01 + 512 * 0.125 + 318 * 0.50
     ) / 1_000_000
     assert record["costUsd"] == pytest.approx(expected)
     # 우리가 계산한 값이다. provider 가 청구한 값과 한 칸에 섞이면 안 된다.
@@ -242,7 +242,7 @@ def test_haiku_long_context_price_applies_to_the_whole_request() -> None:
     from app.llm.usage import _estimate_cost
 
     cost = _estimate_cost(
-        "bedrock/us.anthropic.claude-haiku-5-5",
+        "claude/claude-haiku-5-5",
         input_tokens=99_500,
         output_tokens=1_000,
         cached_input_tokens=10_000,
@@ -453,30 +453,26 @@ def test_the_oldest_records_go_when_the_buffer_fills() -> None:
     assert [record["marker"] for record in payload["records"]] == [3, 4]
 
 
-def test_a_bedrock_model_keeps_its_vendor_in_provider() -> None:
-    """Bedrock 은 vendor 접두를 잃은 이름으로 답한다.
+def test_a_prefixed_model_keeps_its_route_in_provider() -> None:
+    """`gpt/` 처럼 접두를 떼고 부르는 경로는 응답의 `model_name` 에 슬래시가 없다.
 
-    `build_chat_model` 이 `bedrock/` 을 떼고 profile ID 만 클라이언트에 넘기므로,
-    응답의 `model_name` 에는 슬래시가 없다. 그대로 두면 `provider` 가 모델 이름
-    전체(43자)가 되어 받는 쪽의 `VARCHAR(40)` 을 넘고, 그 런의 사용량이 통째로
-    버려진다 — 실제로 stage 에서 그렇게 됐다.
-
-    카탈로그 값을 들고 있으면 그것으로 되살릴 수 있다.
+    그대로 두면 `provider` 가 모델 이름 전체가 되어 받는 쪽의 `VARCHAR(40)` 을 넘을 수 있고, 그 런의
+    사용량이 통째로 버려진다 — 예전 Bedrock 경로가 stage 에서 그렇게 됐다. 카탈로그 값을 들고 있으면
+    그것으로 되살린다.
     """
     sender = RecordingSender()
     buffer = _buffer(sender, flush_size=1)
-    profile = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
     async def scenario() -> None:
         set_usage_scope("QA_RUN", 7)
         await _feed_chat(
-            UsageCallback(buffer, slug=f"bedrock/{profile}"),
-            _chat_result(cost=None, model=profile),
+            UsageCallback(buffer, slug="gpt/gpt-6-luna"),
+            _chat_result(cost=None, model="gpt-6-luna"),
         )
 
     asyncio.run(scenario())
 
     (record,) = sender.payloads[0]["records"]
-    assert record["provider"] == "bedrock"
-    assert record["model"] == f"bedrock/{profile}"
+    assert record["provider"] == "gpt"
+    assert record["model"] == "gpt/gpt-6-luna"
     assert len(record["provider"]) <= 40

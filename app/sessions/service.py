@@ -17,6 +17,7 @@ from app.agents import (
     SceneEdge,
     TestCaseListItem,
 )
+from app.llm.credentials import LlmKey, bind_llm_key
 from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig
 from app.llm.usage import set_usage_scope
 from app.sessions.channel import ScenarioChannel
@@ -66,6 +67,7 @@ class SessionService:
         project_id: int | None = None,
         app_user_id: int | None = None,
         current_scenarios: list[ScenarioPlan] | None = None,
+        llm_key: LlmKey | None = None,
     ) -> str:
         session_id = uuid.uuid4().hex
         record = SessionRecord(
@@ -86,6 +88,7 @@ class SessionService:
             project_id=project_id,
             app_user_id=app_user_id,
             current_scenarios=current_scenarios or [],
+            llm_key=llm_key,
         )
         await self._store.save(session_id, record)
         return session_id
@@ -117,6 +120,7 @@ class SessionService:
         test_case_list: list | None = None,
         starting_values: dict[str, str] | None = None,
         declined_cases: list[str] | None = None,
+        llm_key: LlmKey | None = None,
     ) -> ScenarioAgentResult:
         record = await self._load(session_id)
         # 계약이 바뀐 턴에만 온다. 기억(history)은 그대로 두고 TC 목록만 갈아 끼운다.
@@ -126,8 +130,11 @@ class SessionService:
             record.starting_values = starting_values
         if declined_cases is not None:
             record.declined_cases = declined_cases
+        # model 과 key 는 함께 바뀐다(ARTEL-1426). model 을 바꾼 턴에 key 가 없으면 그 model 은 공용 key 로 돈다 —
+        # 앞 model 의 사용자 key 를 새 model 에 넘겨 쓰지 않는다.
         if model is not None:
             record.model = model
+            record.llm_key = llm_key
         if locale is not None:
             record.locale = locale
         # Orchestration refreshes the run's current scenarios each turn, so the
@@ -175,6 +182,8 @@ class SessionService:
         # `test_run.id` is also what the receiving side reads `SCENARIO` as
         # (`LlmUsageServiceType`).
         set_usage_scope("SCENARIO", record.run_id)
+        # 이 턴의 model 호출과 지출 기록(key source)이 세션의 key 를 쓴다. 턴은 저마다 task 라 매번 묶는다.
+        bind_llm_key(record.llm_key)
         request = ScenarioAgentRequest(
             user_input=user_input,
             unity_context=record.unity_context,

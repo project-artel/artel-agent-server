@@ -5,7 +5,7 @@
 여기서 가른 코드를 orchestration 에 보낸다. 그 밖의 오류(시간 초과, 잠깐의 과부하, 우리 코드의 예외)는
 [classify_provider_error] 가 `None` 을 돌려주고 지금처럼 그 시나리오만 실패로 닫는다.
 
-제공사 SDK 를 import 하지 않고 예외의 모양(`status_code` · `body` · `code` · botocore `response`)만 본다.
+제공사 SDK 를 import 하지 않고 예외의 모양(`status_code` · `body` · `code`)만 본다.
 SDK 가 바뀌어도 이 파일이 깨지지 않게 하려는 것이고, 테스트에서 가짜 예외로 흉내 내기도 쉽다.
 """
 
@@ -35,12 +35,8 @@ _MISSING_KEY_ERRORS = {
     "GptApiKeyMissingError": "openai",
 }
 
-_BEDROCK_AUTH_CODES = {
-    "UnrecognizedClientException",
-    "InvalidSignatureException",
-    "ExpiredTokenException",
-    "AccessDeniedException",
-}
+# 더는 부르지 않는 경로의 model(ARTEL-1438). 카탈로그에 남은 `bedrock/` 행을 고른 런이다.
+_RETIRED_MODEL_ERRORS = {"RetiredModelError": "bedrock"}
 
 
 @dataclass(frozen=True)
@@ -87,9 +83,8 @@ def _classify_one(error: BaseException) -> ProviderFailure | None:
     name = type(error).__name__
     if name in _MISSING_KEY_ERRORS:
         return ProviderFailure(AUTH_FAILED, _MISSING_KEY_ERRORS[name], _clip(str(error)))
-    response = getattr(error, "response", None)
-    if isinstance(response, dict) and "Error" in response:
-        return _classify_bedrock(error, response)
+    if name in _RETIRED_MODEL_ERRORS:
+        return ProviderFailure(MODEL_UNAVAILABLE, _RETIRED_MODEL_ERRORS[name], _clip(str(error)))
     status = getattr(error, "status_code", None)
     if not isinstance(status, int):
         return None
@@ -105,17 +100,6 @@ def _classify_one(error: BaseException) -> ProviderFailure | None:
         return ProviderFailure(AUTH_FAILED, provider, _clip(message))
     if status == 404 or (status == 400 and _names_missing_model(lowered)):
         return ProviderFailure(MODEL_UNAVAILABLE, provider, _clip(message))
-    return None
-
-
-def _classify_bedrock(error: BaseException, response: dict) -> ProviderFailure | None:
-    detail = response.get("Error") or {}
-    code = str(detail.get("Code", ""))
-    message = str(detail.get("Message", "")) or str(error)
-    if code in _BEDROCK_AUTH_CODES:
-        return ProviderFailure(AUTH_FAILED, "bedrock", _clip(message))
-    if code == "ResourceNotFoundException" or (code == "ValidationException" and _names_missing_model(message.lower())):
-        return ProviderFailure(MODEL_UNAVAILABLE, "bedrock", _clip(message))
     return None
 
 

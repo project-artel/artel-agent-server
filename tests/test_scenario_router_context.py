@@ -81,7 +81,7 @@ def test_previous_turn_is_none_without_a_reply() -> None:
 
 
 def _fixed(route: Route) -> ScenarioRouter:
-    async def caller(prompt: str) -> RouteVerdict:
+    async def caller(prompt: str, model: str | None = None) -> RouteVerdict:
         return RouteVerdict(route=route)
 
     return ScenarioRouter(caller=caller)
@@ -90,7 +90,7 @@ def _fixed(route: Route) -> ScenarioRouter:
 def test_decline_and_unsupported_end_with_one_reply_and_no_scenario(monkeypatch) -> None:
     asked: list = []
 
-    async def write(self, route, user_input):  # 문구 노드의 모델 호출을 대신한다
+    async def write(self, route, user_input, model):  # 문구 노드의 모델 호출을 대신한다
         asked.append(route)
         return ""  # 문구를 못 받으면 고정 문구로 떨어져야 한다
 

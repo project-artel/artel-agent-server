@@ -5,7 +5,6 @@ import asyncio
 import anthropic
 import httpx
 import openai
-from botocore.exceptions import ClientError
 
 from app.agents.qa.runner import QaRunner
 from app.qa.provider_error import (
@@ -34,10 +33,6 @@ def _openai(status: int, message: str, host="api.openai.com", code=None, error_c
     body = {"message": message, "type": code, "code": code}
     response = httpx.Response(status, request=request, json={"error": body})
     return error_class(f"Error code: {status}", response=response, body=body)
-
-
-def _bedrock(code: str, message: str) -> ClientError:
-    return ClientError({"Error": {"Code": code, "Message": message}}, "Converse")
 
 
 def test_anthropic_credit_balance_is_credit_exhausted() -> None:
@@ -77,11 +72,12 @@ def test_unknown_model_is_model_unavailable() -> None:
     assert bad_model.code == MODEL_UNAVAILABLE
 
 
-def test_bedrock_codes() -> None:
-    assert classify_provider_error(_bedrock("AccessDeniedException", "no access")).code == AUTH_FAILED
-    model = classify_provider_error(_bedrock("ValidationException", "The provided model identifier is invalid."))
-    assert (model.code, model.provider) == (MODEL_UNAVAILABLE, "bedrock")
-    assert classify_provider_error(_bedrock("ThrottlingException", "slow down")) is None
+def test_a_retired_bedrock_model_is_model_unavailable() -> None:
+    """카탈로그에 남은 `bedrock/` 을 고른 런은 다시 해도 같다(ARTEL-1438). 런을 멈춘다."""
+    from app.llm.chat_model import RetiredModelError
+
+    found = classify_provider_error(RetiredModelError("Model 'bedrock/x' is on the Bedrock route, which is no longer called."))
+    assert (found.code, found.provider) == (MODEL_UNAVAILABLE, "bedrock")
 
 
 def test_wrapped_error_is_found_through_its_cause() -> None:

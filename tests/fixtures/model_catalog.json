@@ -1,34 +1,5 @@
 [
   {
-    "id": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
-    "label": "Claude Haiku 4.5 (AWS Bedrock)",
-    "provider": "anthropic",
-    "supportsStrictJson": true,
-    "maxInputTokens": 183616,
-    "inputModalities": [
-      "text",
-      "image"
-    ],
-    "reasoning": {
-      "kind": "max_tokens",
-      "efforts": null,
-      "minTokens": 1024,
-      "maxTokens": 32000,
-      "step": null,
-      "defaultTokens": 4096
-    },
-    "pricing": {
-      "inputPerMtok": 1.0,
-      "outputPerMtok": 5.0,
-      "cacheWritePerMtok": 1.25,
-      "cacheReadPerMtok": 0.1,
-      "asOf": "2026-09-03",
-      "source": "AWS 콘솔, Claude Haiku 4.5 / us-west-2 / on-demand"
-    },
-    "enabled": true,
-    "sortOrder": 10
-  },
-  {
     "id": "openai/gpt-6.1-sol",
     "label": "GPT-6.1 Sol",
     "provider": "openai",
@@ -342,75 +313,6 @@
     "pricing": null,
     "enabled": true,
     "sortOrder": 130
-  },
-  {
-    "id": "bedrock/us.anthropic.claude-haiku-5-5",
-    "label": "Claude Haiku 5.5 (AWS Bedrock)",
-    "provider": "anthropic",
-    "supportsStrictJson": false,
-    "maxInputTokens": 872000,
-    "inputModalities": [
-      "text",
-      "image"
-    ],
-    "reasoning": {
-      "kind": "effort",
-      "efforts": [
-        "max",
-        "xhigh",
-        "high",
-        "medium",
-        "low"
-      ],
-      "minTokens": null,
-      "maxTokens": null,
-      "step": null,
-      "defaultTokens": null
-    },
-    "pricing": {
-      "inputPerMtok": 0.1,
-      "outputPerMtok": 0.5,
-      "cacheWritePerMtok": 0.125,
-      "cacheReadPerMtok": 0.01,
-      "asOf": "2026-10-13",
-      "source": "Anthropic Claude Haiku 5.5 overview",
-      "longContextThresholdTokens": 100000,
-      "longContextInputPerMtok": 0.5,
-      "longContextOutputPerMtok": 2.5,
-      "longContextCacheWritePerMtok": 0.625,
-      "longContextCacheReadPerMtok": 0.05
-    },
-    "enabled": false,
-    "sortOrder": 140
-  },
-  {
-    "id": "bedrock/us.openai.gpt-6.1-sol",
-    "label": "GPT-6.1 Sol (AWS Bedrock)",
-    "provider": "openai",
-    "supportsStrictJson": false,
-    "maxInputTokens": 922000,
-    "inputModalities": [
-      "text",
-      "image",
-      "file"
-    ],
-    "reasoning": {
-      "kind": "effort",
-      "efforts": [
-        "max",
-        "xhigh",
-        "high",
-        "medium",
-        "low"
-      ],
-      "minTokens": null,
-      "maxTokens": null,
-      "step": null,
-      "defaultTokens": null
-    },
-    "pricing": null,
-    "enabled": false,
-    "sortOrder": 150
   },
   {
     "id": "claude/claude-opus-5-5",

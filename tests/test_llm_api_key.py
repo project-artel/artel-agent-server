@@ -10,7 +10,6 @@ from app.llm.api_key import (
     KeyRefreshOnUnauthorized,
     LlmApiKeyProvider,
     is_key_rejected_by_anthropic,
-    is_key_rejected_by_bedrock,
 )
 
 BASE_URL = "http://orchestration:8081"
@@ -40,17 +39,17 @@ def build_provider(handler, *, ttl=30.0, clock=None, base_url=BASE_URL):
     return provider, calls
 
 
-def answer(openrouter=None, bedrock=None):
+def answer(openrouter=None, anthropic=None):
     return lambda request: httpx.Response(
-        200, json={"openrouterApiKey": openrouter, "bedrockApiKey": bedrock}
+        200, json={"openrouterApiKey": openrouter, "anthropicApiKey": anthropic}
     )
 
 
 def test_both_keys_are_read_from_the_settings_endpoint():
-    provider, calls = build_provider(answer("or-key", "br-key"))
+    provider, calls = build_provider(answer("or-key", "an-key"))
 
     assert provider.get_openrouter_key() == "or-key"
-    assert provider.get_bedrock_key() == "br-key"
+    assert provider.get_anthropic_key() == "an-key"
     assert calls[0].url.path == "/internal/settings/llm"
     # One response carries both keys, so reading both costs one request.
     assert len(calls) == 1
@@ -60,14 +59,14 @@ def test_either_key_may_be_null():
     provider, _ = build_provider(answer("or-key", None))
 
     assert provider.get_openrouter_key() == "or-key"
-    assert provider.get_bedrock_key() is None
+    assert provider.get_anthropic_key() is None
 
 
 def test_blank_keys_count_as_no_key():
     provider, _ = build_provider(answer("   ", ""))
 
     assert provider.get_openrouter_key() is None
-    assert provider.get_bedrock_key() is None
+    assert provider.get_anthropic_key() is None
 
 
 def test_the_old_response_shape_gives_no_key():
@@ -80,15 +79,15 @@ def test_environment_keys_are_not_read(monkeypatch):
     """The keys live only in the database. A key exported by the shell must not leak in."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "env-or-key")
     monkeypatch.setenv("LLM_API_KEY", "env-llm-key")
-    monkeypatch.setenv("BEDROCK_API_KEY", "env-br-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "env-an-key")
     provider, _ = build_provider(answer(None, None))
 
     assert provider.get_openrouter_key() is None
-    assert provider.get_bedrock_key() is None
+    assert provider.get_anthropic_key() is None
     assert provider.get_openrouter_key_or_placeholder() == "missing"
     settings = Settings(_env_file=None)
     assert not hasattr(settings, "llm_api_key")
-    assert not hasattr(settings, "bedrock_api_key")
+    assert not hasattr(settings, "anthropic_api_key")
 
 
 def test_cache_holds_until_ttl_then_refetches():
@@ -110,19 +109,19 @@ def test_cache_holds_until_ttl_then_refetches():
 
 
 def test_invalidate_forces_a_refetch_of_both_keys_before_the_ttl():
-    answers = iter([("old-or", "old-br"), ("new-or", "new-br")])
+    answers = iter([("old-or", "old-an"), ("new-or", "new-an")])
 
     def handler(request):
-        openrouter, bedrock = next(answers)
+        openrouter, anthropic = next(answers)
         return httpx.Response(
-            200, json={"openrouterApiKey": openrouter, "bedrockApiKey": bedrock}
+            200, json={"openrouterApiKey": openrouter, "anthropicApiKey": anthropic}
         )
 
     provider, calls = build_provider(handler)
 
-    assert provider.get_bedrock_key() == "old-br"
+    assert provider.get_anthropic_key() == "old-an"
     provider.invalidate()
-    assert provider.get_bedrock_key() == "new-br"
+    assert provider.get_anthropic_key() == "new-an"
     assert provider.get_openrouter_key() == "new-or"
     assert len(calls) == 2
 
@@ -141,7 +140,7 @@ def test_unexpected_answers_before_any_load_give_no_key(handler):
     provider, _ = build_provider(handler)
 
     assert provider.get_openrouter_key() is None
-    assert provider.get_bedrock_key() is None
+    assert provider.get_anthropic_key() is None
 
 
 def test_a_failed_refresh_keeps_the_last_keys():
@@ -151,15 +150,15 @@ def test_a_failed_refresh_keeps_the_last_keys():
     def handler(request: httpx.Request) -> httpx.Response:
         if state["down"]:
             raise httpx.ConnectError("refused", request=request)
-        return httpx.Response(200, json={"openrouterApiKey": "or", "bedrockApiKey": "br"})
+        return httpx.Response(200, json={"openrouterApiKey": "or", "anthropicApiKey": "an"})
 
     provider, _ = build_provider(handler, clock=clock)
-    assert provider.get_bedrock_key() == "br"
+    assert provider.get_anthropic_key() == "an"
 
     state["down"] = True
     clock.now += 31
     assert provider.get_openrouter_key() == "or"
-    assert provider.get_bedrock_key() == "br"
+    assert provider.get_anthropic_key() == "an"
 
 
 def test_orchestration_down_is_asked_once_per_ttl():
@@ -170,7 +169,7 @@ def test_orchestration_down_is_asked_once_per_ttl():
     provider, calls = build_provider(refuse, clock=clock)
 
     assert provider.get_openrouter_key() is None
-    assert provider.get_bedrock_key() is None
+    assert provider.get_anthropic_key() is None
     assert len(calls) == 1
 
     clock.now += 31
@@ -196,10 +195,10 @@ def test_recovery_after_an_outage_picks_up_the_keys():
 
 
 def test_no_orchestration_url_means_no_key_and_no_request():
-    provider, calls = build_provider(answer("or", "br"), base_url=None)
+    provider, calls = build_provider(answer("or", "an"), base_url=None)
 
     assert provider.get_openrouter_key() is None
-    assert provider.get_bedrock_key() is None
+    assert provider.get_anthropic_key() is None
     assert calls == []
 
 
@@ -211,7 +210,7 @@ def test_no_openrouter_key_gives_a_placeholder():
 
 def test_keys_are_never_logged_or_printed(caplog):
     caplog.set_level("DEBUG")
-    provider, _ = build_provider(answer("secret-or-key", "secret-br-key"))
+    provider, _ = build_provider(answer("secret-or-key", "secret-an-key"))
     provider.get_openrouter_key()
 
     # pydantic quotes the offending input in its error, and here that input is a key.
@@ -247,42 +246,12 @@ def test_unauthorized_chat_error_invalidates_the_cache():
     assert provider.get_openrouter_key() == "new"
 
 
-def _botocore_error(status: int) -> Exception:
-    from botocore.exceptions import ClientError
-
-    return ClientError(
-        {
-            "Error": {"Code": "UnrecognizedClientException", "Message": "bad token"},
-            "ResponseMetadata": {"HTTPStatusCode": status},
-        },
-        "ConverseStream",
-    )
-
-
-@pytest.mark.parametrize(("status", "rejected"), [(401, True), (403, True), (400, False), (500, False)])
-def test_bedrock_rejection_is_read_off_botocore_errors(status, rejected):
-    assert is_key_rejected_by_bedrock(_botocore_error(status)) is rejected
-
-
-def test_bedrock_rejection_invalidates_the_cache():
-    keys = iter(["old", "new"])
-    provider, _ = build_provider(
-        lambda request: httpx.Response(200, json={"bedrockApiKey": next(keys)})
-    )
-    callback = KeyRefreshOnUnauthorized(provider, rejected=is_key_rejected_by_bedrock)
-
-    assert provider.get_bedrock_key() == "old"
-    asyncio.run(callback.on_llm_error(_botocore_error(403)))
-    assert provider.get_bedrock_key() == "new"
-
-
 def test_the_claude_api_key_is_read_from_the_same_response():
     provider, calls = build_provider(
         lambda request: httpx.Response(
             200,
             json={
                 "openrouterApiKey": "or-key",
-                "bedrockApiKey": None,
                 "anthropicApiKey": " sk-ant-key ",
             },
         )
@@ -295,7 +264,7 @@ def test_the_claude_api_key_is_read_from_the_same_response():
 
 
 def test_a_missing_claude_api_key_is_none():
-    provider, _ = build_provider(answer("or-key", "br-key"))
+    provider, _ = build_provider(answer("or-key"))
 
     assert provider.get_anthropic_key() is None
 

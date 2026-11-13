@@ -24,7 +24,7 @@ install_model_catalog(FIXTURE_MODEL_CATALOG)
 def install_catalog_with_enabled(*model_ids: str) -> None:
     """Installs the fixture catalog with `model_ids` switched on.
 
-    The two Bedrock rows are seeded off, so a test that sends one through a request
+    The `claude/` rows are seeded off, so a test that sends one through a request
     which refuses disabled models has to turn it on first. The autouse fixture
     below restores the fixture catalog afterwards.
     """

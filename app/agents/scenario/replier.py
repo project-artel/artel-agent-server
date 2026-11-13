@@ -24,10 +24,6 @@ from app.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
 
-# 라우터와 같은 모델로 고정한다. 한두 문장을 쓰는 일이고, 세션 모델(비쌀 수 있다)을 끌어올
-# 이유가 없다 — 노드별 모델 혼합의 둘째 사례다.
-REPLY_MODEL = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
-
 # 문구 노드가 답을 못 줄 때의 마지막 그물. 라우터가 문구를 쓰던 시절의 고정 문구와 같다.
 FALLBACK = {
     Route.GREETING: (
@@ -45,11 +41,11 @@ ASK_WHICH = (
     "고치는 것이면 어느 시나리오인지 알려 주세요."
 )
 
-ReplyCall = Callable[[str], Awaitable[str]]
+ReplyCall = Callable[[str, LLMModel], Awaitable[str]]
 
 
 def _as_text(content: object) -> str:
-    """Bedrock 은 본문을 **블록 리스트**로 돌려준다 — 문자열만 받으면 조용히 빈 문구가 된다.
+    """Anthropic 계열은 본문을 **블록 리스트**로 돌려준다 — 문자열만 받으면 조용히 빈 문구가 된다.
 
     실측(2026-10-06): 문자열만 처리했을 때 여섯 건이 전부 폴백으로 떨어졌고, 로그만 보면
     "모델이 빈 답을 줬다" 로 보였다. 모델은 답했고 받는 쪽이 못 읽었다.
@@ -67,9 +63,11 @@ def _as_text(content: object) -> str:
     return ""
 
 
-async def _call_model(prompt: str) -> str:
+async def _call_model(prompt: str, model: LLMModel) -> str:
+    # **세션 모델로 쓴다**(ARTEL-1426). 예전에는 Bedrock Haiku 로 고정했는데, 사용자가 챗봇에서 모델과 키를 고른
+    # 뒤로는 그 대화의 답이 모두 고른 모델 · 키로 나가야 한다. 세션에 묶인 key 는 `build_chat_model` 이 읽는다.
     # 추론은 안 켠다. 한두 문장을 쓰는 데 추론 예산을 쓰면 이 노드만 라우터보다 느려진다.
-    chat = build_chat_model(REPLY_MODEL, ReasoningConfig(max_tokens=0))
+    chat = build_chat_model(model, ReasoningConfig(max_tokens=0))
     answer = await chat.ainvoke(prompt)
     return _as_text(answer.content)
 
@@ -80,14 +78,14 @@ class ScenarioReplier:
     def __init__(self, caller: ReplyCall | None = None) -> None:
         self._caller = caller or _call_model
 
-    async def write(self, route: Route, user_input: str) -> str:
+    async def write(self, route: Route, user_input: str, model: LLMModel) -> str:
         if route not in FALLBACK:
             raise ValueError(f"문구를 쓸 갈래가 아니다: {route}")
         prompt = load_prompt("scenario_reply", "system").body.format(
             route=route.value, user_input=user_input
         )
         try:
-            reply = await self._caller(prompt)
+            reply = await self._caller(prompt, model)
         except Exception as error:  # noqa: BLE001 — 문구 실패가 턴을 죽이면 안 된다
             logger.warning("[scenario] reply node failed — using fallback: %s", error)
             return FALLBACK[route]

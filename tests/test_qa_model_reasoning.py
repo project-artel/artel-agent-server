@@ -36,15 +36,10 @@ def test_catalog_carries_reasoning_selection_capabilities() -> None:
     every_effort = tuple(ReasoningEffort)
     assert catalog["anthropic/claude-sonnet-5.5"].reasoning is ReasoningKind.effort
     assert catalog["anthropic/claude-sonnet-5.5"].reasoning_efforts == every_effort
-    # The one row left that takes a token budget instead of an effort.
-    haiku = catalog["bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"]
-    assert haiku.reasoning is ReasoningKind.max_tokens
-    assert haiku.reasoning_efforts is None
-    assert haiku.reasoning_min_tokens == 1_024
-    assert haiku.reasoning_max_tokens == 32_000
-    assert haiku.reasoning_default_tokens == 4_096
-    assert catalog["bedrock/us.anthropic.claude-haiku-5-5"].reasoning_efforts == every_effort
-    assert catalog["bedrock/us.openai.gpt-6.1-sol"].reasoning_efforts == every_effort
+    # No seed row takes a token budget since the Bedrock rows went (ARTEL-1438).
+    assert not any(spec.reasoning is ReasoningKind.max_tokens for spec in catalog.values())
+    assert catalog["claude/claude-haiku-5-5"].reasoning_efforts == every_effort
+    assert catalog["gpt/gpt-6.1-sol"].reasoning_efforts == every_effort
     assert catalog["google/gemini-3.8-flash"].input_modalities == (
         "text",
         "image",
@@ -61,28 +56,28 @@ def test_catalog_carries_reasoning_selection_capabilities() -> None:
 
 
 def test_request_accepts_each_supported_reasoning_shape() -> None:
-    install_catalog_with_enabled("bedrock/us.anthropic.claude-haiku-5-5")
+    install_catalog_with_enabled("claude/claude-haiku-5-5")
     effort = OpenQaSessionRequest.model_validate(
         open_request(
             model="anthropic/claude-sonnet-5.5",
             reasoning={"effort": "high"},
         )
     )
-    budget = OpenQaSessionRequest.model_validate(
+    off = OpenQaSessionRequest.model_validate(
         open_request(
-            model="bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
-            reasoning={"max_tokens": 2048},
+            model="anthropic/claude-sonnet-5.5",
+            reasoning={"max_tokens": 0},
         )
     )
     haiku_effort = OpenQaSessionRequest.model_validate(
         open_request(
-            model="bedrock/us.anthropic.claude-haiku-5-5",
+            model="claude/claude-haiku-5-5",
             reasoning={"effort": "medium"},
         )
     )
 
     assert effort.reasoning == ReasoningConfig(effort=ReasoningEffort.high)
-    assert budget.reasoning == ReasoningConfig(max_tokens=2048)
+    assert off.reasoning == ReasoningConfig(max_tokens=0)
     assert haiku_effort.reasoning == ReasoningConfig(effort=ReasoningEffort.medium)
 
 
@@ -91,8 +86,7 @@ def test_request_accepts_each_supported_reasoning_shape() -> None:
     [
         ("qwen/qwen3.7-max", {"effort": "low"}),
         ("anthropic/claude-sonnet-5.5", {"max_tokens": 2048}),
-        ("bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", {"effort": "high"}),
-        ("bedrock/us.anthropic.claude-haiku-5-5", {"max_tokens": 2048}),
+        ("gpt/gpt-6.1-sol", {"max_tokens": 2048}),
         # The right kind, an effort the model does not offer.
         ("google/gemini-3.8-flash", {"effort": "max"}),
         ("google/gemini-3.8-flash", {"effort": "xhigh"}),
@@ -121,13 +115,6 @@ def test_request_rejects_unknown_or_out_of_range_reasoning_fields() -> None:
             open_request(
                 model="anthropic/claude-sonnet-5.5",
                 reasoning={"effort": "high", "max_token": 2048},
-            )
-        )
-    with pytest.raises(ValidationError, match="max_tokens >= 1024"):
-        OpenQaSessionRequest.model_validate(
-            open_request(
-                model="bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
-                reasoning={"max_tokens": 1023},
             )
         )
 
@@ -377,38 +364,13 @@ def test_a_model_call_carries_a_request_timeout_and_bounded_retries(
     assert settings.openrouter_max_retries < 2
 
 
-def test_zero_budget_disables_reasoning_on_both_paths() -> None:
-    """max_tokens=0 = 추론 끔 — None(미지정)과 다르다. 미지정은 token 예산 row 에서는
-    기본 예산으로 켜고, effort row 에서는 provider 기본값에 맡긴다. 라우터가 쓴다:
+def test_zero_budget_disables_reasoning() -> None:
+    """max_tokens=0 = 추론 끔 — None(미지정)과 다르다. 미지정은 provider 기본값에 맡긴다. 라우터가 쓴다:
     669토큰 분류에 추론이 지연 13초를 먹던 실측이 이 값의 이유다."""
     from app.llm.chat_model import build_chat_model
     from app.llm.models import ReasoningConfig
 
     off = ReasoningConfig(max_tokens=0)
-    haiku_4_5 = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
-
-    budget_off = build_chat_model(haiku_4_5, off)
-    assert "thinking" not in (budget_off.additional_model_request_fields or {})
-
-    budget_default_on = build_chat_model(haiku_4_5)
-    assert "thinking" in budget_default_on.additional_model_request_fields
-
-    bedrock = build_chat_model("bedrock/us.anthropic.claude-haiku-5-5", off)
-    assert bedrock.additional_model_request_fields == {"thinking": {"type": "disabled"}}
-    assert bedrock.temperature is None
-    assert bedrock.max_tokens == 128_000
-
-    default_on = build_chat_model("bedrock/us.anthropic.claude-haiku-5-5")
-    assert default_on.additional_model_request_fields is None
-
-    high = build_chat_model(
-        "bedrock/us.anthropic.claude-haiku-5-5",
-        ReasoningConfig(effort=ReasoningEffort.high),
-    )
-    assert high.additional_model_request_fields == {
-        "thinking": {"type": "adaptive"},
-        "output_config": {"effort": "high"},
-    }
 
     openrouter = build_chat_model("google/gemini-3.8-flash", off)
     assert "reasoning" not in openrouter.extra_body
