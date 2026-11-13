@@ -89,7 +89,7 @@ def _resettable_menu() -> FakeGame:
         game.scene = "Menu"
         game.objects = {"Root/Start": {"text": "Start"}}
 
-    fake.reactions[("reset_game", None)] = back_to_menu
+    fake.reactions[("invoke_cheat", "reset_game")] = back_to_menu
     return fake
 
 
@@ -107,7 +107,7 @@ def _run_free(fake: FakeGame, scenario: QaScenario, asked: Raw, judge, jev: Fake
 
 
 def _resets(fake: FakeGame) -> int:
-    return sum(1 for method, _ in fake.actions if method == "reset_game")
+    return sum(1 for method, params in fake.actions if method == "invoke_cheat" and params[0]["name"] == "reset_game")
 
 
 # --- which cases a scene is offered, and where to go next ----------------------------------------

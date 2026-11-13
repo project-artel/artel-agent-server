@@ -10,6 +10,7 @@ from typing import Any
 
 from langchain_core.tools import BaseTool, tool
 
+from app.agents.qa.reset import reset_game_cheat
 from app.agents.qa.macro.lift import DispatchRecord, lift_call
 from app.agents.qa.tools.tool_context import ToolContext
 from app.qa.acting import PressLanding
@@ -224,13 +225,10 @@ def build_action_tools(ctx: ToolContext) -> list[BaseTool]:
             step,
         )
 
-    @tool(description=load_tool_description("reset_game").body)
-    async def reset_game(step: int, thought: str, clear_player_prefs: bool = False) -> str:
-        # 플래그가 꺼져 있으면 params를 아예 비운다. 기본 호출의 wire를 지금과 byte 단위로
-        # 같게 두어야 이 파라미터를 모르는 옛 SDK가 아무 변화도 보지 않는다.
-        params: list[Any] = [{"clearPlayerPrefs": True}] if clear_player_prefs else []
+    @tool(description="Reset the game for QA. The SDK default clears game PlayerPrefs and static state, then reloads the startup scene. Games can supply their own reset flow.")
+    async def reset_game(step: int, thought: str) -> str:
         return await _run(
-            [JsonRpcAction(id=1, method="reset_game", params=params)],
+            [reset_game_cheat()],
             "Resetting the game",
             step,
         )
