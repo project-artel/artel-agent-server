@@ -13,10 +13,18 @@ TR 단위 QA 실행에서 run 루프는 "무엇을 얼마나 되돌리나"를 �
 `clear_player_prefs` 로 정책이 정한다. 기본값은 끄기라 지금까지의 동작은 그대로다.
 """
 
-from typing import Any, Protocol
+from typing import Protocol
 
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import JsonRpcAction
+
+
+def reset_game_cheat(clear_player_prefs: bool = False) -> JsonRpcAction:
+    return JsonRpcAction(
+        id=1,
+        method="invoke_cheat",
+        params=[{"name": "reset_game", "args": {"clearPlayerPrefs": clear_player_prefs}}],
+    )
 
 
 class ResetPolicy(Protocol):
@@ -54,11 +62,8 @@ class FullResetPolicy:
     async def between_scenarios(
         self, channel: QaRunChannel, completed_index: int, total: int
     ) -> None:
-        # 꺼져 있으면 params를 비운 채 보낸다. 이 파라미터를 모르는 옛 SDK가 보는 frame이
-        # 지금과 동일해야 한다.
-        params: list[Any] = [{"clearPlayerPrefs": True}] if self._clear_player_prefs else []
         await channel.dispatch_actions(
-            [JsonRpcAction(id=1, method="reset_game", params=params)],
+            [reset_game_cheat(self._clear_player_prefs)],
             "Resetting the game before the next scenario",
         )
 

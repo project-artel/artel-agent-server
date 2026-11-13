@@ -675,11 +675,11 @@ def test_resetting_goes_out_as_the_reset_action() -> None:
             "Resetting the game"
         ]
         assert [item["method"] for item in actions(sent)[0]["payload"]["actions"]] == [
-            "reset_game"
+            "invoke_cheat"
         ]
-        # 기본 호출은 params가 빈 채로 나간다. clearPlayerPrefs 를 모르는 옛 SDK 가 보는
-        # frame 이 지금과 동일해야 하므로, 이 단언이 그 하위 호환을 고정한다.
-        assert actions(sent)[0]["payload"]["actions"][0]["params"] == []
+        assert actions(sent)[0]["payload"]["actions"][0]["params"] == [
+            {"name": "reset_game", "args": {"clearPlayerPrefs": False}}
+        ]
 
     asyncio.run(run())
 
@@ -706,8 +706,8 @@ def test_a_reset_can_ask_for_the_player_prefs_to_go() -> None:
             {
                 "id": 1,
                 "jsonrpc": "2.0",
-                "method": "reset_game",
-                "params": [{"clearPlayerPrefs": True}],
+                "method": "invoke_cheat",
+                "params": [{"name": "reset_game", "args": {"clearPlayerPrefs": True}}],
             }
         ]
 
