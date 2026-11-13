@@ -78,11 +78,10 @@ FAILURE_CAPTURE_TURNS = 6
 # guessing from content shape.
 CAPTURE_MESSAGE_KEY = "artel_capture_id"
 
-# Marks a message that rides on one request and is never stored, so the cache
-# boundary can be written before it rather than after
-# (`_CachingChatBedrockConverse._with_cache_point`). A boundary written after it
-# would put a picture that changes every turn inside the cached prefix, which is
-# the same lost read this arm exists to avoid.
+# Marks a message that rides on one request and is never stored. The Bedrock route
+# read it to write its cache boundary before the picture rather than after; that
+# route is gone (ARTEL-1438) and nothing reads the mark now. It stays so a cache
+# boundary written by hand on another route can skip the picture the same way.
 TRANSIENT_MESSAGE_KEY = "artel_transient"
 
 _ALLOWED_MIME_TYPES = frozenset({"image/jpeg", "image/png"})
@@ -346,9 +345,8 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
 
         ## Why the picture does not go into the conversation
 
-        The cache boundary is written at the end of the prompt
-        (`_CachingChatBedrockConverse._with_cache_point`), so the next turn reads
-        this whole prompt back — but only while every byte of it is the same again.
+        Providers cache the prompt prefix, so the next turn reads this whole prompt
+        back — but only while every byte of it is the same again.
 
         Storing a picture per turn cannot keep that promise, whichever way the old
         ones are disposed of. `fold_context` rewrites them into text and a deletion

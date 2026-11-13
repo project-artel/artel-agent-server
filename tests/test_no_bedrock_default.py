@@ -1,4 +1,4 @@
-"""A default install never needs Bedrock: the router default and boot."""
+"""Bedrock is gone (ARTEL-1438): the router default and boot need nothing from it."""
 
 import pytest
 from fastapi.testclient import TestClient
@@ -33,13 +33,6 @@ def test_router_defaults_to_an_openrouter_model(no_bedrock):
     assert not router_model().startswith("bedrock/")
 
 
-def test_router_model_can_be_set_to_bedrock_by_an_operator(no_bedrock, monkeypatch):
-    monkeypatch.setenv("ROUTER_MODEL", "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0")
-    get_settings.cache_clear()
-
-    assert router_model() == "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
-
-
 def test_router_model_outside_the_catalog_is_rejected_when_used(no_bedrock, monkeypatch):
     """Settings load before the catalog is reachable, so the check runs at use."""
     monkeypatch.setenv("ROUTER_MODEL", "nope/none")
@@ -51,10 +44,10 @@ def test_router_model_outside_the_catalog_is_rejected_when_used(no_bedrock, monk
 
 def test_router_model_may_name_a_disabled_row(no_bedrock, monkeypatch):
     """Turning a model off hides it from users; an operator's router keeps it."""
-    monkeypatch.setenv("ROUTER_MODEL", "bedrock/us.openai.gpt-6.1-sol")
+    monkeypatch.setenv("ROUTER_MODEL", "claude/claude-haiku-5-5")
     get_settings.cache_clear()
 
-    assert router_model() == "bedrock/us.openai.gpt-6.1-sol"
+    assert router_model() == "claude/claude-haiku-5-5"
 
 
 def test_default_router_builds_without_any_bedrock_value(no_bedrock):

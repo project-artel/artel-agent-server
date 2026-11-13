@@ -10,6 +10,7 @@ from app.agents import (
     SceneEdge,
     TestCaseListItem,
 )
+from app.llm.credentials import LlmKey
 from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig
 
 
@@ -70,3 +71,6 @@ class SessionRecord(BaseModel):
     # orchestration server. Fed to the agent so it can target existing scenarios
     # for edits (echoing `scenario_id`). Default empty keeps older records valid.
     current_scenarios: list[ScenarioPlan] = Field(default_factory=list)
+    # 사용자가 고른 model 을 부를 사용자 · 프로젝트 key(ARTEL-1426). 없으면 공용 key 다. QA 세션처럼 세션
+    # 기록에만 두고 로그 · 응답에는 내지 않는다(`app/llm/credentials.py`). 턴이 model 을 바꾸면 함께 바뀐다.
+    llm_key: LlmKey | None = Field(default=None, repr=False)

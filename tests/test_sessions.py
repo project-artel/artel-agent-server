@@ -19,6 +19,7 @@ from app.sessions import (
     SessionExpired,
     SessionService,
 )
+from app.llm.credentials import LlmKey, LlmKeyService, bound_llm_key
 from app.llm.usage import _scope
 from app.sessions.schemas import SessionRecord
 
@@ -488,3 +489,89 @@ def test_a_trimmed_history_is_flagged_on_the_next_request() -> None:
     asyncio.run(service.run_turn(session_id, _channel(), "third", draft=None))
 
     assert seen == [False, False, True]
+
+
+# --- the session's own LLM key (ARTEL-1426) ------------------------------------------------
+
+
+USER_ANTHROPIC = LlmKey(service=LlmKeyService.anthropic, api_key="sk-ant-user")
+
+
+class KeyReadingAgent(ScenarioAgent):
+    """Reads the bound key where a real model call would read it — inside the turn's task."""
+
+    def __init__(self, seen: list[object]) -> None:
+        def factory(*, model, tools, system_prompt, reasoning=None):
+            def run(_inputs):
+                seen.append(bound_llm_key())
+                return {"messages": [], "structured_response": _result()}
+
+            return RunnableLambda(run)
+
+        super().__init__(agent_factory=factory)
+
+
+def test_the_sessions_key_reaches_every_turn_until_the_model_changes() -> None:
+    seen: list[object] = []
+    store = InMemorySessionStore()
+    service = SessionService(store=store, agent=KeyReadingAgent(seen))
+    session_id = asyncio.run(
+        service.open({}, {}, "start", model="claude/claude-sonnet-5-5", llm_key=USER_ANTHROPIC)
+    )
+
+    asyncio.run(service.start_first_turn(session_id, _channel()))
+    asyncio.run(service.run_turn(session_id, _channel(), "again", None))
+    # A turn that switches the model without a key runs that model on the platform key —
+    # the previous model's user key is not carried over to it.
+    asyncio.run(service.run_turn(session_id, _channel(), "switch", None, model="openai/gpt-6-luna"))
+
+    assert seen == [USER_ANTHROPIC, USER_ANTHROPIC, None]
+    record = asyncio.run(store.load(session_id))
+    assert record is not None and record.llm_key is None
+
+
+def test_the_key_never_shows_in_the_record_repr() -> None:
+    record = SessionRecord(llm_key=USER_ANTHROPIC)
+
+    assert "sk-ant-user" not in repr(record)
+
+
+def test_open_session_refuses_an_openai_model_without_an_openai_key() -> None:
+    client = TestClient(_test_app())
+
+    missing = client.post("/sessions", json={"user_input": "shop flow", "model": "gpt/gpt-6-luna"})
+    wrong = client.post(
+        "/sessions",
+        json={
+            "user_input": "shop flow",
+            "model": "gpt/gpt-6-luna",
+            "llm_key": {"service": "anthropic", "api_key": "sk-ant-user"},
+        },
+    )
+
+    assert missing.status_code == 422
+    assert wrong.status_code == 422
+    assert "sk-ant-user" not in wrong.text
+
+
+def test_ws_turn_switching_to_an_openai_model_needs_its_key() -> None:
+    client = TestClient(_test_app())
+    session_id = client.post("/sessions", json={"user_input": "shop flow"}).json()["session_id"]
+
+    with client.websocket_connect(f"/sessions/{session_id}") as ws:
+        assert ws.receive_json()["type"] == "result"
+
+        ws.send_json({"type": "turn", "user_input": "x", "model": "gpt/gpt-6-luna"})
+        refused = ws.receive_json()
+        ws.send_json(
+            {
+                "type": "turn",
+                "user_input": "x",
+                "model": "gpt/gpt-6-luna",
+                "llm_key": {"service": "openai", "api_key": "sk-user-openai"},
+            }
+        )
+        accepted = ws.receive_json()
+
+    assert refused["type"] == "error" and refused["code"] == "bad_request"
+    assert accepted["type"] == "result"

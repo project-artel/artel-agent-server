@@ -3,13 +3,13 @@
 The keys live only in the orchestration server, stored encrypted after an
 administrator enters them on the admin page. This module reads them from
 ``GET {ORCHESTRATION_BASE_URL}/internal/settings/llm``, which answers
-``{ "openrouterApiKey": ..., "bedrockApiKey": ..., "anthropicApiKey": ...,
-"typesafeApiKey": ... }`` with any value possibly null. There is no environment fallback: a key in ``.env`` is
+``{ "openrouterApiKey": ..., "anthropicApiKey": ..., "typesafeApiKey": ... }``
+with any value possibly null. Fields this module does not know are ignored. There is no environment fallback: a key in ``.env`` is
 not read.
 
 The fetched keys are cached for ``llm_key_cache_ttl_seconds`` so a model call does
 not pay a network round trip. They are dropped early when a provider rejects a
-key (401 from OpenRouter or the Claude API, 401 or 403 from Bedrock) or when
+key (401 from OpenRouter or the Claude API) or when
 orchestration calls ``POST /internal/llm-cache/invalidate``, so a key an
 administrator just replaced takes effect on the next call instead of after the
 TTL.
@@ -47,7 +47,6 @@ SETTINGS_PATH = "/internal/settings/llm"
 MISSING_KEY_PLACEHOLDER = "missing"
 
 UNAUTHORIZED = 401
-FORBIDDEN = 403
 
 
 class _LlmSettingsBody(BaseModel):
@@ -56,7 +55,6 @@ class _LlmSettingsBody(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, extra="ignore", frozen=True)
 
     openrouter_api_key: str | None = None
-    bedrock_api_key: str | None = None
     anthropic_api_key: str | None = None
     typesafe_api_key: str | None = None
 
@@ -64,7 +62,6 @@ class _LlmSettingsBody(BaseModel):
 @dataclass(frozen=True)
 class ProviderKeys:
     openrouter: str | None = None
-    bedrock: str | None = None
     anthropic: str | None = None
     typesafe: str | None = None
 
@@ -73,7 +70,6 @@ class ProviderKeys:
         # that shows this object.
         return (
             f"ProviderKeys(openrouter={'set' if self.openrouter else None}, "
-            f"bedrock={'set' if self.bedrock else None}, "
             f"anthropic={'set' if self.anthropic else None}, "
             f"typesafe={'set' if self.typesafe else None})"
         )
@@ -116,10 +112,6 @@ class LlmApiKeyProvider:
     def get_openrouter_key_or_placeholder(self) -> str:
         """Same as `get_openrouter_key`, shaped for a client that insists on a string."""
         return self.get_openrouter_key() or MISSING_KEY_PLACEHOLDER
-
-    def get_bedrock_key(self) -> str | None:
-        """The Bedrock API key to use now, or None so the AWS credential chain answers."""
-        return self._current().bedrock
 
     def get_anthropic_key(self) -> str | None:
         """The Claude API key to use now, or None when none is stored."""
@@ -183,42 +175,20 @@ class LlmApiKeyProvider:
 
         return ProviderKeys(
             openrouter=_clean(body.openrouter_api_key),
-            bedrock=_clean(body.bedrock_api_key),
             anthropic=_clean(body.anthropic_api_key),
             typesafe=_clean(body.typesafe_api_key),
         )
 
 
 def _status_code(error: BaseException) -> int | None:
-    """The HTTP status of a provider client error, from either client library.
-
-    The OpenAI client puts it on `status_code`. botocore's `ClientError` puts it
-    under `response["ResponseMetadata"]["HTTPStatusCode"]`.
-    """
+    """The HTTP status of a provider client error. The OpenAI and Anthropic clients put it on `status_code`."""
     status = getattr(error, "status_code", None)
-    if isinstance(status, int):
-        return status
-    response = getattr(error, "response", None)
-    if isinstance(response, dict):
-        metadata = response.get("ResponseMetadata")
-        if isinstance(metadata, dict) and isinstance(metadata.get("HTTPStatusCode"), int):
-            return metadata["HTTPStatusCode"]
-    return None
+    return status if isinstance(status, int) else None
 
 
 def is_unauthorized(error: BaseException) -> bool:
     """True when a provider client error is an HTTP 401."""
     return _status_code(error) == UNAUTHORIZED
-
-
-def is_key_rejected_by_bedrock(error: BaseException) -> bool:
-    """True when Bedrock answered 401 or 403.
-
-    Bedrock answers a bad API key with 403 as often as 401. A 403 can also mean
-    the account lacks access to the model; dropping the cache then costs one
-    extra fetch and nothing else.
-    """
-    return _status_code(error) in (UNAUTHORIZED, FORBIDDEN)
 
 
 def is_key_rejected_by_anthropic(error: BaseException) -> bool:
@@ -235,8 +205,8 @@ class KeyRefreshOnUnauthorized(AsyncCallbackHandler):
     """Drops the cached keys when a chat call is rejected for its key.
 
     The call that failed is not retried here; the next one reads a fresh key.
-    `rejected` decides which errors count, so the OpenRouter, Bedrock and Claude
-    API clients can share this class.
+    `rejected` decides which errors count, so the OpenRouter and Claude API clients
+    can share this class.
     """
 
     def __init__(

@@ -18,35 +18,11 @@ def _capture(monkeypatch) -> MagicMock:
     return chat
 
 
-BEDROCK = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
-BEDROCK_WITHOUT_STRICT = "bedrock/us.anthropic.claude-haiku-5-5"
 OPENROUTER = "openai/gpt-6-luna"
 
 
-def test_bedrock_gets_json_schema_without_strict(monkeypatch) -> None:
-    """`ChatBedrockConverse._converse_params()` 가 `strict` 인자를 받지 않는다
-    (ARTEL-806). `json_schema` 자체는 Bedrock 도 받으므로 `json_mode` 로 내리지 않는다."""
-    chat = _capture(monkeypatch)
-
-    structured(BEDROCK, _Schema)
-
-    chat.with_structured_output.assert_called_once_with(_Schema, method="json_schema")
-    assert "strict" not in chat.with_structured_output.call_args.kwargs
-
-
-def test_bedrock_without_structured_outputs_uses_function_calling(monkeypatch) -> None:
-    """Haiku 5.5 Bedrock 은 structured outputs 미지원이라 tool schema 로 받는다."""
-    chat = _capture(monkeypatch)
-
-    structured(BEDROCK_WITHOUT_STRICT, _Schema)
-
-    chat.with_structured_output.assert_called_once_with(
-        _Schema, method="function_calling"
-    )
-
-
 def test_openrouter_still_gets_strict(monkeypatch) -> None:
-    """OpenRouter 경로는 그대로다. 이 결함은 Bedrock 에서만 났다."""
+    """OpenRouter 경로는 strict json_schema 다."""
     chat = _capture(monkeypatch)
 
     structured(OPENROUTER, _Schema)
@@ -73,16 +49,11 @@ def test_a_reasoning_setting_reaches_the_chat_model(monkeypatch) -> None:
     assert built == [(OPENROUTER, off)]
 
 
-def test_bedrock_catalog_reports_strict_schema_support_per_row() -> None:
-    assert select_structured_method(BEDROCK) == "json_schema"
-    assert select_structured_method(BEDROCK_WITHOUT_STRICT) == "json_mode"
-
-
-@pytest.mark.parametrize("model", [BEDROCK, BEDROCK_WITHOUT_STRICT, OPENROUTER])
+@pytest.mark.parametrize("model", [OPENROUTER, "claude/claude-sonnet-5-5"])
 def test_no_call_site_decides_this_for_itself(model) -> None:
     """네 agent 가 각자 고르지 않고 이 함수를 지난다.
 
-    종전에는 넷이 같은 분기를 복사해 갖고 있었고, Bedrock 이 들어오자 넷이 함께 죽었다.
+    종전에는 넷이 같은 분기를 복사해 갖고 있었고, 새 provider 가 들어오자 넷이 함께 죽었다.
     한 곳이 알면 다음 provider 가 늘어도 고칠 자리가 하나다.
     """
     import inspect
