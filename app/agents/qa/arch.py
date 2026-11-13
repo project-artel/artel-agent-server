@@ -497,7 +497,12 @@ from app.llm.models import LLMModel, get_model_spec
 # 과거 기록은 출처와 함께 참고로 읽으며 현재 실행의 판정을 대체하지 않는다.
 # v52는 사용자 질문을 게임 의도·기대 결과·사람의 게임 내 작업 확인으로 제한한다.
 # v53은 모든 대상 TC의 판정이 저장된 뒤 종료를 허용하고, ORDERED에서 앞선 미판정 TC를 안내한다.
-QA_ARCH_LABEL = "v53-require-tc-verdicts"
+# 새 prompt는 Game Function 호출을 합치고, 읽기 전용 결과를 TC 판정 근거로 쓴다.
+# v55의 every_call은 orchestration이 받은 최신 영상 프레임을 먼저 읽는다.
+# v56은 최신 Pulse 상태와 값의 흐름을 매 모델 호출 앞에 제공한다.
+# v57은 TC 없이 step만 있는 ORDERED scenario를 순서대로 수행하고 실행 결과로 종료한다.
+# `context compaction` 이후에도 원본 step 순서를 제공한다.
+QA_ARCH_LABEL = "v57-ordered-steps-without-cases"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

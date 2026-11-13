@@ -60,6 +60,7 @@ from app.agents.planner_executer.free import (
     next_scene,
     same_scene,
 )
+from app.agents.planner_executer.inputs import InputsReader
 from app.agents.planner_executer.macros import RegisteredMacros
 from app.agents.planner_executer.observe import watch
 from app.agents.planner_executer.planner import Ask, Planner
@@ -156,9 +157,11 @@ class PlannerExecuterRunner:
         registered = RegisteredMacros(channel)
         # 런 단위 행동 장부: play 마다 실패를 종류로 쌓고, planner 가 계획을 검증할 때 읽는다.
         self._ledger = ActionLedger()
+        # 이 빌드가 읽는 입력(SDK `list_inputs`). planner 와 editor 가 나눠 써서, 옛 SDK 의 거절을 한 번만 듣는다.
+        inputs = InputsReader(channel)
         planner = Planner(
             self._config, channel, self._spec, registered, ask=self._ask, developer=self._developer, ledger=self._ledger,
-            facts=self._facts,
+            facts=self._facts, inputs=inputs,
         )
         executer = Executer(channel, self._spec, jev, facts=self._facts)
         if self._spec.facts == "on":
@@ -173,7 +176,7 @@ class PlannerExecuterRunner:
             await watch_facts(channel, self._facts)
         # 런 중 macro 수정(ARTEL-1288). `editor="off"` 면 executer 는 멈춤 규칙만 더한 채 돈다.
         self._editor = MacroEditor(
-            self._config, channel, self._spec, registered, ask=self._ask, developer=self._developer
+            self._config, channel, self._spec, registered, ask=self._ask, developer=self._developer, inputs=inputs
         ) if (
             self._spec.editor == "on"
         ) else None

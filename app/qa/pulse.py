@@ -191,6 +191,16 @@ def observed_text(value: Any) -> str:
     return repr(value)
 
 
+def _remember_recent(values: dict[str, list[str]], key: str, observed: Any) -> None:
+    text = observed_text(observed).replace("\n", "\\n")
+    if len(text) > 120:
+        text = text[:119] + "…"
+    history = values.setdefault(key, [])
+    if not history or history[-1] != text:
+        history.append(text)
+        del history[:-5]
+
+
 # `uitk` element 를 한 줄에 몇 개까지 적나. 문서 하나가 120 개까지 오고, 그것을 다 적으면 객체 블록이 화면이 된다.
 MAX_UITK_SHOWN = 8
 
@@ -352,6 +362,9 @@ class PulseObject(BaseModel):
     # 왔다는 사실 자체가 "이번에 바뀌었다" 이고, 아래 `text_at` 이 그것을 적는다.
     text: str | None = None
     offers: dict[str, Any] | None = None
+    # 포인터로 겨누는 객체가 지금 보이는가(ARTEL-1435). 덮개 뒤, 투명, mask 밖이면 false. SDK 가 클릭이나 포인터 offer 가
+    # 있는 객체에만, 바뀔 때만 싣는다. `None` 은 "모른다" 다 — 옛 SDK 이거나 키로만 누르는 객체다.
+    visible: bool | None = None
     # uGUI·엔진 컴포넌트·UI Toolkit 의 상태. 어느 멤버에도 없는 값이라 SDK 의 adapter 가 읽어 객체
     # 항목에 조각으로 싣는다(ARTEL-1282). 조각은 바뀔 때 통째로 다시 온다.
     ui: dict[str, Any] | None = None
@@ -454,6 +467,7 @@ class PulseReading(BaseModel):
     #
     # 없으면 없는 대로 돈다. 이 필드를 모르는 SDK 에서는 종전처럼 전량 판독까지 잔상이 남는다.
     gone: list[str] = Field(default_factory=list)
+    offscreen: list[str] = Field(default_factory=list)
     # Written even when empty: an empty list and a missing field are different
     # claims, and the reading means the first.
     changed: list[str] = Field(default_factory=list)
@@ -534,9 +548,12 @@ class _HeldObject(BaseModel):
     # 이 객체가 화면에 띄우고 있는 글자(ARTEL-678).
     text: str | None = None
     offers: dict[str, Any] | None = None
+    # `PulseObject.visible` 의 마지막 값. 델타에 안 실리면 이어받는다 — SDK 는 바뀔 때만 보낸다.
+    visible: bool | None = None
     # True when the object last arrived under `active`.
     live: bool = True
     members: dict[str, PulseMember] = Field(default_factory=dict)
+    recent: dict[str, list[str]] = Field(default_factory=dict)
     # SDK adapter 의 조각(ARTEL-1289). `PulseObject` 에서 그대로 옮긴다 — 전에는 이 객체를 다시
     # 만들 때 빠져서 세 adapter 의 상태가 모델에도 macro 에도 닿지 않았다.
     ui: dict[str, Any] | None = None
@@ -619,6 +636,8 @@ class PulseMemory(BaseModel):
     # 안 되는데, 도구 결과는 대화에 그대로 남으므로 읽는 쪽은 옛 화면에서 그 객체를 여전히
     # 본다 — 실제로 파괴된 카드의 좌표로 두 번 드래그했다(ARTEL-663).
     gone_at: dict[str, int] = Field(default_factory=dict)
+    static_recent: dict[str, list[str]] = Field(default_factory=dict)
+    snapshot_omissions: list[str] = Field(default_factory=list)
     # `deactive` 로 온 객체와 그것이 꺼진 `reading`. `gone` 과 같은 이유로 남긴다 — `render` 가
     # 꺼진 것을 안 그리므로(누를 수 없어 조준 후보가 아니다) 꺼짐도 침묵으로만 표현됐고, 침묵은
     # 소식 없음과 구분이 안 된다. 조합 zone 이 닫힌 줄 모르고 없는 칸에 카드를 끌었다(ARTEL-665).
@@ -819,6 +838,7 @@ class PulseMemory(BaseModel):
 
     def apply(self, reading: PulseReading) -> None:
         self.readings += 1
+        previous_holders = set(self.held) if reading.whole and reading.scene in (None, self.scene) else set()
 
         # A whole reading replaces rather than adds. Keeping the old rows would
         # leave behind objects the game has since destroyed, and the reading
@@ -827,6 +847,8 @@ class PulseMemory(BaseModel):
             self.wholes += 1
             self.held = {}
             self.statics = {}
+            self.static_recent = {}
+            self.snapshot_omissions = []
             # 전량 판독은 쥔 것을 통째로 갈아치운다. 그 앞에서 무엇이 사라졌다는 말은 새
             # 화면에 대고 할 말이 아니다.
             self.gone_at = {}
@@ -901,6 +923,7 @@ class PulseMemory(BaseModel):
         for entry in reading.statics:
             self.statics[entry.key] = entry
             self.static_at[entry.key] = now
+            _remember_recent(self.static_recent, entry.key, entry.observed)
 
         # event 는 이 reading 의 번호를 달고 뒤에 붙는다. 같은 번호가 창을 가르는 자(`clock`)라
         # `render` 가 "지난번 그린 뒤" 를 값과 같은 자로 잰다.
@@ -915,6 +938,8 @@ class PulseMemory(BaseModel):
             for folded in arrived:
                 obj = folded.flatten(reading.scene)
                 was = self.held.get(obj.key)
+                if was is not None and obj.id is not None and was.id not in (None, obj.id):
+                    was = None
                 held = _HeldObject(
                     scene=obj.scene or (was.scene if was else None),
                     # 0 이 유효한 id 는 아니지만 None 과 가리려면 is not None 이어야 한다.
@@ -926,8 +951,11 @@ class PulseMemory(BaseModel):
                     tag=obj.tag or (was.tag if was else None),
                     text=obj.text if obj.text is not None else (was.text if was else None),
                     offers=obj.offers or (was.offers if was else None),
+                    # false 도 값이라 `or` 로 잇지 않는다.
+                    visible=obj.visible if obj.visible is not None else (was.visible if was else None),
                     live=live,
                     members=dict(was.members) if was else {},
+                    recent=dict(was.recent) if was else {},
                 )
                 held.at = dict(was.at) if was else {}
                 # 실려 왔다는 것이 곧 바뀌었다는 뜻이다 — SDK 가 장부에 얹어 보내므로
@@ -948,6 +976,7 @@ class PulseMemory(BaseModel):
                 for member in obj.members:
                     held.members[member.key] = member
                     held.at[member.key] = now
+                    _remember_recent(held.recent, member.key, member.observed)
                 self.held[obj.key] = held
 
                 # 켜져 있던 것이 꺼진 **순간**만 적는다. 처음 보는데 이미 꺼져 있는 것은
@@ -963,6 +992,11 @@ class PulseMemory(BaseModel):
         # 판독이 말한 것만 지운다. 통에 안 왔다는 이유로 지우면 판독이 잘린 창에서 살아 있는
         # 객체를 잃는다 — 안 걸은 것과 없는 것은 걷는 쪽만 가릴 수 있고, 그래서 이 목록이
         # 생겼다(ARTEL-651).
+        for key in reading.offscreen:
+            self.held.pop(key, None)
+            self.off_at.pop(key, None)
+            self.gone_at.pop(key, None)
+
         for key in reading.gone:
             self.held.pop(key, None)
             # 꺼진 채로 파괴된 것이다. 두 번 말하지 않는다 — `gone` 이 더 센 말이다.
@@ -975,12 +1009,62 @@ class PulseMemory(BaseModel):
             for tracked in [name for name in self.moves if name.startswith(f"{key}|")]:
                 del self.moves[tracked]
 
+        if previous_holders:
+            self.snapshot_omissions = sorted(previous_holders - self.held.keys() - self.gone_at.keys())
+        elif self.snapshot_omissions:
+            self.snapshot_omissions = [key for key in self.snapshot_omissions if key not in self.held and key not in self.gone_at]
+
         # 오래된 것부터 버린다. 이미 말한 것은 대화에 남아 있다.
         for ledger in (self.gone_at, self.off_at):
             if len(ledger) <= MAX_TRACKED_KEYS:
                 continue
             for key in sorted(ledger, key=ledger.get)[: len(ledger) - MAX_TRACKED_KEYS]:
                 del ledger[key]
+
+    def render_latest_context(self) -> str | None:
+        if not self.seen:
+            return None
+        lines = [
+            f"Latest Pulse observations · scene {self.current_scene() or '(unknown)'} · reading {self.clock()}",
+            "Value sequences show observed changes in order. Use this view for current state.",
+        ]
+        removed = sorted(self.gone_at.keys() - self.held.keys(), key=lambda key: (-self.gone_at[key], key))
+        inactive = [key for key, obj in self.held.items() if not obj.live]
+        if removed:
+            names = ", ".join(self._named(key) for key in removed[:MAX_NAMED_OFF])
+            extra = max(0, len(removed) - MAX_NAMED_OFF)
+            lines.append(f"Reported gone: {names}" + (f", +{extra} more" if extra else ""))
+        if inactive:
+            lines.append(f"Inactive: {self._roll(inactive)}")
+        if self.snapshot_omissions:
+            lines.append(f"Missing from the latest full snapshot (removal unconfirmed): {self._roll(self.snapshot_omissions)}")
+        if self.gaps:
+            lines.append("The SDK reports incomplete coverage. Omitted objects may still be present.")
+
+        rows = [
+            (self.static_at[key], key, history)
+            for key, history in self.static_recent.items()
+            if not self.is_cosmetic(changed_type_key(key))
+        ]
+        rows.extend(
+            (obj.at[member], f"{self._named(key)} · {member}", history)
+            for key, obj in self.held.items() if obj.live
+            for member, history in obj.recent.items()
+            if not self.is_cosmetic(obj.members[member].type_key)
+        )
+        rows.sort(key=lambda row: (-row[0], row[1]))
+        remaining = 7000 - sum(len(line) + 1 for line in lines)
+        shown = 0
+        for _, name, history in rows[:32]:
+            line = f"- {name}: {' → '.join(history)}"
+            if len(line) + 1 > remaining:
+                break
+            lines.append(line)
+            remaining -= len(line) + 1
+            shown += 1
+        if len(rows) > shown:
+            lines.append(f"{len(rows) - shown} other watched values omitted from this summary.")
+        return "\n".join(lines)
 
     def render(
         self,

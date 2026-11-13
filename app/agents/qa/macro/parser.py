@@ -26,6 +26,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from app.agents.qa.macro.errors import MacroRejection
+from app.agents.qa.macro.key_codes import KEY_INPUT_RULES, canonical_key_code, key_code_suggestion
 from app.agents.qa.macro.grammar import (
     ARITHMETIC_FUNCTIONS,
     ASK,
@@ -769,6 +770,22 @@ def _literal(node: ast.expr) -> MacroLiteral | None:
     if isinstance(value, str):
         return MacroLiteral(shape=MacroShape.string, value=value)
     return None
+
+
+def _reject_unknown_key_code(literal: MacroLiteral, what: str, node: ast.AST) -> None:
+    """키 자리의 문자열이 Unity `KeyCode` 이름이 아니면 거절한다(ARTEL-1432).
+
+    대소문자는 가리지 않는다. SDK 도 가리지 않으므로(`Enum.TryParse(..., true)`) 원문을 그대로 둔다. 이름 인자는
+    검사하지 않는다 — `def` parameter 나 대입된 값은 여기서 값을 모른다.
+    """
+    if literal.shape is not MacroShape.string or canonical_key_code(literal.value) is not None:
+        return
+    suggestion = key_code_suggestion(literal.value)
+    fix = f" Use `{suggestion}`." if suggestion else ""
+    raise MacroRejection(
+        f"{what} is {literal.value!r}, which is not a Unity `KeyCode` name.{fix} {KEY_INPUT_RULES}",
+        getattr(node, "lineno", None),
+    )
 
 
 def _reject_type_mismatch(
@@ -2474,6 +2491,8 @@ class _FunctionReader:
         literal = _literal(node)
         if literal is not None:
             _reject_type_mismatch(parameter.declared_type, literal, what, node)
+            if parameter.key_code:
+                _reject_unknown_key_code(literal, what, node)
             return MacroLiteralArgument(parameter=parameter.name, literal=literal)
 
         if isinstance(node, ast.Name):

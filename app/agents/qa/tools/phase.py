@@ -151,6 +151,7 @@ _TOOL_PHASE: dict[str, RunPhase] = {
     # 그 목록을 다 적어야 하는데 축이 꺼진 run 에는 그 tool 이 없다.
     "run_cheat": RunPhase.act,
     "start_behavior": RunPhase.act,
+    "call_game_function": RunPhase.act,
     # VERIFY — 판정 하나.
     "report_test_case": RunPhase.verify,
     # UPDATE_MEMORY — 런을 넘어 남는 것을 적는 자리, 그리고 적을 것이 없다고 답하는 자리.

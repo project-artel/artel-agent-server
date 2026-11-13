@@ -148,7 +148,10 @@ time the game reports a new pulse, until it is true or the seconds run out. The
 seconds are a number written in the macro, more than 0 and at most
 {MAX_WAIT_PER_STATEMENT_SECONDS}. Nothing is sent to the game while it waits.
 While it waits, a lookup that matches nothing counts as "not yet" instead of
-stopping the macro, so you can wait for something to appear. When the time runs
+stopping the macro, so you can wait for something to appear. `actionable()` is
+false while something is drawn over the object, such as a loading screen, so
+`wait_until(actionable(button), ...)` before pressing it waits for the cover to
+go instead of pressing the cover. When the time runs
 out the macro stops with `WAIT_TIMEOUT`, saying how long it waited and how many
 pulses arrived; zero pulses means the screen never changed. Wait with this, not
 with `while`: a `while` with no action in it does not wait for the game, it

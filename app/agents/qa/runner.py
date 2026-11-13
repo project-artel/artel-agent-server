@@ -12,7 +12,7 @@ import re
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import wrap_model_call
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
 from app.agents.qa.arch import ResolvedArch, withheld_skills
@@ -26,7 +26,7 @@ from app.agents.qa.context import (
     fold_context,
 )
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
-from app.agents.qa.question_policy import USER_QUESTION_POLICY
+from app.agents.qa.question_policy import ORDERED_ACTION_POLICY, USER_QUESTION_POLICY
 from app.agents.qa.tools import QaRunState, build_tools
 from app.agents.qa.tools.game_function_tools import focus
 from app.agents.qa.tools.tool_context import ToolContext
@@ -213,16 +213,19 @@ def _macro_discovery(arch: ResolvedArch, channel: QaRunChannel) -> str:
     return context.macro_section() if context is not None else ""
 
 
-def _game_functions(arch: ResolvedArch, channel: QaRunChannel) -> str:
+def _game_functions(arch: ResolvedArch, channel: QaRunChannel, prompt_version: str = "v43") -> str:
     """첫 메시지 끝에 붙는, 이 run 이 부를 수 있는 cheat 와 behavior 의 catalog (ARTEL-1054).
 
     축이 켜진 쪽만 적는다. 둘 다 꺼진 run 은 빈 문자열이라 첫 메시지가 종전 그대로다. 첫
     메시지인 이유는 `_macro_discovery` 와 같다.
     """
     catalog = channel.game_functions
+    from app.agents.qa.tools.game_function_tools import uses_unified_functions
+
     return render_catalog(
         catalog.cheats if arch.cheats == "on" else None,
         catalog.behaviors if arch.behaviors == "on" else None,
+        unified=uses_unified_functions(prompt_version),
     )
 
 
@@ -295,6 +298,13 @@ def _plan(scenario: QaScenario) -> str:
                 item["human_review"] = reviews
             cases[step.case_id] = item
     document = {"test_cases": list(cases.values()), "reference_steps": references}
+    if scenario.execution_mode == "ORDERED" and references and not cases:
+        actions = json.dumps([_action_line(step) for step in scenario.steps], ensure_ascii=False, indent=2)
+        return (
+            f"Scenario: {scenario.title} — {scenario.description}\n\n"
+            "Execute the scenario actions below in order using the game tools.\n"
+            f"{actions}\n\nObserve the screen and begin."
+        )
     payload = json.dumps(document, ensure_ascii=False, indent=2)
     if count_tokens_approximately([{"role": "user", "content": payload}]) > TC_DETAIL_BUDGET:
         document = {"test_cases": [
@@ -372,6 +382,7 @@ def middleware_names_for(arch: ResolvedArch) -> tuple[str, ...]:
     # 자동 모드가 이 호출에만 붙이는 그림은 보지 않는다.
     if fold_kinds_for(arch):
         names.append("fold_context")
+    names.append("latest_pulse_context")
     # Only when the run can see. On a text-only run it would have nothing to
     # inject.
     if arch.vision:
@@ -419,10 +430,22 @@ def build_middleware(
         "fold_context": lambda: _fold_context_for(
             fold_kinds_for(arch), arch.fold_threshold_chars, state, channel
         ),
+        "latest_pulse_context": lambda: _latest_pulse_context_for(channel),
         "capture_vision": lambda: QaCaptureVisionMiddleware(state, channel, arch),
         "log_token_usage": lambda: _log_token_usage,
     }
     return [builders[name]() for name in middleware_names_for(arch)]
+
+
+def _latest_pulse_context_for(channel: QaRunChannel):
+    @wrap_model_call(name="latest_pulse_context")
+    async def latest_pulse_context(request, handler):
+        content = channel.scene.pulse.render_latest_context()
+        if content is not None:
+            request = request.override(messages=[HumanMessage(content=content), *request.messages])
+        return await handler(request)
+
+    return latest_pulse_context
 
 
 def _fold_context_for(
@@ -635,7 +658,9 @@ class QaRunner:
             "and report_test_case after it. "
             "This contract replaces any step-reporting instructions in the preceding prompt."
         )
-        system_prompt += "\n" + USER_QUESTION_POLICY
+        system_prompt += "\n" + (
+            ORDERED_ACTION_POLICY if state.executes_steps_without_cases else USER_QUESTION_POLICY
+        )
         if arch.macros == "on":
             system_prompt += (
                 "\nCurrent macro contract: intermediate dialogue history is not collected or returned. "
@@ -644,7 +669,7 @@ class QaRunner:
                 "instruction promising a list of text shown during a macro."
             )
         first_message = (
-            _plan(scenario) + _macro_discovery(arch, channel) + _game_functions(arch, channel)
+            _plan(scenario) + _macro_discovery(arch, channel) + _game_functions(arch, channel, prompt.version)
         )
         # 사람 판정 기록이 첫 메시지에 실제로 실렸는지 남긴다(ARTEL-1257 영향 실측).
         reviewed = [step.case.id for step in scenario.steps if step.case is not None and step.case.reviews]

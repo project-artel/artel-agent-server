@@ -109,7 +109,13 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         cited_checks, evidence = None, None
         if checks:
             pulse = channel.scene.pulse
-            cited_checks, evidence = cite(checks, pulse, state.shown_captures, pulse.scene or channel.scene.scene)
+            queries = {
+                key: message for key, (owner, message) in state.function_observations.items()
+                if owner == str(attempt_id)
+            }
+            cited_checks, evidence = cite(
+                checks, pulse, state.shown_captures, pulse.scene or channel.scene.scene, queries,
+            )
         citations = [entry for entry in dict.fromkeys(used_knowledge_ids) if state.knows_of(entry)]
         rejected_citations = len(set(used_knowledge_ids) - set(citations))
         if pending is None:
@@ -205,7 +211,7 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
     @tool(description="Close the QA run after recording a verdict for every assigned test case with report_test_case. Report INCONCLUSIVE when evidence is insufficient. Reference steps do not require separate verdicts.")
     async def finish_run(passed: bool, summary: str, thought: str) -> str:
         case_ids = dict.fromkeys(case_id for case_id, _ in state.step_meta if case_id is not None)
-        if not case_ids:
+        if not case_ids and not state.executes_steps_without_cases:
             return "Cannot finish the run because no test cases were assigned. Ask the operator to check the test case assignment."
         reported = reported_case_ids()
         missing = [str(case_id) for case_id in case_ids if case_id not in reported]

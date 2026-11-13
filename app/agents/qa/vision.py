@@ -11,6 +11,7 @@ Three separate problems, kept apart because they fail differently:
    (`app/agents/qa/context.py`), batched with the other stale blocks.
 """
 
+import asyncio
 import base64
 import logging
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 
 from app.agents.qa.arch import ScreenCaptureMode
+from app.config import get_settings
 from app.qa.envelope import JsonRpcAction
 
 if TYPE_CHECKING:
@@ -62,6 +64,7 @@ DOWNLOAD_TIMEOUT_SECONDS = 15.0
 # (15.0). Under `on_demand` that 15 was paid only on the turns the model asked to
 # look; here it is on every turn.
 AUTO_CAPTURE_TIMEOUT_SECONDS = 10.0
+STREAM_FRAME_TIMEOUT_SECONDS = 1.0
 
 # `by_role` 이 실패 화면을 몇 turn 들고 있나.
 #
@@ -477,6 +480,10 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
         close-up it is what the model asked to look at.
         """
         pending = self._state.take_pending_captures()
+        if not pending and getattr(self._arch, "screen_capture", None) is ScreenCaptureMode.every_call:
+            streamed = await self._latest_stream_screen()
+            if streamed is not None:
+                return streamed
         capture = pending[-1] if pending else await self._auto_capture()
         if capture is None:
             return None
@@ -495,4 +502,24 @@ class QaCaptureVisionMiddleware(AgentMiddleware):
             mime_type=capture.mime_type,
             encoded=encoded,
             caption=self._state.saw_capture(capture.capture_id, capture.caption),
+        )
+
+    async def _latest_stream_screen(self) -> HeldCapture | None:
+        root = get_settings().orchestration_base_url
+        if not root or self._channel is None:
+            return None
+        url = f"{root.rstrip('/')}/internal/qa-tries/{self._channel.qa_try_id}/stream-frame"
+        try:
+            async with asyncio.timeout(STREAM_FRAME_TIMEOUT_SECONDS):
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(url)
+            if response.status_code != 200 or image_mime_of(response.content) != "image/jpeg":
+                return None
+        except (TimeoutError, httpx.HTTPError, CaptureFetchError):
+            return None
+        return HeldCapture(
+            capture_id="",
+            mime_type="image/jpeg",
+            encoded=base64.b64encode(response.content).decode("ascii"),
+            caption="This is the latest screen frame from the live stream.",
         )

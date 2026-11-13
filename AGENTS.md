@@ -56,6 +56,9 @@ directories under `app/prompts/`, and are recorded on the run separately.
 so either one moving without the other fails there rather than in a report weeks
 later.
 
+For each QA Agent structure change, follow the
+[QA Agent runtime reference maintenance rules](.agents/docs/project.md#qa-agent-runtime-reference-maintenance).
+
 Wiring is not improvement, and that test only answers wiring. When you change the
 shape, drive a real QA run on this machine with the `qa-run-local` skill in
 `.agents/skills/` and put the numbers in the pull request. The fourth item above

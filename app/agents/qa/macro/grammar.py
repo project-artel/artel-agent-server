@@ -225,6 +225,8 @@ class ToolParameter:
     # 기본값은 이 표가 낸다.
     default: int | float | str | bool | None = None
     required: bool = True
+    # Unity `KeyCode` 이름을 받는 자리. parser 가 문자열 리터럴을 `key_codes.KEY_CODE_NAMES` 로 검사한다(ARTEL-1432).
+    key_code: bool = False
 
 
 @dataclass(frozen=True)
@@ -303,7 +305,7 @@ TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec(
         "press_key",
         (
-            ToolParameter("key_code", MacroType.string),
+            ToolParameter("key_code", MacroType.string, key_code=True),
             ToolParameter("duration_seconds", MacroType.float_),
         ),
         (ActionStep("key_click", ("key_code", "duration_seconds")),),
@@ -324,12 +326,12 @@ TOOLS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         "hold_key",
-        (ToolParameter("key_code", MacroType.string),),
+        (ToolParameter("key_code", MacroType.string, key_code=True),),
         (ActionStep("key_down", ("key_code",)),),
     ),
     ToolSpec(
         "release_key",
-        (ToolParameter("key_code", MacroType.string),),
+        (ToolParameter("key_code", MacroType.string, key_code=True),),
         (ActionStep("key_up", ("key_code",)),),
     ),
     ToolSpec(

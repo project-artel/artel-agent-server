@@ -98,6 +98,7 @@ class QaRunState:
         # 상한을 세는 것은 시도다. 게임이 매번 거절해도 루프에 끝이 있어야 한다 — 위
         # `captures_attempted` 와 같은 이유다.
         self.cheats_attempted = 0
+        self.function_observations: dict[str, tuple[str, str]] = {}
         self.behavior_calls_attempted = 0
         # 시나리오가 각 스텝에 적은 행위 문장, 1번 스텝이 0번 자리. macro 초안의 docstring 이
         # 이것을 싣는다(`draft_for_step`). 비면 문장을 모르는 것이고 초안은 번호만 적는다.
@@ -405,6 +406,14 @@ class QaRunState:
             unit["passed"] = bool(result and result.passed)
             unit["message"] = result.message if result else ""
         return units
+
+    @property
+    def executes_steps_without_cases(self) -> bool:
+        return (
+            self.execution_mode == "ORDERED"
+            and bool(self.step_meta)
+            and all(case_id is None for case_id, _ in self.step_meta)
+        )
 
     def build_summary(self) -> dict:
         """TC 검증 시도를 집계한다. 참고 step을 실패 판정으로 계산하지 않는다."""

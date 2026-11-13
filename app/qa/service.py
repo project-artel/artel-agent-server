@@ -407,6 +407,12 @@ class QaExecutionService:
                 channel.on_action_result(raw)
             elif message_type == MessageType.PULSE:
                 channel.on_pulse(raw)
+            elif message_type == MessageType.PULSE_CHUNK:
+                try:
+                    channel.on_pulse_chunk(raw)
+                except (KeyError, TypeError, ValueError) as error:
+                    logger.warning("[QA] dropped an unreadable PULSE_CHUNK: %s", error)
+                    return False
             elif message_type == MessageType.KNOWLEDGE_SEARCH_RESULT:
                 channel.on_knowledge_search_result(raw)
             elif message_type == MessageType.KNOWLEDGE_EXPAND_RESULT:
