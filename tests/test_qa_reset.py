@@ -40,34 +40,7 @@ def test_full_reset_dispatches_reset_game() -> None:
                 "id": 1,
                 "jsonrpc": "2.0",
                 "method": "invoke_cheat",
-                "params": [{"name": "reset_game", "args": {"clearPlayerPrefs": False}}],
-            }
-        ]
-
-    asyncio.run(run())
-
-
-def test_a_full_reset_can_be_asked_to_clear_player_prefs() -> None:
-    """켜면 저장 데이터까지 지우라는 파라미터가 실려 나간다.
-
-    기본값이 끄기라 `DEFAULT_RESET_POLICY` 를 쓰는 run 의 frame 은 그대로다. 이 테스트가
-    고정하는 것은 켰을 때의 wire 모양 — SDK 가 읽는 이름은 camelCase 인 `clearPlayerPrefs`
-    다.
-    """
-
-    async def run() -> None:
-        channel, sent = make_channel()
-        answer_first_action(channel, sent)
-        await FullResetPolicy(clear_player_prefs=True).between_scenarios(
-            channel, completed_index=0, total=2
-        )
-
-        assert sent[0]["payload"]["actions"] == [
-            {
-                "id": 1,
-                "jsonrpc": "2.0",
-                "method": "invoke_cheat",
-                "params": [{"name": "reset_game", "args": {"clearPlayerPrefs": True}}],
+                "params": [{"name": "reset_game"}],
             }
         ]
 

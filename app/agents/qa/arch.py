@@ -504,7 +504,8 @@ from app.llm.models import LLMModel, get_model_spec
 # `context compaction` 이후에도 원본 step 순서를 제공한다.
 # v58은 v56의 최신 Pulse 요약을 대화 앞이 아니라 끝에 붙인다. 내용은 같다. 앞에 두면 요약이 바뀔 때마다
 # 그 뒤 대화 전체가 `cache` 에서 빠져, Claude 에서는 매 호출 대화 전체를 다시 썼다.
-QA_ARCH_LABEL = "v58-latest-pulse-at-end"
+# v59는 `reset_game` 도구에서 저장소 옵션을 제거하고 SDK 내장 치트를 호출한다.
+QA_ARCH_LABEL = "v59-built-in-reset-cheat"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
