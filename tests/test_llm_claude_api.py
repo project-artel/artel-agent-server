@@ -116,6 +116,14 @@ def test_openrouter_anthropic_ids_stay_on_openrouter(keys) -> None:
     assert isinstance(build_chat_model("anthropic/claude-opus-5.5"), ChatOpenAI)
 
 
+def test_only_cached_openrouter_anthropic_calls_mark_the_stored_end(keys) -> None:
+    from app.llm.chat_model import _OpenRouterAnthropicChat
+
+    assert isinstance(build_chat_model("anthropic/claude-opus-5.5", cache_prompt=True), _OpenRouterAnthropicChat)
+    assert not isinstance(build_chat_model("anthropic/claude-opus-5.5"), _OpenRouterAnthropicChat)
+    assert not isinstance(build_chat_model("openai/gpt-6-luna", cache_prompt=True), _OpenRouterAnthropicChat)
+
+
 def test_no_stored_key_fails_before_any_client_is_built(keys, monkeypatch) -> None:
     keys.anthropic = None
     built = []

@@ -502,7 +502,9 @@ from app.llm.models import LLMModel, get_model_spec
 # v56은 최신 Pulse 상태와 값의 흐름을 매 모델 호출 앞에 제공한다.
 # v57은 TC 없이 step만 있는 ORDERED scenario를 순서대로 수행하고 실행 결과로 종료한다.
 # `context compaction` 이후에도 원본 step 순서를 제공한다.
-QA_ARCH_LABEL = "v57-ordered-steps-without-cases"
+# v58은 v56의 최신 Pulse 요약을 대화 앞이 아니라 끝에 붙인다. 내용은 같다. 앞에 두면 요약이 바뀔 때마다
+# 그 뒤 대화 전체가 `cache` 에서 빠져, Claude 에서는 매 호출 대화 전체를 다시 썼다.
+QA_ARCH_LABEL = "v58-latest-pulse-at-end"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.

@@ -272,6 +272,7 @@ def test_caching_is_opt_in_and_only_for_anthropic(monkeypatch) -> None:
             created.append(kwargs)
 
     monkeypatch.setattr(chat_model, "ChatOpenAI", FakeChat)
+    monkeypatch.setattr(chat_model, "_OpenRouterAnthropicChat", FakeChat)
     chat_model.build_chat_model.cache_clear()
     try:
         chat_model.build_chat_model("anthropic/claude-opus-5.5", cache_prompt=True)

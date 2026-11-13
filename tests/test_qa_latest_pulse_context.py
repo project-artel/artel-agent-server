@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from langchain_core.messages import HumanMessage, ToolMessage
 
 from app.agents.qa.runner import _latest_pulse_context_for
+from app.llm.cache_boundary import PER_CALL_KEY
 from app.qa.pulse import PulseMemory, PulseReading
 
 
@@ -41,7 +42,7 @@ def test_latest_context_distinguishes_snapshot_omissions_and_inactive_objects():
     assert "Reported gone:" not in context
 
 
-def test_latest_context_is_prepended_once_to_each_request():
+def test_latest_context_is_appended_once_to_each_request_after_the_stored_conversation():
     pulse = PulseMemory()
     channel = SimpleNamespace(scene=SimpleNamespace(pulse=pulse))
     middleware = _latest_pulse_context_for(channel)
@@ -58,6 +59,8 @@ def test_latest_context_is_prepended_once_to_each_request():
     second = asyncio.run(middleware.awrap_model_call(request, capture))
 
     assert len(original) == 1
-    assert isinstance(first[0], HumanMessage)
-    assert "100 → 80" in second[0].content
-    assert first[1:] == second[1:] == original
+    # 요약이 바뀌어도 앞의 대화는 그대로다. 그래야 다음 호출이 앞을 `cache` 에서 읽는다.
+    assert first[:-1] == second[:-1] == original
+    assert isinstance(second[-1], HumanMessage)
+    assert "100 → 80" in second[-1].content
+    assert second[-1].additional_kwargs[PER_CALL_KEY] is True

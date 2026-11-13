@@ -23,6 +23,7 @@ from app.llm.api_key import (
     is_key_rejected_by_anthropic,
     is_unauthorized,
 )
+from app.llm.cache_boundary import first_per_call, with_breakpoint
 from app.llm.claude_api import ClaudeApiChat
 from app.llm.credentials import LlmKeyService, bound_llm_key, session_chat_models
 from app.llm.usage import KeySource, UsageCallback
@@ -377,7 +378,8 @@ def _build_chat_model(
     # disabled(max_tokens=0)면 아예 안 싣는다 — OpenRouter 는 안 실으면 안 켠다.
     if reasoning is not None and not reasoning.disabled:
         extra_body["reasoning"] = reasoning.as_openrouter()
-    if cache_prompt and get_model_spec(model).provider is LLMProvider.anthropic:
+    caches_anthropic = cache_prompt and get_model_spec(model).provider is LLMProvider.anthropic
+    if caches_anthropic:
         # OpenRouter caches OpenAI and Google prompts by itself; Anthropic only
         # caches what the request marks. At the request root OpenRouter places the
         # breakpoint itself, at the end of the rendered prompt, and a later call
@@ -403,7 +405,9 @@ def _build_chat_model(
         else get_llm_api_key_provider().get_openrouter_key_or_placeholder
     )
 
-    return ChatOpenAI(
+    # Anthropic 은 표시한 자리만 cache 하므로, 이번 호출에만 붙는 메시지가 있으면 그 앞에 경계를 하나 더 둔다.
+    client = _OpenRouterAnthropicChat if caches_anthropic else ChatOpenAI
+    return client(
         model=model,
         base_url=settings.llm_base_url,
         api_key=api_key,
@@ -419,6 +423,28 @@ def _build_chat_model(
             *_platform_key_refresh(key_source, rejected=is_unauthorized),
         ],
     )
+
+
+class _OpenRouterAnthropicChat(ChatOpenAI):
+    """OpenRouter 로 부르는 Anthropic 모델. 첫 `per_call` 메시지 바로 앞에 cache 경계를 둔다.
+
+    이유는 `app.llm.cache_boundary`. langchain-openai 는 tool 메시지 content block 의 `cache_control` 을
+    지우므로, 메시지가 아니라 다 만든 요청 본문에 단다. chat completions 본문은 메시지 하나가 항목 하나다.
+    """
+
+    def _get_request_payload(self, input_, *, stop=None, **kwargs):  # type: ignore[override]
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        messages = self._convert_input(input_).to_messages()
+        first = first_per_call(messages)
+        sent = payload.get("messages")
+        if first is None or not isinstance(sent, list) or len(sent) != len(messages):
+            return payload
+        # 답 메시지에는 달지 않는다(`app.llm.claude_api._with_stored_breakpoint` 와 같다).
+        if sent[first - 1].get("role") in ("user", "tool"):
+            content = with_breakpoint(sent[first - 1].get("content"))
+            if content is not None:
+                sent[first - 1] = {**sent[first - 1], "content": content}
+        return payload
 
 
 # Tests and scripts clear the client cache through the public name.

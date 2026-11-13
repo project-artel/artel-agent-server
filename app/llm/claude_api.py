@@ -64,6 +64,8 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, Syst
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from pydantic import PrivateAttr
 
+from app.llm.cache_boundary import first_per_call, with_breakpoint
+
 THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 
 # How many thinking block signatures one client remembers. One QA run makes a few
@@ -71,6 +73,7 @@ THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 # on the same model, key and settings, so this is room for many runs at once. Each
 # entry is a signature and a 64-character hash.
 MAX_REMEMBERED_SIGNATURES = 20_000
+
 
 
 def forces_a_tool(tool_choice: Any) -> bool:
@@ -174,7 +177,7 @@ class ClaudeApiChat(ChatAnthropic):
                 ):
                     message = _without_thinking(message)
                 prepared.append(message)
-        return _with_system_breakpoint(prepared), hashes[-1]
+        return _with_stored_breakpoint(_with_system_breakpoint(prepared)), hashes[-1]
 
     def _invalidated(self, message: AIMessage, prefix_hash: str) -> bool:
         for signature in _signatures(message):
@@ -254,6 +257,18 @@ def _with_system_breakpoint(messages: list[BaseMessage]) -> list[BaseMessage]:
     else:
         return messages
     return [messages[0].model_copy(update={"content": blocks}), *messages[1:]]
+
+
+def _with_stored_breakpoint(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """첫 `per_call` 메시지 바로 앞, 저장된 대화의 끝에 cache 경계를 하나 둔다. 이유는 `app.llm.cache_boundary`."""
+    first = first_per_call(messages)
+    # 답 메시지에는 달지 않는다. 마지막 블록이 경계를 받지 못하는 thinking 일 수 있다.
+    if first is None or isinstance(messages[first - 1], (SystemMessage, AIMessage)):
+        return messages
+    content = with_breakpoint(messages[first - 1].content)
+    if content is None:
+        return messages
+    return [*messages[: first - 1], messages[first - 1].model_copy(update={"content": content}), *messages[first:]]
 
 
 def _merge(
