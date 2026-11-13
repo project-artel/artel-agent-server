@@ -225,10 +225,10 @@ def build_action_tools(ctx: ToolContext) -> list[BaseTool]:
             step,
         )
 
-    @tool(description=load_tool_description("reset_game").body)
-    async def reset_game(step: int, thought: str, clear_player_prefs: bool = False) -> str:
+    @tool(description="Reset the game for QA. The SDK default clears game PlayerPrefs and static state, then reloads the startup scene. Games can supply their own reset flow.")
+    async def reset_game(step: int, thought: str) -> str:
         return await _run(
-            [reset_game_cheat(clear_player_prefs)],
+            [reset_game_cheat()],
             "Resetting the game",
             step,
         )

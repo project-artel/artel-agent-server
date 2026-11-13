@@ -502,7 +502,8 @@ from app.llm.models import LLMModel, get_model_spec
 # v56은 최신 Pulse 상태와 값의 흐름을 매 모델 호출 앞에 제공한다.
 # v57은 TC 없이 step만 있는 ORDERED scenario를 순서대로 수행하고 실행 결과로 종료한다.
 # `context compaction` 이후에도 원본 step 순서를 제공한다.
-QA_ARCH_LABEL = "v57-ordered-steps-without-cases"
+# v58은 reset_game 도구에서 저장소 옵션을 제거하고 SDK 내장 치트를 호출한다.
+QA_ARCH_LABEL = "v58-built-in-reset-cheat"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
