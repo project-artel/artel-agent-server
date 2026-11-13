@@ -132,6 +132,8 @@ class QaRunState:
         # 행위가 경계다(ARTEL-621). `None` 은 아직 아무 행위도 없었거나, 그 필드를 모르는
         # 옛 SDK 다.
         self.last_action_frame: int | None = None
+        # 화면이 바뀌거나 새 TC 검증 시도를 시작하면 0으로 돌린다.
+        self.still_streak = 0
         # 지난 모델 호출까지 `fold_context` 가 `fold` 한 block 의 `key`. 다음 호출이 같은 block 을
         # 다시 `fold` 해야 프롬프트 앞이 그대로라 `cache` 가 맞는다
         # (`app/agents/qa/runner.py` 의 `_fold_context_for`).

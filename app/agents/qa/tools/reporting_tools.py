@@ -65,10 +65,13 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
         if step is None:
             return "This test case is not assigned to the scenario."
         stopped = await stop_not_allowed_before(ctx, step, starting_case=True)
+        previous_attempt_id = channel.evaluation.attempts.get(case_id)
         try:
             attempt = await channel.evaluation.start(case_id)
         except httpx.HTTPError:
             return "Could not save the start of the verification attempt. Retry the same start_test_case call."
+        if attempt.id != previous_attempt_id:
+            state.still_streak = 0
         state.current_case_id = case_id
         dispatch_starts.setdefault(case_id, len(state.dispatches))
         cheat_starts.setdefault(case_id, len(state.used_cheats))
