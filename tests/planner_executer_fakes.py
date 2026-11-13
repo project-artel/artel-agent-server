@@ -77,6 +77,8 @@ class FakeGame:
             first = params[0] if params else None
             # `watch` 처럼 목록을 첫 param 으로 보내는 action 도 `refuse`·`reactions` 의 key 가 되게 한다.
             first = tuple(first) if isinstance(first, list) else first
+            if method == "invoke_cheat" and isinstance(first, dict):
+                first = first.get("name")
             if method == "list_inputs":
                 # planner 가 step 마다 묻는 읽기 전용 질의다. 게임을 바꾸는 action 기록에 섞지 않는다.
                 self.queries.append(method)

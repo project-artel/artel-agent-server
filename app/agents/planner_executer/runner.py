@@ -24,6 +24,7 @@ recorded as ORDERED, and its FREE scenarios still play this way.
 import asyncio
 from collections.abc import Awaitable, Callable
 
+from app.agents.qa.reset import reset_game_cheat
 from app.agents.editor import MacroEditor
 from app.agents.evaluator import (
     Evaluator,
@@ -620,7 +621,7 @@ def unreached(attempts: int, resets: int, cause: str, last: str) -> str:
 async def reset_game(channel: QaRunChannel) -> None:
     """Restart the game from its first scene before the next FREE round, and wait for a reading."""
     await channel.dispatch_actions(
-        [JsonRpcAction(id=1, method="reset_game", params=[])], "Resetting the game for the next round"
+        [reset_game_cheat()], "Resetting the game for the next round"
     )
     await channel.wait_for_reading(RESET_READING_SECONDS)
 

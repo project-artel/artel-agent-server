@@ -27,11 +27,7 @@ def answer_first_action(channel: QaRunChannel, sent: list[dict]) -> None:
 
 
 def test_full_reset_dispatches_reset_game() -> None:
-    """FullResetPolicy는 시나리오 사이에 reset_game 액션을 내보낸다(첫 씬 리로드).
-
-    `params: []` 단언은 이제 새 생성자 기본값까지 고정한다 — clearPlayerPrefs 를 모르는
-    옛 SDK 가 보는 frame 이 지금과 동일해야 한다.
-    """
+    """FullResetPolicy는 시나리오 사이에 reset_game 내장 치트를 호출한다."""
 
     async def run() -> None:
         channel, sent = make_channel()
@@ -40,7 +36,12 @@ def test_full_reset_dispatches_reset_game() -> None:
 
         assert sent[0]["type"] == MessageType.ACTION.value
         assert sent[0]["payload"]["actions"] == [
-            {"id": 1, "jsonrpc": "2.0", "method": "reset_game", "params": []}
+            {
+                "id": 1,
+                "jsonrpc": "2.0",
+                "method": "invoke_cheat",
+                "params": [{"name": "reset_game", "args": {"clearPlayerPrefs": False}}],
+            }
         ]
 
     asyncio.run(run())
@@ -65,8 +66,8 @@ def test_a_full_reset_can_be_asked_to_clear_player_prefs() -> None:
             {
                 "id": 1,
                 "jsonrpc": "2.0",
-                "method": "reset_game",
-                "params": [{"clearPlayerPrefs": True}],
+                "method": "invoke_cheat",
+                "params": [{"name": "reset_game", "args": {"clearPlayerPrefs": True}}],
             }
         ]
 
