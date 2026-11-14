@@ -31,6 +31,7 @@ from app.agents.qa.macro.grammar import (
     ARITHMETIC_FUNCTIONS,
     ASK,
     ASK_VERDICT,
+    AT_START,
     CHECKPOINT,
     DECIDE,
     DECLARABLE_TYPE_NAMES,
@@ -96,6 +97,7 @@ from app.agents.qa.macro.model import (
     MacroDefinition,
     MacroExtremumOperand,
     MacroFindAllIterable,
+    MacroFindTarget,
     MacroFindValue,
     MacroFlagStatement,
     MacroForStatement,
@@ -2116,7 +2118,10 @@ class _FunctionReader:
         index = 0
         target: MacroTarget | None = None
         if spec.takes_target and not without_target:
-            target = self._target(node.args[index], f"the target of `{spec.name}`")
+            # `at_start` 는 step 시작 때의 기록을 읽는다. 지금 푸는 `find` 와는 맞지 않아 bind 한 이름만 받는다.
+            target = self._target(
+                node.args[index], f"the target of `{spec.name}`", inline_find=spec.name != AT_START
+            )
             index += 1
         key: MacroStringRef | None = None
         if spec.takes_key:
@@ -2125,11 +2130,12 @@ class _FunctionReader:
 
     # -- 조준 --
 
-    def _target(self, node: ast.expr, what: str) -> MacroTarget:
+    def _target(self, node: ast.expr, what: str, inline_find: bool = False) -> MacroTarget:
         """target 자리에 올 수 있는 셋만 통과시킨다.
 
         `selector(<문자열 리터럴>)`, `def` 줄의 parameter, `find()` 나 `selector()` 에
         bind 된 이름. 맨문자열 좌표(`640,360`)나 id(`#12345`)를 적을 문법 자체가 없다.
+        `inline_find` 면 reader 자리라 `find(...)` 를 바로 적은 것도 받는다(`MacroFindTarget`).
         """
         if isinstance(node, ast.Attribute):
             # `click(t.id)` 가 이 자리다. id 를 꺼내 쓰는 것이 조준의 자연스러운 모양처럼
@@ -2138,6 +2144,8 @@ class _FunctionReader:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             if node.func.id == SELECTOR:
                 return MacroSelectorTarget(selector=self._selector_string(node))
+            if node.func.id == FIND and inline_find:
+                return MacroFindTarget(find=self._find(node))
             if node.func.id == FIND:
                 raise MacroRejection(
                     f"{what} cannot be `find(...)` written inline. Bind it to a name "

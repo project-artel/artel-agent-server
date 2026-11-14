@@ -47,7 +47,10 @@ def test_the_check_block_is_read_beside_observe_and_an_empty_one_is_refused() ->
     assert read_check(check_text) == StepCheck(paths=("Root/Stage",), members=("Player.Hp",))
     assert read_check(None) is None
     assert read_check('{"paths": [], "members": ["Player.Hp"]}') == StepCheck(paths=None, members=("Player.Hp",))
-    for bad in ("{}", '{"paths": []}', '{"paths": "Card"}', '{"values": ["x"]}', "{nope"):
+    # 아무것도 이름 대지 않은 블록은 블록이 없는 것과 같다(ARTEL-1453). 거절하면 planner 가 step 을 통째로 다시 썼다.
+    for empty in ("{}", '{"paths": []}', '{"paths": [], "members": []}'):
+        assert read_check(empty) is None
+    for bad in ('{"paths": "Card"}', '{"values": ["x"]}', "{nope"):
         with pytest.raises(MacroRejection):
             read_check(bad)
 

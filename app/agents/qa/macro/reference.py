@@ -103,7 +103,12 @@ is refused; write a `#` comment there.
   option — Jev picks the case that runs
 
 **Aiming.** A target is `selector("<unity/hierarchy/path>")`, a parameter on the
-`def` line, or a name bound by `find(...)` or `selector(...)`. There is no syntax
+`def` line, or a name bound by `find(...)` or `selector(...)`. A reader may also
+take `find(...)` written in place — `exists(find(label="OK"))` — except
+`at_start()`; an action's target may not, so a lookup that finds nothing stops
+at its assignment before any input is sent. `exists(find(...))` is False and
+`absent(find(...))` is True when nothing matches; a bound `find` that matches
+nothing stops the macro at its assignment, so ask those two in place. There is no syntax
 for a coordinate or a `#id`: both go stale between the run that writes the macro
 and the run that calls it. `enter_text` takes a target here even though the tool
 itself takes an id — the macro resolves the id for you.

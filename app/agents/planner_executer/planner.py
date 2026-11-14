@@ -234,13 +234,16 @@ def read_observe(text: str | None) -> StepObserve | None:
 
 
 def read_check(text: str | None) -> StepCheck | None:
-    """The ```check block as a `StepCheck`, `None` when there is none, or `MacroRejection`. Same shape as
-    ```observe; it has to name something, since an empty block would record every live value."""
+    """The ```check block as a `StepCheck`, `None` when there is none or it names nothing, or `MacroRejection`.
+    Same shape as ```observe.
+
+    A block that names nothing is read as no block (ARTEL-1453). Taken literally it would record every live
+    value, and refusing it made the planner write the whole step again for a block it meant as "nothing in
+    particular" — 5 of 26 refusals in three weeks. The active scene is recorded either way (`_read_evidence`).
+    """
     names = _read_names(text, "check")
-    if names is None:
+    if names is None or (not names["paths"] and not names["members"]):
         return None
-    if not names["paths"] and not names["members"]:
-        raise MacroRejection('the ```check block names nothing; list the "paths" or "members" the verdict rests on.')
     return StepCheck(paths=names["paths"], members=names["members"])
 
 

@@ -29,6 +29,7 @@ play 를 그 오류로 멈춘다 — 대신 아무거나 고르면 무엇을 잰
 
 import ast
 import asyncio
+import hashlib
 import itertools
 import json
 import re
@@ -162,6 +163,14 @@ def address_hints(text: str, pulse: Any) -> dict[str, list[str]]:
         if matches:
             hints[name] = matches[:3]
     return hints
+
+
+def state_fingerprint(state: dict[str, Any]) -> str:
+    """Jev 가 읽는 state 의 지문. 같은 지문이면 Jev 는 같은 화면을 보고 고른다.
+
+    `render_jev_state` 는 cosmetic 값을 빼고 그리므로, 애니메이션처럼 혼자 도는 값으로는 바뀌지 않는다.
+    """
+    return hashlib.sha256(json.dumps(state, sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest()
 
 
 def effect_missed(turn: dict) -> bool:
@@ -402,9 +411,11 @@ class Executer:
         started = clock()
         none_since: float | None = None
         failures = disagreements = idle_turns = repairs = unobserved = 0
-        # 같은 action 을 연달아 고른 횟수.
+        # 같은 action 을 연달아 고른 횟수. Jev 가 읽는 state 가 그 사이 바뀌면 처음부터 센다(ARTEL-1453).
         same_in_a_row = 0
         last_picked: str | None = None
+        # 마지막으로 action 을 고른 turn 에 Jev 가 읽은 state 의 지문.
+        picked_on: str | None = None
         # 방금 통과한 action 의 ```after 다음 행동. 다음 turn 의 선택지를 이것으로 좁힌다.
         follow: tuple[str, ...] = ()
         # 이 step 에서 action 마다 실패했거나 입력 없이 끝난 횟수(누적, ARTEL-1298). 연속만 세면 두 action 이 번갈아 헛돌
@@ -459,6 +470,12 @@ class Executer:
                         break
                 # state 를 먼저 읽는다. 상한에 걸려 빠진 것이 있는지가 선택지(`EXPAND_STATE`)를 정한다.
                 state = await self._state()
+                fingerprint = state_fingerprint(state)
+                if picked_on is not None and fingerprint != picked_on:
+                    # 지난 선택 뒤로 Jev 가 읽는 state 가 바뀌었다. 같은 action 을 또 골라도 제자리걸음이 아니다. 대사 넘기기처럼
+                    # 효과를 선언하지 않은 action 은 `effect_met` 이 나지 않아, 런 415 에서 대사 11줄을 넘기던 Space 가 6번째에
+                    # 선택지에서 빠졌다(ARTEL-1453).
+                    same_in_a_row, last_picked = 0, None
                 # Jev 가 무엇을 보고 골랐는지는 그 state 가 전부다. 기록에 없으면 "왜 그걸 골랐나" 를 다시 볼 길이 없다
                 # (런 162 step 4: 대사가 없는데 `dismiss_dialogue` 를 다섯 번 골랐다).
                 record["jev_state"] = state
@@ -473,6 +490,19 @@ class Executer:
                     names = [name for name in [*macros.actions, *macros.contracts] if name not in dropped]
                 if parked:
                     record["parked"] = sorted(parked)
+                if not macros.actions and not macros.contracts:
+                    # 화면을 보기만 하는 step 이다(ARTEL-1453). 고를 것이 없으니 Jev 에게 묻지 않고 `done()` 이 참이 되기를
+                    # 유예 동안 기다린다. 다시 쓸 action 도 없으니 복구로 넘기지 않고 멈춰 evaluator 가 판정한다.
+                    await self._send(record)
+                    none_since = none_since or now
+                    remaining = spec.no_action_grace_seconds - (now - none_since)
+                    if remaining <= 0:
+                        play.stopped = (
+                            f"the step has no action and done() did not hold for {spec.no_action_grace_seconds:g}s"
+                        )
+                        break
+                    await channel.wait_for_reading(min(remaining, IDLE_LOOK_SECONDS))
+                    continue
                 options = {name: macros.description(name) for name in names if name in macros.actions}
                 # 준비 조건이 거짓인 행동은 고르기 전에 뺀다. 실행 직전에도 다시 읽는다.
                 not_ready = await self._not_ready(list(options), macros, step)
@@ -749,6 +779,7 @@ class Executer:
                 else:
                     same_in_a_row = same_in_a_row + 1 if picked == last_picked else 1
                     last_picked = picked
+                picked_on = fingerprint
                 if same_in_a_row >= spec.max_same_action_in_a_row:
                     repeated = f"`{picked}` was picked {same_in_a_row} times in a row"
                     if can_ask_planner:

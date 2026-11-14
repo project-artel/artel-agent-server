@@ -33,6 +33,7 @@ from app.agents.qa.macro.errors import (
 from app.agents.qa.macro.grammar import MacroOperator, MacroShape
 from app.agents.qa.macro.model import (
     MacroComparisonCondition,
+    MacroFindTarget,
     MacroFindValue,
     MacroLiteral,
     MacroLiteralOperand,
@@ -299,6 +300,31 @@ def test_exists_and_absent_answer_without_stopping_the_macro() -> None:
     assert read(held, scope, reader("absent", there)) is False
     assert read(held, scope, reader("exists", gone)) is False
     assert read(held, scope, reader("absent", gone)) is True
+
+
+def test_exists_and_absent_take_a_find_written_in_place() -> None:
+    """ARTEL-1453. bind 된 `find` 는 못 찾으면 대입 줄에서 멈춰서, `exists`·`absent` 로 물을 길이 이것뿐이다."""
+    held = memories(card("Root[0]/Go[1]", "OK", 1), card("Root[0]/Go[2]", "OK", 2))
+    scope = MacroScope()
+    shown = MacroFindTarget(find=MacroFindValue(label=MacroStringLiteral(value="OK")))
+    missing = MacroFindTarget(find=MacroFindValue(label=MacroStringLiteral(value="Cancel")))
+
+    # 둘이 잡혀도 "있느냐" 는 참이다. `find` 처럼 `SELECTOR_AMBIGUOUS` 로 멈추지 않는다.
+    assert read(held, scope, reader("exists", shown)) is True
+    assert read(held, scope, reader("absent", shown)) is False
+    assert read(held, scope, reader("exists", missing)) is False
+    assert read(held, scope, reader("absent", missing)) is True
+
+
+def test_a_find_written_in_place_resolves_like_a_bound_one() -> None:
+    held = memories(card("Root[0]/Go[1]", "OK"))
+    scope = MacroScope()
+    target = MacroFindTarget(find=MacroFindValue(label=MacroStringLiteral(value="OK")))
+
+    assert resolve_target(held, scope, target).key == resolve_find(held, scope, target.find).key
+    with pytest.raises(MacroFailure) as failed:
+        resolve_target(held, scope, MacroFindTarget(find=MacroFindValue(label=MacroStringLiteral(value="No"))))
+    assert failed.value.code == SELECTOR_NOT_FOUND
 
 
 def test_scene_reads_the_name_from_pulse_when_game_state_never_arrives() -> None:

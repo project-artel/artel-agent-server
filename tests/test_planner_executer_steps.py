@@ -210,13 +210,6 @@ def test_the_plan_summary_and_each_action_s_description_go_to_the_log_for_a_pers
          "`def look_around` has no docstring"),
         (MACROS.replace('wait_until(scene() == "Map", 1,', 'require(scene() == "Map" and exists(start),'),
          "MACRO_NODE_REJECTED"),
-        # 인자 있는 `-> None` def 는 helper 라 action 이 아니다. 둘 다 helper 가 되면 action 이 없다.
-        (
-            MACROS.replace("def look_around() -> None:", "def look_around(times: int) -> None:").replace(
-                "def press_start() -> None:", "def press_start(times: int) -> None:"
-            ),
-            "at least one action",
-        ),
     ],
 )
 def test_a_refused_answer_goes_back_with_the_refusal_and_the_rewrite_is_used(refused: str, said: str) -> None:
@@ -226,6 +219,17 @@ def test_a_refused_answer_goes_back_with_the_refusal_and_the_rewrite_is_used(ref
 
     assert written.macros is not None
     assert said in asked.calls[1][1] and "They were refused" in asked.calls[1][1]
+
+
+def test_a_step_that_only_looks_is_taken_with_no_action() -> None:
+    """ARTEL-1453. 화면을 보기만 하는 step 은 `done` 하나다. 전에는 action 이 없다고 거절해 planner 가 한 번 더 썼다."""
+    asked = Asked('def done() -> bool:\n    return scene() == "Title"\n')
+
+    written = _write(_menu(), asked)
+
+    assert written.refusal is None
+    assert written.macros is not None and not written.macros.actions
+    assert len(asked.calls) == 1
 
 
 def test_every_refusal_of_the_step_goes_back_not_only_the_last() -> None:
