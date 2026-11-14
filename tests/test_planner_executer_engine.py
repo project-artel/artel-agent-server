@@ -80,7 +80,7 @@ def test_a_relabelled_planner_executer_run_keeps_its_digest() -> None:
 def test_the_planner_prompt_is_recorded_with_the_macro_grammar_it_reads() -> None:
     config = resolve_run_config(arch=PLANNER_EXECUTER)
 
-    assert config.prompt_version == "v4"
+    assert config.prompt_version == "v5"
     roles = (
         "rules", "rules_contract", "rules_guidance", "evaluator", "scene_rules", "scene_evaluator", "failure_analysis", "run_review",
         "macro_repair", "target_resolver",
@@ -88,15 +88,15 @@ def test_the_planner_prompt_is_recorded_with_the_macro_grammar_it_reads() -> Non
     assert set(config.prompt_hashes) == {*roles, "macro_grammar"}
     locked = read_lock()["prompts"]
     for role in roles:
-        assert locked[f"qa_planner/v4/{role}"] == config.prompt_hashes[role]
+        assert locked[f"qa_planner/v5/{role}"] == config.prompt_hashes[role]
     assert config.prompt_hashes["macro_grammar"] == hashlib.sha256(MACRO_GRAMMAR.encode()).hexdigest()
 
 
 def test_the_planner_defaults_to_the_newest_prompt_and_v1_can_still_be_pinned() -> None:
     """`qa_planner` has no `*_PROMPT_VERSION` setting, so the newest version is the default. The
     tool loop's `qa_run` default is not moved by it."""
-    assert available_versions("qa_planner") == ("v1", "v2", "v3", "v4")
-    assert resolve_version("qa_planner") == "v4"
+    assert available_versions("qa_planner") == ("v1", "v2", "v3", "v4", "v5")
+    assert resolve_version("qa_planner") == "v5"
     assert resolve_run_config().prompt_version == resolve_version("qa_run")
 
     # v1 has neither `failure_analysis` nor `macro_repair`, so a pinned run turns both off to be built.
@@ -145,6 +145,21 @@ def test_v4_adds_the_engine_prompts() -> None:
     assert repair.body.startswith("You fix the macros of ONE test step of a game while it is being played.")
     assert "Never weaken `done()`" in repair.body and "{macro_grammar}" in repair.body
     assert repair.placeholders == ("macro_grammar",)
+
+
+def test_v5_lets_the_picture_decide_a_result_a_player_sees() -> None:
+    """ARTEL-1453. v4 는 사진과 값이 다르면 값이 이긴다고 했다. 로컬 런 7 step 9 는 "손패에서 빠진다" 를 화면은
+    보여 줬는데, 칸에 놓인 카드도 든 손패 목록 값이 그대로라 실패했다. v5 는 evaluator 만 바꾼다."""
+    assert set(roles_in("qa_planner", "v5")) == set(roles_in("qa_planner", "v4"))
+    for role in roles_in("qa_planner", "v4"):
+        if role != "evaluator":
+            assert load_prompt("qa_planner", role, "v5").body == load_prompt("qa_planner", role, "v4").body
+    old = load_prompt("qa_planner", "evaluator", "v4").body
+    new = load_prompt("qa_planner", "evaluator", "v5").body
+    assert "the values win" in old and "the values win" not in new
+    assert "When it says what a player sees" in new and "the picture is direct evidence" in new
+    assert "When it says something the screen does not show" in new and "the values decide" in new
+    assert "judge from the values" in new
 
 
 def test_editor_on_is_refused_on_a_prompt_version_without_its_prompt() -> None:
