@@ -58,6 +58,7 @@ from app.agents.qa.macro.grammar import (
 from app.agents.qa.macro.model import (
     MacroComparisonCondition,
     MacroCondition,
+    MacroFindTarget,
     MacroFindValue,
     MacroLiteral,
     MacroNameTarget,
@@ -216,6 +217,10 @@ def _segments(record: _HeldObject) -> set[str]:
     return names
 
 
+# 씬을 넘어 사는 객체가 key 에 다는 씬 이름. Unity 가 `DontDestroyOnLoad` 객체를 두는 씬이다.
+PERSISTENT_SCENE = "DontDestroyOnLoad"
+
+
 def _under(key: str, scene: str, under: str) -> bool:
     """`under=` 가 그 기록을 범위에 넣는가. memory 의 key 에 prefix 로 맞춘다.
 
@@ -228,10 +233,15 @@ def _under(key: str, scene: str, under: str) -> bool:
     모든 객체를 맞춘다 — `scene="TurnBattleScene"` 에서 `under="T"` 가 전부 통과한다.
     그러면 걸린 것이 하나뿐일 때 범위 제한이 조용히 없는 것이 되고, macro 는 범위를
     좁힌 것처럼 읽힌다.
+
+    씬을 넘어 사는 객체는 key 가 `DontDestroyOnLoad/@persistent/...` 이고 화면과 selector 는
+    `@persistent/...` 로 적는다. 그 앞 마디도 뗀 모양을 받는다(ARTEL-1453) — 안 받으면
+    `selector("@persistent/X")` 는 찾는데 `find(under="@persistent/X")` 는 언제나 0개다. 런 6
+    step 7 의 준비 조건이 그렇게 거짓으로 굳어 대사를 한 번도 넘기지 못했다.
     """
     return any(
         candidate == under or candidate.startswith(f"{under.rstrip('/')}/")
-        for candidate in (key, _without_scene(key, scene))
+        for candidate in (key, _without_scene(key, scene), _without_scene(key, PERSISTENT_SCENE))
     )
 
 
@@ -353,6 +363,10 @@ def resolve_target(
             )
         return found
 
+    if isinstance(target, MacroFindTarget):
+        # reader 자리에 바로 적은 `find(...)` 다. 대입과 같은 규칙으로 지금 푼다.
+        return resolve_find(memories, scope, target.find)
+
     bound = scope.value(target.name)
     if isinstance(bound, LateSelector):
         found = _by_selector(memories, bound.selector)
@@ -386,7 +400,14 @@ def resolve_target(
 
 
 def _exists(memories: MacroMemories, scope: MacroScope, target: MacroTarget) -> bool:
-    """`exists` 와 `absent` 는 답이 참거짓이라 조회 실패로 멈추지 않는다."""
+    """`exists` 와 `absent` 는 답이 참거짓이라 조회 실패로 멈추지 않는다.
+
+    바로 적은 `find(...)` 는 하나 이상 잡히면 있는 것이다. 둘 이상이 잡혀도 "있느냐" 의 답은 참이라
+    `find` 처럼 `SELECTOR_AMBIGUOUS` 로 멈추지 않는다.
+    """
+    if isinstance(target, MacroFindTarget):
+        hits, _asked = _matches(memories, scope, target.find)
+        return bool(hits)
     try:
         resolve_target(memories, scope, target)
     except MacroFailure as failure:
@@ -416,9 +437,20 @@ def _absent(memories: MacroMemories, scope: MacroScope, target: MacroTarget) -> 
     return True
 
 
+def describe_find(value: MacroFindValue) -> str:
+    """`find(...)` 의 keyword 를 적힌 그대로. 이름으로 넘긴 값은 이름으로 남는다."""
+    return ", ".join(
+        f"{keyword}={ref.value!r}" if ref.kind == "literal" else f"{keyword}={ref.name}"
+        for keyword, ref in (("label", value.label), ("name", value.name), ("under", value.under))
+        if ref is not None
+    )
+
+
 def describe_target(target: MacroTarget) -> str:
     if isinstance(target, MacroSelectorTarget):
         return f"selector({target.selector!r})"
+    if isinstance(target, MacroFindTarget):
+        return f"find({describe_find(target.find)})"
     return target.name
 
 
@@ -1092,7 +1124,7 @@ def describe(call: MacroReaderCall) -> str:
         parts.append(
             call.target.selector
             if isinstance(call.target, MacroSelectorTarget)
-            else call.target.name
+            else describe_target(call.target)
         )
     if call.key is not None:
         parts.append(

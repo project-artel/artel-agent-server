@@ -54,7 +54,10 @@ from pydantic import BaseModel, ConfigDict, Field
 # Unity `KeyCode` 이름이 아닌 키를 거절한다. planner 가 읽는 것이 바뀌어 label 을 올린다.
 # pe6(ARTEL-1436): `actionable()`은 SDK가 `visible: false`로 보고한 대상을 거짓으로 읽는다.
 # Planner는 덮개가 걷힐 때까지 `wait_until(actionable(...))`로 기다린다. `visible`이 없으면 기존 판정을 유지한다.
-PLANNER_EXECUTER_LABEL = "pe6-actionable-visible"
+# pe7(ARTEL-1453): executer 는 같은 action 연속 횟수를 Jev 가 읽는 state 가 바뀌면 처음부터 센다. 효과를 선언하지 않은 대사
+# 넘기기가 6번째에 빠지던 것을 막는다. action 이 없는 step 은 Jev 에게 묻지 않고 `done()` 을 유예 동안 기다린다. parser 는 reader
+# 자리의 `find(...)` 와 action 없는 step 을 받고, 빈 ```check 는 없는 것으로 읽는다. macro 문법 글에 reader 의 `find(...)` 를 더했다.
+PLANNER_EXECUTER_LABEL = "pe7-state-change-progress"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1

@@ -53,6 +53,36 @@ class MacroLiteral(_Frozen):
     value: bool | int | float | str
 
 
+# --- 문자열 하나가 오는 자리 ----------------------------------------------------
+
+
+class MacroStringLiteral(_Frozen):
+    kind: Literal["literal"] = "literal"
+    value: str
+
+
+class MacroStringName(_Frozen):
+    kind: Literal["name"] = "name"
+    name: str
+
+
+MacroStringRef = Annotated[
+    Union[MacroStringLiteral, MacroStringName], Field(discriminator="kind")
+]
+
+
+# `find(...)` 의 모양. 대입의 오른쪽이 주로 쓰지만, 아래 `MacroFindTarget` 과 `MacroContextFindAll` 이
+# 먼저 참조하므로 조준보다 앞에 둔다. Python 3.13 이하(CI image 는 3.12)에서는 class 본문의 annotation 이
+# 정의되는 순간 평가되어, 뒤에 두면 import 할 때 `NameError` 가 난다.
+class MacroFindValue(_Frozen):
+    """`find(label=..., name=..., under=...)`. keyword 만 받는다."""
+
+    kind: Literal["find"] = "find"
+    label: MacroStringRef | None = None
+    name: MacroStringRef | None = None
+    under: MacroStringRef | None = None
+
+
 # --- 조준 ---------------------------------------------------------------------
 
 
@@ -79,26 +109,21 @@ class MacroNameTarget(_Frozen):
     name: str
 
 
+class MacroFindTarget(_Frozen):
+    """reader 의 target 자리에 바로 적은 `find(...)`. 읽는 그 순간에 푼다(ARTEL-1453).
+
+    action 의 target 과 `at_start` 에는 오지 않는다. action 은 bind 해야 못 찾은 것이 입력을
+    보내기 전 대입 줄에서 드러나고, `at_start` 는 step 시작 때의 기록을 읽어 지금 푸는 조회와
+    맞지 않는다. reader 는 게임에 아무것도 보내지 않으므로 그 자리에서 풀어도 잃는 것이 없다.
+    `exists`·`absent` 는 bind 로는 쓸 수 없었다 — bind 된 `find` 는 못 찾으면 대입 줄에서 멈춘다.
+    """
+
+    kind: Literal["find"] = "find"
+    find: MacroFindValue
+
+
 MacroTarget = Annotated[
-    Union[MacroSelectorTarget, MacroNameTarget], Field(discriminator="kind")
-]
-
-
-# --- 문자열 하나가 오는 자리 ----------------------------------------------------
-
-
-class MacroStringLiteral(_Frozen):
-    kind: Literal["literal"] = "literal"
-    value: str
-
-
-class MacroStringName(_Frozen):
-    kind: Literal["name"] = "name"
-    name: str
-
-
-MacroStringRef = Annotated[
-    Union[MacroStringLiteral, MacroStringName], Field(discriminator="kind")
+    Union[MacroSelectorTarget, MacroNameTarget, MacroFindTarget], Field(discriminator="kind")
 ]
 
 
@@ -242,18 +267,6 @@ class MacroPredicateCondition(_Frozen):
     kind: Literal["predicate"] = "predicate"
     callee: str
     arguments: tuple[MacroArgument, ...] = ()
-
-
-# `find(...)` 의 모양. 대입의 오른쪽이 주로 쓰지만, 아래 `MacroContextFindAll` 이 먼저
-# 참조하므로 여기 둔다. Python 3.13 이하(CI image 는 3.12)에서는 class 본문의 annotation 이
-# 정의되는 순간 평가되어, 뒤에 두면 import 할 때 `NameError` 가 난다.
-class MacroFindValue(_Frozen):
-    """`find(label=..., name=..., under=...)`. keyword 만 받는다."""
-
-    kind: Literal["find"] = "find"
-    label: MacroStringRef | None = None
-    name: MacroStringRef | None = None
-    under: MacroStringRef | None = None
 
 
 # --- Jev 에게 넘기는 context ----------------------------------------------------

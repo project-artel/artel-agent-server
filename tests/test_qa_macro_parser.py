@@ -2462,3 +2462,52 @@ def test_at_start_refuses_other_argument_shapes(reading: str) -> None:
 def test_at_start_is_kept_out_of_the_reader_list_the_qa_agent_reads() -> None:
     """QA agent 의 skill 과 거절 문장은 `READER_NAMES` 를 쓴다. 쓰는 쪽이 생길 때까지 그대로다."""
     assert "at_start" not in READER_NAMES
+
+
+# --- reader 자리의 inline find (ARTEL-1453) -----------------------------------
+
+
+def test_a_reader_takes_a_find_written_in_place() -> None:
+    """planner 첫 답이 가장 자주 거절된 모양이다. reader 는 입력을 보내지 않으니 그 자리에서 푼다."""
+    from app.agents.qa.macro.model import MacroFindTarget, MacroIfStatement, MacroReturnStatement
+
+    definition = macro_definition_from_source(
+        "m",
+        'def m() -> None:\n    require(p(), "Wait for the screen.")\n\n'
+        "def p() -> bool:\n"
+        '    if exists(find(label="OK")):\n'
+        "        return True\n"
+        '    if actionable(find(name="Go", under="Canvas")):\n'
+        "        return True\n"
+        '    return absent(find(name="Panel"))\n',
+    )
+
+    predicate = definition.function("p")
+    first = predicate.statements[0]
+    assert isinstance(first, MacroIfStatement)
+    assert isinstance(first.condition.call.target, MacroFindTarget)
+    last = predicate.statements[-1]
+    assert isinstance(last, MacroReturnStatement)
+    assert isinstance(last.condition.call.target, MacroFindTarget)
+
+
+def test_an_action_target_still_refuses_a_find_written_in_place() -> None:
+    """action 은 bind 해야 못 찾은 것이 입력을 보내기 전에 대입 줄에서 드러난다."""
+    assert "cannot be `find(...)` written inline" in rejection(
+        'def m() -> None:\n    click(find(label="OK"))\n'
+    )
+
+
+def test_at_start_still_refuses_a_find_written_in_place() -> None:
+    """`at_start` 는 step 시작 때의 기록을 읽어 지금 푸는 조회와 맞지 않는다."""
+    assert "cannot be `find(...)` written inline" in rejection(
+        "def m() -> None:\n"
+        '    require(at_start(find(name="Enemy"), "Enemy.Hp") > 0, "Wait.")\n'
+    )
+
+
+def test_a_comparison_still_refuses_a_find_written_in_place() -> None:
+    """inline `find` 는 reader 의 target 자리만이다. 비교 한쪽에 선 `find` 는 지금처럼 거절한다."""
+    assert "cannot stand in a comparison" in rejection(
+        'def m() -> None:\n    me: object = find(name="Go")\n    require(me == find(name="Go"), "Wait.")\n'
+    )

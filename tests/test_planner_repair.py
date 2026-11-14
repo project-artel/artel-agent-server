@@ -177,6 +177,72 @@ def test_without_a_repair_left_an_action_picked_six_times_in_a_row_is_dropped_an
     assert play.stopped.startswith("no action left:") and "(press_start, look_around)" in play.stopped
 
 
+def test_the_same_action_repeated_while_the_screen_keeps_changing_is_not_dropped() -> None:
+    """ARTEL-1453. 대사를 한 줄씩 넘기는 반복은 화면이 바뀌므로 제자리걸음이 아니다. 런 415 에서 대사 11줄을 넘기던 Space 가
+    효과를 선언하지 않았다는 이유로 6번째에 선택지에서 빠졌다."""
+    import asyncio
+
+    from app.agents.planner_executer.arch import PlannerExecuterArchSpec
+    from app.agents.planner_executer.executer import Executer
+    from app.agents.planner_executer.macros import RegisteredMacros, parse_step
+    from app.qa.jev import JevClient
+
+    fake = _slow_menu()
+    lines = iter(range(1, 100))
+
+    def next_line(game: FakeGame) -> None:
+        line = next(lines)
+        game.objects["Root/Start"] = {"text": f"Line {line}"}
+        if line == 10:
+            game.scene = "Map"
+
+    fake.reactions[("press", "Root/Start")] = next_line
+    spec = PlannerExecuterArchSpec(no_action_grace_seconds=0.2, state_source="pulse_memory", repair="planner")
+
+    async def go() -> StepPlay:
+        fake.push_reading()
+        macros = await parse_step(PATIENT, RegisteredMacros(fake.channel))
+        return await Executer(fake.channel, spec, JevClient(post=FakeJev())).play(
+            1, "Press Start until the map opens.", macros, None, can_ask_planner=False
+        )
+
+    play = asyncio.run(go())
+
+    picked = [turn.get("picked") for turn in play.turns if turn.get("picked")]
+    assert picked == ["press_start"] * 10
+    assert not any("dropped" in turn for turn in play.turns)
+    assert play.stopped == "done"
+
+
+def test_a_step_with_no_action_waits_for_done_and_then_stops_without_asking_for_a_repair() -> None:
+    """ARTEL-1453. 화면을 보기만 하는 step 은 `done` 하나다. 고를 것이 없으니 Jev 에게 묻지 않는다."""
+    import asyncio
+
+    from app.agents.planner_executer.arch import PlannerExecuterArchSpec
+    from app.agents.planner_executer.executer import Executer
+    from app.agents.planner_executer.macros import RegisteredMacros, parse_step
+    from app.qa.jev import JevClient
+
+    fake = _slow_menu()
+    jev = FakeJev()
+    spec = PlannerExecuterArchSpec(no_action_grace_seconds=0.2, state_source="pulse_memory", repair="planner")
+
+    async def go(source: str) -> StepPlay:
+        fake.push_reading()
+        macros = await parse_step(source, RegisteredMacros(fake.channel))
+        return await Executer(fake.channel, spec, JevClient(post=jev)).play(
+            1, "Look at the title screen.", macros, None, can_ask_planner=True
+        )
+
+    shown = asyncio.run(go('def done() -> bool:\n    return scene() == "Menu"\n'))
+    assert shown.stopped == "done"
+
+    missing = asyncio.run(go('def done() -> bool:\n    return scene() == "Map"\n'))
+    assert missing.stopped == "the step has no action and done() did not hold for 0.2s"
+    assert missing.repair_request is None
+    assert not jev.asked("choice")
+
+
 def test_the_same_action_picked_six_times_in_a_row_asks_the_planner_with_what_was_hidden() -> None:
     play = _repeat_play(can_ask_planner=True)
     play.turns[-1]["jev_state"] = {"hidden": {"objects": {"MeleeRock(Clone)": 3, "Word": 3}, "statics": ["Player.Hp"]}}

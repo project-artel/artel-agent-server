@@ -33,6 +33,7 @@ from app.agents.qa.macro.errors import (
 from app.agents.qa.macro.grammar import MacroOperator, MacroShape
 from app.agents.qa.macro.model import (
     MacroComparisonCondition,
+    MacroFindTarget,
     MacroFindValue,
     MacroLiteral,
     MacroLiteralOperand,
@@ -203,6 +204,24 @@ def test_under_narrows_by_prefix_with_or_without_the_scene_name() -> None:
         assert found.record.selector == "Root[0]/Hand[2]/Card(Clone)[3]"
 
 
+def test_under_takes_a_persistent_address_as_the_screen_spells_it() -> None:
+    """ARTEL-1453. 씬을 넘어 사는 객체는 key 가 `DontDestroyOnLoad/@persistent/...` 다.
+
+    화면과 selector 는 `@persistent/...` 로 적으므로, 그 모양으로 좁혀도 맞아야 한다. 런 6 step 7 의
+    준비 조건 `exists(find(name="DialogueWindow", under="@persistent/..."))` 가 언제나 거짓이었다.
+    """
+    window = card("@persistent/TutorialController[5]/ChatWindow[1]/DialogueWindow[5]", text=None)
+    window["scene"] = "DontDestroyOnLoad"
+    held = memories(window, scene="TurnBattleScene")
+
+    for under in (
+        "@persistent/TutorialController[5]/ChatWindow[1]",
+        "DontDestroyOnLoad/@persistent/TutorialController[5]/ChatWindow[1]",
+    ):
+        found = resolve_find(held, MacroScope(), find(name="DialogueWindow", under=under))
+        assert found.record.selector == "@persistent/TutorialController[5]/ChatWindow[1]/DialogueWindow[5]"
+
+
 def test_under_stops_at_a_segment_boundary() -> None:
     """글자 prefix 로만 보면 범위 제한이 조용히 없는 것이 된다.
 
@@ -299,6 +318,31 @@ def test_exists_and_absent_answer_without_stopping_the_macro() -> None:
     assert read(held, scope, reader("absent", there)) is False
     assert read(held, scope, reader("exists", gone)) is False
     assert read(held, scope, reader("absent", gone)) is True
+
+
+def test_exists_and_absent_take_a_find_written_in_place() -> None:
+    """ARTEL-1453. bind 된 `find` 는 못 찾으면 대입 줄에서 멈춰서, `exists`·`absent` 로 물을 길이 이것뿐이다."""
+    held = memories(card("Root[0]/Go[1]", "OK", 1), card("Root[0]/Go[2]", "OK", 2))
+    scope = MacroScope()
+    shown = MacroFindTarget(find=MacroFindValue(label=MacroStringLiteral(value="OK")))
+    missing = MacroFindTarget(find=MacroFindValue(label=MacroStringLiteral(value="Cancel")))
+
+    # 둘이 잡혀도 "있느냐" 는 참이다. `find` 처럼 `SELECTOR_AMBIGUOUS` 로 멈추지 않는다.
+    assert read(held, scope, reader("exists", shown)) is True
+    assert read(held, scope, reader("absent", shown)) is False
+    assert read(held, scope, reader("exists", missing)) is False
+    assert read(held, scope, reader("absent", missing)) is True
+
+
+def test_a_find_written_in_place_resolves_like_a_bound_one() -> None:
+    held = memories(card("Root[0]/Go[1]", "OK"))
+    scope = MacroScope()
+    target = MacroFindTarget(find=MacroFindValue(label=MacroStringLiteral(value="OK")))
+
+    assert resolve_target(held, scope, target).key == resolve_find(held, scope, target.find).key
+    with pytest.raises(MacroFailure) as failed:
+        resolve_target(held, scope, MacroFindTarget(find=MacroFindValue(label=MacroStringLiteral(value="No"))))
+    assert failed.value.code == SELECTOR_NOT_FOUND
 
 
 def test_scene_reads_the_name_from_pulse_when_game_state_never_arrives() -> None:

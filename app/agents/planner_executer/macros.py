@@ -259,7 +259,8 @@ async def parse_step(
     """The step's macros, or `MacroRejection` with what to write instead.
 
     The parser checks each action and `done`; this adds what the executer needs of the source as
-    a whole — a `done` predicate, at least one action, no parameters, a docstring on each action.
+    a whole — a `done` predicate, no parameters, a docstring on each action. A step may have no action at
+    all: one that only looks at the screen is `done` alone.
     `developer_actions` 는 planner 가 이 step 에 고른 developer macro 다. 하나라도 있으면 planner 의
     `def` action 이 없어도 된다.
     """
@@ -279,13 +280,9 @@ async def parse_step(
         )
     if contracts_text is not None:
         return await _parse_contract_step(source, defs, registered, developer_actions, contracts_text)
+    # action 이 없어도 받는다(ARTEL-1453). 화면을 보기만 하는 step 은 `done` 하나로 끝나고, executer 는 그것이 참이 되기를
+    # 기다린다. 전에는 거절해서 planner 가 같은 step 을 한 번 더 썼다 — 3주간 거절 26건 중 5건이 이것이었다.
     actions = _action_defs(defs)
-    if not actions and not developer_actions:
-        raise MacroRejection(
-            "the source needs at least one action: a `def <name>() -> None:` with no parameters whose "
-            "docstring says what it does and when it is the right move, or a developer macro selected "
-            "for the step. A `-> None` def with parameters is a helper, not an action."
-        )
     reject_unstable_selectors(source)
     parsed = await _parse_actions(actions, source, registered, developer_actions)
     probe = await registered.parse(PROBE, source.rstrip("\n") + _PROBE_SOURCE)
@@ -385,10 +382,7 @@ async def parse_guidance_step(
             f"{', '.join(f'`{name}`' for name in owned)}: when an action can run and what it changes are part of the "
             "registered action, not of the plan. Leave them out."
         )
-    if not developer_actions and not contracts:
-        raise MacroRejection(
-            "the step needs at least one registered action in the ```developer block, one name per line."
-        )
+    # 등록 행동을 하나도 고르지 않은 step 도 받는다. 화면을 보기만 하는 step 이다(ARTEL-1453).
     if source.strip():
         reject_unstable_selectors(source)
     parsed = await _parse_actions([], source, registered, developer_actions)

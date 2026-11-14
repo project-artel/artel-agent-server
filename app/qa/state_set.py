@@ -23,6 +23,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
+from app.agents.qa.macro.binding import PERSISTENT_SCENE
 from app.agents.qa.macro.context import DEFAULT_OBJECTS_KEY, clip_value
 
 # 같은 상한 규칙으로 자른다. 출처가 달라도 Jev 가 받는 글의 크기 규칙이 같아야 비교가 출처만 잰다.
@@ -35,7 +36,6 @@ logger = logging.getLogger(__name__)
 STATE_PATH = "/internal/qa-tries/{qa_try_id}/state"
 STATE_TIMEOUT_SECONDS = 5.0
 PERSISTENT_SCOPE = "persistent"
-PERSISTENT_SCENE = "DontDestroyOnLoad"
 # Executer 가 묻는 범위. live object 전부와 static(`runtime`). 거르는 것은 Agent 다(`StateView`) — Planner 가 화면에서
 # 읽은 이름(selector, `Type.member`)이 서버의 id 꼴과 달라서다. `planned` 가 아니면 static 은 그리지 않는다.
 EXECUTER_SPEC: dict[str, Any] = {
