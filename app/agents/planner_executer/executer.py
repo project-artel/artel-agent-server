@@ -109,6 +109,15 @@ REPLAN_DESCRIPTION = (
     "progress from this screen."
 )
 PICK_QUESTION = "Which of these should the player do now to progress this step?"
+# 준비 조건이 거짓이라 선택지에서 뺀 이 step 의 행동을 Jev 에게도 알린다. 런 418 step 8 에서 조합 칸에 카드를
+# 놓는 행동이 입력 잠금으로 빠지고 대사 넘기기만 남자, Jev 는 그것이 step 문장과 맞지 않는다며 none_fits 를 6번 골랐다.
+# 놓는 행동이 왜 없는지 모르면, 남은 선택지가 그것을 풀어 준다는 것도 알 수 없다.
+BLOCKED_ACTIONS_LINE = (
+    "\nThis step's other actions cannot run yet, because the game does not allow them now: {actions}. "
+    "If a listed option would let the game move on so that they can run, that option progresses the step."
+)
+# 막힌 행동마다 설명의 첫 문장만 붙인다. 질문이 선택지보다 길어지지 않게 한다.
+BLOCKED_ACTION_CHARS = 160
 
 # How long the executer waits for a reading when nothing fits, before it asks again.
 IDLE_LOOK_SECONDS = 1.0
@@ -583,7 +592,7 @@ class Executer:
                     options[REPLAN] = REPLAN_DESCRIPTION
                 record["question"] = f"{PICK_QUESTION} The step: {action}" + (
                     f"\nHow to play it: {macros.guidance}" if macros.guidance else ""
-                )
+                ) + blocked_actions_line(not_ready, options, macros)
                 record["options"] = list(options)
                 earlier = [{**turn, "earlier_plan": True} for turn in history or []]
                 recent = recent_action_lines(earlier + play.turns[:-1])
@@ -1351,6 +1360,29 @@ def merge_plays(plays: list[StepPlay]) -> StepPlay:
         target=last.target,
         state_source=last.state_source,
     )
+
+
+def blocked_actions_line(not_ready: list[str], options: dict[str, str], macros: StepMacros) -> str:
+    """준비 조건이 거짓이라 빠진 이 step 의 행동을 질문 끝에 붙일 한 줄. 없거나 고를 것이 없으면 빈 문자열이다.
+
+    `not_ready` 에는 행동 이름과 `<행동> @ <객체> (...)` 꼴의 후보가 섞여 온다. 행동 이름으로 묶고, 같은 행동의 다른 후보가
+    선택지에 남았으면 막힌 것이 아니니 뺀다.
+    """
+    offered = {key.split(PICK_SEPARATOR, 1)[0] for key in options}
+    blocked = [
+        name for name in dict.fromkeys(entry.split(" ", 1)[0] for entry in not_ready) if name and name not in offered
+    ]
+    if not blocked or not options:
+        return ""
+    described = []
+    for name in blocked:
+        try:
+            text = macros.description(name)
+        except KeyError:
+            text = ""
+        first = text.strip().split(". ", 1)[0].rstrip(".")[:BLOCKED_ACTION_CHARS]
+        described.append(f"{name} ({first})" if first else name)
+    return BLOCKED_ACTIONS_LINE.format(actions="; ".join(described))
 
 
 def recent_action_lines(turns: list[dict], limit: int = RECENT_ACTIONS_SHOWN) -> list[str]:

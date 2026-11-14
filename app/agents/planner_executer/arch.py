@@ -57,7 +57,9 @@ from pydantic import BaseModel, ConfigDict, Field
 # pe7(ARTEL-1453): executer 는 같은 action 연속 횟수를 Jev 가 읽는 state 가 바뀌면 처음부터 센다. 효과를 선언하지 않은 대사
 # 넘기기가 6번째에 빠지던 것을 막는다. action 이 없는 step 은 Jev 에게 묻지 않고 `done()` 을 유예 동안 기다린다. parser 는 reader
 # 자리의 `find(...)` 와 action 없는 step 을 받고, 빈 ```check 는 없는 것으로 읽는다. macro 문법 글에 reader 의 `find(...)` 를 더했다.
-PLANNER_EXECUTER_LABEL = "pe7-state-change-progress"
+# pe8: Jev 의 고르기 질문이 준비 조건 때문에 빠진 이 step 의 행동을 함께 말한다. parser 는 `-> bool` 호출과 bool 리터럴의
+# `==`·`!=` 와 비교의 `None` 리터럴을 받는다. step 판정(evaluator·실패 분석)은 다음 step 의 계획·플레이와 겹쳐 돈다.
+PLANNER_EXECUTER_LABEL = "pe8-blocked-actions-overlap-judging"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1

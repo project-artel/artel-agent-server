@@ -61,6 +61,7 @@ from app.agents.qa.macro.model import (
     MacroFindTarget,
     MacroFindValue,
     MacroLiteral,
+    MacroLiteralOperand,
     MacroNameTarget,
     MacroOperand,
     MacroReaderCall,
@@ -919,6 +920,21 @@ def _object_key(memories: MacroMemories, value: Any) -> str:
 # --- 비교 ----------------------------------------------------------------------
 
 
+def compare_condition(
+    memories: MacroMemories, condition: MacroComparisonCondition, left: Any, right: Any
+) -> bool:
+    """비교 조건 하나의 판정. 한쪽이 `None` 리터럴이면 다른 쪽이 null 로 도착했는지만 본다.
+
+    도착한 null 은 모양이 `other` 라 `compare` 가 모양 표로 거절한다. `None` 을 적은 비교만 여기서 따로 판정하므로,
+    숫자를 기대한 자리에 null 이 오는 경우는 예전처럼 거절로 남는다.
+    """
+    for operand, value in ((condition.right, left), (condition.left, right)):
+        if isinstance(operand, MacroLiteralOperand) and operand.literal.shape is MacroShape.null:
+            is_null = value is None
+            return is_null if condition.operator is MacroOperator.equal else not is_null
+    return compare(memories, left, condition.operator, right)
+
+
 def compare(
     memories: MacroMemories,
     left: Any,
@@ -1150,7 +1166,7 @@ def evaluate(
     if isinstance(condition, MacroComparisonCondition):
         left = operand_value(memories, scope, condition.left, observed)
         right = operand_value(memories, scope, condition.right, observed)
-        return compare(memories, left, condition.operator, right)
+        return compare_condition(memories, condition, left, right)
 
     value = read(memories, scope, condition.call)
     if observed is not None:

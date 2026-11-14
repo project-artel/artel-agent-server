@@ -23,6 +23,7 @@ recorded as ORDERED, and its FREE scenarios still play this way.
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from app.agents.qa.reset import reset_game_cheat
 from app.agents.editor import MacroEditor
@@ -197,50 +198,57 @@ class PlannerExecuterRunner:
             # 대상 계약: 첫 계획 전에 대상의 뜻을 한 번 고정한다. planner 는 읽기만 한다.
             targets = await self._resolve_targets(channel, scenario, executer) if self._spec.target_contract == "on" else None
             planner.targets = targets
-            for step in range(1, len(scenario.steps) + 1):
-                target = targets.get(step) if targets is not None else None
-                if targets is not None and target is not None and target.status == "fixed":
-                    # 확인할 값은 그 step 을 시작할 때 지금 값과 선언으로 고른다. 뜻은 바뀌지 않는다.
-                    target = observe(target, await executer.read_values(), self._identities)
-                    targets = targets.with_step(target)
-                    planner.targets = targets
-                    await note_decision(channel, "step_target", f"Step {step}: target {target.status}", step, **target.logged())
-                written = await planner.write(scenario, step)
-                if written.macros is None:
-                    message = (
-                        f"PLANNER-REFUSED: the step's macros were still refused after "
-                        f"{self._spec.max_rewrites} rewrites: {written.refusal}"
+            # 판정(evaluator·실패 분석)은 다음 step 의 계획·플레이와 겹쳐 돈다. 런 418 에서 실패한 step 마다 판정 두 호출이
+            # 약 30초씩 다음 계획을 막았고, 다음 planner 는 앞 판정을 읽지 않는다. 판정끼리는 앞 판정이 끝난 뒤에 시작하므로
+            # evaluator 가 읽는 앞 step 들의 판정과 STATUS 의 순서는 그대로다. 끝 화면은 다음 step 전에 지금 찍는다.
+            settling: asyncio.Task[None] | None = None
+            try:
+                for step in range(1, len(scenario.steps) + 1):
+                    if settling is not None and settling.done():
+                        # 앞 판정이 예외로 끝났으면 여기서 올린다. 다음 step 을 돌린 뒤에야 알게 두지 않는다.
+                        settling.result()
+                    target = targets.get(step) if targets is not None else None
+                    if targets is not None and target is not None and target.status == "fixed":
+                        # 확인할 값은 그 step 을 시작할 때 지금 값과 선언으로 고른다. 뜻은 바뀌지 않는다.
+                        target = observe(target, await executer.read_values(), self._identities)
+                        targets = targets.with_step(target)
+                        planner.targets = targets
+                        await note_decision(channel, "step_target", f"Step {step}: target {target.status}", step, **target.logged())
+                    written = await planner.write(scenario, step)
+                    if written.macros is None:
+                        message = (
+                            f"PLANNER-REFUSED: the step's macros were still refused after "
+                            f"{self._spec.max_rewrites} rewrites: {written.refusal}"
+                        )
+                        settling = self._after(settling, self._send_verdict(
+                            channel, state, scenario, step, False, message, self._engine_error(message)
+                        ))
+                        continue
+                    play = await self._play_with_replans(scenario, step, planner, executer, written.macros, target)
+                    if play is None:
+                        message = (
+                            "PLANNER-REFUSED: the replanned macros were still refused after "
+                            f"{self._spec.max_rewrites} rewrites"
+                        )
+                        settling = self._after(settling, self._send_verdict(
+                            channel, state, scenario, step, False, message, self._engine_error(message)
+                        ))
+                        continue
+                    image = (
+                        await capture_screen(channel, f"Step {step}: capturing the screen for the evaluator", step)
+                        if self._spec.screen_images == "on"
+                        else None
                     )
-                    await self._send_verdict(channel, state, scenario, step, False, message, self._engine_error(message))
-                    continue
-                play = await self._play_with_replans(scenario, step, planner, executer, written.macros, target)
-                if play is None:
-                    message = (
-                        "PLANNER-REFUSED: the replanned macros were still refused after "
-                        f"{self._spec.max_rewrites} rewrites"
-                    )
-                    await self._send_verdict(channel, state, scenario, step, False, message, self._engine_error(message))
-                    continue
-                image = (
-                    await capture_screen(channel, f"Step {step}: capturing the screen for the evaluator", step)
-                    if self._spec.screen_images == "on"
-                    else None
-                )
-                verdict = await judge.judge(scenario, step, play, earlier_verdicts(scenario, state), image)
-                details = verdict.details()
-                if targets is not None:
-                    # 모델의 답을 대상 계약으로 거른다. 대상 불일치·미확인, 예측과 다른 움직임은 통과로 남지 않는다.
-                    read = readings(play.evidence)
-                    verdict, check = guard(verdict, target, read[0]["values"] if read else None, read[-1]["values"] if read else None)
-                    if check is not None and target is not None:
-                        logged = check.logged(target)
-                        details = {**verdict.details(), "target": logged}
-                        await note_decision(channel, "target_check", f"Step {step}: target {check.state}", step, **logged)
-                analysis = (
-                    None if verdict.passed
-                    else await self._analyse(scenario, step, play, verdict.message, verdict.evidence_sufficient)
-                )
-                await self._send_verdict(channel, state, scenario, step, verdict.passed, verdict.message, analysis, play, details)
+                    settling = self._after(settling, self._settle(
+                        channel, state, scenario, step, judge, play, image, target, targets is not None
+                    ))
+                if settling is not None:
+                    await settling
+                    settling = None
+            finally:
+                if settling is not None and not settling.done():
+                    # 런이 끊겼다. 뒤에서 돌던 판정을 남기지 않는다.
+                    settling.cancel()
         state.finished = True
         passed = all(result.passed for result in state.step_results)
         review = None
@@ -266,6 +274,55 @@ class PlannerExecuterRunner:
                 analysis=review.model_dump() if review is not None else None,
             ),
         )
+
+    def _after(self, previous: "asyncio.Task[None] | None", work: Awaitable[None]) -> "asyncio.Task[None]":
+        """`previous` 가 끝난 뒤 `work` 를 돌리는 task. step 판정을 앞 판정 뒤로 줄 세운다.
+
+        앞 판정이 실패하면 뒤 판정도 같은 예외로 끝나고, 마지막 task 를 기다리는 쪽(step 루프의 끝)이 그것을 받는다.
+        """
+
+        async def chained() -> None:
+            try:
+                if previous is not None:
+                    await previous
+            except BaseException:
+                # 앞이 끝나지 못하면 이 판정은 시작하지 않는다. 만들어 둔 coroutine 을 닫아 경고 없이 버린다.
+                close = getattr(work, "close", None)
+                if close is not None:
+                    close()
+                raise
+            await work
+
+        return asyncio.create_task(chained())
+
+    async def _settle(
+        self,
+        channel: QaRunChannel,
+        state: QaRunState,
+        scenario: QaScenario,
+        step: int,
+        judge: Evaluator,
+        play: StepPlay,
+        image: Any,
+        target: Any,
+        contracted: bool,
+    ) -> None:
+        """한 step 의 판정: evaluator, 대상 계약 확인, 실패 분석, `STATUS`. 앞 step 의 판정이 끝난 뒤에 불린다."""
+        verdict = await judge.judge(scenario, step, play, earlier_verdicts(scenario, state), image)
+        details = verdict.details()
+        if contracted:
+            # 모델의 답을 대상 계약으로 거른다. 대상 불일치·미확인, 예측과 다른 움직임은 통과로 남지 않는다.
+            read = readings(play.evidence)
+            verdict, check = guard(verdict, target, read[0]["values"] if read else None, read[-1]["values"] if read else None)
+            if check is not None and target is not None:
+                logged = check.logged(target)
+                details = {**verdict.details(), "target": logged}
+                await note_decision(channel, "target_check", f"Step {step}: target {check.state}", step, **logged)
+        analysis = (
+            None if verdict.passed
+            else await self._analyse(scenario, step, play, verdict.message, verdict.evidence_sufficient)
+        )
+        await self._send_verdict(channel, state, scenario, step, verdict.passed, verdict.message, analysis, play, details)
 
     async def _send_verdict(
         self,

@@ -50,7 +50,8 @@ class MacroLiteral(_Frozen):
     """
 
     shape: MacroShape
-    value: bool | int | float | str
+    # `None` 은 비교의 한쪽에 적힌 `None` 리터럴뿐이다(`MacroShape.null`).
+    value: bool | int | float | str | None
 
 
 # --- 문자열 하나가 오는 자리 ----------------------------------------------------
@@ -267,6 +268,8 @@ class MacroPredicateCondition(_Frozen):
     kind: Literal["predicate"] = "predicate"
     callee: str
     arguments: tuple[MacroArgument, ...] = ()
+    # `pred() == False`·`pred() != True` 로 적힌 조건이다. 참거짓을 뒤집어 읽는다.
+    negated: bool = False
 
 
 # --- Jev 에게 넘기는 context ----------------------------------------------------
