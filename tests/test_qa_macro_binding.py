@@ -204,6 +204,24 @@ def test_under_narrows_by_prefix_with_or_without_the_scene_name() -> None:
         assert found.record.selector == "Root[0]/Hand[2]/Card(Clone)[3]"
 
 
+def test_under_takes_a_persistent_address_as_the_screen_spells_it() -> None:
+    """ARTEL-1453. 씬을 넘어 사는 객체는 key 가 `DontDestroyOnLoad/@persistent/...` 다.
+
+    화면과 selector 는 `@persistent/...` 로 적으므로, 그 모양으로 좁혀도 맞아야 한다. 런 6 step 7 의
+    준비 조건 `exists(find(name="DialogueWindow", under="@persistent/..."))` 가 언제나 거짓이었다.
+    """
+    window = card("@persistent/TutorialController[5]/ChatWindow[1]/DialogueWindow[5]", text=None)
+    window["scene"] = "DontDestroyOnLoad"
+    held = memories(window, scene="TurnBattleScene")
+
+    for under in (
+        "@persistent/TutorialController[5]/ChatWindow[1]",
+        "DontDestroyOnLoad/@persistent/TutorialController[5]/ChatWindow[1]",
+    ):
+        found = resolve_find(held, MacroScope(), find(name="DialogueWindow", under=under))
+        assert found.record.selector == "@persistent/TutorialController[5]/ChatWindow[1]/DialogueWindow[5]"
+
+
 def test_under_stops_at_a_segment_boundary() -> None:
     """글자 prefix 로만 보면 범위 제한이 조용히 없는 것이 된다.
 

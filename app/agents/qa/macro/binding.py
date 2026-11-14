@@ -217,6 +217,10 @@ def _segments(record: _HeldObject) -> set[str]:
     return names
 
 
+# 씬을 넘어 사는 객체가 key 에 다는 씬 이름. Unity 가 `DontDestroyOnLoad` 객체를 두는 씬이다.
+PERSISTENT_SCENE = "DontDestroyOnLoad"
+
+
 def _under(key: str, scene: str, under: str) -> bool:
     """`under=` 가 그 기록을 범위에 넣는가. memory 의 key 에 prefix 로 맞춘다.
 
@@ -229,10 +233,15 @@ def _under(key: str, scene: str, under: str) -> bool:
     모든 객체를 맞춘다 — `scene="TurnBattleScene"` 에서 `under="T"` 가 전부 통과한다.
     그러면 걸린 것이 하나뿐일 때 범위 제한이 조용히 없는 것이 되고, macro 는 범위를
     좁힌 것처럼 읽힌다.
+
+    씬을 넘어 사는 객체는 key 가 `DontDestroyOnLoad/@persistent/...` 이고 화면과 selector 는
+    `@persistent/...` 로 적는다. 그 앞 마디도 뗀 모양을 받는다(ARTEL-1453) — 안 받으면
+    `selector("@persistent/X")` 는 찾는데 `find(under="@persistent/X")` 는 언제나 0개다. 런 6
+    step 7 의 준비 조건이 그렇게 거짓으로 굳어 대사를 한 번도 넘기지 못했다.
     """
     return any(
         candidate == under or candidate.startswith(f"{under.rstrip('/')}/")
-        for candidate in (key, _without_scene(key, scene))
+        for candidate in (key, _without_scene(key, scene), _without_scene(key, PERSISTENT_SCENE))
     )
 
 
