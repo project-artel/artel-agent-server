@@ -702,3 +702,57 @@ def test_the_planner_shows_the_reasoning_summary_before_it_writes(monkeypatch) -
     planner, answer = asyncio.run(go(Reasoning(refuse=True)))
     assert answer == "whole answer"
     assert planner._streaming_model()[1] is False
+
+
+# --- pe9: 다음 step 계획 미리 쓰기 -----------------------------------------------------------------------
+
+
+def _run_ahead(fake, asked, monkeypatch, scenes=None):
+    from app.agents.planner_executer import runner as runner_module
+
+    if scenes is not None:
+        # 씬 변화 추적은 끄고, 계획을 쓸 때와 쓰려 할 때의 씬만 바꿔 본다.
+        monkeypatch.setattr(runner_module, "SCENE_POLL_SECONDS", 3600)
+        seen = iter(scenes)
+        monkeypatch.setattr(runner_module, "current_scene", lambda _channel: next(seen))
+
+    async def judge(system: str, user: str):
+        return {"passed": True, "reason": "ok", "state_detail": "", "insight": ""}
+
+    config = _config(no_action_grace_seconds=0.2, analysis="off", plan_ahead="on")
+
+    async def go():
+        fake.push_reading()
+        runner = PlannerExecuterRunner(config, ask=asked, judge=judge, jev=JevClient(post=FakeJev()))
+        return await runner.run_with_deadline(fake.channel, _two_steps())
+
+    return asyncio.run(go())
+
+
+def test_the_next_step_is_written_ahead_while_the_step_before_it_plays_and_used_on_the_same_scene(monkeypatch) -> None:
+    fake = _menu()
+    asked = Asked(MACROS, MACROS)
+
+    state, failure = _run_ahead(fake, asked, monkeypatch, scenes=["Menu", "Menu"])
+
+    assert failure is None and state.finished
+    assert len(asked.calls) == 2, "둘째 step 은 다시 묻지 않는다"
+    assert "This plan is written ahead, while step 1 is still being played" in asked.calls[1][1]
+    plans = [f["payload"] for f in fake.frames("LOG") if f["payload"].get("kind") == "step_macros"]
+    assert [plan["step"] for plan in plans] == [1, 2]
+    assert plans[1]["decision"]["written_ahead"] is True
+    assert [verdict["step"] for verdict in _verdicts(fake)] == [1, 2]
+
+
+def test_a_plan_written_ahead_on_another_scene_is_dropped_and_the_step_is_written_again(monkeypatch) -> None:
+    fake = _menu()
+    asked = Asked(MACROS, MACROS, MACROS)
+
+    state, failure = _run_ahead(fake, asked, monkeypatch, scenes=["Menu", "Battle"])
+
+    assert failure is None and state.finished
+    assert len(asked.calls) == 3
+    dropped = [f["payload"] for f in fake.frames("LOG") if f["payload"].get("kind") == "ahead_plan_dropped"]
+    assert len(dropped) == 1 and "written on `Menu`, and the screen is now on `Battle`" in dropped[0]["message"]
+    plans = [f["payload"] for f in fake.frames("LOG") if f["payload"].get("kind") == "step_macros"]
+    assert [plan["step"] for plan in plans] == [1, 2] and not plans[1]["decision"].get("written_ahead")

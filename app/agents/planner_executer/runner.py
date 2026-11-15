@@ -75,6 +75,7 @@ from app.agents.planner_executer.facts import NO_FACTS, GameFacts, load_game_fac
 from app.agents.planner_executer.identities import GameIdentity
 from app.config import get_settings
 from app.agents.planner_executer.target import StepContracts, StepTarget, TargetResolver, guard, observe
+from app.agents.qa.macro.binding import MacroMemories
 from app.agents.qa.runner import _step_plan
 from app.agents.qa.tools import QaRunState
 from app.qa.channel import QaCancelled, QaRunChannel
@@ -95,6 +96,26 @@ FIRST_READING_SECONDS = 5.0
 # How long a FREE round waits for the game's first reading after `reset_game`.
 RESET_READING_SECONDS = 10.0
 
+
+
+# 미리 쓰기: 씬이 바뀌었는지 보는 간격, 바뀐 뒤 객체가 들어오기를 기다리는 시간, 한 step 에서 다시 쓰는 횟수의 상한.
+SCENE_POLL_SECONDS = 0.5
+SCENE_SETTLE_SECONDS = 1.5
+MAX_EARLY_RESTARTS = 2
+
+
+@dataclass
+class Early:
+    """다음 step 의 미리 쓰는 계획(pe9 `plan_ahead`): 어느 step 인가, 쓰기 시작할 때의 씬, 쓰는 task."""
+
+    step: int
+    scene: str | None
+    task: "asyncio.Task[Written]"
+
+
+def current_scene(channel: QaRunChannel) -> str | None:
+    """지금 화면의 씬 이름. 아직 읽은 것이 없으면 `None` 이다."""
+    return MacroMemories(scene=channel.scene).scene_name or None
 
 
 @dataclass(frozen=True)
@@ -177,6 +198,16 @@ class PlannerExecuterRunner:
             self._config, channel, self._spec, registered, ask=self._ask, developer=self._developer, ledger=self._ledger,
             facts=self._facts, inputs=inputs,
         )
+        # 앞 step 이 도는 동안 다음 step 을 미리 쓰는 planner(pe9 `plan_ahead`). 본 planner 와 계획을 나누지 않아, 앞 step 의
+        # 재계획이 미리 쓰는 계획을 덮지 않는다.
+        self._ahead_planner = (
+            Planner(
+                self._config, channel, self._spec, registered, ask=self._ask, developer=self._developer,
+                ledger=self._ledger, facts=self._facts, inputs=inputs, ahead=True,
+            )
+            if self._spec.plan_ahead == "on"
+            else None
+        )
         executer = Executer(channel, self._spec, jev, facts=self._facts)
         if self._spec.facts == "on":
             await note_decision(
@@ -219,6 +250,8 @@ class PlannerExecuterRunner:
             ahead: dict[int, StepMacros] = {}
             # 묶음이 끝나기를 기다리는 step 들의 play(pe9). 묶음의 마지막 step 이 끝나거나 묶음이 끊기면 함께 판정한다.
             held: list[Held] = []
+            # 다음 step 의 미리 쓴 계획(pe9 `plan_ahead`).
+            early: Early | None = None
 
             def release() -> None:
                 nonlocal settling, held
@@ -240,6 +273,10 @@ class PlannerExecuterRunner:
                         planner.targets = targets
                         await note_decision(channel, "step_target", f"Step {step}: target {target.status}", step, **target.logged())
                     if step in ahead:
+                        if early is not None:
+                            # 묶음이 이 step 을 맡았는데 미리 쓴 계획이 있다면 그것은 쓰지 않는다.
+                            early.task.cancel()
+                            early = None
                         written = Written("", ahead.pop(step))
                         await note_decision(
                             channel, "segment_step", f"Step {step}: played with the plan written for the earlier step", step,
@@ -247,7 +284,13 @@ class PlannerExecuterRunner:
                         )
                     else:
                         ahead.clear()
-                        written = await planner.write(scenario, step)
+                        used = None
+                        if early is not None and early.step == step:
+                            used = await self._use_early(channel, planner, early)
+                        elif early is not None:
+                            early.task.cancel()
+                        early = None
+                        written = used if used is not None else await planner.write(scenario, step)
                         if written.macros is not None and written.macros.segment:
                             ahead = {
                                 number: step_of_segment(written.macros, number)
@@ -264,7 +307,19 @@ class PlannerExecuterRunner:
                             channel, state, scenario, step, False, message, self._engine_error(message)
                         ))
                         continue
-                    play = await self._play_with_replans(scenario, step, planner, executer, written.macros, target)
+                    following = None
+                    if self._ahead_planner is not None and step < len(scenario.steps) and step + 1 not in ahead:
+                        # 다음 step 이 이 계획의 묶음에 없으면 이 step 이 도는 동안 미리 쓴다. 이 step 에서 씬이 바뀌면 새 씬에서
+                        # 다시 쓴다(`_follow_scene`).
+                        early = self._start_early(channel, scenario, step + 1, step)
+                        holder = [early]
+                        following = asyncio.create_task(self._follow_scene(channel, scenario, step, holder))
+                    try:
+                        play = await self._play_with_replans(scenario, step, planner, executer, written.macros, target)
+                    finally:
+                        if following is not None:
+                            following.cancel()
+                            early = holder[0]
                     if play is None:
                         release()
                         message = (
@@ -291,6 +346,8 @@ class PlannerExecuterRunner:
                     await settling
                     settling = None
             finally:
+                if early is not None:
+                    early.task.cancel()
                 if settling is not None and not settling.done():
                     # 런이 끊겼다. 뒤에서 돌던 판정을 남기지 않는다.
                     settling.cancel()
@@ -339,6 +396,72 @@ class PlannerExecuterRunner:
             await work
 
         return asyncio.create_task(chained())
+
+    def _start_early(self, channel: QaRunChannel, scenario: QaScenario, step: int, playing: int) -> "Early":
+        """step `step` 의 계획을 지금 화면으로 뒤에서 쓰기 시작한다. 쓸 때의 씬을 함께 쥔다."""
+        assert self._ahead_planner is not None
+        task = asyncio.create_task(self._ahead_planner.write_ahead(scenario, step, playing))
+        # 쓰지 않고 버린 task 의 예외가 "회수되지 않음" 경고로 남지 않게 한다.
+        task.add_done_callback(lambda done: done.cancelled() or done.exception())
+        return Early(step, current_scene(channel), task)
+
+    async def _follow_scene(self, channel: QaRunChannel, scenario: QaScenario, playing: int, holder: "list[Early]") -> None:
+        """앞 step 이 도는 동안 씬이 바뀌면 미리 쓰던 계획을 버리고 새 씬에서 다시 쓴다. 새 씬의 객체가 보여야 다음 step 을 쓸
+        수 있다. 씬이 막 바뀐 뒤 객체가 들어올 시간을 조금 둔다."""
+        restarts = 0
+        while restarts < MAX_EARLY_RESTARTS:
+            await asyncio.sleep(SCENE_POLL_SECONDS)
+            early = holder[0]
+            now = current_scene(channel)
+            if not now or now == early.scene:
+                continue
+            await asyncio.sleep(SCENE_SETTLE_SECONDS)
+            early.task.cancel()
+            holder[0] = self._start_early(channel, scenario, early.step, playing)
+            await note_decision(
+                channel, "ahead_plan_restarted", f"Step {early.step}: the scene changed to `{now}`; writing it again ahead",
+                early.step, scene=now, ahead=True,
+            )
+            restarts += 1
+
+    async def _use_early(self, channel: QaRunChannel, planner: Planner, early: "Early") -> "Written | None":
+        """미리 쓴 계획을 확인하고 쓸 수 있으면 본 planner 로 넘긴다. 못 쓰면 이유를 남기고 `None` 이다.
+
+        계획을 쓸 때의 씬이 지금 씬과 같아야 한다. 다른 씬에서 쓴 계획은 지금 화면의 객체를 모른다(Minecraft 사례처럼, 받는 사이
+        단계가 바뀌면 버린다). 버리면 지금처럼 새로 쓴다 — 잃는 것은 그 호출 하나다.
+        """
+        assert self._ahead_planner is not None
+        try:
+            written = await early.task
+        except asyncio.CancelledError:
+            if asyncio.current_task() is not None and asyncio.current_task().cancelling():
+                raise
+            written, problem = None, "the plan written ahead was cancelled"
+        except QaCancelled:
+            raise
+        except Exception as error:  # noqa: BLE001 - 미리 쓴 계획이 실패하면 새로 쓴다
+            written, problem = None, f"{type(error).__name__}: {str(error)[:200]}"
+        else:
+            now = current_scene(channel)
+            if written.macros is None:
+                problem = f"refused: {clip(written.refusal or '', MAX_REFUSAL_CHARS)}"
+            elif now != early.scene:
+                problem = f"written on `{early.scene}`, and the screen is now on `{now}`"
+            else:
+                problem = None
+        if problem is not None or written is None or self._ahead_planner.logged is None:
+            await note_decision(
+                channel, "ahead_plan_dropped", f"Step {early.step}: the plan written ahead was not used ({problem})",
+                early.step, reason=problem, ahead=True,
+            )
+            return None
+        planner.adopt(self._ahead_planner)
+        message, _step, fields = self._ahead_planner.logged
+        await note_decision(
+            channel, "step_macros", f"{message} (written ahead)", early.step,
+            **{**fields, "plan_version": planner.draft_version}, written_ahead=True,
+        )
+        return written
 
     async def _settle_group(
         self,

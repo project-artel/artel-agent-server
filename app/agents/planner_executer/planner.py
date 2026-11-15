@@ -342,8 +342,14 @@ class Planner:
         ledger: ActionLedger | None = None,
         facts: GameFacts = NO_FACTS,
         inputs: InputsReader | None = None,
+        ahead: bool = False,
     ) -> None:
         self._config = config
+        # 앞 step 이 도는 동안 다음 step 을 미리 쓰는 planner 인가(pe9 `plan_ahead`). 로그 이름과 진행 표시가 달라, 화면은 이것을
+        # 지금 step 의 계획으로 읽지 않는다. 쓴 계획은 runner 가 확인한 뒤 본 planner 로 넘긴다(`adopt`).
+        self._ahead = ahead
+        # 마지막으로 쓴 계획의 로그 내용 `(message, step, fields)`. 미리 쓴 계획을 쓸 때 runner 가 `step_macros` 로 다시 남긴다.
+        self.logged: tuple[str, int, dict] | None = None
         # 개발자가 선언한 fact·rule. `facts="on"` 일 때만 요청에 싣고 ```facts 블록을 읽는다.
         self._game_facts = facts if spec.facts == "on" else NO_FACTS
         self._facts_text = planner_text(self._game_facts)
@@ -386,6 +392,27 @@ class Planner:
         """Step `step`'s macros; rewritten while the parser refuses them, up to `max_rewrites`."""
         self._draft = None
         return await self._write(scenario, step, this_step(scenario, step), f"Step {step}", "step")
+
+    async def write_ahead(self, scenario: QaScenario, step: int, playing: int) -> Written:
+        """Step `step` written while step `playing` is still being played on the screen this request shows (pe9)."""
+        self._draft = None
+        note = (
+            f"This plan is written ahead, while step {playing} is still being played on the screen below. Write step "
+            f"{step} for the screen step {playing} will leave behind: do not plan step {playing}'s moves, and do not "
+            f"expect what step {playing} is about to change to be as it is now."
+        )
+        return await self._write(scenario, step, this_step(scenario, step), f"Step {step} (ahead)", "step", note)
+
+    def adopt(self, other: "Planner") -> None:
+        """미리 쓴 planner 의 계획을 이 planner 의 지금 계획으로 받는다. 복구·재계획은 그 계획에 대한 수정으로 받는다."""
+        if other._draft is None:
+            return
+        self._draft_version += 1
+        self._draft = replace(other._draft, version=self._draft_version)
+
+    @property
+    def draft_version(self) -> int:
+        return self._draft_version
 
     async def replan(
         self, scenario: QaScenario, step: int, reason: str, turns: list[str], transition: dict | None = None
@@ -621,7 +648,7 @@ class Planner:
                 written = Written(source, None, rejection.render())
                 await note_decision(
                     self._channel,
-                    f"{kind}_macros_refused",
+                    f"{'ahead' if self._ahead else kind}_macros_refused",
                     f"{label}: the macros were refused (answer {attempt + 1} of {self._spec.max_rewrites + 1}): "
                     f"{clip(written.refusal, MAX_QUOTE_CHARS)}",
                     step,
@@ -652,11 +679,7 @@ class Planner:
             actions = [*written.macros.actions, *written.macros.contracts]
             observe = written.macros.observe
             check = written.macros.check
-            await note_decision(
-                self._channel,
-                f"{kind}_macros",
-                f"{label}: {len(actions)} actions — {', '.join(actions)}",
-                step,
+            fields = dict(
                 actions=actions,
                 source=clip(source, MAX_SOURCE_CHARS),
                 observe=None if observe is None else {"paths": observe.paths, "members": observe.members},
@@ -684,6 +707,9 @@ class Planner:
                 changes=changes.logged() if changes is not None else None,
                 descriptions={name: written.macros.description(name) for name in actions},
             )
+            message = f"{label}: {len(actions)} actions — {', '.join(actions)}"
+            self.logged = (message, step, fields)
+            await note_decision(self._channel, f"{'ahead' if self._ahead else kind}_macros", message, step, **fields)
             break
         return written
 
@@ -737,7 +763,7 @@ class Planner:
                 self._channel, "planner_progress",
                 f"{label}: the planner is writing ({seconds}s, {len(text)} characters so far)", step,
                 elapsed=seconds, chars=len(text), tail=text[-PROGRESS_TAIL_CHARS:],
-                thinking="".join(thoughts)[-PROGRESS_TAIL_CHARS:],
+                thinking="".join(thoughts)[-PROGRESS_TAIL_CHARS:], ahead=self._ahead or None,
             )
 
         async def tick() -> None:

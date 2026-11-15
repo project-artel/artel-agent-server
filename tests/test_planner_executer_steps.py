@@ -123,7 +123,8 @@ def _scenario() -> QaScenario:
 def _config(**knobs):
     # 엔진의 흐름을 보는 테스트라 Executer 의 state 출처는 `PulseMemory` 로 둔다. orchestration 이 없다.
     # 화면 그림은 끈다: 켜면 `capture_screen` ACTION 이 action 순서에 끼어든다. 그림은 test_screen_images.py 가 본다.
-    knobs = {"state_source": "pulse_memory", "screen_images": "off", **knobs}
+    # 미리 쓰기도 끈다: 켜면 planner 호출 수와 순서가 앞 step 의 실행과 겹친다. 미리 쓰기는 test_planner_executer_pe8.py 가 본다.
+    knobs = {"state_source": "pulse_memory", "screen_images": "off", "plan_ahead": "off", **knobs}
     return resolve_run_config(
         arch=QaArchSpec(engine="planner_executer", planner=PlannerExecuterArchSpec(**knobs))
     )
