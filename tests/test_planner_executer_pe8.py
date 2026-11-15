@@ -666,9 +666,13 @@ def test_the_planner_shows_the_reasoning_summary_before_it_writes(monkeypatch) -
                 async def astream(self, messages):
                     if outer.refuse:
                         raise RuntimeError("organization must be verified to generate reasoning summaries")
-                    for piece in ("Checking which", " slot is empty"):
-                        await asyncio.sleep(0.03)
-                        yield SimpleNamespace(content=[{"type": "reasoning", "summary": [{"type": "summary_text", "text": piece}]}])
+                    await asyncio.sleep(0.03)
+                    yield SimpleNamespace(content=[{"type": "reasoning", "summary": [{"type": "summary_text", "text": "Checking which"}]}])
+                    # langchain-openai 의 v0 형식: `additional_kwargs` 에 `type` 없이 온다.
+                    await asyncio.sleep(0.03)
+                    yield SimpleNamespace(
+                        content=[], additional_kwargs={"reasoning": {"summary": [{"type": "summary_text", "text": " slot is empty"}]}}
+                    )
                     await asyncio.sleep(0.03)
                     yield SimpleNamespace(content=[{"type": "text", "text": "answer"}])
 

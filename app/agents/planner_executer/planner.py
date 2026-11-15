@@ -791,7 +791,8 @@ def _thought(chunk) -> str:
     blocks = list(content) if isinstance(content, list) else []
     extra = (getattr(chunk, "additional_kwargs", None) or {}).get("reasoning")
     if isinstance(extra, dict):
-        blocks.append(extra)
+        # langchain-openai 의 v0 형식은 `type` 없이 `{"summary": [...]}` 만 둔다.
+        blocks.append({"type": "reasoning", **extra})
     out: list[str] = []
     for block in blocks:
         if not isinstance(block, dict):
