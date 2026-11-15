@@ -577,7 +577,10 @@ class Planner:
                 goals, goal_probes = await read_goals(goals_text, source, self._registered)
                 # 묶음은 처음 쓰는 계획에만 받는다. 다시 쓰는 계획(복구·재계획)은 그 step 하나를 고친다.
                 segment = (
-                    await read_segment(segment_text, source, self._registered, step, tuple(name for name, _ in goals))
+                    await read_segment(
+                        segment_text, source, self._registered, step, tuple(name for name, _ in goals),
+                        tuple([*macros.actions, *macros.contracts]),
+                    )
                     if base is None and kind == "step" else {}
                 )
                 if self._game_facts.facts:
@@ -652,7 +655,10 @@ class Planner:
                 guidance=written.macros.guidance,
                 facts=list(written.macros.facts) or None,
                 goals=[{"name": name, "goal": goal} for name, goal in written.macros.goals] or None,
-                segment={str(number): list(names) for number, (names, _probe) in written.macros.segment.items()} or None,
+                segment={
+                    str(number): {"goals": list(names), "actions": list(actions)}
+                    for number, (names, _probe, actions) in written.macros.segment.items()
+                } or None,
                 guidance_summary=guidance_summary.strip() if guidance_summary else None,
                 changes=changes.logged() if changes is not None else None,
                 descriptions={name: written.macros.description(name) for name in actions},

@@ -53,8 +53,8 @@ nothing else.
     <name>: <the next goal>
     ```
     ```segment
-    <this step's number>: <goal name>, ...
-    <the next step's number>: <goal name>, ...
+    <this step's number>: <goal name>, ... | <action>, ...
+    <the next step's number>: <goal name>, ... | <action>, ...
     ```
     ```python
     def <action>() -> None:
@@ -114,8 +114,9 @@ Where the step ends
 
 Planning the next steps on the same screen
 - When the next steps continue on this same scene, plan them in this answer with a ```segment block:
-  one line per step, `<step number>: <goal name>, <goal name>`, starting with the step you are
-  writing and going on without gaps. A run of steps on one screen — reading through a dialogue line
+  one line per step, `<step number>: <goal name>, ... | <action>, ...`, starting with the step you
+  are writing and going on without gaps. The actions after the `|` are the only ones offered in
+  that step; a step that only looks lists none. A run of steps on one screen — reading through a dialogue line
   by line, several moves in the same battle, menu or level — belongs in one segment. Name each
   step's goals from your ```goals block. For each later step write `def done_<step number>() -> bool:`
   reading that step's result, the same way `done()` reads this one's. The executer plays the steps in

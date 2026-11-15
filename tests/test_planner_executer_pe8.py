@@ -365,26 +365,30 @@ def _segment(text: str, source: str = SEGMENT_SOURCE):
 
     async def go():
         fake.push_reading()
-        return await read_segment(text, source, RegisteredMacros(fake.channel), 1, ("open_map", "stay"))
+        return await read_segment(
+            text, source, RegisteredMacros(fake.channel), 1, ("open_map", "stay"), ("press_start", "look_around")
+        )
 
     return asyncio.run(go())
 
 
 def test_a_segment_names_the_following_steps_with_their_goals_and_done() -> None:
-    segment = _segment("1: open_map\n2: stay\n")
+    segment = _segment("1: open_map | press_start\n2: stay |\n")
 
-    assert segment[1] == (("open_map",), None)
-    assert segment[2][0] == ("stay",) and segment[2][1] is not None
+    assert segment[1] == (("open_map",), None, ("press_start",))
+    assert segment[2][0] == ("stay",) and segment[2][1] is not None and segment[2][2] == ()
     assert _segment("") == {}
 
 
 @pytest.mark.parametrize(
     ("text", "said"),
     [
-        ("2: stay", "starting with the step you are writing (1)"),
-        ("1: open_map\n3: stay", "lists [1, 3]"),
-        ("1: open_map\n2: nowhere", "not in the ```goals block"),
-        ("1: open_map\n2: stay\n3: stay", "`def done_3() -> bool:`"),
+        ("2: stay |", "starting with the step you are writing (1)"),
+        ("1: open_map |\n3: stay |", "lists [1, 3]"),
+        ("1: open_map |\n2: nowhere |", "not in the ```goals block"),
+        ("1: open_map |\n2: stay |\n3: stay |", "`def done_3() -> bool:`"),
+        ("1: open_map\n2: stay", "a step that only looks lists no action"),
+        ("1: open_map | fly\n2: stay |", "`fly`, which is not an action of this plan"),
     ],
 )
 def test_a_segment_that_cannot_be_read_is_refused(text: str, said: str) -> None:
@@ -396,7 +400,7 @@ def test_a_segment_that_cannot_be_read_is_refused(text: str, said: str) -> None:
 SEGMENT_ANSWER = (
     "```summary\nPress Start, then stay on the map.\n```\n"
     "```goals\nopen_map: Press Start to open the map.\nstay: Stay on the map.\n```\n"
-    "```segment\n1: open_map\n2: stay\n```\n"
+    "```segment\n1: open_map | press_start\n2: stay | look_around\n```\n"
     f"```python\n{SEGMENT_SOURCE}```\n"
 )
 
@@ -437,7 +441,10 @@ def test_step_of_segment_swaps_in_the_step_s_done_and_goals() -> None:
         registered = RegisteredMacros(fake.channel)
         macros = await parse_step(SEGMENT_SOURCE, registered)
         goals, probes = await read_goals("open_map: a\nstay: b\n", SEGMENT_SOURCE, registered)
-        segment = await read_segment("1: open_map\n2: stay\n", SEGMENT_SOURCE, registered, 1, ("open_map", "stay"))
+        segment = await read_segment(
+            "1: open_map | press_start\n2: stay | look_around\n", SEGMENT_SOURCE, registered, 1, ("open_map", "stay"),
+            ("press_start", "look_around"),
+        )
         from dataclasses import replace
 
         return replace(macros, goals=goals, goal_probes=probes, segment=segment)
@@ -447,3 +454,5 @@ def test_step_of_segment_swaps_in_the_step_s_done_and_goals() -> None:
 
     assert first.probe is macros.probe and first.goals == (("open_map", "a"),)
     assert second.probe is macros.segment[2][1] and second.goals == (("stay", "b"),)
+    # 묶음의 action 은 그 step 에 적힌 것만 열린다.
+    assert list(first.actions) == ["press_start"] and list(second.actions) == ["look_around"]
