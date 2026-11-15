@@ -263,8 +263,12 @@ async def parse_step(
     registered: RegisteredMacros,
     developer_actions: Mapping[str, DeveloperAction] | None = None,
     contracts_text: str | None = None,
+    contract_keys: tuple[str, ...] = (),
 ) -> StepMacros:
     """The step's macros, or `MacroRejection` with what to write instead.
+
+    `contract_keys` 는 legacy 모드에서 등록 계약으로 도는 developer macro 의 키다. planner 가 그 이름으로 쓴 `ready_`·`effect_`
+    는 거절하지 않되 쓰지 않는다 — 등록된 계약이 이긴다.
 
     The parser checks each action and `done`; this adds what the executer needs of the source as
     a whole — a `done` predicate, no parameters, a docstring on each action. A step may have no action at
@@ -295,8 +299,11 @@ async def parse_step(
     parsed = await _parse_actions(actions, source, registered, developer_actions)
     probe = await registered.parse(PROBE, source.rstrip("\n") + _PROBE_SOURCE)
     descriptions = {key: action.description for key, action in developer_actions.items()}
-    effects = await _parse_predicates(defs, list(parsed), source, registered, EFFECT_PREFIX, effect_name, EFFECT_FLAG)
-    readies = await _parse_predicates(defs, list(parsed), source, registered, READY_PREFIX, ready_name, READY_FLAG)
+    named = [*parsed, *contract_keys]
+    effects = await _parse_predicates(defs, named, source, registered, EFFECT_PREFIX, effect_name, EFFECT_FLAG)
+    readies = await _parse_predicates(defs, named, source, registered, READY_PREFIX, ready_name, READY_FLAG)
+    effects = {key: probe for key, probe in effects.items() if key not in contract_keys}
+    readies = {key: probe for key, probe in readies.items() if key not in contract_keys}
     readies = _with_developer_readies(readies, developer_actions)
     picks = {key: action.pick for key, action in developer_actions.items() if action.pick is not None}
     return StepMacros(source, parsed, probe, descriptions, effects=effects, readies=readies, picks=picks)

@@ -122,6 +122,9 @@ Planning the next steps on the same screen
   reading that step's result, the same way `done()` reads this one's. The executer plays the steps in
   order with the same actions, stopping each one at its own `done_`, and you are not asked again
   until the segment ends.
+- The ```observe and ```check blocks serve every step of the segment. Name in them what each step's
+  choices and verdict need — a value that only a later step changes belongs there too, or that step
+  is judged without evidence. A later step's `done_` must be false where the step before it stops.
 - A step whose move takes the player to another scene may be the segment's last step; the step after
   it is planned again from the new screen. Leave out a step that needs objects this screen does not
   show yet. Leave the block out only when the next step is on another scene.

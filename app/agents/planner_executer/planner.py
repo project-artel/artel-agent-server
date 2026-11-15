@@ -28,6 +28,7 @@ from app.agents.planner_executer.developer_macros import (
     NO_DEVELOPER_MACROS,
     LoadedDeveloperMacros,
     bind_developer_calls,
+    bind_developer_calls_with_contracts,
     bind_guidance_calls,
     split_developer_block,
     DEVELOPER_ACTION_PREFIX,
@@ -567,12 +568,20 @@ class Planner:
                     )
                     # 지침 모드의 ```developer 줄은 이름 하나라 줄과 행동 키가 하나씩 맞는다.
                     pairs = tuple((DEVELOPER_ACTION_PREFIX + call.removesuffix("()"), call) for call in calls)
-                else:
+                elif contract_mode:
                     developer_actions = await bind_developer_calls(calls, self._developer)
-                    macros = await parse_step(
-                        source, self._registered, developer_actions, (actions_text or "") if contract_mode else None
-                    )
+                    macros = await parse_step(source, self._registered, developer_actions, actions_text or "")
                     pairs = tuple(zip(developer_actions, calls))
+                else:
+                    # legacy: 계약을 등록한 developer macro 는 그 계약(준비·효과·대상)으로 돈다(pe9).
+                    developer_actions, developer_contracts, developer_binder, pairs = (
+                        await bind_developer_calls_with_contracts(calls, self._developer)
+                    )
+                    macros = await parse_step(
+                        source, self._registered, developer_actions, None, contract_keys=tuple(developer_contracts)
+                    )
+                    if developer_contracts:
+                        macros = replace(macros, contracts=developer_contracts, binder=developer_binder)
                 after = read_after(after_text, [*macros.actions, *macros.contracts])
                 goals, goal_probes = await read_goals(goals_text, source, self._registered)
                 # 묶음은 처음 쓰는 계획에만 받는다. 다시 쓰는 계획(복구·재계획)은 그 step 하나를 고친다.

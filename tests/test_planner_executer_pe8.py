@@ -334,14 +334,40 @@ from app.agents.planner_executer.executer import no_effect_shown  # noqa: E402
 from app.agents.planner_executer.macros import read_segment, step_of_segment  # noqa: E402
 
 
-def test_play_stops_the_moment_done_holds_without_asking_jev() -> None:
-    fake = FakeGame("Map", {"Root/Stage": {"text": "Stage 0"}})  # `done()` 이 처음부터 참이다
-    jev = FakeJev(picks=("look_around",), goal=(0.1,))
+def test_play_stops_the_moment_done_turns_true_without_asking_jev() -> None:
+    fake = _menu()  # `done()` 은 처음에 거짓이고, Start 를 누르면 참이 된다
+    jev = FakeJev(picks=("press_start",), goal=(0.1,))
 
     play = _play(fake, jev)
 
-    assert play.stopped == "done" and fake.actions == []
-    assert jev.asked("noul") == [] and jev.asked("choice") == []
+    assert play.stopped == "done" and [turn.get("picked") for turn in play.turns] == ["press_start", None]
+    assert jev.asked("noul") == []
+
+
+def test_a_done_already_true_at_the_start_of_a_step_with_actions_is_confirmed_by_jev() -> None:
+    """처음부터 참인 완료 조건은 이 step 의 결과가 아닐 수 있다(try 14 step 4). 동작이 있는 step 이면 Jev 에게 확인받는다."""
+    agreed = FakeGame("Map", {"Root/Stage": {"text": "Stage 0"}})
+    jev = FakeJev(picks=("look_around",), goal=(0.9,))
+
+    play = _play(agreed, jev)
+
+    assert play.stopped == "done" and agreed.actions == []
+    assert len(jev.asked("noul")) == 1
+
+    doubted = FakeGame("Map", {"Root/Stage": {"text": "Stage 0"}})
+    play = _play(doubted, FakeJev(picks=("look_around",), goal=(0.1,)), max_done_disagreements=2)
+
+    assert play.stopped.startswith("done() and Jev disagree")
+
+
+def test_a_step_that_only_looks_takes_a_done_true_from_the_start() -> None:
+    fake = FakeGame("Map", {"Root/Stage": {"text": "Stage 0"}})
+    jev = FakeJev(picks=("look_around",), goal=(0.1,))
+    only_done = 'def done() -> bool:\n    return scene() == "Map"\n'
+
+    play = _play(fake, jev, source=only_done)
+
+    assert play.stopped == "done" and jev.asked("noul") == []
 
 
 def test_an_effect_that_was_already_true_counts_as_no_effect() -> None:
@@ -456,3 +482,56 @@ def test_step_of_segment_swaps_in_the_step_s_done_and_goals() -> None:
     assert second.probe is macros.segment[2][1] and second.goals == (("stay", "b"),)
     # 묶음의 action 은 그 step 에 적힌 것만 열린다.
     assert list(first.actions) == ["press_start"] and list(second.actions) == ["look_around"]
+
+
+# --- pe9: legacy 모드도 developer macro 의 등록 계약을 쓴다 ---------------------------------------------
+
+from app.agents.planner_executer.developer_macros import (  # noqa: E402
+    DeveloperMacro,
+    bind_developer_calls_with_contracts,
+    load_developer_macros,
+)
+
+STRIKE = '''def strike(enemy: object) -> None:
+    """Strike one living enemy so it loses health."""
+    click(enemy)
+
+
+def ready_strike(enemy: object) -> bool:
+    return member(enemy, "Game.Enemy::hp") > 0
+
+
+def effect_strike(enemy: object) -> bool:
+    return member(enemy, "Enemy.hit") == True
+'''
+WAIT = '''def wait_a_bit() -> None:
+    """Press Space once."""
+    press_key("Space", 0.05)
+'''
+STRIKE_CONTRACT = {"params": {"enemy": {"holds": "Game.Enemy::hp"}}, "effect": {"mode": "transition", "within": 0.5}}
+
+
+def test_a_registered_contract_is_used_in_legacy_mode_and_the_planner_s_ready_for_it_is_ignored() -> None:
+    fake = _menu()
+
+    async def go():
+        fake.push_reading()
+        loaded = await load_developer_macros((
+            DeveloperMacro("strike", STRIKE, "1.0", None, False, STRIKE_CONTRACT),
+            DeveloperMacro("wait_a_bit", WAIT, "1.0", None, False, None),
+        ))
+        actions, contracts, binder, pairs = await bind_developer_calls_with_contracts(
+            ['strike(pick("Enemy"))', "wait_a_bit"], loaded
+        )
+        source = (
+            'def ready_strike() -> bool:\n    return scene() == "Battle"\n\n\n'
+            'def done() -> bool:\n    return scene() == "Done"\n'
+        )
+        macros = await parse_step(source, RegisteredMacros(fake.channel), actions, None, contract_keys=tuple(contracts))
+        return actions, contracts, pairs, macros
+
+    actions, contracts, pairs, macros = asyncio.run(go())
+
+    assert list(contracts) == ["developer:strike"] and list(actions) == ["developer:wait_a_bit"]
+    assert pairs == (("developer:strike", 'strike(pick("Enemy"))'), ("developer:wait_a_bit", "wait_a_bit"))
+    assert "developer:strike" not in macros.readies

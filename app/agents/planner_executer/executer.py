@@ -457,6 +457,10 @@ class Executer:
         # 지난 action 에 효과 조건이 있었는데 효과가 보이지 않았나. 그랬다면 state 가 바뀌어도 연속 횟수를 이어 센다 — state 는
         # 타이머 같은 값만으로도 매 turn 바뀐다(try 11 step 7).
         last_no_effect = False
+        # 완료 조건이 첫 turn 부터 참이었나, 그 뒤 한 번이라도 거짓이 됐나. 처음부터 참인 완료 조건은 이 step 의 결과가 아닐 수
+        # 있다 — try 14 step 4 의 "줄이 끝까지 찍혔다" 는 앞 step 이 끝난 자리에서 이미 참이라, 키를 한 번도 안 누르고 끝났다.
+        done_at_start: bool | None = None
+        done_dropped = False
         # 방금 통과한 action 의 ```after 다음 행동. 다음 turn 의 선택지를 이것으로 좁힌다.
         follow: tuple[str, ...] = ()
         # 이 step 에서 action 마다 실패했거나 입력 없이 끝난 횟수(누적, ARTEL-1298). 연속만 세면 두 action 이 번갈아 헛돌
@@ -494,7 +498,15 @@ class Executer:
                     # 뒤 `guard` 가 통과로 남기지 않는다.
                     latest = next((entry["values"] for entry in reversed(play.evidence) if "values" in entry), {})
                     record["target"] = target_state(step_target, latest)[0]
-                if record["done"] and spec.done_by == "code":
+                if done_at_start is None:
+                    done_at_start = bool(record["done"])
+                if not record["done"]:
+                    done_dropped = True
+                acts = bool(macros.actions or macros.contracts)
+                # 코드가 바로 멈추는 것은 완료 조건이 이 play 안에서 참이 됐을 때다. 동작이 있는 step 에서 처음부터 참이었고 한 번도
+                # 거짓이 되지 않았으면 Jev 에게 목표 도달을 확인받는다(아래 `jev` 길). 보기만 하는 step 은 처음부터 참이 정답이다.
+                code_decides = not acts or not done_at_start or done_dropped
+                if record["done"] and spec.done_by == "code" and code_decides:
                     # 완료는 코드가 판정한다(pe9). 공개 Jev 에이전트들은 완료를 게임 값으로 정하고 Jev 에게 묻지 않는다. 전에는 Jev 가
                     # 아니라고 하면 동작을 계속 골라, try 11 step 3·4 에서 맵에 도착한 뒤 Space 를 4번 더 눌러 다음 step 의
                     # 나레이션을 미리 지웠다. 완료 조건이 참이면 입력을 더 보내지 않는다. 판정은 evaluator 가 한다.
