@@ -450,6 +450,31 @@ def evidence_values(
     return EvidenceReading(values, unknown, clipped=clipped, omitted=snapshot.omitted_entities)
 
 
+# 근거 읽기마다 함께 적는 화면 글자 수. 글자가 많은 씬에서 check 의 값을 밀어내지 않게 상한을 둔다.
+MAX_VISIBLE_TEXTS = 25
+
+
+def visible_texts(snapshot: StateSnapshot, scene: str | None = None, limit: int = MAX_VISIBLE_TEXTS) -> dict[str, Any]:
+    """지금 씬에서 켜져 있는 객체가 띄운 글자, `path text` 이름으로(pe9). check 와 상관없이 근거에 함께 적는다.
+
+    planner 의 check 는 계획을 쓸 때 보이는 객체만 적을 수 있어, 다음 씬에 나올 대사·안내의 글자는 근거에서 빠졌다. 로컬
+    try 21 step 2 는 타이틀에서 계획을 써 대사 객체가 check 에 없었고, "한 글자씩 나온다" 를 확인할 근거가 없어 실패했다.
+    읽을 때마다 글자를 적으면 글자가 늘어나는 모습이 기록에 남는다. 게임마다 다른 이름을 알 필요가 없다.
+    """
+    active = (scene or snapshot.scene or "").strip()
+    texts: dict[str, Any] = {}
+    for entity in sorted(snapshot.entities, key=lambda entity: entity.address):
+        if len(texts) >= limit:
+            break
+        if not entity.active or entity.status != "KNOWN" or (active and entity.scene != active):
+            continue
+        text = entity.fragments.get("text")
+        if text is None or text.status != "KNOWN" or not text.value:
+            continue
+        texts[f"{entity.selector or entity.path or entity.entity_id} text"] = clip_value(text.value)
+    return texts
+
+
 def _evidence_entity(
     entity: StateEntity, is_cosmetic: Any, wanted: set[str] | None, seen: set[str]
 ) -> tuple[dict[str, Any], int]:

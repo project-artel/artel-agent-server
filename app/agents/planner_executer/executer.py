@@ -82,6 +82,7 @@ from app.qa.state_set import (
     declared_values,
     unmatched_paths,
     evidence_values,
+    visible_texts,
     read_state,
     render_jev_state,
     state_changes,
@@ -1057,6 +1058,8 @@ class Executer:
                 entry["clipped"] = reading.clipped
             if reading.omitted:
                 entry["omitted"] = reading.omitted
+        for name, text in visible_texts(snapshot, scene).items():
+            values.setdefault(name, text)
         if at == "start":
             self._evidence_start = snapshot
         elif at == "end" and self._evidence_start is not None:

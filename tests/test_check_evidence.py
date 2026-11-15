@@ -230,7 +230,9 @@ def test_unmatched_paths_count_inactive_and_stale_objects_as_matched() -> None:
 def test_without_a_check_block_the_active_scene_is_still_read() -> None:
     play = _play_checked(_menu(), None)
 
-    assert all(entry["values"].keys() == {"(active scene)"} for entry in play.evidence)
+    # check 가 없어도 활성 씬과 화면 글자(pe9)는 읽는다. 그 밖의 값은 없다.
+    assert all("(active scene)" in entry["values"] for entry in play.evidence)
+    assert all(name == "(active scene)" or name.endswith(" text") for entry in play.evidence for name in entry["values"])
     assert "the plan named no values (no ```check block)" in evidence_text(play)
 
 
@@ -340,3 +342,31 @@ def test_a_play_records_what_changed_and_each_turn_names_its_frame() -> None:
     assert all("frame" in turn for turn in play.turns)
     (log,) = [frame["payload"] for frame in fake.frames("LOG") if frame["payload"].get("kind") == "evidence"]
     assert "Root/Stage: appeared" in log["evidence"]["changes"]
+
+
+def test_every_reading_also_keeps_the_words_on_screen_whatever_the_check_named() -> None:
+    from app.qa.state_set import visible_texts
+
+    def entity(path: str, text: str | None, scene: str = "StoryScene", active: bool = True) -> dict:
+        fragments = {"text": {"status": "KNOWN", "value": text}} if text is not None else {}
+        return {"entity_id": path, "scope": scene, "path": path, "selector": path, "active": active, "status": "KNOWN", "fragments": fragments}
+
+    snapshot = StateSnapshot.model_validate({
+        "state_version": 3, "sync": "SYNCED", "scene": "StoryScene",
+        "entities": [
+            entity("Canvas/ChatText", "안녕"),
+            entity("Canvas/Hidden", "숨은 글자", active=False),
+            entity("Canvas/Empty", ""),
+            entity("Canvas/Frame", None),
+            entity("Title/Label", "시작하기", scene="TitleScene"),
+        ],
+    })
+
+    texts = visible_texts(snapshot)
+
+    assert texts == {"Canvas/ChatText text": "안녕"}, "지금 씬에서 켜진 객체의 글자만"
+    many = StateSnapshot.model_validate({
+        "state_version": 3, "sync": "SYNCED", "scene": "StoryScene",
+        "entities": [entity(f"Canvas/Line{index:02d}", f"line {index}") for index in range(40)],
+    })
+    assert len(visible_texts(many)) == 25
