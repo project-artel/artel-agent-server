@@ -25,6 +25,7 @@ source is parsed once more with a generated entry, `executer_probe_done`, that d
 """
 
 import ast
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 
@@ -116,6 +117,10 @@ class StepMacros:
     guidance: str | None = None
     # planner 의 ```facts 블록: 이 step 에서 Jev 가 매 turn 값을 읽을 선언 fact 의 이름.
     facts: tuple[str, ...] = ()
+    # planner 의 ```goals 블록(prompt v6): 순서 있는 하위 목표 (이름, 문장). Jev 는 step 문장 대신 지금 하위 목표를 읽는다.
+    goals: tuple[tuple[str, str], ...] = ()
+    # 하위 목표마다 `goal_<이름>() -> bool` 을 읽는 probe. 참이면 다음 하위 목표로 넘어간다.
+    goal_probes: dict[str, "MacroDefinition"] = field(default_factory=dict)
 
     def description(self, action: str) -> str:
         if action in self.descriptions:
@@ -299,7 +304,9 @@ def _with_developer_readies(
 ) -> dict[str, MacroDefinition]:
     """planner 의 `ready_<action>` 에, 그것이 없는 developer macro 의 앞부분 `require` probe 를 더한다."""
     derived = {key: action.ready for key, action in developer_actions.items() if action.ready is not None}
-    return {**derived, **readies}
+    # developer macro 가 제 준비 조건을 가지면 그것이 이긴다(pe9). planner 의 `ready_` 는 step 이 기대하는 화면을 적는 일이
+    # 잦았다 — 로컬 try 8·9 step 11~18 은 그 조건이 다른 화면에서 거짓이라 "준비된 동작 없음" 으로 줄줄이 멈췄다.
+    return {**readies, **derived}
 
 
 async def _parse_contract_step(
@@ -394,6 +401,54 @@ async def parse_guidance_step(
         source, parsed, probe, descriptions, readies=readies, contracts=dict(contracts), binder=binder,
         guidance=guidance.strip() if guidance and guidance.strip() else None,
     )
+
+
+GOAL_DEF_PREFIX = "goal_"
+GOAL_FLAG = "goal"
+_GOAL_LINE = re.compile(r"^\s*([a-z][a-z0-9_]{0,39})\s*:\s*(\S.*)$")
+
+
+async def read_goals(
+    text: str | None, source: str, registered: RegisteredMacros
+) -> tuple[tuple[tuple[str, str], ...], dict[str, MacroDefinition]]:
+    """```goals 블록의 하위 목표와 그 완료 조건 probe. 블록이 없으면 둘 다 비어 있다.
+
+    줄마다 `<이름>: <목표>` 이고, 이름마다 source 에 `def goal_<이름>() -> bool:` 이 있어야 한다. 이름이 틀린 조건은 조용히 안
+    읽히므로 거절한다.
+    """
+    if text is None or not text.strip():
+        return (), {}
+    goals: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        matched = _GOAL_LINE.match(line)
+        if matched is None:
+            raise MacroRejection(
+                "each line of the ```goals block is `<name>: <goal>` with a lowercase name of letters, digits and `_`."
+            )
+        name, goal = matched.group(1), matched.group(2).strip()
+        if any(name == seen for seen, _ in goals):
+            raise MacroRejection(f"the goal `{name}` is listed twice in the ```goals block.")
+        goals.append((name, goal))
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as error:
+        raise MacroRejection(f"this is not valid Python syntax — {error.msg}.", error.lineno) from None
+    defs = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    probes: dict[str, MacroDefinition] = {}
+    for name, _goal in goals:
+        node = defs.get(GOAL_DEF_PREFIX + name)
+        if node is None:
+            raise MacroRejection(
+                f"the goal `{name}` needs `def {GOAL_DEF_PREFIX}{name}() -> bool:` in the ```python block, reading when it is reached."
+            )
+        if not _returns(node, "bool") or node.args.args:
+            raise MacroRejection(f"`{GOAL_DEF_PREFIX}{name}` must be `def {GOAL_DEF_PREFIX}{name}() -> bool:` with no parameters.")
+        entry = f"executer_probe_{GOAL_DEF_PREFIX}{name}"
+        probe_source = f'\n\ndef {entry}() -> None:\n    if {GOAL_DEF_PREFIX}{name}():\n        flag("{GOAL_FLAG}")\n'
+        probes[name] = await registered.parse(entry, source.rstrip("\n") + probe_source)
+    return tuple(goals), probes
 
 
 async def _parse_predicates(

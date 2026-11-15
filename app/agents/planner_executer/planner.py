@@ -41,6 +41,7 @@ from app.agents.planner_executer.macros import (
     parse_guidance_step,
     parse_scene,
     parse_step,
+    read_goals,
 )
 from app.agents.planner_executer.facts import NO_FACTS, GameFacts, check_guidance_facts, planner_text, read_facts_block
 from app.agents.planner_executer.target import StepContracts, planner_note
@@ -80,6 +81,7 @@ _GUIDANCE_SUMMARY_BLOCK = re.compile(r"```guidance_summary\s*\n(.*?)```", re.DOT
 _AFTER_BLOCK = re.compile(r"```after\s*\n(.*?)```", re.DOTALL)
 _GUIDANCE_BLOCK = re.compile(r"```guidance\s*\n(.*?)```", re.DOTALL)
 _FACTS_BLOCK = re.compile(r"```facts\s*\n(.*?)```", re.DOTALL)
+_GOALS_BLOCK = re.compile(r"```goals\s*\n(.*?)```", re.DOTALL)
 # 사람이 읽는 계획 요약의 언어. prompt 의 `summary_language` 자리에 들어간다.
 SUMMARY_LANGUAGES = {"ko": "Korean", "en": "English"}
 # observe 블록 하나에 받는 이름 수. 범위를 좁히는 것이 블록의 쓸모라 넉넉하게만 막는다.
@@ -203,6 +205,11 @@ def read_after(text: str | None, actions: list[str]) -> dict[str, tuple[str, ...
         for action in named(first):
             after[action] = followers
     return after
+
+
+def split_goals_block(answer: str) -> tuple[str, str | None]:
+    """The answer without its ```goals block, and the block's text."""
+    return _split_block(answer, _GOALS_BLOCK)
 
 
 def split_facts_block(answer: str) -> tuple[str, str | None]:
@@ -521,6 +528,7 @@ class Planner:
             rest, actions_text = split_actions_block(rest)
             rest, guidance_text = split_guidance_block(rest)
             rest, facts_text = split_facts_block(rest)
+            rest, goals_text = split_goals_block(rest)
             contract_mode = self._spec.actions == "contract"
             guidance_mode = self._spec.actions == "guidance"
             source = extract_code(rest)
@@ -536,6 +544,7 @@ class Planner:
                     actions_text = actions_text if actions_text is not None else base.actions_text
                     guidance_text = guidance_text if guidance_text is not None else base.guidance_text
                     facts_text = facts_text if facts_text is not None else base.facts_text
+                    goals_text = goals_text if goals_text is not None else base.goals_text
                     summary = summary or base.summary
                     # 지침을 바꾸지 않은 수정이면 사람에게 보이는 지침도 그대로다.
                     guidance_summary = guidance_summary or (base.guidance_summary if guidance_text == base.guidance_text else None)
@@ -556,9 +565,16 @@ class Planner:
                     )
                     pairs = tuple(zip(developer_actions, calls))
                 after = read_after(after_text, [*macros.actions, *macros.contracts])
+                goals, goal_probes = await read_goals(goals_text, source, self._registered)
                 if self._game_facts.facts:
                     check_guidance_facts(macros.guidance, fact_names, self._game_facts)
-                written = Written(source, replace(macros, observe=observe, check=check, after=after, facts=fact_names))
+                written = Written(
+                    source,
+                    replace(
+                        macros, observe=observe, check=check, after=after, facts=fact_names, goals=goals,
+                        goal_probes=goal_probes,
+                    ),
+                )
                 # 계획 검증(파서와 따로): 이 런에서 통과할 수 없다고 확인된 버전을 다시 고르지 않았는가.
                 refused = self._ledger.check(written.macros, self._developer, self._channel.scene.pulse)
                 if refused is not None:
@@ -593,7 +609,7 @@ class Planner:
                 self._draft_version, source, pairs,
                 tuple([*written.macros.actions, *written.macros.contracts]),
                 observe_text, check_text, after_text, summary, actions_text, guidance_text, guidance_summary,
-                facts_text,
+                facts_text, goals_text,
             )
             actions = [*written.macros.actions, *written.macros.contracts]
             observe = written.macros.observe
@@ -621,6 +637,7 @@ class Planner:
                 } or None,
                 guidance=written.macros.guidance,
                 facts=list(written.macros.facts) or None,
+                goals=[{"name": name, "goal": goal} for name, goal in written.macros.goals] or None,
                 guidance_summary=guidance_summary.strip() if guidance_summary else None,
                 changes=changes.logged() if changes is not None else None,
                 descriptions={name: written.macros.description(name) for name in actions},

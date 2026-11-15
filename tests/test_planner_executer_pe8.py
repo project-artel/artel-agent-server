@@ -238,3 +238,88 @@ def test_the_old_way_is_kept_behind_the_knob() -> None:
 
     first = jev.asked("choice")[0]
     assert "none_fits" in first["questions"]["answer"]["criteria"] and "wait" not in first["questions"]
+
+
+# --- pe9: planner 의 하위 목표(```goals, prompt v6) ------------------------------------------------
+
+from app.agents.planner_executer.macros import read_goals  # noqa: E402
+
+GOALS_MACROS = MACROS.replace(
+    "def done() -> bool:",
+    'def goal_open_map() -> bool:\n    return scene() == "Map"\n\n\ndef goal_stay() -> bool:\n    return scene() == "Map"\n\n\ndef done() -> bool:',
+)
+
+
+def _read(text: str, source: str = GOALS_MACROS):
+    fake = _menu()
+
+    async def go():
+        fake.push_reading()
+        return await read_goals(text, source, RegisteredMacros(fake.channel))
+
+    return asyncio.run(go())
+
+
+def test_goals_are_read_in_order_with_a_predicate_each() -> None:
+    goals, probes = _read("open_map: Press Start to open the map.\nstay: Stay on the map.\n")
+
+    assert goals == (("open_map", "Press Start to open the map."), ("stay", "Stay on the map."))
+    assert set(probes) == {"open_map", "stay"}
+    assert _read("") == ((), {})
+
+
+@pytest.mark.parametrize(
+    ("text", "said"),
+    [
+        ("Open the map", "`<name>: <goal>`"),
+        ("open_map: a\nopen_map: b", "listed twice"),
+        ("missing: Do it.", "needs `def goal_missing() -> bool:`"),
+    ],
+)
+def test_a_goals_block_that_cannot_be_read_is_refused(text: str, said: str) -> None:
+    with pytest.raises(MacroRejection) as refused:
+        _read(text)
+    assert said in refused.value.reason
+
+
+def test_jev_reads_the_current_goal_instead_of_the_step_and_moves_on_when_it_is_reached() -> None:
+    fake = _menu()
+    jev = FakeJev(picks=("press_start", "look_around"), goal=(0.1,))
+
+    async def go():
+        fake.push_reading()
+        macros = await parse_step(GOALS_MACROS, RegisteredMacros(fake.channel))
+        goals, probes = await read_goals(
+            "open_map: Press Start to open the map.\nstay: Stay on the map.\n", GOALS_MACROS, RegisteredMacros(fake.channel)
+        )
+        from dataclasses import replace
+
+        from app.agents.planner_executer.arch import PlannerExecuterArchSpec
+        from app.agents.planner_executer.executer import Executer
+
+        spec = PlannerExecuterArchSpec(no_action_grace_seconds=0.1, state_source="pulse_memory", max_turns_per_step=3)
+        return await Executer(fake.channel, spec, JevClient(post=jev)).play(
+            1, "Press Start and look at the map.", replace(macros, goals=goals, goal_probes=probes)
+        )
+
+    asyncio.run(go())
+
+    questions = [body["questions"]["answer"]["instructions"] for body in jev.asked("choice")]
+    assert questions[0] == "Which of these should the player do now to reach this goal? The goal: Press Start to open the map."
+    assert "The step:" not in questions[0]
+    assert questions[1].endswith("The goal: Stay on the map.")
+    picks = [turn for turn in _turn_logs(fake) if turn.get("goal")]
+    assert [turn["goal"] for turn in picks[:2]] == ["open_map", "stay"]
+
+
+def test_a_developer_macro_keeps_its_own_ready_condition_over_the_planner_s() -> None:
+    from app.agents.planner_executer.macros import _with_developer_readies
+
+    planner_ready, developer_ready = object(), object()
+
+    class Action:
+        ready = developer_ready
+
+    merged = _with_developer_readies({"developer:tap": planner_ready, "mine": planner_ready}, {"developer:tap": Action()})
+
+    assert merged["developer:tap"] is developer_ready and merged["mine"] is planner_ready

@@ -52,6 +52,7 @@ from app.agents.planner_executer.macro_host import (
 )
 from app.agents.planner_executer.macros import (
     EFFECT_FLAG,
+    GOAL_FLAG,
     READY_FLAG,
     PROBE_FLAG,
     ActionPick,
@@ -109,6 +110,9 @@ REPLAN_DESCRIPTION = (
     "progress from this screen."
 )
 PICK_QUESTION = "Which of these should the player do now to progress this step?"
+# planner 가 ```goals 를 썼을 때의 질문(prompt v6). step 문장 대신 지금 하위 목표만 준다. 녹화 turn 재질의에서 step 문장을
+# 하위 목표로 바꾸자 전투의 카드 놓기가 약 20% 에서 93% 가 됐고, 같은 하위 목표를 step 문장 뒤에 덧붙이면 37% 였다.
+PICK_GOAL_QUESTION = "Which of these should the player do now to reach this goal?"
 # 준비 조건이 거짓이라 선택지에서 뺀 이 step 의 행동을 Jev 에게도 알린다. 런 418 step 8 에서 조합 칸에 카드를
 # 놓는 행동이 입력 잠금으로 빠지고 대사 넘기기만 남자, Jev 는 그것이 step 문장과 맞지 않는다며 none_fits 를 6번 골랐다.
 # 놓는 행동이 왜 없는지 모르면, 남은 선택지가 그것을 풀어 준다는 것도 알 수 없다.
@@ -439,6 +443,8 @@ class Executer:
         last_picked: str | None = None
         # 마지막으로 action 을 고른 turn 에 Jev 가 읽은 state 의 지문.
         picked_on: str | None = None
+        # 지금 하위 목표의 순번(```goals). 그 완료 조건이 참이면 다음으로 넘어가고 되돌아가지 않는다.
+        goal_index = 0
         # 방금 통과한 action 의 ```after 다음 행동. 다음 turn 의 선택지를 이것으로 좁힌다.
         follow: tuple[str, ...] = ()
         # 이 step 에서 action 마다 실패했거나 입력 없이 끝난 횟수(누적, ARTEL-1298). 연속만 세면 두 action 이 번갈아 헛돌
@@ -607,7 +613,16 @@ class Executer:
                     options[EXPAND_STATE] = EXPAND_STATE_DESCRIPTION
                 if can_replan and self._planned():
                     options[REPLAN] = REPLAN_DESCRIPTION
-                record["question"] = f"{PICK_QUESTION} The step: {action}" + (
+                goal_text = None
+                if macros.goals:
+                    while goal_index < len(macros.goals) - 1:
+                        reached = await self._predicate(macros.goal_probes[macros.goals[goal_index][0]], step, GOAL_FLAG)
+                        if reached != "met":
+                            break
+                        goal_index += 1
+                    record["goal"], goal_text = macros.goals[goal_index]
+                asked = f"{PICK_GOAL_QUESTION} The goal: {goal_text}" if goal_text else f"{PICK_QUESTION} The step: {action}"
+                record["question"] = asked + (
                     f"\nHow to play it: {macros.guidance}" if macros.guidance else ""
                 ) + blocked_actions_line(not_ready, options, macros)
                 record["options"] = list(options)

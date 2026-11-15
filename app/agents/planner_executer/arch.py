@@ -61,7 +61,9 @@ from pydantic import BaseModel, ConfigDict, Field
 # `==`·`!=` 와 비교의 `None` 리터럴을 받는다. step 판정(evaluator·실패 분석)은 다음 step 의 계획·플레이와 겹쳐 돈다.
 # pe9: 선택지 설명에 대상이 화면에 띄운 글자, 연달아 고른 횟수, 효과 없이 끝난 시도를 붙인다. `none_fits` 는 선택지에서 빼고
 # 같은 요청의 기다림 noul 로 묻는다(`pick_wait`). 막힌 행동 줄은 무엇이 막혔는지만 말한다. `facts` 를 기본으로 켠다.
-PLANNER_EXECUTER_LABEL = "pe9-described-options-wait-noul"
+# planner 가 ```goals 를 쓰면(prompt v6) Jev 는 step 문장 대신 지금 하위 목표를 읽는다. developer macro 가 제 준비 조건을
+# 가지면 planner 의 `ready_` 보다 그것이 이긴다.
+PLANNER_EXECUTER_LABEL = "pe9-goals-described-options"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1
