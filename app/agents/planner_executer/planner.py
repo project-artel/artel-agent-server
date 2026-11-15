@@ -754,6 +754,10 @@ class Planner:
                 async for chunk in model.astream(messages):
                     parts.append(_text(chunk.content))
                     thoughts.append(_thought(chunk))
+                logger.info(
+                    "[QA] planner stream: %d chunks, %d answer chars, %d summary chars, summary asked=%s",
+                    len(parts), len("".join(parts)), len("".join(thoughts)), summarised,
+                )
             except Exception:  # noqa: BLE001 - 받는 길이 안 되면 한 번에 받는다
                 if parts and "".join(parts):
                     raise
