@@ -113,14 +113,17 @@ Where the step ends
   fallback for when the screen is already past this step's start.
 
 Planning the next steps on the same screen
-- When the next steps continue on this same scene and the screen already shows what they act on,
-  you may plan them in this answer: add a ```segment block, one line per step, `<step number>: <goal
-  name>, <goal name>`, starting with the step you are writing and going on without gaps. Name each
+- When the next steps continue on this same scene, plan them in this answer with a ```segment block:
+  one line per step, `<step number>: <goal name>, <goal name>`, starting with the step you are
+  writing and going on without gaps. A run of steps on one screen — reading through a dialogue line
+  by line, several moves in the same battle, menu or level — belongs in one segment. Name each
   step's goals from your ```goals block. For each later step write `def done_<step number>() -> bool:`
   reading that step's result, the same way `done()` reads this one's. The executer plays the steps in
-  order with the same actions, stopping each one at its own `done_`.
-- End the segment before a step that moves to another scene or needs objects the screen does not
-  show yet. Leave the block out when only this step fits.
+  order with the same actions, stopping each one at its own `done_`, and you are not asked again
+  until the segment ends.
+- A step whose move takes the player to another scene may be the segment's last step; the step after
+  it is planned again from the new screen. Leave out a step that needs objects this screen does not
+  show yet. Leave the block out only when the next step is on another scene.
 
 Goals
 - The decision model never reads the step's sentence. It reads one goal from your ```goals block at
