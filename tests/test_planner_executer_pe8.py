@@ -565,3 +565,45 @@ def effect_tap_start() -> bool:
     assert fake.scene == "Map"
     plan = next(f["payload"] for f in fake.frames("LOG") if f["payload"].get("kind") == "step_macros")
     assert plan["decision"]["descriptions"]["developer:tap_start"] == "Press Start on the title screen."
+
+
+# --- pe9: planner 진행 표시 ------------------------------------------------------------------------
+
+
+def test_the_planner_streams_its_answer_and_notes_its_progress(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from app.agents.planner_executer import planner as planner_module
+    from app.agents.planner_executer.planner import Planner
+
+    monkeypatch.setattr(planner_module, "PROGRESS_SECONDS", 0.01)
+
+    class Streaming:
+        async def astream(self, messages):
+            for piece in ("```python\n", "def done() -> bool:\n", "    return True\n```"):
+                await asyncio.sleep(0.03)
+                yield SimpleNamespace(content=piece)
+
+    class Broken:
+        async def astream(self, messages):
+            raise RuntimeError("no streaming here")
+            yield  # pragma: no cover
+
+        async def ainvoke(self, messages):
+            return SimpleNamespace(content="whole answer")
+
+    fake = _menu()
+    config = _config()
+
+    async def go(model):
+        fake.push_reading()
+        planner = Planner(config, fake.channel, config.arch.planner, RegisteredMacros(fake.channel))
+        planner._model = model
+        planner._progress = ("Step 1", 1)
+        return await planner._ask_model("system", "user")
+
+    assert asyncio.run(go(Streaming())).endswith("return True\n```")
+    progress = [f["payload"] for f in fake.frames("LOG") if f["payload"].get("kind") == "planner_progress"]
+    assert progress and progress[0]["step"] == 1
+    assert max(entry["decision"]["chars"] for entry in progress) > 0
+    assert asyncio.run(go(Broken())) == "whole answer"

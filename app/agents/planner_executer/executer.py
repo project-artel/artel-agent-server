@@ -120,6 +120,10 @@ BLOCKED_ACTIONS_LINE = "\nNot available right now (their ready condition is fals
 # pe8 은 여기에 "게임을 진행시키는 선택지가 step 을 진행시킨다" 를 붙였다. 로컬 try 8·9 step 10 에서 시전이 막히자 그 말이
 # 가리키는 것이 '턴 종료' 가 되어, Jev 가 손패를 쥔 채 턴 종료를 19~20번 골랐다. 지금은 무엇이 막혔는지만 말한다.
 
+# 완료 뒤 입력 없이 더 읽는 근거 횟수와 간격. 타이핑처럼 1초 안팎에 끝나는 변화를 잡는다.
+SETTLE_READINGS = 2
+SETTLE_READING_SECONDS = 0.4
+
 # 고르기와 같은 요청에 묻는 기다림 질문(pe9). TypeSafe 는 "해당 없음" 선택지 대신 같은 요청의 noul 을 권한다. 게임 동작과
 # 다른 종류의 판단이 한 분포를 나눠 갖지 않게, `none_fits` 를 선택지에서 빼고 이것으로 묻는다. 대사가 키를 기다리는 것은
 # 기다림이 아니다 — 게임이 플레이어의 입력을 기다리는 것이다.
@@ -885,6 +889,12 @@ class Executer:
             if play.turns:
                 play.turns[-1]["state_error"] = str(error)
                 await self._send(play.turns[-1])
+        if play.stopped == "done" and play.evidence:
+            # 완료 뒤에 입력 없이 잠깐 더 읽는다(pe9). 완료 조건이 참이 되자마자 멈추면 근거가 한 번뿐이라, "한 글자씩 나온다"
+            # 처럼 잠깐 동안의 변화는 판정할 수 없었다(run 16 step 2). 입력은 보내지 않는다.
+            for index in range(SETTLE_READINGS):
+                await channel.wait_for_reading(SETTLE_READING_SECONDS)
+                await self._read_evidence(play, f"after done {index + 1}")
         play.end_screen = screen(channel.scene.pulse)
         await self._read_evidence(play, "end")
         if play.evidence:

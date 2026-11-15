@@ -10,8 +10,11 @@ names — `claude/` to the Claude API, `gpt/` to the OpenAI API, anything else t
 and its usage reaches Orchestration under the run's scope.
 """
 
+import asyncio
 import json
+import logging
 import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 
@@ -77,6 +80,8 @@ from app.qa.schemas import QaScenario
 
 _FENCE = re.compile(r"```(?:python)?\s*\n(.*?)```", re.DOTALL)
 _PLAN_BLOCK = re.compile(r"```plan\s*\n(.*?)```", re.DOTALL)
+logger = logging.getLogger(__name__)
+
 _OBSERVE_BLOCK = re.compile(r"```observe\s*\n(.*?)```", re.DOTALL)
 _CHECK_BLOCK = re.compile(r"```check\s*\n(.*?)```", re.DOTALL)
 _SUMMARY_BLOCK = re.compile(r"```summary\s*\n(.*?)```", re.DOTALL)
@@ -526,6 +531,7 @@ class Planner:
                 LogCategory.THOUGHT,
                 step,
             )
+            self._progress = (label, step)
             answer = normalize_paths(await self._ask(self._system, self._request(scenario, step, shown, feedback)))
             rest, summary = split_summary_block(answer)
             rest, guidance_summary = split_guidance_summary_block(rest)
@@ -707,11 +713,55 @@ class Planner:
         )
 
     async def _ask_model(self, system: str, user: str) -> str:
+        """planner 의 답. 받는 동안 `planner_progress` 를 몇 초마다 남긴다(pe9).
+
+        planner 호출은 40~90초 걸리고, 그동안 화면에는 "작성 중" 만 떠 정말 일하는지 알 수 없었다. 답을 chunk 로 받아 지금까지
+        쓴 글자 수와 끝부분을, 아직 글이 없으면(추론 중) 지난 시간만 남긴다. 받는 길이 실패하면 예전처럼 한 번에 받는다.
+        """
         if self._model is None:
             self._model = build_chat_model(self._config.model, self._config.reasoning)
         images = [self._image.block()] if self._image is not None else None
-        answer = await self._model.ainvoke(prompt_messages(self._config.model, system, user, self._stable_prefix, images))
-        return _text(answer.content)
+        messages = prompt_messages(self._config.model, system, user, self._stable_prefix, images)
+        label, step = getattr(self, "_progress", ("Plan", None))
+        started = time.monotonic()
+        parts: list[str] = []
+
+        async def report() -> None:
+            text = "".join(parts)
+            seconds = round(time.monotonic() - started)
+            await note_decision(
+                self._channel, "planner_progress",
+                f"{label}: the planner is writing ({seconds}s, {len(text)} characters so far)", step,
+                elapsed=seconds, chars=len(text), tail=text[-PROGRESS_TAIL_CHARS:],
+            )
+
+        async def tick() -> None:
+            while True:
+                await asyncio.sleep(PROGRESS_SECONDS)
+                try:
+                    await report()
+                except Exception:  # noqa: BLE001 - 진행 표시는 계획을 막지 않는다
+                    logger.debug("[QA] planner progress note failed", exc_info=True)
+
+        ticker = asyncio.create_task(tick())
+        try:
+            try:
+                async for chunk in self._model.astream(messages):
+                    parts.append(_text(chunk.content))
+            except Exception:  # noqa: BLE001 - 받는 길이 안 되면 한 번에 받는다
+                if parts:
+                    raise
+                logger.warning("[QA] planner streaming failed; asking once without streaming", exc_info=True)
+                answer = await self._model.ainvoke(messages)
+                return _text(answer.content)
+            return "".join(parts)
+        finally:
+            ticker.cancel()
+
+
+# planner 진행을 남기는 간격과, 함께 싣는 답 끝부분의 길이.
+PROGRESS_SECONDS = 2.0
+PROGRESS_TAIL_CHARS = 400
 
 
 def _text(content) -> str:
