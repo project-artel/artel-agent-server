@@ -27,7 +27,7 @@ source is parsed once more with a generated entry, `executer_probe_done`, that d
 import ast
 import re
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from app.agents.qa.macro.errors import MacroRejection
 from app.agents.qa.macro.model import MacroDefinition
@@ -121,6 +121,9 @@ class StepMacros:
     goals: tuple[tuple[str, str], ...] = ()
     # 하위 목표마다 `goal_<이름>() -> bool` 을 읽는 probe. 참이면 다음 하위 목표로 넘어간다.
     goal_probes: dict[str, "MacroDefinition"] = field(default_factory=dict)
+    # planner 의 ```segment 블록: 같은 씬에서 이어지는 step 들을 이 계획이 함께 맡는다. step 번호 → (그 step 의 하위 목표
+    # 이름들, 그 step 의 완료 probe). 지금 step 의 probe 는 `None` 이고 `done()` 을 쓴다.
+    segment: dict[int, tuple[tuple[str, ...], "MacroDefinition | None"]] = field(default_factory=dict)
 
     def description(self, action: str) -> str:
         if action in self.descriptions:
@@ -449,6 +452,75 @@ async def read_goals(
         probe_source = f'\n\ndef {entry}() -> None:\n    if {GOAL_DEF_PREFIX}{name}():\n        flag("{GOAL_FLAG}")\n'
         probes[name] = await registered.parse(entry, source.rstrip("\n") + probe_source)
     return tuple(goals), probes
+
+
+_SEGMENT_LINE = re.compile(r"^\s*(\d+)\s*:\s*(.*)$")
+SEGMENT_DONE_PREFIX = "done_"
+
+
+async def read_segment(
+    text: str | None, source: str, registered: RegisteredMacros, step: int, goal_names: tuple[str, ...]
+) -> dict[int, tuple[tuple[str, ...], MacroDefinition | None]]:
+    """```segment 블록: 이 계획이 맡는 연속 step 과 step 마다의 하위 목표·완료 조건. 블록이 없으면 비어 있다.
+
+    줄마다 `<step 번호>: <하위 목표 이름>, ...` 이다. 첫 줄은 지금 step 이고 그 뒤는 바로 다음 step 부터 빠짐없이 이어진다.
+    뒤 step 마다 `def done_<번호>() -> bool:` 이 있어야 한다. 하위 목표 이름은 ```goals 에 있는 것이어야 한다.
+    """
+    if text is None or not text.strip():
+        return {}
+    rows: list[tuple[int, tuple[str, ...]]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        matched = _SEGMENT_LINE.match(line)
+        if matched is None:
+            raise MacroRejection("each line of the ```segment block is `<step number>: <goal name>, <goal name>`.")
+        names = tuple(name.strip() for name in matched.group(2).split(",") if name.strip())
+        unknown = [name for name in names if name not in goal_names]
+        if unknown:
+            raise MacroRejection(
+                f"the ```segment block names goals that are not in the ```goals block: {', '.join(unknown)}."
+            )
+        rows.append((int(matched.group(1)), names))
+    numbers = [number for number, _ in rows]
+    if numbers != list(range(step, step + len(rows))):
+        raise MacroRejection(
+            f"the ```segment block lists consecutive steps starting with the step you are writing ({step}); it lists {numbers}."
+        )
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as error:
+        raise MacroRejection(f"this is not valid Python syntax — {error.msg}.", error.lineno) from None
+    defs = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    segment: dict[int, tuple[tuple[str, ...], MacroDefinition | None]] = {}
+    for number, names in rows:
+        if number == step:
+            segment[number] = (names, None)
+            continue
+        name = f"{SEGMENT_DONE_PREFIX}{number}"
+        node = defs.get(name)
+        if node is None or not _returns(node, "bool") or node.args.args:
+            raise MacroRejection(
+                f"step {number} is in the ```segment block, so the source needs `def {name}() -> bool:` reading that step's result."
+            )
+        entry = f"executer_probe_{name}"
+        probe_source = f'\n\ndef {entry}() -> None:\n    if {name}():\n        flag("{PROBE_FLAG}")\n'
+        segment[number] = (names, await registered.parse(entry, source.rstrip("\n") + probe_source))
+    return segment
+
+
+def step_of_segment(macros: StepMacros, step: int) -> StepMacros:
+    """묶음 계획에서 `step` 하나를 맡는 모양. 완료 probe 와 하위 목표를 그 step 의 것으로 바꾼다. 묶음이 없으면 그대로다."""
+    if step not in macros.segment:
+        return macros
+    names, probe = macros.segment[step]
+    goals = tuple(goal for goal in macros.goals if goal[0] in names) if names else macros.goals
+    return replace(
+        macros,
+        probe=probe or macros.probe,
+        goals=goals,
+        goal_probes={name: macros.goal_probes[name] for name, _goal in goals if name in macros.goal_probes},
+    )
 
 
 async def _parse_predicates(

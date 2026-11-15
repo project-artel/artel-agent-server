@@ -121,6 +121,18 @@ def step_text(item: QaStep) -> str:
     return "(no action)"
 
 
+# planner 에게 보여 줄 뒤 step 수. 같은 씬에서 이어지는 묶음을 고르고, 어디까지가 이 step 인지 알게 하려고 보인다.
+UPCOMING_STEPS_SHOWN = 6
+
+
+def upcoming_steps(scenario: QaScenario, step: int, count: int = UPCOMING_STEPS_SHOWN) -> str:
+    """`step` 다음의 step 들. 이 step 이 어디서 끝나는지는 다음 step 이 정한다 — TC 가 없는 step 은 기대 결과가 없다."""
+    following = [this_step(scenario, number) for number in range(step + 1, min(len(scenario.steps), step + count) + 1)]
+    if not following:
+        return "Steps after this one: none — this is the last step.\n\n"
+    return "Steps after this one, in order (do not do them in this step; plan them only in a ```segment block):\n" + "\n".join(following) + "\n\n"
+
+
 def this_step(scenario: QaScenario, step: int) -> str:
     """The step as JSON: what to do, and for a test case's last step the result to verify."""
     item = scenario.steps[step - 1]

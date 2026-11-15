@@ -305,7 +305,8 @@ def test_jev_picks_an_action_and_confirms_the_goal_before_play_stops() -> None:
     fake = _menu()
     jev = FakeJev(picks=("press_start",), goal=(0.9,))
 
-    play = _play(fake, jev)
+    # 목표 도달을 Jev 에게 묻는 예전 길이다. 기본(`done_by="code"`)은 묻지 않고 멈춘다.
+    play = _play(fake, jev, done_by="jev")
 
     assert play.stopped == "done"
     (pick,) = jev.asked("choice")
@@ -384,7 +385,7 @@ def test_nothing_fitting_waits_for_the_screen_and_stops_after_the_grace() -> Non
 def test_when_jev_does_not_confirm_the_goal_play_goes_on_and_then_stops_on_the_disagreement() -> None:
     fake = FakeGame("Map", {"Root/Stage": {"text": "Stage 0"}})  # `done()` 이 처음부터 참이다
 
-    play = _play(fake, FakeJev(picks=("look_around",), goal=(0.2,)), max_done_disagreements=2)
+    play = _play(fake, FakeJev(picks=("look_around",), goal=(0.2,)), max_done_disagreements=2, done_by="jev")
 
     assert [turn["goal_ask"] for turn in play.turns] == [0.2, 0.2]
     assert play.turns[0]["picked"] == "look_around"  # 맞지 않으면 play 를 이어 간다
@@ -698,7 +699,7 @@ def test_turn_records_go_out_as_logs_with_the_jev_answers() -> None:
     fake = _menu()
     judge, _ = _judge({"passed": True, "reason": "ok", "state_detail": "", "insight": ""})
 
-    _run(fake, Asked(MACROS), judge, FakeJev())
+    _run(fake, Asked(MACROS), judge, FakeJev(), done_by="jev")
 
     first, second = _turn_logs(fake)
     assert first["picked"] == "press_start" and first["options"] == ["press_start", "look_around"]

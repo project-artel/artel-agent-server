@@ -42,6 +42,7 @@ from app.agents.planner_executer.macros import (
     parse_scene,
     parse_step,
     read_goals,
+    read_segment,
 )
 from app.agents.planner_executer.facts import NO_FACTS, GameFacts, check_guidance_facts, planner_text, read_facts_block
 from app.agents.planner_executer.target import StepContracts, planner_note
@@ -58,6 +59,7 @@ from app.agents.planner_executer.prompts import (
     screen,
     step_text,
     this_step,
+    upcoming_steps,
     travel_step,
 )
 from app.agents.planner_executer.ledger import ActionLedger
@@ -82,6 +84,7 @@ _AFTER_BLOCK = re.compile(r"```after\s*\n(.*?)```", re.DOTALL)
 _GUIDANCE_BLOCK = re.compile(r"```guidance\s*\n(.*?)```", re.DOTALL)
 _FACTS_BLOCK = re.compile(r"```facts\s*\n(.*?)```", re.DOTALL)
 _GOALS_BLOCK = re.compile(r"```goals\s*\n(.*?)```", re.DOTALL)
+_SEGMENT_BLOCK = re.compile(r"```segment\s*\n(.*?)```", re.DOTALL)
 # 사람이 읽는 계획 요약의 언어. prompt 의 `summary_language` 자리에 들어간다.
 SUMMARY_LANGUAGES = {"ko": "Korean", "en": "English"}
 # observe 블록 하나에 받는 이름 수. 범위를 좁히는 것이 블록의 쓸모라 넉넉하게만 막는다.
@@ -205,6 +208,11 @@ def read_after(text: str | None, actions: list[str]) -> dict[str, tuple[str, ...
         for action in named(first):
             after[action] = followers
     return after
+
+
+def split_segment_block(answer: str) -> tuple[str, str | None]:
+    """The answer without its ```segment block, and the block's text."""
+    return _split_block(answer, _SEGMENT_BLOCK)
 
 
 def split_goals_block(answer: str) -> tuple[str, str | None]:
@@ -529,6 +537,7 @@ class Planner:
             rest, guidance_text = split_guidance_block(rest)
             rest, facts_text = split_facts_block(rest)
             rest, goals_text = split_goals_block(rest)
+            rest, segment_text = split_segment_block(rest)
             contract_mode = self._spec.actions == "contract"
             guidance_mode = self._spec.actions == "guidance"
             source = extract_code(rest)
@@ -566,13 +575,18 @@ class Planner:
                     pairs = tuple(zip(developer_actions, calls))
                 after = read_after(after_text, [*macros.actions, *macros.contracts])
                 goals, goal_probes = await read_goals(goals_text, source, self._registered)
+                # 묶음은 처음 쓰는 계획에만 받는다. 다시 쓰는 계획(복구·재계획)은 그 step 하나를 고친다.
+                segment = (
+                    await read_segment(segment_text, source, self._registered, step, tuple(name for name, _ in goals))
+                    if base is None and kind == "step" else {}
+                )
                 if self._game_facts.facts:
                     check_guidance_facts(macros.guidance, fact_names, self._game_facts)
                 written = Written(
                     source,
                     replace(
                         macros, observe=observe, check=check, after=after, facts=fact_names, goals=goals,
-                        goal_probes=goal_probes,
+                        goal_probes=goal_probes, segment=segment,
                     ),
                 )
                 # 계획 검증(파서와 따로): 이 런에서 통과할 수 없다고 확인된 버전을 다시 고르지 않았는가.
@@ -638,6 +652,7 @@ class Planner:
                 guidance=written.macros.guidance,
                 facts=list(written.macros.facts) or None,
                 goals=[{"name": name, "goal": goal} for name, goal in written.macros.goals] or None,
+                segment={str(number): list(names) for number, (names, _probe) in written.macros.segment.items()} or None,
                 guidance_summary=guidance_summary.strip() if guidance_summary else None,
                 changes=changes.logged() if changes is not None else None,
                 descriptions={name: written.macros.description(name) for name in actions},
@@ -662,6 +677,7 @@ class Planner:
             + self._ledger.lessons(self._channel.scene.pulse)
             + (f"{self._inputs}\n\n" if self._inputs else "")
             + f"Write step {step} now:\n{shown}\n\n"
+            + upcoming_steps(scenario, step)
             + planner_note(
                 self.targets, step, step_text(scenario.steps[step]) if self.targets is not None and step < len(scenario.steps) else None
             )

@@ -200,6 +200,15 @@ def state_fingerprint(state: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(state, sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest()
 
 
+def no_effect_shown(turn: dict) -> bool:
+    """효과 조건이 있는데 이번 입력으로 바뀐 것이 없는 turn: 안 나타났거나(unmet) 입력 전부터 이미 참이었다(already).
+
+    로컬 try 11 step 7 은 이미 전투 중인데 스테이지 입장 키를 128번 눌렀다. 효과 조건(전투 장면)은 누르기 전부터 참이라
+    `already` 였고, 그것을 효과 없음으로 세지 않아 반복 상한에도 시도 표시에도 걸리지 않았다.
+    """
+    return effect_missed(turn) or turn.get("effect") == "already" or turn.get("result") == "already_true"
+
+
 def effect_missed(turn: dict) -> bool:
     """입력은 갔는데 효과가 나지 않은 turn. 계약 행동은 `result`, planner 가 쓴 효과 조건은 `effect` 에 적는다.
 
@@ -445,6 +454,9 @@ class Executer:
         picked_on: str | None = None
         # 지금 하위 목표의 순번(```goals). 그 완료 조건이 참이면 다음으로 넘어가고 되돌아가지 않는다.
         goal_index = 0
+        # 지난 action 에 효과 조건이 있었는데 효과가 보이지 않았나. 그랬다면 state 가 바뀌어도 연속 횟수를 이어 센다 — state 는
+        # 타이머 같은 값만으로도 매 turn 바뀐다(try 11 step 7).
+        last_no_effect = False
         # 방금 통과한 action 의 ```after 다음 행동. 다음 turn 의 선택지를 이것으로 좁힌다.
         follow: tuple[str, ...] = ()
         # 이 step 에서 action 마다 실패했거나 입력 없이 끝난 횟수(누적, ARTEL-1298). 연속만 세면 두 action 이 번갈아 헛돌
@@ -482,6 +494,13 @@ class Executer:
                     # 뒤 `guard` 가 통과로 남기지 않는다.
                     latest = next((entry["values"] for entry in reversed(play.evidence) if "values" in entry), {})
                     record["target"] = target_state(step_target, latest)[0]
+                if record["done"] and spec.done_by == "code":
+                    # 완료는 코드가 판정한다(pe9). 공개 Jev 에이전트들은 완료를 게임 값으로 정하고 Jev 에게 묻지 않는다. 전에는 Jev 가
+                    # 아니라고 하면 동작을 계속 골라, try 11 step 3·4 에서 맵에 도착한 뒤 Space 를 4번 더 눌러 다음 step 의
+                    # 나레이션을 미리 지웠다. 완료 조건이 참이면 입력을 더 보내지 않는다. 판정은 evaluator 가 한다.
+                    await self._send(record)
+                    play.stopped = "done"
+                    break
                 if record["done"]:
                     probability = await self._ask_goal(action)
                     record["goal_ask"] = round(probability, 3)
@@ -500,7 +519,7 @@ class Executer:
                 # state 를 먼저 읽는다. 상한에 걸려 빠진 것이 있는지가 선택지(`EXPAND_STATE`)를 정한다.
                 state = await self._state()
                 fingerprint = state_fingerprint(state)
-                if picked_on is not None and fingerprint != picked_on:
+                if picked_on is not None and fingerprint != picked_on and not last_no_effect:
                     # 지난 선택 뒤로 Jev 가 읽는 state 가 바뀌었다. 같은 action 을 또 골라도 제자리걸음이 아니다. 대사 넘기기처럼
                     # 효과를 선언하지 않은 action 은 `effect_met` 이 나지 않아, 런 415 에서 대사 11줄을 넘기던 Space 가 6번째에
                     # 선택지에서 빠졌다(ARTEL-1453).
@@ -822,6 +841,7 @@ class Executer:
                     same_in_a_row = same_in_a_row + 1 if picked == last_picked else 1
                     last_picked = picked
                 picked_on = fingerprint
+                last_no_effect = no_effect_shown(record)
                 if same_in_a_row >= spec.max_same_action_in_a_row:
                     repeated = f"`{picked}` was picked {same_in_a_row} times in a row"
                     if can_ask_planner:
@@ -1448,7 +1468,7 @@ def annotate_options(
             streak += 1
         if streak >= 2:
             notes.append(f"Picked in each of the last {streak} turns.")
-        idle = sum(1 for turn in acted if turn["picked"] == key and (not turn.get("sent") or effect_missed(turn)))
+        idle = sum(1 for turn in acted if turn["picked"] == key and (not turn.get("sent") or no_effect_shown(turn)))
         if idle:
             notes.append(f"Tried {idle} time{'s' if idle != 1 else ''} in this step without a visible effect.")
         described[key] = text + ("\n\n" + " ".join(notes) if notes else "")

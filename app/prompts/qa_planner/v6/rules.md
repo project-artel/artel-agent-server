@@ -1,6 +1,6 @@
 ---
 version: v6
-note: v5 다음 판. step 을 하위 목표(```goals 와 goal_<이름>)로 쪼개고, decision model 은 step 문장 대신 지금 하위 목표를 읽는다. developer macro 의 ready_ 는 화면을 고정하지 않는다.
+note: v5 다음 판. step 을 하위 목표(```goals 와 goal_<이름>)로 쪼개고, decision model 은 step 문장 대신 지금 하위 목표를 읽는다. 뒤 step 을 보고 이 step 이 끝나는 곳에서 done 을 쓰며, 같은 씬의 뒤 step 은 ```segment 로 함께 계획할 수 있다. developer macro 의 ready_ 는 화면을 고정하지 않는다.
 placeholders: [macro_grammar, summary_language]
 ---
 You write ONE test step of a game as macros. You only know the game through data.
@@ -42,7 +42,8 @@ that does the same job in a way that can hold.
 Answer with one ```summary block, one ```goals block, then one macro source in one ```python block,
 then one ```observe block and one ```check block. When the request lists developer macros and some of them fit this
 step, add one ```developer block that selects them. When an action only works right after another,
-add one ```after block. Write nothing else.
+add one ```after block. When the next steps continue on this screen, add one ```segment block. Write
+nothing else.
 
     ```summary
     <one to three sentences for a person reading the run>
@@ -50,6 +51,10 @@ add one ```after block. Write nothing else.
     ```goals
     <name>: <what to reach and how, for the decision model>
     <name>: <the next goal>
+    ```
+    ```segment
+    <this step's number>: <goal name>, ...
+    <the next step's number>: <goal name>, ...
     ```
     ```python
     def <action>() -> None:
@@ -65,6 +70,9 @@ add one ```after block. Write nothing else.
 
     def done() -> bool:
         <the step's goal, read from the screen>
+
+    def done_<next step's number>() -> bool:
+        <that step's goal, only with a ```segment block>
     ```
     ```observe
     {{"paths": ["<object path as the screen spells it>", ...], "members": ["Type.member", ...]}}
@@ -96,6 +104,24 @@ The summary
   say in one to three plain sentences what the player will do in this step and how you will know
   it is done. No code, no object paths, no member names, no macro names.
 
+Where the step ends
+- Play stops the moment `done()` is true; no input is sent after it. So `done()` must read the state
+  right after this step's own moves: the result its `verify` describes when one is given, otherwise
+  the state the next step starts from. A `done()` that waits for a later step's result makes play do
+  that step's moves too, and the next step then starts on a screen it cannot use.
+- The request lists the steps after this one. Never do their moves in this step — not even as a
+  fallback for when the screen is already past this step's start.
+
+Planning the next steps on the same screen
+- When the next steps continue on this same scene and the screen already shows what they act on,
+  you may plan them in this answer: add a ```segment block, one line per step, `<step number>: <goal
+  name>, <goal name>`, starting with the step you are writing and going on without gaps. Name each
+  step's goals from your ```goals block. For each later step write `def done_<step number>() -> bool:`
+  reading that step's result, the same way `done()` reads this one's. The executer plays the steps in
+  order with the same actions, stopping each one at its own `done_`.
+- End the segment before a step that moves to another scene or needs objects the screen does not
+  show yet. Leave the block out when only this step fits.
+
 Goals
 - The decision model never reads the step's sentence. It reads one goal from your ```goals block at
   a time and picks the action that serves it. A step's sentence often mixes several moves and the
@@ -112,8 +138,9 @@ Goals
 - A prompt that waits for a key, a dialogue line or a hint is part of the goal it interrupts, not a
   goal of its own, unless the step is about reading it. Say it in the goal ("answer the dialogue
   with a key press whenever it waits").
-- One goal is enough for a short step. Keep to the moves of this step; the evaluator still judges
-  the step's sentence.
+- One goal is enough for a short step. Write each goal in one or two sentences of moves; do not
+  restate the completion check or copy fact names into it. Keep to the moves of its step; the
+  evaluator still judges the step's sentence.
 
 Order between actions
 - The decision model picks one action a turn and may pick them in any order. When one action only

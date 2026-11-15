@@ -62,8 +62,9 @@ from pydantic import BaseModel, ConfigDict, Field
 # pe9: 선택지 설명에 대상이 화면에 띄운 글자, 연달아 고른 횟수, 효과 없이 끝난 시도를 붙인다. `none_fits` 는 선택지에서 빼고
 # 같은 요청의 기다림 noul 로 묻는다(`pick_wait`). 막힌 행동 줄은 무엇이 막혔는지만 말한다. `facts` 를 기본으로 켠다.
 # planner 가 ```goals 를 쓰면(prompt v6) Jev 는 step 문장 대신 지금 하위 목표를 읽는다. developer macro 가 제 준비 조건을
-# 가지면 planner 의 `ready_` 보다 그것이 이긴다.
-PLANNER_EXECUTER_LABEL = "pe9-goals-described-options"
+# 가지면 planner 의 `ready_` 보다 그것이 이긴다. step 경계: 완료 조건이 참이면 바로 멈추고(`done_by`), 효과가 이미 참이던 시도도
+# 효과 없음으로 센다. planner 는 뒤 step 을 보고, 같은 씬의 뒤 step 을 ```segment 로 함께 계획하면 runner 가 그 계획으로 잇는다.
+PLANNER_EXECUTER_LABEL = "pe9-goals-segments"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1
@@ -131,6 +132,9 @@ class PlannerExecuterArchSpec(BaseModel):
     # Jev 의 고르기에 "지금 기다려야 하나" 를 어떻게 묻는가. `noul` 은 같은 요청에 noul 로 따로 묻고 0.7 이상이면 기다린다
     # (pe9). `option` 은 예전처럼 `none_fits` 를 선택지에 섞는다.
     pick_wait: Literal["option", "noul"] = "noul"
+    # `done()`(또는 step 의 완료 조건)이 참일 때 누가 멈춤을 정하는가. `code` 는 바로 멈춘다(pe9). `jev` 는 예전처럼 Jev 에게
+    # 목표 도달을 묻고, 아니라고 하면 동작을 계속 고른다.
+    done_by: Literal["code", "jev"] = "code"
     # Executer 가 Jev 에게 보내는 state 의 출처(ARTEL-1297). `state_set` 은 Orchestration 의 `STATE_SET`,
     # `pulse_memory` 는 Agent 가 합친 `PulseMemory`. 둘을 같은 빌드에서 비교하려고 knob 으로 둔다.
     state_source: Literal["state_set", "pulse_memory"] = "state_set"

@@ -63,9 +63,9 @@ from app.agents.planner_executer.free import (
     same_scene,
 )
 from app.agents.planner_executer.inputs import InputsReader
-from app.agents.planner_executer.macros import RegisteredMacros
+from app.agents.planner_executer.macros import RegisteredMacros, StepMacros, step_of_segment
 from app.agents.planner_executer.observe import watch
-from app.agents.planner_executer.planner import Ask, Planner
+from app.agents.planner_executer.planner import Ask, Planner, Written
 from app.agents.planner_executer.ledger import ActionLedger
 from app.agents.planner_executer.prompts import screen, step_text
 from app.agents.planner_executer.screen_capture import capture_screen
@@ -202,6 +202,9 @@ class PlannerExecuterRunner:
             # 약 30초씩 다음 계획을 막았고, 다음 planner 는 앞 판정을 읽지 않는다. 판정끼리는 앞 판정이 끝난 뒤에 시작하므로
             # evaluator 가 읽는 앞 step 들의 판정과 STATUS 의 순서는 그대로다. 끝 화면은 다음 step 전에 지금 찍는다.
             settling: asyncio.Task[None] | None = None
+            # 앞 step 의 계획이 ```segment 로 함께 맡은 뒤 step 들(pe9). 그 step 은 planner 를 다시 부르지 않고 이 계획으로 돈다.
+            # 앞 step 이 제 완료 조건에서 멈추지 않았으면 버린다 — 그 계획은 지금 화면을 전제하지 않는다.
+            ahead: dict[int, StepMacros] = {}
             try:
                 for step in range(1, len(scenario.steps) + 1):
                     if settling is not None and settling.done():
@@ -214,7 +217,21 @@ class PlannerExecuterRunner:
                         targets = targets.with_step(target)
                         planner.targets = targets
                         await note_decision(channel, "step_target", f"Step {step}: target {target.status}", step, **target.logged())
-                    written = await planner.write(scenario, step)
+                    if step in ahead:
+                        written = Written("", ahead.pop(step))
+                        await note_decision(
+                            channel, "segment_step", f"Step {step}: played with the plan written for the earlier step", step,
+                            goals=[name for name, _goal in written.macros.goals] or None,
+                        )
+                    else:
+                        ahead.clear()
+                        written = await planner.write(scenario, step)
+                        if written.macros is not None and written.macros.segment:
+                            ahead = {
+                                number: step_of_segment(written.macros, number)
+                                for number in written.macros.segment if number > step
+                            }
+                            written = Written(written.source, step_of_segment(written.macros, step), written.refusal)
                     if written.macros is None:
                         message = (
                             f"PLANNER-REFUSED: the step's macros were still refused after "
@@ -234,6 +251,8 @@ class PlannerExecuterRunner:
                             channel, state, scenario, step, False, message, self._engine_error(message)
                         ))
                         continue
+                    if play.stopped != "done":
+                        ahead.clear()
                     image = (
                         await capture_screen(channel, f"Step {step}: capturing the screen for the evaluator", step)
                         if self._spec.screen_images == "on"

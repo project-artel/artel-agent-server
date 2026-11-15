@@ -16,6 +16,7 @@ from app.agents.qa.macro.parser import macro_definition_from_source
 from app.qa.jev import JevClient
 from app.qa.schemas import QaCaseRef, QaScenario, QaStep
 from tests.test_planner_executer_steps import MACROS, Asked, FakeJev, _config, _menu, _play, _turn_logs, _verdicts
+from tests.planner_executer_fakes import FakeGame
 from tests.test_qa_macro_runner import FakeHost, LateSelector, card, drive, scene_with
 
 # --- parser: `pred() == False` 와 `== None` -------------------------------------------------------
@@ -297,7 +298,9 @@ def test_jev_reads_the_current_goal_instead_of_the_step_and_moves_on_when_it_is_
         from app.agents.planner_executer.arch import PlannerExecuterArchSpec
         from app.agents.planner_executer.executer import Executer
 
-        spec = PlannerExecuterArchSpec(no_action_grace_seconds=0.1, state_source="pulse_memory", max_turns_per_step=3)
+        spec = PlannerExecuterArchSpec(
+            no_action_grace_seconds=0.1, state_source="pulse_memory", max_turns_per_step=3, done_by="jev"
+        )
         return await Executer(fake.channel, spec, JevClient(post=jev)).play(
             1, "Press Start and look at the map.", replace(macros, goals=goals, goal_probes=probes)
         )
@@ -323,3 +326,124 @@ def test_a_developer_macro_keeps_its_own_ready_condition_over_the_planner_s() ->
     merged = _with_developer_readies({"developer:tap": planner_ready, "mine": planner_ready}, {"developer:tap": Action()})
 
     assert merged["developer:tap"] is developer_ready and merged["mine"] is planner_ready
+
+
+# --- pe9: step 경계 ---------------------------------------------------------------------------------
+
+from app.agents.planner_executer.executer import no_effect_shown  # noqa: E402
+from app.agents.planner_executer.macros import read_segment, step_of_segment  # noqa: E402
+
+
+def test_play_stops_the_moment_done_holds_without_asking_jev() -> None:
+    fake = FakeGame("Map", {"Root/Stage": {"text": "Stage 0"}})  # `done()` 이 처음부터 참이다
+    jev = FakeJev(picks=("look_around",), goal=(0.1,))
+
+    play = _play(fake, jev)
+
+    assert play.stopped == "done" and fake.actions == []
+    assert jev.asked("noul") == [] and jev.asked("choice") == []
+
+
+def test_an_effect_that_was_already_true_counts_as_no_effect() -> None:
+    assert no_effect_shown({"effect": "already"}) and no_effect_shown({"result": "already_true"})
+    assert no_effect_shown({"effect": "unmet"}) and not no_effect_shown({"effect": "met"})
+    described = annotate_options(
+        {"enter": "Enter the stage."},
+        [{"picked": "enter", "outcome": "passed", "sent": [{"ok": True}], "effect": "already"}],
+        lambda target: [],
+    )
+    assert described["enter"].endswith("Tried 1 time in this step without a visible effect.")
+
+
+SEGMENT_SOURCE = GOALS_MACROS.replace(
+    "def done() -> bool:", 'def done_2() -> bool:\n    return scene() == "Map"\n\n\ndef done() -> bool:'
+)
+
+
+def _segment(text: str, source: str = SEGMENT_SOURCE):
+    fake = _menu()
+
+    async def go():
+        fake.push_reading()
+        return await read_segment(text, source, RegisteredMacros(fake.channel), 1, ("open_map", "stay"))
+
+    return asyncio.run(go())
+
+
+def test_a_segment_names_the_following_steps_with_their_goals_and_done() -> None:
+    segment = _segment("1: open_map\n2: stay\n")
+
+    assert segment[1] == (("open_map",), None)
+    assert segment[2][0] == ("stay",) and segment[2][1] is not None
+    assert _segment("") == {}
+
+
+@pytest.mark.parametrize(
+    ("text", "said"),
+    [
+        ("2: stay", "starting with the step you are writing (1)"),
+        ("1: open_map\n3: stay", "lists [1, 3]"),
+        ("1: open_map\n2: nowhere", "not in the ```goals block"),
+        ("1: open_map\n2: stay\n3: stay", "`def done_3() -> bool:`"),
+    ],
+)
+def test_a_segment_that_cannot_be_read_is_refused(text: str, said: str) -> None:
+    with pytest.raises(MacroRejection) as refused:
+        _segment(text)
+    assert said in refused.value.reason
+
+
+SEGMENT_ANSWER = (
+    "```summary\nPress Start, then stay on the map.\n```\n"
+    "```goals\nopen_map: Press Start to open the map.\nstay: Stay on the map.\n```\n"
+    "```segment\n1: open_map\n2: stay\n```\n"
+    f"```python\n{SEGMENT_SOURCE}```\n"
+)
+
+
+def test_the_next_step_of_a_segment_is_played_without_asking_the_planner_again() -> None:
+    fake = _menu()
+    calls: list[str] = []
+
+    async def ask(system: str, user: str) -> str:
+        calls.append(user)
+        return SEGMENT_ANSWER
+
+    async def judge(system: str, user: str):
+        return {"passed": True, "reason": "ok", "state_detail": "", "insight": ""}
+
+    config = _config(no_action_grace_seconds=0.2, analysis="off")
+
+    async def go():
+        fake.push_reading()
+        runner = PlannerExecuterRunner(config, ask=ask, judge=judge, jev=JevClient(post=FakeJev()))
+        return await runner.run_with_deadline(fake.channel, _two_steps())
+
+    state, failure = asyncio.run(go())
+
+    assert failure is None and state.finished
+    assert len(calls) == 1
+    assert "Steps after this one" in calls[0] and '"do": "Stay on the map."' in calls[0]
+    assert [verdict["step"] for verdict in _verdicts(fake)] == [1, 2]
+    reused = [f for f in fake.frames("LOG") if f["payload"].get("kind") == "segment_step"]
+    assert len(reused) == 1 and reused[0]["payload"]["step"] == 2
+
+
+def test_step_of_segment_swaps_in_the_step_s_done_and_goals() -> None:
+    fake = _menu()
+
+    async def go():
+        fake.push_reading()
+        registered = RegisteredMacros(fake.channel)
+        macros = await parse_step(SEGMENT_SOURCE, registered)
+        goals, probes = await read_goals("open_map: a\nstay: b\n", SEGMENT_SOURCE, registered)
+        segment = await read_segment("1: open_map\n2: stay\n", SEGMENT_SOURCE, registered, 1, ("open_map", "stay"))
+        from dataclasses import replace
+
+        return replace(macros, goals=goals, goal_probes=probes, segment=segment)
+
+    macros = asyncio.run(go())
+    first, second = step_of_segment(macros, 1), step_of_segment(macros, 2)
+
+    assert first.probe is macros.probe and first.goals == (("open_map", "a"),)
+    assert second.probe is macros.segment[2][1] and second.goals == (("stay", "b"),)
