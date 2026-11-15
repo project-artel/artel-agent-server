@@ -58,10 +58,15 @@ class FakeJev:
         if body["questions"]["answer"]["type"] == "choice":
             pick = next(self.picks)
             offered = list(body["questions"]["answer"]["criteria"])
+            answers: dict = {}
+            if "wait" in body["questions"]:
+                # pe9: `none_fits` 는 선택지가 아니라 같은 요청의 기다림 noul 이다. 정해 둔 답이 `none_fits` 면 기다림으로 답한다.
+                answers["wait"] = {"noul": 0.95 if pick == "none_fits" else 0.05}
             if pick not in offered:
                 # 실제 Jev 는 받은 선택지 안에서만 고른다. 정해 둔 답이 선택지에 없으면(잠시 뺀 action 등) 처음 action 을 고른다.
                 pick = next((name for name in offered if name not in _CONTROL), pick)
-            return {"answers": {"answer": {"choice": pick}}}
+            answers["answer"] = {"choice": pick}
+            return {"answers": answers}
         return {"answers": {"answer": {"noul": next(self.goal)}}}
 
     def asked(self, kind: str) -> list[dict]:
@@ -311,8 +316,10 @@ def test_jev_picks_an_action_and_confirms_the_goal_before_play_stops() -> None:
     assert question["criteria"] == {
         "press_start": {"what": "Press Start on the title screen. The right move while the menu shows Start."},
         "look_around": {"what": "Wait for the screen to settle. The right move while nothing can be pressed yet."},
-        "none_fits": {"what": "None of the other options fits the current state."},
     }
+    # pe9: `none_fits` 는 선택지가 아니라 같은 요청의 기다림 noul 이다.
+    assert pick["questions"]["wait"]["type"] == "noul"
+    assert pick["questions"]["wait"]["instructions"].startswith("Is the game busy right now")
     assert pick["state"] == {"scene": "Menu", "objects": [{"path": "Root/Start", "text": "Start", "members": {}}]}
     (goal,) = jev.asked("noul")
     assert goal["questions"]["answer"]["instructions"] == "Has this step's goal been reached? The step: Press Start."

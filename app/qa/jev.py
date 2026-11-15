@@ -80,6 +80,8 @@ class JevChoice:
     choice: str
     confidence: float | None = None
     probabilities: dict[str, float] | None = None
+    # 같은 요청에 함께 물은 기다림 질문(noul)의 답. 함께 묻지 않았으면 비어 있다.
+    wait: float | None = None
 
 
 def _score(value: Any) -> float | None:
@@ -131,6 +133,46 @@ class JevClient:
             raise JevError(f"Jev chose an unknown option: {choice!r}.")
         self._log_cost(answer.usage)
         return JevChoice(choice, _score(picked.confidence), _scores(picked.probabilities))
+
+    async def choose_or_wait(
+        self,
+        instructions: str,
+        options: dict[str, str],
+        state: dict[str, Any],
+        wait_instructions: str,
+        wait_true_means: str,
+        wait_false_means: str,
+    ) -> JevChoice:
+        """고르기와 "지금 기다려야 하나" 를 한 요청에 묻는다. 둘은 서로 독립이고, 어떻게 합칠지는 부르는 쪽이 정한다.
+
+        TypeSafe 문서는 "해당 없음" 선택지 대신 같은 요청의 noul 로 물으라고 한다(companion noul). 선택지 목록에
+        "맞는 것 없음" 을 섞으면 게임 동작과 다른 종류의 판단이 한 분포를 나눠 갖는다.
+        """
+        request = JevRequest(
+            state=state,
+            questions={
+                "answer": JevChoiceQuestion(
+                    instructions=instructions,
+                    criteria={option: JevChoiceCriterion(what=description) for option, description in options.items()},
+                ),
+                "wait": JevNoulQuestion(
+                    instructions=wait_instructions,
+                    criteria={"true": wait_true_means, "false": wait_false_means},
+                ),
+            },
+        )
+        response = await self._send(request)
+        answers = response.get("answers") if isinstance(response, dict) else None
+        try:
+            picked = JevChoiceAnswer.model_validate((answers or {})["answer"])
+            wait = JevNoulAnswer.model_validate((answers or {})["wait"]).noul
+        except (ValidationError, KeyError, TypeError) as error:
+            raise JevError("Jev response is missing a valid answers.answer.choice or answers.wait.noul.") from error
+        if picked.choice not in options:
+            raise JevError(f"Jev chose an unknown option: {picked.choice!r}.")
+        usage = response.get("usage") if isinstance(response, dict) else None
+        self._log_cost(JevUsage.model_validate(usage) if isinstance(usage, dict) else None)
+        return JevChoice(picked.choice, _score(picked.confidence), _scores(picked.probabilities), wait)
 
     async def probability(
         self, instructions: str, state: dict[str, Any], true_means: str, false_means: str

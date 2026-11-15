@@ -361,4 +361,4 @@ def test_the_whole_view_of_pe9_is_kept_with_observation_all() -> None:
 
     first = jev.asked("choice")[0]
     assert "omitted_objects" not in first["state"]
-    assert set(first["questions"]["answer"]["criteria"]) == {"press_start", "look_around", "none_fits"}
+    assert set(first["questions"]["answer"]["criteria"]) == {"press_start", "look_around"}

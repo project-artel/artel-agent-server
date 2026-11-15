@@ -59,7 +59,9 @@ from pydantic import BaseModel, ConfigDict, Field
 # 자리의 `find(...)` 와 action 없는 step 을 받고, 빈 ```check 는 없는 것으로 읽는다. macro 문법 글에 reader 의 `find(...)` 를 더했다.
 # pe8: Jev 의 고르기 질문이 준비 조건 때문에 빠진 이 step 의 행동을 함께 말한다. parser 는 `-> bool` 호출과 bool 리터럴의
 # `==`·`!=` 와 비교의 `None` 리터럴을 받는다. step 판정(evaluator·실패 분석)은 다음 step 의 계획·플레이와 겹쳐 돈다.
-PLANNER_EXECUTER_LABEL = "pe8-blocked-actions-overlap-judging"
+# pe9: 선택지 설명에 대상이 화면에 띄운 글자, 연달아 고른 횟수, 효과 없이 끝난 시도를 붙인다. `none_fits` 는 선택지에서 빼고
+# 같은 요청의 기다림 noul 로 묻는다(`pick_wait`). 막힌 행동 줄은 무엇이 막혔는지만 말한다. `facts` 를 기본으로 켠다.
+PLANNER_EXECUTER_LABEL = "pe9-described-options-wait-noul"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1
@@ -121,8 +123,12 @@ class PlannerExecuterArchSpec(BaseModel):
     # ORDERED 시나리오에만 쓰인다. prompt v4 부터 있는 `target_resolver` 를 읽는다. `off` 면 대상을 정하지 않는다.
     target_contract: Literal["off", "on"] = "off"
     # 개발자가 선언한 fact·rule(`facts.py`). `on` 이면 planner 가 읽고 step 마다 쓸 fact 를 고르며, Jev state 에 그 값이 실린다.
-    # 선언은 `qa_facts_dir` 에서 읽는다. 선언이 없으면 `off` 와 같다.
-    facts: Literal["off", "on"] = "off"
+    # 선언은 orchestration(MCP 로 등록한 것)에서, `qa_facts_dir` 이 있으면 그 디렉터리에서 읽는다. 선언이 없으면 `off` 와 같다.
+    # pe9 부터 기본으로 켠다: 로컬 try 9 에서 `tutorial_waiting_for_key` 등을 실으니 Jev 가 대사 대기를 0.95 이상으로 골랐다.
+    facts: Literal["off", "on"] = "on"
+    # Jev 의 고르기에 "지금 기다려야 하나" 를 어떻게 묻는가. `noul` 은 같은 요청에 noul 로 따로 묻고 0.7 이상이면 기다린다
+    # (pe9). `option` 은 예전처럼 `none_fits` 를 선택지에 섞는다.
+    pick_wait: Literal["option", "noul"] = "noul"
     # Executer 가 Jev 에게 보내는 state 의 출처(ARTEL-1297). `state_set` 은 Orchestration 의 `STATE_SET`,
     # `pulse_memory` 는 Agent 가 합친 `PulseMemory`. 둘을 같은 빌드에서 비교하려고 knob 으로 둔다.
     state_source: Literal["state_set", "pulse_memory"] = "state_set"

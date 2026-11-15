@@ -94,7 +94,8 @@ def test_the_pick_question_names_the_actions_left_out_by_their_ready_condition()
 
     first = next(turn for turn in _turn_logs(fake) if "question" in turn)
     assert first["options"][0] == "look_around"
-    assert "This step's other actions cannot run yet" in first["question"]
+    assert "Not available right now (their ready condition is false)" in first["question"]
+    assert "move on" not in first["question"]
     assert "press_start (Press Start on the title screen)" in first["question"]
 
 
@@ -184,3 +185,56 @@ def test_an_error_while_judging_still_ends_the_run(monkeypatch) -> None:
 
     assert failure is not None and "judging broke" in str(failure)
     assert not state.finished and _verdicts(fake) == []
+
+
+# --- pe9: 선택지에 지금의 사실을 붙이고, 기다림은 noul 로 묻는다 -------------------------------------
+
+from app.agents.planner_executer.executer import WAIT_AT, annotate_options  # noqa: E402
+
+
+def test_options_carry_the_target_s_words_the_streak_and_the_attempts_without_effect() -> None:
+    turns = [
+        {"picked": "end_turn", "outcome": "passed", "sent": [{"ok": True}]},
+        {"picked": "none_fits"},
+        {"picked": "end_turn", "outcome": "passed", "sent": [{"ok": True}]},
+        {"picked": "place @ Hand/Card[1]", "outcome": "passed", "sent": []},
+        {"picked": "end_turn", "outcome": "passed", "sent": [{"ok": True}]},
+        {"picked": "end_turn", "outcome": "passed", "sent": [{"ok": True}]},
+    ]
+    shown = {"Hand/Card[1]": ["Shoot", "Spell"]}.get
+
+    described = annotate_options(
+        {"end_turn": "End the turn.", "place @ Hand/Card[1]": "Place a card.", "place @ Hand/Card[2]": "Place a card."},
+        turns,
+        lambda target: shown(target) or [],
+    )
+
+    assert described["end_turn"] == "End the turn.\n\nPicked in each of the last 2 turns."
+    assert described["place @ Hand/Card[1]"] == (
+        'Place a card.\n\nIt shows: "Shoot", "Spell". Tried 1 time in this step without a visible effect.'
+    )
+    assert described["place @ Hand/Card[2]"] == "Place a card."
+
+
+def test_a_high_wait_answer_waits_like_none_fits_and_none_fits_is_no_longer_an_option() -> None:
+    fake = _menu()
+    jev = FakeJev(picks=("none_fits",), goal=(0.1,))
+
+    play = _play(fake, jev, no_action_grace_seconds=0.05)
+
+    first = jev.asked("choice")[0]
+    assert "none_fits" not in first["questions"]["answer"]["criteria"]
+    assert first["questions"]["wait"]["type"] == "noul"
+    waited = [turn for turn in _turn_logs(fake) if turn.get("wait") is not None]
+    assert waited and all(turn["wait"] >= WAIT_AT and turn["picked"] == "none_fits" for turn in waited)
+    assert fake.actions == [] and play.stopped.startswith("no action fit")
+
+
+def test_the_old_way_is_kept_behind_the_knob() -> None:
+    fake = _menu()
+    jev = FakeJev(picks=("press_start",), goal=(0.9,))
+
+    _play(fake, jev, pick_wait="option")
+
+    first = jev.asked("choice")[0]
+    assert "none_fits" in first["questions"]["answer"]["criteria"] and "wait" not in first["questions"]

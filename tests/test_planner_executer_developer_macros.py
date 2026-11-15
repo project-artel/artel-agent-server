@@ -272,7 +272,7 @@ def test_a_parameterless_developer_macro_is_picked_by_jev_and_runs_in_a_step_wit
     assert failure is None and state.step_results[0].passed
     (pick,) = jev.asked("choice")[:1]
     options = pick["questions"]["answer"]["criteria"]
-    assert set(options) == {"developer:tap_start", "none_fits"}
+    assert set(options) == {"developer:tap_start"} and "wait" in pick["questions"]
     assert options["developer:tap_start"]["what"].startswith("Press Start on the title screen.")
     assert fake.frames("MACRO_READ") == []
     (action,) = fake.frames("ACTION")
@@ -463,7 +463,7 @@ def test_with_developer_macros_off_the_planner_executer_runs_without_them(monkey
     arch = QaArchSpec(engine="planner_executer", planner=PlannerExecuterArchSpec(developer_macros="off"))
     seen, fetched = _serve(monkeypatch, arch, fetch)
 
-    assert fetched == [] and seen == [{}, {}]
+    assert fetched == [] and len(seen) == 2 and all("developer" not in options for options in seen)
 
 
 def test_the_run_goes_on_when_orchestration_fails(monkeypatch) -> None:
@@ -489,7 +489,8 @@ def test_a_picked_argument_becomes_one_option_per_object_on_screen_and_runs_on_t
     options = jev.asked("choice")[0]["questions"]["answer"]["criteria"]
     assert {"developer:press @ Root/Start", "developer:press @ Root/Quit"} <= set(options)
     assert "developer:press" not in options
-    assert options["developer:press @ Root/Quit"]["what"].endswith("This option acts on `Root/Quit`.")
+    # pe9: 대상이 화면에 띄운 글자를 주소 뒤에 붙인다.
+    assert options["developer:press @ Root/Quit"]["what"].endswith('This option acts on `Root/Quit`.\n\nIt shows: "Quit".')
     assert fake.actions[0][0] == "move_mouse" and fake.actions[0][1][0] == "Root/Start"
     turn = next(f["payload"]["turn"] for f in fake.frames("LOG") if f["payload"].get("kind") == "turn")
     assert turn["picked"] == "developer:press @ Root/Start" and turn["target"] == "Root/Start"

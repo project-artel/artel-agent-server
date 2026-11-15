@@ -112,10 +112,24 @@ PICK_QUESTION = "Which of these should the player do now to progress this step?"
 # 준비 조건이 거짓이라 선택지에서 뺀 이 step 의 행동을 Jev 에게도 알린다. 런 418 step 8 에서 조합 칸에 카드를
 # 놓는 행동이 입력 잠금으로 빠지고 대사 넘기기만 남자, Jev 는 그것이 step 문장과 맞지 않는다며 none_fits 를 6번 골랐다.
 # 놓는 행동이 왜 없는지 모르면, 남은 선택지가 그것을 풀어 준다는 것도 알 수 없다.
-BLOCKED_ACTIONS_LINE = (
-    "\nThis step's other actions cannot run yet, because the game does not allow them now: {actions}. "
-    "If a listed option would let the game move on so that they can run, that option progresses the step."
+BLOCKED_ACTIONS_LINE = "\nNot available right now (their ready condition is false): {actions}."
+# pe8 은 여기에 "게임을 진행시키는 선택지가 step 을 진행시킨다" 를 붙였다. 로컬 try 8·9 step 10 에서 시전이 막히자 그 말이
+# 가리키는 것이 '턴 종료' 가 되어, Jev 가 손패를 쥔 채 턴 종료를 19~20번 골랐다. 지금은 무엇이 막혔는지만 말한다.
+
+# 고르기와 같은 요청에 묻는 기다림 질문(pe9). TypeSafe 는 "해당 없음" 선택지 대신 같은 요청의 noul 을 권한다. 게임 동작과
+# 다른 종류의 판단이 한 분포를 나눠 갖지 않게, `none_fits` 를 선택지에서 빼고 이것으로 묻는다. 대사가 키를 기다리는 것은
+# 기다림이 아니다 — 게임이 플레이어의 입력을 기다리는 것이다.
+WAIT_QUESTION = (
+    "Is the game busy right now, so that the player should wait instead of acting: loading, playing an "
+    "animation or transition, or running the other side's turn?"
 )
+WAIT_TRUE_MEANS = "the game is busy and an input now would be ignored or come too early"
+WAIT_FALSE_MEANS = "the game is waiting for the player's input, including a dialogue that waits for a key press"
+# 기다림으로 읽는 noul 값. TypeSafe 문서의 시작값이다. 그 아래는 고른 action 을 한다.
+WAIT_AT = 0.7
+# 선택지 대상이 화면에 띄운 글자를 몇 개, 몇 자까지 붙이는가.
+SHOWN_WORDS = 4
+SHOWN_WORD_CHARS = 40
 # 막힌 행동마다 설명의 첫 문장만 붙인다. 질문이 선택지보다 길어지지 않게 한다.
 BLOCKED_ACTION_CHARS = 160
 
@@ -586,6 +600,9 @@ class Executer:
                     else:
                         play.stopped = f"no action left: {left}"
                     break
+                earlier = [{**turn, "earlier_plan": True} for turn in history or []]
+                # 선택지마다 지금 사실을 붙인다(pe9): 대상이 화면에 띄운 글자, 연달아 고른 횟수, 효과 없이 끝난 시도.
+                options = annotate_options(options, earlier + play.turns[:-1], self._shown_words)
                 if self._narrows() and self._expansions < spec.max_expansions_per_step:
                     options[EXPAND_STATE] = EXPAND_STATE_DESCRIPTION
                 if can_replan and self._planned():
@@ -594,12 +611,13 @@ class Executer:
                     f"\nHow to play it: {macros.guidance}" if macros.guidance else ""
                 ) + blocked_actions_line(not_ready, options, macros)
                 record["options"] = list(options)
-                earlier = [{**turn, "earlier_plan": True} for turn in history or []]
                 recent = recent_action_lines(earlier + play.turns[:-1])
                 if recent:
                     record["recent_actions"] = recent
                 choice = await self._pick(record["question"], options, recent, state)
                 record["picked"] = picked = choice.choice
+                if choice.wait is not None:
+                    record["wait"] = choice.wait
                 if choice.confidence is not None:
                     record["confidence"] = choice.confidence
                 if choice.probabilities is not None:
@@ -1178,6 +1196,25 @@ class Executer:
             return "unknown"
         return await self._predicate(probe, step, READY_FLAG)
 
+    def _shown_words(self, target: str) -> list[str]:
+        """`target` 과 그 아래 객체가 지금 화면에 띄운 글자. 선택지가 무엇에 작용하는지를 주소가 아니라 글자로 말하려고 쓴다.
+
+        Jev 는 간접 참조에 약하다(TypeSafe 문서). 전에는 "`Card(Clone)[23]` 에 작용" 만 적어, 그 카드가 무엇인지는 Jev 가
+        state 에서 주소를 찾아 맞춰야 했다. 게임 지식 없이 SDK 가 보고한 글자만 쓴다.
+        """
+        base = target.rstrip("/")
+        words: list[str] = []
+        for held in self._channel.scene.pulse.held.values():
+            address = held.selector or held.path or ""
+            if not held.live or not held.text or not (address == base or address.startswith(base + "/")):
+                continue
+            word = " ".join(held.text.split())[:SHOWN_WORD_CHARS]
+            if word and word not in words:
+                words.append(word)
+            if len(words) >= SHOWN_WORDS:
+                break
+        return words
+
     def _candidates(self, names: tuple[str, ...]) -> list[str]:
         """지금 씬(과 씬을 넘어 사는 객체)에서 켜져 있고 이름(마지막 마디, `[n]` 무시)이 `names` 중 하나인 객체의 `selector`.
 
@@ -1261,13 +1298,21 @@ class Executer:
         if recent:
             state["recent_actions"] = recent
         try:
-            return await self._jev.choose_scored(
-                question,
-                {**options, NONE_FITS: NONE_FITS_DESCRIPTION},
-                state,
+            if self._spec.pick_wait == "option":
+                return await self._jev.choose_scored(
+                    question,
+                    {**options, NONE_FITS: NONE_FITS_DESCRIPTION},
+                    state,
+                )
+            choice = await self._jev.choose_or_wait(
+                question, options, state, WAIT_QUESTION, WAIT_TRUE_MEANS, WAIT_FALSE_MEANS
             )
         except JevError as error:
             raise JevStopped(str(error)) from error
+        if choice.wait is not None and choice.wait >= WAIT_AT:
+            # 기다린다. 이후 흐름은 `none_fits` 와 같다 — 유예 동안 화면을 기다리고 다시 묻는다.
+            return JevChoice(NONE_FITS, choice.confidence, choice.probabilities, choice.wait)
+        return choice
 
     async def _run(self, definition: MacroDefinition, step: int, allowed: frozenset[str] | None = None) -> ActionRun:
         """실패나 pause 전까지 기록된 flags도 실행 결과와 함께 보존한다. `allowed` 가 있으면 그 밖의 대상에 가는 입력은 보내지
@@ -1360,6 +1405,38 @@ def merge_plays(plays: list[StepPlay]) -> StepPlay:
         target=last.target,
         state_source=last.state_source,
     )
+
+
+def annotate_options(
+    options: dict[str, str], turns: list[dict], shown: Callable[[str], list[str]]
+) -> dict[str, str]:
+    """선택지 설명 끝에 지금의 사실을 붙인다. 게임 지식 없이 이 런의 기록과 SDK 가 보고한 글자만 쓴다.
+
+    - 대상이 있는 선택지: 대상이 화면에 띄운 글자(`It shows: "Shoot".`).
+    - 직전 action turn 들에서 연달아 고른 횟수(둘 이상일 때). 로컬 try 9 step 10 은 '턴 종료' 를 19번 연달아 골랐고,
+      그 사실은 `recent_actions` 에만 있었다. 공개 사례(Pokémon)는 이것을 선택지 문장에 직접 적는다.
+    - 이 step 에서 입력을 못 보냈거나 효과가 안 나타난 시도 횟수.
+    """
+    acted = [turn for turn in turns if turn.get("picked") and "outcome" in turn]
+    described: dict[str, str] = {}
+    for key, text in options.items():
+        notes: list[str] = []
+        if PICK_SEPARATOR in key:
+            words = shown(key.split(PICK_SEPARATOR, 1)[1])
+            if words:
+                notes.append("It shows: " + ", ".join(f'"{word}"' for word in words) + ".")
+        streak = 0
+        for turn in reversed(acted):
+            if turn["picked"] != key:
+                break
+            streak += 1
+        if streak >= 2:
+            notes.append(f"Picked in each of the last {streak} turns.")
+        idle = sum(1 for turn in acted if turn["picked"] == key and (not turn.get("sent") or effect_missed(turn)))
+        if idle:
+            notes.append(f"Tried {idle} time{'s' if idle != 1 else ''} in this step without a visible effect.")
+        described[key] = text + ("\n\n" + " ".join(notes) if notes else "")
+    return described
 
 
 def blocked_actions_line(not_ready: list[str], options: dict[str, str], macros: StepMacros) -> str:
