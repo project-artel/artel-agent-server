@@ -716,7 +716,9 @@ class Planner:
         """planner 의 답. 받는 동안 `planner_progress` 를 몇 초마다 남긴다(pe9).
 
         planner 호출은 40~90초 걸리고, 그동안 화면에는 "작성 중" 만 떠 정말 일하는지 알 수 없었다. 답을 chunk 로 받아 지금까지
-        쓴 글자 수와 끝부분을, 아직 글이 없으면(추론 중) 지난 시간만 남긴다. 받는 길이 실패하면 예전처럼 한 번에 받는다.
+        쓴 글자 수와 끝부분을 남긴다. 추론 model 은 답을 쓰기 전 30초 넘게 글자 없이 생각하므로, provider 가 주는 추론 요약
+        (OpenAI `summary`, Claude `thinking`)의 끝부분도 함께 남긴다. 요약을 거절하는 key 면 다음부터 요약 없이 받고, 받는 길이
+        실패하면 예전처럼 한 번에 받는다.
         """
         if self._model is None:
             self._model = build_chat_model(self._config.model, self._config.reasoning)
@@ -725,6 +727,8 @@ class Planner:
         label, step = getattr(self, "_progress", ("Plan", None))
         started = time.monotonic()
         parts: list[str] = []
+        thoughts: list[str] = []
+        model, summarised = self._streaming_model()
 
         async def report() -> None:
             text = "".join(parts)
@@ -733,6 +737,7 @@ class Planner:
                 self._channel, "planner_progress",
                 f"{label}: the planner is writing ({seconds}s, {len(text)} characters so far)", step,
                 elapsed=seconds, chars=len(text), tail=text[-PROGRESS_TAIL_CHARS:],
+                thinking="".join(thoughts)[-PROGRESS_TAIL_CHARS:],
             )
 
         async def tick() -> None:
@@ -746,11 +751,14 @@ class Planner:
         ticker = asyncio.create_task(tick())
         try:
             try:
-                async for chunk in self._model.astream(messages):
+                async for chunk in model.astream(messages):
                     parts.append(_text(chunk.content))
+                    thoughts.append(_thought(chunk))
             except Exception:  # noqa: BLE001 - 받는 길이 안 되면 한 번에 받는다
-                if parts:
+                if parts and "".join(parts):
                     raise
+                if summarised:
+                    self._no_summaries = True
                 logger.warning("[QA] planner streaming failed; asking once without streaming", exc_info=True)
                 answer = await self._model.ainvoke(messages)
                 return _text(answer.content)
@@ -759,9 +767,40 @@ class Planner:
             ticker.cancel()
 
 
+    def _streaming_model(self):
+        """추론 요약을 함께 달라고 묶은 model 과, 묶었는지. OpenAI 추론 model 에만 묶는다."""
+        reasoning = getattr(self._model, "reasoning", None)
+        if (
+            getattr(self, "_no_summaries", False)
+            or not isinstance(reasoning, dict)
+            or reasoning.get("effort") in (None, "none")
+            or "summary" in reasoning
+        ):
+            return self._model, False
+        return self._model.bind(reasoning={**reasoning, "summary": "auto"}), True
+
+
 # planner 진행을 남기는 간격과, 함께 싣는 답 끝부분의 길이.
 PROGRESS_SECONDS = 2.0
 PROGRESS_TAIL_CHARS = 400
+
+
+def _thought(chunk) -> str:
+    """chunk 에 실린 추론 요약. OpenAI 는 `reasoning` block 의 `summary`(v0 는 `additional_kwargs`), Claude 는 `thinking` block."""
+    content = getattr(chunk, "content", None)
+    blocks = list(content) if isinstance(content, list) else []
+    extra = (getattr(chunk, "additional_kwargs", None) or {}).get("reasoning")
+    if isinstance(extra, dict):
+        blocks.append(extra)
+    out: list[str] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "reasoning":
+            out.extend(str(part.get("text", "")) for part in block.get("summary") or [] if isinstance(part, dict))
+        elif block.get("type") == "thinking":
+            out.append(str(block.get("thinking", "")))
+    return "".join(out)
 
 
 def _text(content) -> str:

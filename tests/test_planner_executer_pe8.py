@@ -607,3 +607,58 @@ def test_the_planner_streams_its_answer_and_notes_its_progress(monkeypatch) -> N
     assert progress and progress[0]["step"] == 1
     assert max(entry["decision"]["chars"] for entry in progress) > 0
     assert asyncio.run(go(Broken())) == "whole answer"
+
+
+def test_the_planner_shows_the_reasoning_summary_before_it_writes(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from app.agents.planner_executer import planner as planner_module
+    from app.agents.planner_executer.planner import Planner
+
+    monkeypatch.setattr(planner_module, "PROGRESS_SECONDS", 0.01)
+    asked: list[dict] = []
+
+    class Reasoning:
+        reasoning = {"effort": "high"}
+
+        def __init__(self, refuse=False):
+            self.refuse = refuse
+
+        def bind(self, **kwargs):
+            asked.append(kwargs["reasoning"])
+            outer = self
+
+            class Bound:
+                async def astream(self, messages):
+                    if outer.refuse:
+                        raise RuntimeError("organization must be verified to generate reasoning summaries")
+                    for piece in ("Checking which", " slot is empty"):
+                        await asyncio.sleep(0.03)
+                        yield SimpleNamespace(content=[{"type": "reasoning", "summary": [{"type": "summary_text", "text": piece}]}])
+                    await asyncio.sleep(0.03)
+                    yield SimpleNamespace(content=[{"type": "text", "text": "answer"}])
+
+            return Bound()
+
+        async def ainvoke(self, messages):
+            return SimpleNamespace(content="whole answer")
+
+    fake = _menu()
+    config = _config()
+
+    async def go(model):
+        fake.push_reading()
+        planner = Planner(config, fake.channel, config.arch.planner, RegisteredMacros(fake.channel))
+        planner._model = model
+        planner._progress = ("Step 1", 1)
+        return planner, await planner._ask_model("system", "user")
+
+    _, answer = asyncio.run(go(Reasoning()))
+    assert answer == "answer"
+    assert asked == [{"effort": "high", "summary": "auto"}]
+    thinking = [f["payload"]["decision"]["thinking"] for f in fake.frames("LOG") if f["payload"].get("kind") == "planner_progress"]
+    assert "Checking which slot is empty" in thinking
+
+    planner, answer = asyncio.run(go(Reasoning(refuse=True)))
+    assert answer == "whole answer"
+    assert planner._streaming_model()[1] is False
