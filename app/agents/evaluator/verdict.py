@@ -319,10 +319,11 @@ def segment_note(step: int, segment: list[int] | None) -> str:
     steps = ", ".join(str(number) for number in segment)
     return (
         f"Steps {steps} were played under one plan, one after another, and the record below is the whole group's. "
-        "Where one step ended and the next began is the executer's guess, so a step's result may show up in the turns "
-        f"marked with a neighbouring step. Judge step {step} on the whole record: it passed if its expected result "
-        "appears there in order — after what the earlier steps of the group produced and before what the later ones "
-        "produced. Do not credit it with a result that belongs to another step of the group.\n\n"
+        "Where one step ended and the next began is the executer's guess, so a step's result often shows up in the "
+        f"turns marked with a neighbouring step. Judge step {step} on the whole record: it passed if, anywhere in the "
+        "record and whichever step's turns it falls in, the state the step starts from held, the step's move was made, "
+        "and what its expected result describes followed that move. A change that a different move caused does not "
+        "count for this step. It failed if the record never shows its move followed by that result.\n\n"
     )
 
 

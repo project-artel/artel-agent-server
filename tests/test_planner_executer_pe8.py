@@ -488,6 +488,8 @@ def test_the_steps_of_a_segment_are_judged_after_the_segment_on_its_whole_record
     assert len(judged) == 2
     assert all("Steps 1, 2 were played under one plan" in user for user in judged)
     assert "Judge step 1 on the whole record" in judged[0] and "Judge step 2 on the whole record" in judged[1]
+    assert "whichever step's turns it falls in, the state the step starts from held" in judged[0]
+    assert "A change that a different move caused does not count" in judged[0]
     assert "step 1 · turn" in judged[0] and "step 2 · turn" in judged[0], "첫 step 판정도 둘째 step 의 turn 을 읽는다"
     together = [f for f in fake.frames("LOG") if f["payload"].get("kind") == "segment_judgement"]
     assert len(together) == 1 and together[0]["payload"]["decision"]["steps"] == [1, 2]

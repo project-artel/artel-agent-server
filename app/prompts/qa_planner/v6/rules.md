@@ -117,7 +117,9 @@ Planning the next steps on the same screen
   one line per step, `<step number>: <goal name>, ... | <action>, ...`, starting with the step you
   are writing and going on without gaps. The actions after the `|` are the only ones offered in
   that step; a step that only looks lists none. A run of steps on one screen — reading through a dialogue line
-  by line, several moves in the same battle, menu or level — belongs in one segment. Name each
+  by line, several moves in the same battle, menu or level — belongs in one segment. A step that
+  needs a passing state — a line still being typed, an animation, a timer — belongs in a segment with the steps
+  around it: while the next plan is being written the game keeps running, and that state is gone when it starts. Name each
   step's goals from your ```goals block. For each later step write `def done_<step number>() -> bool:`
   reading that step's result, the same way `done()` reads this one's. The executer plays the steps in
   order with the same actions, stopping each one at its own `done_`, and you are not asked again
