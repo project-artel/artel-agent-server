@@ -459,6 +459,40 @@ def test_the_next_step_of_a_segment_is_played_without_asking_the_planner_again()
     assert len(reused) == 1 and reused[0]["payload"]["step"] == 2
 
 
+def test_the_steps_of_a_segment_are_judged_after_the_segment_on_its_whole_record() -> None:
+    fake = _menu()
+    asked: list[str] = []
+    judged: list[str] = []
+
+    async def ask(system: str, user: str) -> str:
+        asked.append(user)
+        return SEGMENT_ANSWER
+
+    async def judge(system: str, user: str):
+        # 묶음의 첫 step 판정은 둘째 step 을 다 돈 뒤에 온다.
+        judged.append(user)
+        assert any("turn" in f["payload"].get("kind", "") and f["payload"].get("step") == 2 for f in fake.frames("LOG"))
+        return {"passed": True, "reason": "ok", "state_detail": "", "insight": ""}
+
+    config = _config(no_action_grace_seconds=0.2, analysis="off")
+
+    async def go():
+        fake.push_reading()
+        runner = PlannerExecuterRunner(config, ask=ask, judge=judge, jev=JevClient(post=FakeJev()))
+        return await runner.run_with_deadline(fake.channel, _two_steps())
+
+    state, failure = asyncio.run(go())
+
+    assert failure is None and state.finished
+    assert [verdict["step"] for verdict in _verdicts(fake)] == [1, 2]
+    assert len(judged) == 2
+    assert all("Steps 1, 2 were played under one plan" in user for user in judged)
+    assert "Judge step 1 on the whole record" in judged[0] and "Judge step 2 on the whole record" in judged[1]
+    assert "step 1 · turn" in judged[0] and "step 2 · turn" in judged[0], "첫 step 판정도 둘째 step 의 turn 을 읽는다"
+    together = [f for f in fake.frames("LOG") if f["payload"].get("kind") == "segment_judgement"]
+    assert len(together) == 1 and together[0]["payload"]["decision"]["steps"] == [1, 2]
+
+
 def test_step_of_segment_swaps_in_the_step_s_done_and_goals() -> None:
     fake = _menu()
 

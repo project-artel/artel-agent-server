@@ -145,10 +145,12 @@ class Evaluator:
         play: StepPlay,
         earlier: list[str] | None = None,
         image: "ScreenImage | None" = None,
+        segment: list[int] | None = None,
     ) -> StepVerdict:
         """The step's verdict. The message names the stop when it was not `done`. `earlier` is the run's verdicts
-        before this step, one line each — a result an earlier step reached is told apart from one that never came."""
-        user = request(scenario, step, play, earlier)
+        before this step, one line each — a result an earlier step reached is told apart from one that never came.
+        `segment` is the steps one plan played together when `play` is the whole group's record (pe9)."""
+        user = request(scenario, step, play, earlier, segment)
         if image is not None:
             user += "\nA picture of the screen when play stopped is attached.\n"
         self._image = image
@@ -280,8 +282,11 @@ def _read_scene(answer: Any) -> SceneVerdicts:
     return SceneVerdicts.model_validate(read_json(answer))
 
 
-def request(scenario: QaScenario, step: int, play: StepPlay, earlier: list[str] | None = None) -> str:
-    """What the evaluator reads about one step."""
+def request(
+    scenario: QaScenario, step: int, play: StepPlay, earlier: list[str] | None = None, segment: list[int] | None = None
+) -> str:
+    """What the evaluator reads about one step. `segment` is the steps one plan played together (pe9); the record is then
+    the whole group's, and the note says why the step's own turns are not where its result has to be."""
     shown = play.turns[-MAX_TURNS_SHOWN:]
     skipped = len(play.turns) - len(shown)
     turns = "\n".join(turn_line(turn) for turn in shown) or "  (no turn was played)"
@@ -294,11 +299,26 @@ def request(scenario: QaScenario, step: int, play: StepPlay, earlier: list[str] 
         history
         + f"The step:\n{this_step(scenario, step)}\n\n"
         + evaluator_note(getattr(play, "target", None))
+        + segment_note(step, segment)
         + f"Why play stopped: {play.stopped}\n\n"
         f"Turns played ({len(play.turns)}"
         + (f", the first {skipped} left out" if skipped else "")
         + f"):\n{turns}\n\n"
         f"{evidence_text(play)}\n"
+    )
+
+
+def segment_note(step: int, segment: list[int] | None) -> str:
+    """한 계획이 함께 돈 step 들을 묶음째 판정할 때 붙는 글. 묶음이 아니면 빈 글이다."""
+    if not segment or len(segment) < 2:
+        return ""
+    steps = ", ".join(str(number) for number in segment)
+    return (
+        f"Steps {steps} were played under one plan, one after another, and the record below is the whole group's. "
+        "Where one step ended and the next began is the executer's guess, so a step's result may show up in the turns "
+        f"marked with a neighbouring step. Judge step {step} on the whole record: it passed if its expected result "
+        "appears there in order — after what the earlier steps of the group produced and before what the later ones "
+        "produced. Do not credit it with a result that belongs to another step of the group.\n\n"
     )
 
 
@@ -378,6 +398,8 @@ def _series(name: str, read: list[dict]) -> str:
 def turn_line(turn: dict) -> str:
     """One turn of a play as the Evaluator's prompts draw it."""
     plan = f"plan {turn['plan']} · " if turn.get("plan") else ""
+    if turn.get("segment_step"):
+        plan = f"step {turn['segment_step']} · {plan}"
     parts = [f"  {plan}turn {turn['turn']} on {turn.get('scene')}: done()={turn.get('done')}"]
     if turn.get("done_error"):
         parts.append(f"(done() could not be read: {turn['done_error']})")

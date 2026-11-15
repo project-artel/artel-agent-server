@@ -1442,20 +1442,35 @@ def merge_plays(plays: list[StepPlay]) -> StepPlay:
     """
     if len(plays) == 1:
         return plays[0]
-    first, last = plays[0], plays[-1]
-    turns = [{**turn, "plan": number} for number, play in enumerate(plays, start=1) for turn in play.turns]
-    evidence = [
-        {**entry, "at": f"plan {number} · {entry['at']}"}
-        for number, play in enumerate(plays, start=1)
-        for entry in play.evidence
-    ]
+    return _joined([(number, play) for number, play in enumerate(plays, start=1)], "plan")
+
+
+def segment_play(plays: list[tuple[int, StepPlay]]) -> StepPlay:
+    """한 계획의 ```segment 로 이어 돈 step 들의 play 를 evaluator 가 읽을 한 기록으로(pe9). 하나뿐이면 그대로다.
+
+    turn 에는 `segment_step`(어느 step 의 turn 인가)을, 근거 기록의 `at` 앞에는 `step n · ` 를 붙인다. step 사이의 경계는
+    executer 가 다음 step 의 완료 조건으로 짐작한 것이라, 한 step 의 결과가 이웃 step 의 turn 에 찍힐 수 있다(로컬 try 18
+    step 4 는 시작하자마자 끝났다고 보고, 대사를 넘긴 14 turn 은 모두 step 5 에 찍혔다).
+    """
+    if len(plays) == 1:
+        return plays[0][1]
+    return _joined(plays, "step", turn_key="segment_step")
+
+
+def _joined(plays: list[tuple[int, StepPlay]], label: str, turn_key: str = "plan") -> StepPlay:
+    """번호가 붙은 play 들을 한 기록으로. turn 에는 `turn_key` 로 번호를, 근거와 변화에는 `<label> n · ` 를 붙인다."""
+    first, last = plays[0][1], plays[-1][1]
+    turns = [{**turn, turn_key: number} for number, play in plays for turn in play.turns]
+    evidence = [{**entry, "at": f"{label} {number} · {entry['at']}"} for number, play in plays for entry in play.evidence]
+    numbers = [number for number, _play in plays]
+    plays = [play for _number, play in plays]
     unknown = set(first.evidence_unknown)
     for play in plays[1:]:
         unknown &= set(play.evidence_unknown)
     observe_unknown = set(first.observe_unknown)
     for play in plays[1:]:
         observe_unknown &= set(play.observe_unknown)
-    changes = [f"plan {number} · {line}" for number, play in enumerate(plays, start=1) for line in play.changes]
+    changes = [f"{label} {number} · {line}" for number, play in zip(numbers, plays) for line in play.changes]
     return StepPlay(
         last.stopped,
         turns=turns,

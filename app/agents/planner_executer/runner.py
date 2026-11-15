@@ -22,6 +22,7 @@ recorded as ORDERED, and its FREE scenarios still play this way.
 """
 
 import asyncio
+from dataclasses import dataclass
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -53,6 +54,7 @@ from app.agents.planner_executer.executer import (
     Executer,
     StepPlay,
     merge_plays,
+    segment_play,
     recent_action_lines,
 )
 from app.agents.planner_executer.free import (
@@ -93,6 +95,16 @@ FIRST_READING_SECONDS = 5.0
 # How long a FREE round waits for the game's first reading after `reset_game`.
 RESET_READING_SECONDS = 10.0
 
+
+
+@dataclass(frozen=True)
+class Held:
+    """묶음이 끝나기를 기다리는 step 하나의 play 와, 판정에 함께 쓰는 끝 화면·대상(pe9)."""
+
+    step: int
+    play: StepPlay
+    image: Any
+    target: Any
 
 class PlannerExecuterRunner:
     def __init__(
@@ -205,6 +217,16 @@ class PlannerExecuterRunner:
             # 앞 step 의 계획이 ```segment 로 함께 맡은 뒤 step 들(pe9). 그 step 은 planner 를 다시 부르지 않고 이 계획으로 돈다.
             # 앞 step 이 제 완료 조건에서 멈추지 않았으면 버린다 — 그 계획은 지금 화면을 전제하지 않는다.
             ahead: dict[int, StepMacros] = {}
+            # 묶음이 끝나기를 기다리는 step 들의 play(pe9). 묶음의 마지막 step 이 끝나거나 묶음이 끊기면 함께 판정한다.
+            held: list[Held] = []
+
+            def release() -> None:
+                nonlocal settling, held
+                if not held:
+                    return
+                group, held = held, []
+                settling = self._after(settling, self._settle_group(channel, state, scenario, judge, group, targets is not None))
+
             try:
                 for step in range(1, len(scenario.steps) + 1):
                     if settling is not None and settling.done():
@@ -233,6 +255,7 @@ class PlannerExecuterRunner:
                             }
                             written = Written(written.source, step_of_segment(written.macros, step), written.refusal)
                     if written.macros is None:
+                        release()
                         message = (
                             f"PLANNER-REFUSED: the step's macros were still refused after "
                             f"{self._spec.max_rewrites} rewrites: {written.refusal}"
@@ -243,6 +266,7 @@ class PlannerExecuterRunner:
                         continue
                     play = await self._play_with_replans(scenario, step, planner, executer, written.macros, target)
                     if play is None:
+                        release()
                         message = (
                             "PLANNER-REFUSED: the replanned macros were still refused after "
                             f"{self._spec.max_rewrites} rewrites"
@@ -258,9 +282,11 @@ class PlannerExecuterRunner:
                         if self._spec.screen_images == "on"
                         else None
                     )
-                    settling = self._after(settling, self._settle(
-                        channel, state, scenario, step, judge, play, image, target, targets is not None
-                    ))
+                    held.append(Held(step, play, image, target))
+                    if not ahead:
+                        # 묶음이 끝났거나(남은 step 이 없다) 묶음이 아니었다. 묶음의 뒤 step 이 남아 있으면 그 step 까지 기다린다.
+                        release()
+                release()
                 if settling is not None:
                     await settling
                     settling = None
@@ -314,6 +340,32 @@ class PlannerExecuterRunner:
 
         return asyncio.create_task(chained())
 
+    async def _settle_group(
+        self,
+        channel: QaRunChannel,
+        state: QaRunState,
+        scenario: QaScenario,
+        judge: Evaluator,
+        group: "list[Held]",
+        contracted: bool,
+    ) -> None:
+        """한 계획이 함께 돈 step 들의 판정(pe9). 묶음이면 각 step 을 묶음 전체의 기록으로, 앞 step 부터 차례로 판정한다.
+
+        step 사이 경계는 executer 가 다음 step 의 완료 조건으로 짐작한 것이다. 로컬 try 18 step 4 는 시작하자마자 끝났다고
+        보고 대사를 넘긴 14 turn 은 모두 step 5 에 찍혀, step 4 만 따로 본 evaluator 는 "대사가 그대로" 라며 실패로 판정했다.
+        묶음 전체를 보면 경계가 틀려도 결과가 나타난 자리를 찾는다. 대상 계약 확인·화면 기록은 그 step 의 play 로 한다.
+        """
+        steps = [held.step for held in group]
+        if len(group) > 1:
+            await note_decision(channel, "segment_judgement", f"Steps {steps[0]}-{steps[-1]}: judged together", steps[0], steps=steps)
+        whole = segment_play([(held.step, held.play) for held in group])
+        last_image = group[-1].image
+        for held in group:
+            await self._settle(
+                channel, state, scenario, held.step, judge, held.play, held.image if len(group) == 1 else last_image,
+                held.target, contracted, judged=whole if len(group) > 1 else None, segment=steps if len(group) > 1 else None,
+            )
+
     async def _settle(
         self,
         channel: QaRunChannel,
@@ -325,9 +377,18 @@ class PlannerExecuterRunner:
         image: Any,
         target: Any,
         contracted: bool,
+        judged: StepPlay | None = None,
+        segment: list[int] | None = None,
     ) -> None:
-        """한 step 의 판정: evaluator, 대상 계약 확인, 실패 분석, `STATUS`. 앞 step 의 판정이 끝난 뒤에 불린다."""
-        verdict = await judge.judge(scenario, step, play, earlier_verdicts(scenario, state), image)
+        """한 step 의 판정: evaluator, 대상 계약 확인, 실패 분석, `STATUS`. 앞 step 의 판정이 끝난 뒤에 불린다.
+
+        `judged` 는 evaluator·실패 분석이 읽을 기록이다. 묶음이면 묶음 전체의 것이고(`segment`), 아니면 이 step 의 play 다.
+        """
+        record = judged if judged is not None else play
+        if segment:
+            verdict = await judge.judge(scenario, step, record, earlier_verdicts(scenario, state), image, segment=segment)
+        else:
+            verdict = await judge.judge(scenario, step, record, earlier_verdicts(scenario, state), image)
         details = verdict.details()
         if contracted:
             # 모델의 답을 대상 계약으로 거른다. 대상 불일치·미확인, 예측과 다른 움직임은 통과로 남지 않는다.
@@ -339,7 +400,7 @@ class PlannerExecuterRunner:
                 await note_decision(channel, "target_check", f"Step {step}: target {check.state}", step, **logged)
         analysis = (
             None if verdict.passed
-            else await self._analyse(scenario, step, play, verdict.message, verdict.evidence_sufficient)
+            else await self._analyse(scenario, step, record, verdict.message, verdict.evidence_sufficient)
         )
         await self._send_verdict(channel, state, scenario, step, verdict.passed, verdict.message, analysis, play, details)
 
