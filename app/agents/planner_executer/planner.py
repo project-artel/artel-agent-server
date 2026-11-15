@@ -581,7 +581,13 @@ class Planner:
                         source, self._registered, developer_actions, None, contract_keys=tuple(developer_contracts)
                     )
                     if developer_contracts:
-                        macros = replace(macros, contracts=developer_contracts, binder=developer_binder)
+                        macros = replace(
+                            macros, contracts=developer_contracts, binder=developer_binder,
+                            descriptions={
+                                **macros.descriptions,
+                                **{key: contract.description for key, contract in developer_contracts.items()},
+                            },
+                        )
                 after = read_after(after_text, [*macros.actions, *macros.contracts])
                 goals, goal_probes = await read_goals(goals_text, source, self._registered)
                 # 묶음은 처음 쓰는 계획에만 받는다. 다시 쓰는 계획(복구·재계획)은 그 step 하나를 고친다.

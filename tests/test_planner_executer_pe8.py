@@ -535,3 +535,33 @@ def test_a_registered_contract_is_used_in_legacy_mode_and_the_planner_s_ready_fo
     assert list(contracts) == ["developer:strike"] and list(actions) == ["developer:wait_a_bit"]
     assert pairs == (("developer:strike", 'strike(pick("Enemy"))'), ("developer:wait_a_bit", "wait_a_bit"))
     assert "developer:strike" not in macros.readies
+
+
+def test_a_legacy_step_with_a_contracted_developer_macro_runs_end_to_end() -> None:
+    """try 15 는 계약 행동의 설명이 빠져 `KeyError: 'developer:start_new_game'` 로 시작하자마자 멈췄다. planner → executer →
+    evaluator 를 한 번 끝까지 돈다."""
+    from tests.test_planner_executer_developer_macros import ONLY_DONE, Answered, _answer, _run
+
+    tap = '''def tap_start() -> None:
+    """Press Start on the title screen."""
+    click(selector("Root/Start"))
+
+
+def effect_tap_start() -> bool:
+    return scene() == "Map"
+'''
+    contract = {"params": {}, "effect": {"mode": "transition", "within": 1.0}}
+    fake = _menu()
+
+    state, failure = _run(
+        fake,
+        Answered(_answer(ONLY_DONE, "tap_start")),
+        (DeveloperMacro("tap_start", tap, "1.2.0", None, False, contract),),
+        FakeJev(picks=("developer:tap_start",)),
+        analysis="off",
+    )
+
+    assert failure is None and state.finished and state.step_results[0].passed
+    assert fake.scene == "Map"
+    plan = next(f["payload"] for f in fake.frames("LOG") if f["payload"].get("kind") == "step_macros")
+    assert plan["decision"]["descriptions"]["developer:tap_start"] == "Press Start on the title screen."
