@@ -1326,7 +1326,8 @@ class Executer:
             raise JevStopped(str(error)) from error
         if choice.wait is not None and choice.wait >= WAIT_AT:
             # 기다린다. 이후 흐름은 `none_fits` 와 같다 — 유예 동안 화면을 기다리고 다시 묻는다.
-            return JevChoice(NONE_FITS, choice.confidence, choice.probabilities, choice.wait)
+            # 기다림으로 정했으니 그 확신은 기다림 질문의 답이다.
+            return JevChoice(NONE_FITS, choice.wait, choice.probabilities, choice.wait)
         return choice
 
     async def _run(self, definition: MacroDefinition, step: int, allowed: frozenset[str] | None = None) -> ActionRun:

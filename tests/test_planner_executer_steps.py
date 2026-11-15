@@ -766,6 +766,6 @@ def test_a_turn_records_the_scores_jev_gave_its_pick() -> None:
     play = _play(_menu(), Scored())
     scored, unscored = play.turns[0], _play(_menu(), FakeJev()).turns[0]
 
-    assert scored["confidence"] == 0.81
+    assert scored["confidence"] == 0.86  # 고른 선택지의 확률. Jev 의 confidence(0.81)는 균등 대비 값이다.
     assert scored["probabilities"] == {"press_start": 0.86, "none_fits": 0.14}
     assert "confidence" not in unscored and "probabilities" not in unscored

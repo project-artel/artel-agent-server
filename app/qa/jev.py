@@ -90,6 +90,15 @@ def _score(value: Any) -> float | None:
     return float(value)
 
 
+def _picked_probability(choice: str, probabilities: dict[str, float] | None, reported: Any) -> float | None:
+    """고른 선택지의 확률. Jev 의 `confidence` 는 1위 확률을 균등 분포 대비로 바꾼 값((p - 1/n) / (1 - 1/n))이라, 선택지
+    두 개에서 0.63 으로 고른 것이 0.26 으로 보였다. 화면과 기록에는 고른 선택지의 확률을 그대로 싣는다. 확률이 없으면
+    받은 값을 쓴다."""
+    if probabilities is not None and choice in probabilities:
+        return probabilities[choice]
+    return _score(reported)
+
+
 def _scores(value: Any) -> dict[str, float] | None:
     if not isinstance(value, dict):
         return None
@@ -132,7 +141,8 @@ class JevClient:
         if choice not in options:
             raise JevError(f"Jev chose an unknown option: {choice!r}.")
         self._log_cost(answer.usage)
-        return JevChoice(choice, _score(picked.confidence), _scores(picked.probabilities))
+        probabilities = _scores(picked.probabilities)
+        return JevChoice(choice, _picked_probability(choice, probabilities, picked.confidence), probabilities)
 
     async def choose_or_wait(
         self,
@@ -172,7 +182,10 @@ class JevClient:
             raise JevError(f"Jev chose an unknown option: {picked.choice!r}.")
         usage = response.get("usage") if isinstance(response, dict) else None
         self._log_cost(JevUsage.model_validate(usage) if isinstance(usage, dict) else None)
-        return JevChoice(picked.choice, _score(picked.confidence), _scores(picked.probabilities), wait)
+        probabilities = _scores(picked.probabilities)
+        return JevChoice(
+            picked.choice, _picked_probability(picked.choice, probabilities, picked.confidence), probabilities, wait
+        )
 
     async def probability(
         self, instructions: str, state: dict[str, Any], true_means: str, false_means: str
