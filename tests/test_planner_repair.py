@@ -498,3 +498,34 @@ def test_the_after_block_reads_a_developer_call_as_its_action() -> None:
     after = read_after('{"developer:cast": ["developer:select(find(name=\\"Cat\\"))"]}', actions)
 
     assert after == {"developer:cast": ("developer:select", "developer:select#2")}
+
+
+def test_a_repeat_that_only_moves_numbers_on_screen_is_still_dropped() -> None:
+    """화면 글자도 fact 도 그대로이고 숫자만 바뀌면 진척이 아니다. 로컬 run 17 step 9 는 기다리는 것이 없는 화면에서 대사
+    넘기기를 40번 넘게 눌렀다 — state 전체의 지문이 타이머 값으로 매 turn 바뀌어 연속 횟수가 늘 처음부터 다시 세어졌다."""
+    import asyncio
+
+    from app.agents.planner_executer.arch import PlannerExecuterArchSpec
+    from app.agents.planner_executer.executer import Executer
+    from app.agents.planner_executer.macros import RegisteredMacros, parse_step
+    from app.qa.jev import JevClient
+
+    fake = _slow_menu()
+    ticks = iter(range(1, 1000))
+
+    def tick(game: FakeGame) -> None:
+        game.objects["Root/Timer"] = {"members": {"Clock.seconds": next(ticks)}}
+
+    fake.reactions[("press", "Root/Start")] = tick
+    spec = PlannerExecuterArchSpec(no_action_grace_seconds=0.2, state_source="pulse_memory", repair="planner")
+
+    async def go() -> StepPlay:
+        fake.push_reading()
+        macros = await parse_step(PATIENT, RegisteredMacros(fake.channel))
+        return await Executer(fake.channel, spec, JevClient(post=FakeJev())).play(
+            1, "Press Start until the map opens.", macros, None, can_ask_planner=False
+        )
+
+    play = asyncio.run(go())
+
+    assert any(str(turn.get("dropped", "")).startswith("`press_start` was picked 6 times") for turn in play.turns)

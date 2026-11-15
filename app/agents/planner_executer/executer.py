@@ -204,6 +204,22 @@ def state_fingerprint(state: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(state, sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest()
 
 
+def progress_fingerprint(state: dict[str, Any]) -> str:
+    """진척을 가르는 지문: 장면, 선언 fact 값, 객체가 화면에 띄운 글자.
+
+    state 전체의 지문은 타이머·좌표 같은 값만으로도 매 turn 바뀌어, 같은 행동의 반복이 늘 처음부터 다시 세어졌다(로컬 run 17
+    step 9: 아무것도 기다리지 않는 화면에서 대사 넘기기를 40번 넘게 눌렀다). 대사가 한 줄 넘어가면 글자가 바뀌고, 게임 단계가
+    바뀌면 fact 가 바뀐다. 그 밖의 값만 바뀐 것은 진척으로 치지 않는다.
+    """
+    texts = sorted(
+        str(obj.get("text"))
+        for obj in state.get("objects") or []
+        if isinstance(obj, dict) and obj.get("text")
+    )
+    basis = {"scene": state.get("scene"), "facts": state.get("facts"), "texts": texts}
+    return hashlib.sha256(json.dumps(basis, sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest()
+
+
 def no_effect_shown(turn: dict) -> bool:
     """효과 조건이 있는데 이번 입력으로 바뀐 것이 없는 turn: 안 나타났거나(unmet) 입력 전부터 이미 참이었다(already).
 
@@ -534,7 +550,7 @@ class Executer:
                         break
                 # state 를 먼저 읽는다. 상한에 걸려 빠진 것이 있는지가 선택지(`EXPAND_STATE`)를 정한다.
                 state = await self._state()
-                fingerprint = state_fingerprint(state)
+                fingerprint = progress_fingerprint(state)
                 if picked_on is not None and fingerprint != picked_on and not last_no_effect:
                     # 지난 선택 뒤로 Jev 가 읽는 state 가 바뀌었다. 같은 action 을 또 골라도 제자리걸음이 아니다. 대사 넘기기처럼
                     # 효과를 선언하지 않은 action 은 `effect_met` 이 나지 않아, 런 415 에서 대사 11줄을 넘기던 Space 가 6번째에
