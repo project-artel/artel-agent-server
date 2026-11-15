@@ -359,10 +359,11 @@ class PlannerExecuterRunner:
         if len(group) > 1:
             await note_decision(channel, "segment_judgement", f"Steps {steps[0]}-{steps[-1]}: judged together", steps[0], steps=steps)
         whole = segment_play([(held.step, held.play) for held in group])
-        last_image = group[-1].image
         for held in group:
+            # 화면은 그 step 이 끝날 때의 것이다. 글자 없이 그림으로만 보이는 결과(타이틀 그림)는 이 화면으로만 확인된다 —
+            # 로컬 try 20 은 묶음 끝 화면을 붙여 step 1 의 타이틀을 못 보고 실패로 판정했다.
             await self._settle(
-                channel, state, scenario, held.step, judge, held.play, held.image if len(group) == 1 else last_image,
+                channel, state, scenario, held.step, judge, held.play, held.image,
                 held.target, contracted, judged=whole if len(group) > 1 else None, segment=steps if len(group) > 1 else None,
             )
 

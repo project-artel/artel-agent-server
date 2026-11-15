@@ -152,7 +152,11 @@ class Evaluator:
         `segment` is the steps one plan played together when `play` is the whole group's record (pe9)."""
         user = request(scenario, step, play, earlier, segment)
         if image is not None:
-            user += "\nA picture of the screen when play stopped is attached.\n"
+            user += (
+                f"\nA picture of the screen when step {step}'s own turns ended is attached.\n"
+                if segment and len(segment) > 1
+                else "\nA picture of the screen when play stopped is attached.\n"
+            )
         self._image = image
         problem = ""
         for _ in range(ATTEMPTS):
