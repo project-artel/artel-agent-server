@@ -713,7 +713,8 @@ def _run_ahead(fake, asked, monkeypatch, scenes=None):
     if scenes is not None:
         # 씬 변화 추적은 끄고, 계획을 쓸 때와 쓰려 할 때의 씬만 바꿔 본다.
         monkeypatch.setattr(runner_module, "SCENE_POLL_SECONDS", 3600)
-        seen = iter(scenes)
+        # 다 쓰면 마지막 씬이 이어진다.
+        seen = iter([*scenes, *[scenes[-1]] * 50])
         monkeypatch.setattr(runner_module, "current_scene", lambda _channel: next(seen))
 
     async def judge(system: str, user: str):
@@ -748,11 +749,12 @@ def test_a_plan_written_ahead_on_another_scene_is_dropped_and_the_step_is_writte
     fake = _menu()
     asked = Asked(MACROS, MACROS, MACROS)
 
-    state, failure = _run_ahead(fake, asked, monkeypatch, scenes=["Menu", "Battle"])
+    # 쓰기 시작할 때 Menu, step 1 이 끝날 때 Battle → 끝날 때 다시 쓰기 시작(Battle), 쓰려 할 때 Menu → 기다리지 않고 버림.
+    state, failure = _run_ahead(fake, asked, monkeypatch, scenes=["Menu", "Battle", "Battle", "Menu", "Menu"])
 
     assert failure is None and state.finished
     assert len(asked.calls) == 3
     dropped = [f["payload"] for f in fake.frames("LOG") if f["payload"].get("kind") == "ahead_plan_dropped"]
-    assert len(dropped) == 1 and "written on `Menu`, and the screen is now on `Battle`" in dropped[0]["message"]
+    assert len(dropped) == 1 and "written on `Battle`, and the screen is now on `Menu`" in dropped[0]["message"]
     plans = [f["payload"] for f in fake.frames("LOG") if f["payload"].get("kind") == "step_macros"]
     assert [plan["step"] for plan in plans] == [1, 2] and not plans[1]["decision"].get("written_ahead")

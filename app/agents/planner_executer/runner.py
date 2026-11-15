@@ -320,6 +320,10 @@ class PlannerExecuterRunner:
                         if following is not None:
                             following.cancel()
                             early = holder[0]
+                    if early is not None and early.step == step + 1 and current_scene(channel) != early.scene:
+                        # 이 step 이 끝날 때 씬이 바뀌어 있으면(씬 추적이 다시 쓰기 전에 끝났다) 지금 씬에서 다시 쓰기 시작한다.
+                        early.task.cancel()
+                        early = self._start_early(channel, scenario, step + 1, step)
                     if play is None:
                         release()
                         message = (
@@ -431,6 +435,17 @@ class PlannerExecuterRunner:
         단계가 바뀌면 버린다). 버리면 지금처럼 새로 쓴다 — 잃는 것은 그 호출 하나다.
         """
         assert self._ahead_planner is not None
+        now = current_scene(channel)
+        if now != early.scene:
+            # 다른 씬에서 쓰는 계획은 다 쓰기를 기다리지 않고 버린다. 로컬 try 23 step 3 은 Title 에서 쓰던 계획을 76초 기다린 뒤
+            # 버렸다.
+            early.task.cancel()
+            await note_decision(
+                channel, "ahead_plan_dropped",
+                f"Step {early.step}: the plan written ahead was not used (written on `{early.scene}`, and the screen is now on `{now}`)",
+                early.step, reason=f"written on `{early.scene}`, and the screen is now on `{now}`", ahead=True,
+            )
+            return None
         try:
             written = await early.task
         except asyncio.CancelledError:
