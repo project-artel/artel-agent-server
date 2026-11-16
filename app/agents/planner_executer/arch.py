@@ -66,7 +66,10 @@ from pydantic import BaseModel, ConfigDict, Field
 # 효과 없음으로 센다. planner 는 뒤 step 을 보고, 같은 씬의 뒤 step 을 ```segment 로 함께 계획하면 runner 가 그 계획으로 잇는다.
 # pe9-plan-ahead: 앞 step 이 도는 동안 다음 step 의 계획을 미리 쓴다(`plan_ahead`). 한 계획이 함께 돈 step 들은 묶음이 끝난 뒤
 # 묶음 전체 기록으로 판정하고, 근거를 읽을 때마다 지금 씬에 보이는 글자를 함께 적는다.
-PLANNER_EXECUTER_LABEL = "pe9-plan-ahead"
+# pe10-pause-planning: 본 planner 가 계획을 쓰거나 다시 쓰는 동안, 미리 쓴 계획을 기다리는 동안 게임 시간을 멈춘다
+# (`pause_while_planning`, SDK `pause_time`). 계획을 쓰는 60~140초 동안 게임이 돌아 지나가는 상태(타이핑 중인 대사)가
+# 사라지고, 계획이 그때 본 값에 묶이던 것을 막는다(Voyager·Cradle 처럼 멈춘다). orchestration 은 멈춘 동안의 화면을 녹화하지 않는다.
+PLANNER_EXECUTER_LABEL = "pe10-pause-planning"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1
@@ -141,6 +144,9 @@ class PlannerExecuterArchSpec(BaseModel):
     # 곧 지나가는 상태(타이핑 중인 대사)가 다음 step 이 시작할 때 이미 없었다(로컬 try 22 step 3). `on` 이면 따로 쓰고, 앞 step
     # 에서 씬이 바뀌면 새 씬에서 다시 쓰며, 쓸 때의 씬이 지금 씬과 다르면 버리고 새로 쓴다.
     plan_ahead: Literal["off", "on"] = "on"
+    # 계획을 기다리는 동안 게임 시간을 멈추는가(pe10). `on` 이면 본 planner 의 쓰기·다시 쓰기와 미리 쓴 계획을 기다리는 동안
+    # `pause_time` 을 보내고 끝나면 `resume_time` 을 보낸다. unscaled 시간으로 도는 게임은 멈추지 않는다.
+    pause_while_planning: Literal["off", "on"] = "on"
     # Executer 가 Jev 에게 보내는 state 의 출처(ARTEL-1297). `state_set` 은 Orchestration 의 `STATE_SET`,
     # `pulse_memory` 는 Agent 가 합친 `PulseMemory`. 둘을 같은 빌드에서 비교하려고 knob 으로 둔다.
     state_source: Literal["state_set", "pulse_memory"] = "state_set"

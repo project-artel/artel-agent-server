@@ -1307,6 +1307,11 @@ class Executer:
         }
         return sorted(found)[:MAX_PICK_CANDIDATES]
 
+    @property
+    def channel(self) -> QaRunChannel:
+        """이 executer 가 게임과 주고받는 channel. runner 가 계획을 다시 쓰는 동안 게임 시간을 멈출 때 쓴다."""
+        return self._channel
+
     def now(self) -> float:
         """executer 의 시계. runner 가 step 예산을 계획들에 걸쳐 이어 셀 때 같은 시계를 쓴다."""
         return self._clock()

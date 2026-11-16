@@ -124,7 +124,7 @@ def _config(**knobs):
     # 엔진의 흐름을 보는 테스트라 Executer 의 state 출처는 `PulseMemory` 로 둔다. orchestration 이 없다.
     # 화면 그림은 끈다: 켜면 `capture_screen` ACTION 이 action 순서에 끼어든다. 그림은 test_screen_images.py 가 본다.
     # 미리 쓰기도 끈다: 켜면 planner 호출 수와 순서가 앞 step 의 실행과 겹친다. 미리 쓰기는 test_planner_executer_pe8.py 가 본다.
-    knobs = {"state_source": "pulse_memory", "screen_images": "off", "plan_ahead": "off", **knobs}
+    knobs = {"state_source": "pulse_memory", "screen_images": "off", "plan_ahead": "off", "pause_while_planning": "off", **knobs}
     return resolve_run_config(
         arch=QaArchSpec(engine="planner_executer", planner=PlannerExecuterArchSpec(**knobs))
     )
@@ -679,6 +679,19 @@ def test_one_step_is_written_played_judged_and_reported() -> None:
     assert verdict["verdict"] == {"state_detail": "", "insight": "", "evidence_sufficient": True}
     (action,) = fake.frames("ACTION")
     assert action["payload"]["message"] == "click(start)"
+
+
+def test_game_time_is_paused_while_the_plan_is_written() -> None:
+    """pe10: 계획을 쓰는 동안 `pause_time`, 다 쓰면 `resume_time` 을 보내고 그 뒤에 step 의 행동을 보낸다."""
+    fake = _menu()
+    judge, _seen = _judge({"passed": True, "reason": "The map scene shows Stage 0.", "state_detail": "", "insight": ""})
+
+    state, failure = _run(fake, Asked(MACROS), judge, FakeJev(), pause_while_planning="on")
+
+    assert failure is None and state.finished
+    sent = [f["payload"]["actions"][0]["method"] for f in fake.frames("ACTION")]
+    assert sent[:2] == ["pause_time", "resume_time"]
+    assert [f["payload"]["message"] for f in fake.frames("ACTION")][2] == "click(start)"
 
 
 def test_a_step_whose_macros_stay_refused_fails_without_play() -> None:

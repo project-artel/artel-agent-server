@@ -22,8 +22,10 @@ recorded as ORDERED, and its FREE scenarios still play this way.
 """
 
 import asyncio
+import contextlib
+import logging
 from dataclasses import dataclass
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 from app.agents.qa.reset import reset_game_cheat
@@ -102,6 +104,10 @@ RESET_READING_SECONDS = 10.0
 SCENE_POLL_SECONDS = 0.5
 SCENE_SETTLE_SECONDS = 1.5
 MAX_EARLY_RESTARTS = 2
+# `pause_time`·`resume_time` 의 답을 기다리는 시간. SDK 가 바로 답하는 액션이라 짧게 둔다.
+GAME_TIME_TIMEOUT_SECONDS = 10.0
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -285,12 +291,13 @@ class PlannerExecuterRunner:
                     else:
                         ahead.clear()
                         used = None
-                        if early is not None and early.step == step:
-                            used = await self._use_early(channel, planner, early)
-                        elif early is not None:
-                            early.task.cancel()
-                        early = None
-                        written = used if used is not None else await planner.write(scenario, step)
+                        async with self._game_paused(channel, step):
+                            if early is not None and early.step == step:
+                                used = await self._use_early(channel, planner, early)
+                            elif early is not None:
+                                early.task.cancel()
+                            early = None
+                            written = used if used is not None else await planner.write(scenario, step)
                         if written.macros is not None and written.macros.segment:
                             ahead = {
                                 number: step_of_segment(written.macros, number)
@@ -427,6 +434,39 @@ class PlannerExecuterRunner:
                 early.step, scene=now, ahead=True,
             )
             restarts += 1
+
+    @contextlib.asynccontextmanager
+    async def _game_paused(self, channel: QaRunChannel, step: int) -> AsyncIterator[None]:
+        """계획을 기다리는 동안 게임 시간을 멈춘다(pe10 `pause_while_planning`). 멈추지 못했으면 그냥 기다린다.
+
+        SDK `pause_time` 은 `Time.timeScale` 을 0 으로 둔다. SDK 의 대기와 상태 읽기는 unscaled 라 멈춘 동안에도 planner 가 읽는
+        화면은 그대로 온다. orchestration 은 멈춘 동안의 화면을 녹화하지 않고 그 구간을 `PAUSED` 로 남긴다.
+        """
+        if self._spec.pause_while_planning != "on":
+            yield
+            return
+        paused = await self._set_game_time(channel, "pause_time", "Pausing game time while the plan is written", step)
+        try:
+            yield
+        finally:
+            if paused:
+                await self._set_game_time(channel, "resume_time", "Resuming game time", step)
+
+    async def _set_game_time(self, channel: QaRunChannel, method: str, message: str, step: int) -> bool:
+        """`pause_time`·`resume_time` 하나를 보내고 SDK 가 받았는지 돌려준다."""
+        try:
+            result = await channel.dispatch_actions(
+                [JsonRpcAction(id=1, method=method)], message, step, timeout=GAME_TIME_TIMEOUT_SECONDS
+            )
+        except QaCancelled:
+            raise
+        except Exception:  # 멈추지 못해도 계획은 쓴다
+            logger.warning("[QA] %s failed", method, exc_info=True)
+            return False
+        ok = result is not None and all(getattr(item, "success", True) for item in result.results)
+        if not ok:
+            logger.warning("[QA] %s was not accepted: %s", method, result)
+        return ok
 
     async def _use_early(self, channel: QaRunChannel, planner: Planner, early: "Early") -> "Written | None":
         """미리 쓴 계획을 확인하고 쓸 수 있으면 본 planner 로 넘긴다. 못 쓰면 이유를 남기고 `None` 이다.
@@ -633,7 +673,8 @@ class PlannerExecuterRunner:
                 "state_version": play.end_state_version,
                 "seconds_left": round(max(spec.step_budget_seconds - (executer.now() - started), 0.0), 1),
             }
-            written = await planner.replan(scenario, step, reason, lines, transition)
+            async with self._game_paused(executer.channel, step):
+                written = await planner.replan(scenario, step, reason, lines, transition)
             if written.macros is None:
                 plays[-1].stopped = (
                     f"PLANNER-REFUSED: the rewritten macros were still refused after {spec.max_rewrites} rewrites "
