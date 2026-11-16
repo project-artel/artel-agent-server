@@ -24,7 +24,7 @@ recorded as ORDERED, and its FREE scenarios still play this way.
 import asyncio
 import contextlib
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
@@ -586,9 +586,12 @@ class PlannerExecuterRunner:
         for held in group:
             # 화면은 그 step 이 끝날 때의 것이다. 글자 없이 그림으로만 보이는 결과(타이틀 그림)는 이 화면으로만 확인된다 —
             # 로컬 try 20 은 묶음 끝 화면을 붙여 step 1 의 타이틀을 못 보고 실패로 판정했다.
+            # 묶음 기록은 같지만 멈춘 이유는 step 마다 다르다. 마지막 step 의 이유를 모든 step 에 붙이면, 뒤 step 의 결과로 끝난
+            # step 에 "입력을 보내지 않음" 이 달렸다(로컬 try 26 step 3·4).
+            judged = replace(whole, stopped=held.play.stopped) if len(group) > 1 else None
             await self._settle(
                 channel, state, scenario, held.step, judge, held.play, held.image,
-                held.target, contracted, judged=whole if len(group) > 1 else None, segment=steps if len(group) > 1 else None,
+                held.target, contracted, judged=judged, segment=steps if len(group) > 1 else None,
             )
 
     async def _settle(

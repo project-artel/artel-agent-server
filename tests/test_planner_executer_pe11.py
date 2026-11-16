@@ -183,6 +183,9 @@ def test_the_step_whose_result_came_in_the_earlier_step_ends_without_input_and_t
     assert [name for name, _params in fake.actions].count("mouse_down") == 1  # Start 를 한 번만 눌렀다
     together = [f for f in fake.frames("LOG") if f["payload"].get("kind") == "segment_judgement"]
     assert len(together) == 1 and together[0]["payload"]["decision"]["steps"] == [1, 2]
+    # 판정 이유 끝의 멈춤 이유는 step 마다 제 것이다. 묶음 마지막 step 의 이유가 앞 step 에 붙지 않는다.
+    first, second = _verdicts(fake)
+    assert "입력을 보내지 않음" not in first["message"] and "입력을 보내지 않음" in second["message"]
 
 
 def test_steps_between_the_one_played_and_the_later_result_end_without_input() -> None:
