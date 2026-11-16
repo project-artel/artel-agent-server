@@ -1,30 +1,26 @@
-"""The executer: plays one step's macros with Jev until it stops.
+"""The executer: plays one step's macros until it stops. Jev picks between options; the code decides the flow (pe11).
 
 Each turn:
 
 1. stop at `max_turns_per_step` or `step_budget_seconds`;
-2. read `done()` on the current screen. When it holds, ask Jev whether the step's goal has really
-   been reached. Agreed — stop, `done`. Not agreed — note a disagreement and go on;
-   `max_done_disagreements` of them stop play;
-3. ask Jev which action to run now: the actions' docstrings are the options, with `none_fits`. The
-   state Jev reads carries the last `RECENT_ACTIONS_SHOWN` action turns — what ran, whether it sent an
-   input, why it stopped (ARTEL-1288): a screen that did not move looks the same every turn, and
-   without this Jev picked the same idle action eleven times in a row;
-4. `none_fits` — wait for the next reading, and stop once nothing has fit for
-   `no_action_grace_seconds`. Otherwise run the action with the macro runner; `max_failures_in_a_row`
-   failed actions stop play, and so do `max_idle_turns_in_a_row` actions that ran without sending the
-   game an input (ARTEL-1288);
-5. before those stops, when one action has failed or sent nothing `repair_after` times in a row and
-   the play has a `repair` (the editor, `app/agents/editor/`), call it with that action's turn records
-   and go on with the macros it returns — up to `max_repairs_per_step` times a step;
+2. read `done()` and, in a ```segment, every later step's `done_<k>()`. A later step's that has just become true stops
+   this step (`later_done`, or `done` when this step's own holds too) and records which step it reached; `done()` that
+   has just become true stops it (`done`). An acting step whose `done()` holds from the start, without the runner having
+   checked it false when the plan was written, stops without input (`done_at_start`);
+3. a step bound to its scene (ORDERED) whose scene changed waits `no_action_grace_seconds` without input for those to
+   hold, and stops `off_plan` when they do not;
+4. list the options that can run now: actions whose ready condition holds, one per target object. One option runs
+   without asking Jev. Two or more go to Jev, which picks the one that serves the current goal. Whether to wait is asked
+   only when an option has no ready condition that reads true (`WAIT_QUESTION`); otherwise the ready conditions already
+   say the game takes input. The state Jev reads carries the last `RECENT_ACTIONS_SHOWN` action turns;
+5. run the action with the macro runner; `max_failures_in_a_row` failed actions stop play, and so do
+   `max_idle_turns_in_a_row` actions that ran without sending the game an input (ARTEL-1288). Before those stops a stuck
+   action goes to the editor or the planner (`repair`);
 6. record the turn and send it as a `LOG`.
 
-Jev 에 묻는 두 질문은 macro 의 `ask`·`decide` 와 같은 모양이다: state 는 keyword 없는 `ask`·`decide`
-가 보내는 것(scene 과 화면의 live object 전부)이고 — 출처는 `state_source` 가 고른다: Orchestration 의
-`STATE_SET`(`app/qa/state_set.py`, ARTEL-1297) 이나 Agent 의 `PulseMemory`(`build_context_state`) — 선택지 끝에는
-`none_fits` 가 붙고, `ask` 는 `ASK_TRUE_AT` 이상이면 참이다. 질문을 만드는 것은 이 모듈이고, 보내는
-것은 macro runner 의 host 가 쓰는 `app/qa/jev.py` 의 `JevClient` 다. Jev 가 답하지 못하면 그 step 의
-play 를 그 오류로 멈춘다 — 대신 아무거나 고르면 무엇을 잰 것인지 알 수 없게 된다.
+Jev 요청은 macro 의 `ask`·`decide` 와 같은 모양이다: state 는 Orchestration 의 `STATE_SET`(`app/qa/state_set.py`) 이나 Agent 의
+`PulseMemory` 에서 그린다(`state_source`). 보내는 것은 `app/qa/jev.py` 의 `JevClient` 다. Jev 가 답하지 못하면 그 step 의 play 를
+그 오류로 멈춘다 — 대신 아무거나 고르면 무엇을 잰 것인지 알 수 없게 된다.
 """
 
 import ast
@@ -45,11 +41,7 @@ from app.agents.planner_executer.arch import PlannerExecuterArchSpec
 from app.agents.planner_executer.contract import READY_PREFIX
 from app.agents.planner_executer.target import StepTarget, target_state
 from app.agents.planner_executer.evidence import evidence_log, readings
-from app.agents.planner_executer.macro_host import (
-    ASK_FALSE_MEANS,
-    ASK_TRUE_MEANS,
-    ChannelMacroHost,
-)
+from app.agents.planner_executer.macro_host import ChannelMacroHost
 from app.agents.planner_executer.macros import (
     EFFECT_FLAG,
     GOAL_FLAG,
@@ -64,7 +56,7 @@ from app.agents.planner_executer.prompts import screen
 from app.agents.qa.macro.binding import MacroMemories, MacroScope
 from app.agents.qa.macro.context import build_context_state
 from app.agents.qa.macro.errors import ACTION_REJECTED
-from app.agents.qa.macro.grammar import ASK_TRUE_AT, NONE_FITS, NONE_FITS_DESCRIPTION
+from app.agents.qa.macro.grammar import NONE_FITS
 from app.agents.qa.macro.model import MacroDefinition
 from app.agents.qa.macro.runner import _apply_read_member, run_macro
 from app.qa.channel import QaCancelled, QaRunChannel
@@ -95,21 +87,6 @@ StateReader = Callable[[int, dict[str, Any]], Awaitable[StateSnapshot]]
 # records)` → the rewrite, or `None` when it was refused to the end (`app.agents.editor.Repair`).
 Repair = Callable[[StepMacros, str, list[dict]], Awaitable[StepMacros | None]]
 
-GOAL_QUESTION = "Has this step's goal been reached?"
-
-# Jev 가 action 대신 고를 수 있는 둘(ARTEL-1295 C). 서로, 그리고 `none_fits` 와 겹치지 않게 쓴다: `none_fits` 는 "지금은
-# 맞는 것이 없으니 화면이 바뀌길 기다린다", `EXPAND_STATE` 는 "고르려면 보이는 것이 모자란다", `REPLAN` 은 "이 action
-# 들로는 이 화면에서 나아갈 수 없다".
-EXPAND_STATE = "EXPAND_STATE"
-EXPAND_STATE_DESCRIPTION = (
-    "Show more of the game state before choosing: the objects or values needed to pick an action are not in "
-    "the state shown."
-)
-REPLAN = "REPLAN"
-REPLAN_DESCRIPTION = (
-    "Give up these actions and plan the step again: the state shows enough, but no listed action can make "
-    "progress from this screen."
-)
 PICK_QUESTION = "Which of these should the player do now to progress this step?"
 # planner 가 ```goals 를 썼을 때의 질문(prompt v6). step 문장 대신 지금 하위 목표만 준다. 녹화 turn 재질의에서 step 문장을
 # 하위 목표로 바꾸자 전투의 카드 놓기가 약 20% 에서 93% 가 됐고, 같은 하위 목표를 step 문장 뒤에 덧붙이면 37% 였다.
@@ -125,9 +102,9 @@ BLOCKED_ACTIONS_LINE = "\nNot available right now (their ready condition is fals
 SETTLE_READINGS = 2
 SETTLE_READING_SECONDS = 0.4
 
-# 고르기와 같은 요청에 묻는 기다림 질문(pe9). TypeSafe 는 "해당 없음" 선택지 대신 같은 요청의 noul 을 권한다. 게임 동작과
-# 다른 종류의 판단이 한 분포를 나눠 갖지 않게, `none_fits` 를 선택지에서 빼고 이것으로 묻는다. 대사가 키를 기다리는 것은
-# 기다림이 아니다 — 게임이 플레이어의 입력을 기다리는 것이다.
+# 기다림 질문(pe9 의 noul). pe11 부터는 준비 조건이 참으로 읽히지 않는 선택지가 있을 때만 묻는다 — 준비 조건이 모두 참이면
+# 게임이 입력을 받는다는 것을 코드가 이미 안다. try 10~25 에서 1,014번 물어 한 번도 0.7 을 넘지 않았다. 선언이 빈 게임을
+# 위해 남긴다. 대사가 키를 기다리는 것은 기다림이 아니다 — 게임이 플레이어의 입력을 기다리는 것이다.
 WAIT_QUESTION = (
     "Is the game busy right now, so that the player should wait instead of acting: loading, playing an "
     "animation or transition, or running the other side's turn?"
@@ -328,8 +305,14 @@ class StepPlay:
     end_frame: int | None = None
     started_at: str = ""
     ended_at: str = ""
-    # Jev 가 `REPLAN` 을 골라 멈췄다(ARTEL-1295 C). runner 가 planner 를 다시 부른다.
+    # executer 가 planner 에게 step 을 다시 쓰게 하려고 멈췄다: 준비된 행동이 없거나 모두 빠졌거나, 씬이 바뀌었다(`left_scene`).
     replan_requested: bool = False
+    # 묶음의 뒤 step `done_k` 가 이 play 안에서 참이 되어 멈췄으면 그 k(pe11). runner 는 그 사이 step 을 입력 없이 끝낸다.
+    later_step: int | None = None
+    # 씬이 바뀌어 `off_plan` 으로 멈췄으면 바뀐 씬(pe11).
+    left_scene: str | None = None
+    # step 이 planner 의 다시 쓰기를 거쳤다(재계획·복구). 다시 쓴 계획은 묶음을 받지 않으므로 runner 가 묶음을 버린다.
+    rewritten: bool = False
     # play 가 멈출 때 Jev 가 마지막으로 읽은 `STATE_SET` 의 `stateVersion`. 판정의 근거를 Orchestration 상태에 잇는다.
     end_state_version: int | None = None
     # planner 의 ```check 범위와, 그 값을 play 시작·매 turn 시작·끝에 `STATE_SET` 에서 읽은 기록. 기록 하나는
@@ -373,7 +356,15 @@ class StepPlay:
         The engine's claim, not the verdict. The Evaluator records it beside its own answer so
         the two can be compared.
         """
-        return self.stopped == "done" or any(turn.get("done") for turn in self.turns)
+        return self.stopped in GOAL_STOPS or any(turn.get("done") for turn in self.turns)
+
+
+# 끝 조건으로 멈춘 이유: 이 step 의 `done()`, 뒤 step 의 결과(pe11). 앞 step 안에서 결과가 난 step 도 같다.
+LATER_DONE = "later_done"
+RESULT_IN_EARLIER_STEP = "result_in_earlier_step"
+PASSED_IN_EARLIER_STEP = "passed_in_earlier_step"
+DONE_AT_START = "done_at_start"
+GOAL_STOPS = frozenset({"done", LATER_DONE, RESULT_IN_EARLIER_STEP})
 
 
 class JevStopped(Exception):
@@ -412,11 +403,12 @@ class Executer:
         self._state_reader = state_reader
         # 마지막으로 Jev 에게 보낸 state 의 `stateVersion`. turn 기록에 남겨 어느 상태로 골랐는지 잇는다.
         self._state_version: int | None = None
-        # 지금 play 의 범위: planner 의 ```observe 와 `EXPAND_STATE` 로 넓힌 단계(0–2). `play` 가 매번 정한다.
+        # 지금 play 의 범위: planner 의 ```observe. `play` 가 매번 정한다.
         self._observe: StepObserve | None = None
-        self._expansions = 0
         # 상한에 걸려 Jev 의 state 에서 빠진 객체 수. turn 기록에 남긴다.
         self._omitted = 0
+        # 마지막 state 에서 범위 밖이라 가린 것(`hidden`). Jev 에게는 보내지 않고 turn 기록에 남긴다 — planner 복구가 읽는다.
+        self._hidden: dict[str, Any] | None = None
         # 이 play 의 첫 근거 읽기 snapshot. 끝 읽기와 비교해 `StepPlay.changes` 를 만든다.
         self._evidence_start: StateSnapshot | None = None
 
@@ -431,17 +423,29 @@ class Executer:
         can_ask_planner: bool = False,
         target: StepTarget | None = None,
         history: list[dict] | None = None,
+        checked: bool = False,
+        finished_earlier: str | None = None,
+        scene_bound: bool = False,
+        can_replan_scene: bool = False,
     ) -> StepPlay:
         """Play step `step` (`action` is its text) with `macros` until it stops.
 
         `repair` is the editor for this step, or `None` when the play has none (a FREE case's play:
         its macros are a scene plan shared by several cases, which the editor does not rewrite).
-        `can_replan` offers Jev `REPLAN`; the runner passes it while the step has replans left.
+        `can_replan` lets play stop for the planner to write the step again when no action is ready or every action is
+        out; the runner passes it while the step has replans left.
         `budget_seconds` is what is left of the step's time budget (a step played again after a replan or a planner
         repair does not start the budget over). `can_ask_planner` lets a stuck action stop play for the planner to
         write the step again (`repair="planner"`). `target` is the step's fixed target: when `done()` holds,
         the turn records whether it holds on that target. `history` is the step's turns before a replan: Jev's recent actions
         go on showing them, marked as before the new plan, so a failure just before the replan is not lost.
+
+        `checked`: the runner read this plan's `done()` and the segment's later `done_<k>()` false just before play (the
+        plan was written or taken up with the game paused). Then a `done()` already true at the first turn became true
+        after the check and stops as `done`; without the check an acting step stops there as `done_at_start`.
+        `finished_earlier`: an earlier step of the segment already stopped on this step's result (or past it); play reads
+        the evidence and stops with that reason without input. `scene_bound`: an ORDERED step's plan holds for the
+        scene play started on (`off_plan`). `can_replan_scene` lets `off_plan` ask the planner to write the step again.
         """
         channel, spec, clock = self._channel, self._spec, self._clock
         # play 안의 `target` 은 고른 대상 객체의 이름이다. step 의 대상 계약은 이 이름으로 쥔다.
@@ -453,7 +457,6 @@ class Executer:
             for name in getattr(macros, "facts", ())
             if (fact := self._game_facts.get(name)) is not None
         ]
-        self._expansions = 0
         await self._settle()
         play = StepPlay(
             "turn limit",
@@ -467,7 +470,16 @@ class Executer:
         await self._read_evidence(play, "start")
         started = clock()
         none_since: float | None = None
-        failures = disagreements = idle_turns = repairs = unobserved = 0
+        failures = idle_turns = repairs = unobserved = 0
+        # 이 play 가 묶음의 뒤 step 을 맡았나: 그 step 번호와 완료 probe. 이 play 안에서 거짓으로 읽은 적이 있는 것만 "참이 됐다" 로
+        # 센다. 계획 검사를 거친 play 는 처음부터 거짓으로 읽은 셈이다.
+        later = sorted((number, probe) for number, (_goals, probe, _actions) in getattr(macros, "segment", {}).items()
+                       if number > step and probe is not None)
+        later_false = {number for number, _probe in later} if checked else set()
+        # play 를 시작한 씬과, 씬이 바뀐 뒤 처음 본 씬·시각(`off_plan` 유예).
+        play_scene = self._scene()
+        left_to: str | None = None
+        left_at = 0.0
         # 같은 action 을 연달아 고른 횟수. Jev 가 읽는 state 가 그 사이 바뀌면 처음부터 센다(ARTEL-1453).
         same_in_a_row = 0
         last_picked: str | None = None
@@ -478,10 +490,6 @@ class Executer:
         # 지난 action 에 효과 조건이 있었는데 효과가 보이지 않았나. 그랬다면 state 가 바뀌어도 연속 횟수를 이어 센다 — state 는
         # 타이머 같은 값만으로도 매 turn 바뀐다(try 11 step 7).
         last_no_effect = False
-        # 완료 조건이 첫 turn 부터 참이었나, 그 뒤 한 번이라도 거짓이 됐나. 처음부터 참인 완료 조건은 이 step 의 결과가 아닐 수
-        # 있다 — try 14 step 4 의 "줄이 끝까지 찍혔다" 는 앞 step 이 끝난 자리에서 이미 참이라, 키를 한 번도 안 누르고 끝났다.
-        done_at_start: bool | None = None
-        done_dropped = False
         # 방금 통과한 action 의 ```after 다음 행동. 다음 turn 의 선택지를 이것으로 좁힌다.
         follow: tuple[str, ...] = ()
         # 이 step 에서 action 마다 실패했거나 입력 없이 끝난 횟수(누적, ARTEL-1298). 연속만 세면 두 action 이 번갈아 헛돌
@@ -519,37 +527,54 @@ class Executer:
                     # 뒤 `guard` 가 통과로 남기지 않는다.
                     latest = next((entry["values"] for entry in reversed(play.evidence) if "values" in entry), {})
                     record["target"] = target_state(step_target, latest)[0]
-                if done_at_start is None:
-                    done_at_start = bool(record["done"])
-                if not record["done"]:
-                    done_dropped = True
-                acts = bool(macros.actions or macros.contracts)
-                # 코드가 바로 멈추는 것은 완료 조건이 이 play 안에서 참이 됐을 때다. 동작이 있는 step 에서 처음부터 참이었고 한 번도
-                # 거짓이 되지 않았으면 Jev 에게 목표 도달을 확인받는다(아래 `jev` 길). 보기만 하는 step 은 처음부터 참이 정답이다.
-                code_decides = not acts or not done_at_start or done_dropped
-                if record["done"] and spec.done_by == "code" and code_decides:
-                    # 완료는 코드가 판정한다(pe9). 공개 Jev 에이전트들은 완료를 게임 값으로 정하고 Jev 에게 묻지 않는다. 전에는 Jev 가
-                    # 아니라고 하면 동작을 계속 골라, try 11 step 3·4 에서 맵에 도착한 뒤 Space 를 4번 더 눌러 다음 step 의
-                    # 나레이션을 미리 지웠다. 완료 조건이 참이면 입력을 더 보내지 않는다. 판정은 evaluator 가 한다.
+                if finished_earlier is not None:
+                    # 앞 step 이 이 step 의 결과에서(또는 그 뒤에서) 멈췄다. 결과는 앞 step 기록에 있다 — 입력을 보내지 않는다.
                     await self._send(record)
-                    play.stopped = "done"
+                    play.stopped = finished_earlier
+                    break
+                acts = bool(macros.actions or macros.contracts)
+                # 묶음의 뒤 step: 이 play 안에서 거짓이던 것이 참이 되면 이 step 은 거기서 끝난다(try 25: 맵에 닿은 turn 14 에
+                # `done_5` 가 참이었는데 step 4 는 대사를 계속 넘겨 다음 step 의 나레이션 창을 닫았다).
+                reached: list[int] = []
+                for number, probe in later:
+                    holds, _error = await self._done(probe, number)
+                    if not holds:
+                        later_false.add(number)
+                    elif number in later_false:
+                        reached.append(number)
+                if reached:
+                    record["later_done"] = reached
+                    play.later_step = max(reached)
+                    await self._send(record)
+                    play.stopped = "done" if record["done"] else LATER_DONE
                     break
                 if record["done"]:
-                    probability = await self._ask_goal(action)
-                    record["goal_ask"] = round(probability, 3)
-                    if probability >= ASK_TRUE_AT:
+                    # 완료는 코드가 판정한다. 동작이 있는 step 에서 시작부터 참인데 계획 검사를 거치지 않았으면 이 step 의 결과가 아닐
+                    # 수 있다(try 14 step 4). 예전에는 Jev 에게 물었지만 답은 반반이었다(try 17·18 은 "그렇다" 로 누르지 않고 실패,
+                    # try 24 step 3 은 "아니다" 로 25번 눌러 맵까지 갔다). 입력을 보내지 않고 멈춰 evaluator 가 기록으로 판정한다.
+                    await self._send(record)
+                    play.stopped = DONE_AT_START if acts and turn == 0 and not checked else "done"
+                    break
+                if scene_bound and acts:
+                    scene_now = self._scene()
+                    if scene_now != play_scene:
+                        # 씬이 바뀌었다. 계획은 시작한 씬의 것이다. 새 씬의 화면이 늦게 뜰 수 있어 유예 동안 입력 없이 끝 조건을
+                        # 기다리고, 그 사이 씬이 또 바뀌면(로딩 씬) 처음부터 잰다.
+                        if scene_now != left_to:
+                            left_to, left_at = scene_now, now
+                        record["scene_left"] = {"from": play_scene, "to": scene_now}
                         await self._send(record)
-                        play.stopped = "done"
-                        break
-                    disagreements += 1
-                    if disagreements >= spec.max_done_disagreements:
-                        await self._send(record)
+                        if now - left_at < spec.no_action_grace_seconds:
+                            await channel.wait_for_reading(IDLE_LOOK_SECONDS)
+                            continue
+                        play.left_scene = scene_now
+                        play.replan_requested = can_replan_scene
                         play.stopped = (
-                            f"done() and Jev disagree: done() held {disagreements} times and Jev "
-                            "did not see the goal reached"
+                            f"off_plan: the scene changed from `{play_scene}` to `{scene_now}` and done() stayed false for "
+                            f"{spec.no_action_grace_seconds:g}s"
                         )
                         break
-                # state 를 먼저 읽는다. 상한에 걸려 빠진 것이 있는지가 선택지(`EXPAND_STATE`)를 정한다.
+                    left_to = None
                 state = await self._state()
                 fingerprint = progress_fingerprint(state)
                 if picked_on is not None and fingerprint != picked_on and not last_no_effect:
@@ -561,6 +586,8 @@ class Executer:
                 # (런 162 step 4: 대사가 없는데 `dismiss_dialogue` 를 다섯 번 골랐다).
                 record["jev_state"] = state
                 record["view"] = self._view_record()
+                if self._hidden:
+                    record["hidden"] = self._hidden
                 if self._fact_reasons:
                     record["fact_unknown"] = dict(self._fact_reasons)
                 names = [name for name in [*macros.actions, *macros.contracts] if name not in dropped and name not in parked]
@@ -585,18 +612,22 @@ class Executer:
                     await channel.wait_for_reading(min(remaining, IDLE_LOOK_SECONDS))
                     continue
                 options = {name: macros.description(name) for name in names if name in macros.actions}
-                # 준비 조건이 거짓인 행동은 고르기 전에 뺀다. 실행 직전에도 다시 읽는다.
-                not_ready = await self._not_ready(list(options), macros, step)
+                # 준비 조건이 거짓인 행동은 고르기 전에 뺀다. 실행 직전에도 다시 읽는다. 준비 조건이 있고 참으로 읽힌 선택지는
+                # `declared` 에 모은다 — 그것만 있으면 게임이 입력을 받는다는 것을 코드가 안다(기다림 질문 없음, pe11).
+                ready_states = await self._ready_states(list(options), macros, step)
+                not_ready = [name for name, value in ready_states.items() if value == "unmet"]
+                declared = {name for name, value in ready_states.items() if value == "met"}
                 if not_ready:
                     record["not_ready"] = not_ready
                     options = {name: text for name, text in options.items() if name not in not_ready}
                 # 인자를 매 turn 고르는 action 은 지금 켜진 후보 객체마다 선택지가 된다. 사라진 객체는 빠지고, 그 macro
                 # 앞부분 `require` 가 거짓인 객체도 빠진다.
-                options, unready = await self._expand_picks(options, macros, step)
+                options, unready, declared = await self._expand_picks(options, macros, step, declared)
                 # 계약 행동: 바인딩마다 준비 조건이 참인 것만 선택지다. 거짓·확인 불가는 이유와 함께 남긴다.
-                instances, unready_contracts = await self._contract_options(
+                instances, unready_contracts, declared_contracts = await self._contract_options(
                     [name for name in names if name in macros.contracts], macros, step
                 )
+                declared |= declared_contracts
                 unready = [*unready, *unready_contracts]
                 if unready:
                     record["not_ready_targets"] = unready
@@ -661,10 +692,10 @@ class Executer:
                 earlier = [{**turn, "earlier_plan": True} for turn in history or []]
                 # 선택지마다 지금 사실을 붙인다(pe9): 대상이 화면에 띄운 글자, 연달아 고른 횟수, 효과 없이 끝난 시도.
                 options = annotate_options(options, earlier + play.turns[:-1], self._shown_words)
-                if self._narrows() and self._expansions < spec.max_expansions_per_step:
-                    options[EXPAND_STATE] = EXPAND_STATE_DESCRIPTION
-                if can_replan and self._planned():
-                    options[REPLAN] = REPLAN_DESCRIPTION
+                # 준비됐다고 알 수 없는 선택지. 하나라도 있으면 기다림을 묻는다(선택지 수와 상관없이).
+                undeclared = [key for key in options if key not in declared]
+                if undeclared:
+                    record["wait_asked_because"] = undeclared
                 goal_text = None
                 if macros.goals:
                     while goal_index < len(macros.goals) - 1:
@@ -681,8 +712,10 @@ class Executer:
                 recent = recent_action_lines(earlier + play.turns[:-1])
                 if recent:
                     record["recent_actions"] = recent
-                choice = await self._pick(record["question"], options, recent, state)
+                choice = await self._pick(record["question"], options, recent, state, ask_wait=bool(undeclared))
                 record["picked"] = picked = choice.choice
+                # 선택지가 하나면 Jev 는 고르지 않았다(기다림만 물었을 수 있다).
+                record["picked_by"] = "only_option" if len(options) == 1 else "jev"
                 if choice.wait is not None:
                     record["wait"] = choice.wait
                 if choice.confidence is not None:
@@ -704,16 +737,6 @@ class Executer:
                     record["state_version"] = self._state_version
                 if self._omitted:
                     record["omitted_objects"] = self._omitted
-                if picked == EXPAND_STATE:
-                    self._expansions += 1
-                    record["expanded_to"] = self._expansions
-                    await self._send(record)
-                    continue
-                if picked == REPLAN:
-                    await self._send(record)
-                    play.stopped = "REPLAN: the decision model found no listed action that can progress from this screen"
-                    play.replan_requested = True
-                    break
                 if picked == NONE_FITS:
                     await self._send(record)
                     none_since = none_since or now
@@ -906,7 +929,7 @@ class Executer:
             if play.turns:
                 play.turns[-1]["state_error"] = str(error)
                 await self._send(play.turns[-1])
-        if play.stopped == "done" and play.evidence:
+        if play.stopped in ("done", LATER_DONE) and play.evidence:
             # 완료 뒤에 입력 없이 잠깐 더 읽는다(pe9). 완료 조건이 참이 되자마자 멈추면 근거가 한 번뿐이라, "한 글자씩 나온다"
             # 처럼 잠깐 동안의 변화는 판정할 수 없었다(run 16 step 2). 입력은 보내지 않는다.
             for index in range(SETTLE_READINGS):
@@ -961,12 +984,15 @@ class Executer:
                 texts.append(ready_source(macros.source, key))
         return address_hints("\n".join(dict.fromkeys(texts)), self._channel.scene.pulse)
 
-    async def _not_ready(self, names: list[str], macros: StepMacros, step: int) -> list[str]:
-        """`names` 중 준비 조건이 거짓으로 읽힌 행동. 읽지 못한 것은 빼지 않는다."""
-        return [
-            name for name in names
-            if name in macros.readies and await self._predicate(macros.readies[name], step, READY_FLAG) == "unmet"
-        ]
+    async def _ready_states(self, names: list[str], macros: StepMacros, step: int) -> dict[str, str]:
+        """`names` 중 준비 조건이 있는 행동의 지금 값: `met`·`unmet`·`unknown`. 조건이 없는 행동은 싣지 않는다.
+
+        `unmet` 은 선택지에서 빠진다. `unknown` 은 빼지 않는다 — 다만 준비됐다고 알지도 못하므로 기다림 질문의 근거가 된다."""
+        return {
+            name: await self._predicate(macros.readies[name], step, READY_FLAG)
+            for name in names
+            if name in macros.readies
+        }
 
     async def _state(self) -> dict[str, Any]:
         """What a keyword-less macro `ask`/`decide` sends Jev: the scene and every live object.
@@ -997,14 +1023,14 @@ class Executer:
         memories = MacroMemories(scene=self._channel.scene)
         state, clipped = render_jev_state(snapshot, pulse.is_cosmetic, scene=memories.scene_name, view=self._view())
         self._omitted = clipped if self._spec.observation == "planner" else 0
+        # 가린 것의 목록은 Jev 가 범위를 넓히라고 고르게 하던 것이다(pe11 에서 그 선택지를 없앴다). Jev 에게는 보내지 않고 기록에
+        # 남긴다 — planner 가 다시 쓸 때 ```observe 가 결과를 가렸는지 본다.
+        self._hidden = state.pop("hidden", None)
         if self._fact_sources:
             # 고른 fact 를 맨 위에 싣는다. 값은 같은 snapshot 에서 정확한 이름으로 읽고, 못 읽은 것은 `unknown` 으로 보인다.
             values, self._fact_reasons = declared_values(snapshot, self._fact_sources)
             definitions = {name: self._game_facts.get(name).definition() for name, _scope, _member in self._fact_sources}
             state = {"facts": values, "fact_definitions": definitions, **state}
-        if self._omitted:
-            # 조용히 자르지 않는다. Jev 가 무엇을 못 보고 고르는지 알아야 `EXPAND_STATE`·`REPLAN` 을 고를 수 있다.
-            state["omitted_objects"] = self._omitted
         return state
 
     async def read_values(self) -> dict[str, Any] | None:
@@ -1119,12 +1145,14 @@ class Executer:
 
     async def _contract_options(
         self, names: list[str], macros: StepMacros, step: int
-    ) -> tuple[dict[str, "ContractInstance"], list[str]]:
-        """계약 행동의 후보: 바인딩마다 준비 조건이 참인 것. 거짓·확인 불가는 `<후보> (unmet|unknown)` 으로 따로 돌려준다."""
+    ) -> tuple[dict[str, "ContractInstance"], list[str], set[str]]:
+        """계약 행동의 후보: 바인딩마다 준비 조건이 참인 것. 거짓·확인 불가는 `<후보> (unmet|unknown)` 으로 따로 돌려준다.
+        셋째는 준비 조건이 있고 참으로 읽힌 후보다. 조건이 없는 후보는 준비됐다고 알 수 없다."""
         instances: dict[str, ContractInstance] = {}
         unready: list[str] = []
+        declared: set[str] = set()
         if macros.binder is None:
-            return instances, unready
+            return instances, unready, declared
         for name in names:
             contract = macros.contracts[name]
             per_param = [await self._domain_ids(contract, param, step) for param in contract.params]
@@ -1137,11 +1165,13 @@ class Executer:
                 if ready != "met":
                     unready.append(f"{key} ({ready})")
                     continue
+                if probe is not None:
+                    declared.add(key)
                 description = macros.description(name)
                 if binding:
                     description += "\n\nThis option acts on " + ", ".join(f"`{selector}` as {param}" for param, selector in binding) + "."
                 instances[key] = ContractInstance(name, binding, ids, description)
-        return instances, unready
+        return instances, unready, declared
 
     def _alive(self, instance: "ContractInstance") -> bool:
         """바인딩한 객체가 지금도 같은 객체로 켜져 있는가. id 를 모르면 selector 로만 본다(약한 식별).
@@ -1241,27 +1271,36 @@ class Executer:
         return action_run
 
     async def _expand_picks(
-        self, options: dict[str, str], macros: StepMacros, step: int
-    ) -> tuple[dict[str, str], list[str]]:
+        self, options: dict[str, str], macros: StepMacros, step: int, declared: set[str]
+    ) -> tuple[dict[str, str], list[str], set[str]]:
         """`pick` 을 남긴 action 을 지금의 후보 객체마다 하나씩으로 펼친 선택지와, 준비 조건이 거짓이라 뺀 후보.
 
         준비 조건은 그 developer macro 앞부분의 `require` 다. 읽지 못한 후보는 빼지 않는다 — `ready_<action>` 과 같다.
         런 190~219 는 쓰러진 적이 후보에 남아, Jev 가 고르면 `require` 가 "already defeated" 로 거절하기를 되풀이했다.
+
+        `declared` 는 준비 조건이 참으로 읽힌 행동이다. 펼친 후보는 그 행동이 거기 있거나, 후보의 `require` 가 참으로 읽혔을 때
+        준비된 것으로 남는다. 셋째로 돌려준다.
         """
         expanded: dict[str, str] = {}
         unready: list[str] = []
+        known: set[str] = set()
         for name, description in options.items():
             pick = macros.picks.get(name)
             if pick is None:
                 expanded[name] = description
+                if name in declared:
+                    known.add(name)
                 continue
             for path in self._candidates(pick.names):
                 key = f"{name}{PICK_SEPARATOR}{path}"
-                if await self._pick_ready(pick, path, step) == "unmet":
+                ready = await self._pick_ready(pick, path, step)
+                if ready == "unmet":
                     unready.append(f"{key} (unmet)")
                     continue
                 expanded[key] = f"{description}\n\nThis option acts on `{path}`."
-        return expanded, unready
+                if name in declared or (pick.ready is not None and ready == "met"):
+                    known.add(key)
+        return expanded, unready, known
 
     async def _pick_ready(self, pick: ActionPick, path: str, step: int) -> str:
         """고른 객체에 대한 그 macro 앞부분 `require` 의 결과. 조건이 없으면 `met` 이다."""
@@ -1321,7 +1360,7 @@ class Executer:
         return self._spec.observation == "planner" and self._spec.state_source == "state_set"
 
     def _view(self) -> StateView:
-        """지금 Jev 에게 보일 범위. 단계 0 은 planner 의 ```observe, 1 은 path 를 풀고, 2 는 전부다."""
+        """지금 Jev 에게 보일 범위: planner 의 ```observe."""
         if not self._planned():
             return EVERYTHING
         observe = self._observe or StepObserve()
@@ -1330,40 +1369,22 @@ class Executer:
             "planned": True, "limit": self._spec.jev_state_chars,
             "facts": tuple((scope, member) for _name, scope, member in self._fact_sources),
         }
-        if self._expansions == 0:
-            return StateView(paths=observe.paths, members=observe.members, **common)
-        if self._expansions == 1:
-            return StateView(members=observe.members, **common)
-        return StateView(**common)
+        return StateView(paths=observe.paths, members=observe.members, **common)
 
     def _view_record(self) -> dict[str, Any]:
         """turn 기록의 `view`: Jev 에게 보이도록 허용한 범위. 범위를 안 좁히는 런은 `{"all": true}` 다."""
         if not self._planned():
             return {"all": True}
         view = self._view()
-        record = {"paths": view.paths, "members": view.members, "level": self._expansions}
+        record = {"paths": view.paths, "members": view.members}
         if self._fact_sources:
             record["facts"] = [name for name, _scope, _member in self._fact_sources]
         return record
 
-    def _narrows(self) -> bool:
-        """지금 범위보다 넓힐 것이 있는가. 범위를 좁혔거나 상한에 걸려 빠진 것이 있을 때다."""
-        if not self._planned() or self._expansions >= 2:
-            return False
-        observe = self._observe
-        narrowed = observe is not None and (observe.paths is not None or observe.members is not None)
-        return narrowed or self._omitted > 0
-
-    async def _ask_goal(self, action: str) -> float:
-        try:
-            return await self._jev.probability(
-                f"{GOAL_QUESTION} The step: {action}",
-                await self._state(),
-                true_means=ASK_TRUE_MEANS,
-                false_means=ASK_FALSE_MEANS,
-            )
-        except JevError as error:
-            raise JevStopped(str(error)) from error
+    async def holds(self, probe: MacroDefinition, step: int) -> bool:
+        """완료 probe(`done()`·`done_<k>()`)가 지금 화면에서 참인가. runner 가 계획을 받은 화면에서 읽는다(pe11). 읽지 못하면 거짓이다."""
+        holds, _error = await self._done(probe, step)
+        return holds
 
     async def _pick(
         self,
@@ -1371,28 +1392,34 @@ class Executer:
         options: dict[str, str],
         recent: list[str] | None = None,
         state: dict[str, Any] | None = None,
+        ask_wait: bool = True,
     ) -> JevChoice:
-        """Jev 가 고른 action. `recent` 가 있으면 state 에 `recent_actions` 로 함께 간다 — 화면이 안 움직인
-        turn 은 화면만으로는 첫 turn 과 같아, 방금 무엇을 했고 그것이 입력을 보냈는지를 Jev 가 알아야
-        같은 수를 되풀이하지 않는다(ARTEL-1288, 런 153)."""
+        """고를 action. 선택지가 둘 이상이면 Jev 가 고르고, 하나면 그것이다(pe11).
+
+        기다림은 `ask_wait` 일 때만 같은 요청의 noul 로 묻는다(선택지가 하나면 noul 하나만). 준비 조건이 모두 참이면 묻지 않는다.
+        `recent` 가 있으면 state 에 `recent_actions` 로 함께 간다 — 화면이 안 움직인 turn 은 화면만으로는 첫 turn 과 같아, 방금
+        무엇을 했고 그것이 입력을 보냈는지를 Jev 가 알아야 같은 수를 되풀이하지 않는다(ARTEL-1288, 런 153)."""
+        if len(options) == 1 and not ask_wait:
+            return JevChoice(next(iter(options)))
         state = dict(state) if state is not None else await self._state()
         if recent:
             state["recent_actions"] = recent
         try:
-            if self._spec.pick_wait == "option":
-                return await self._jev.choose_scored(
-                    question,
-                    {**options, NONE_FITS: NONE_FITS_DESCRIPTION},
-                    state,
+            if len(options) == 1:
+                wait = await self._jev.probability(
+                    WAIT_QUESTION, state, true_means=WAIT_TRUE_MEANS, false_means=WAIT_FALSE_MEANS
                 )
-            choice = await self._jev.choose_or_wait(
-                question, options, state, WAIT_QUESTION, WAIT_TRUE_MEANS, WAIT_FALSE_MEANS
-            )
+                choice = JevChoice(next(iter(options)), wait=wait)
+            elif ask_wait:
+                choice = await self._jev.choose_or_wait(
+                    question, options, state, WAIT_QUESTION, WAIT_TRUE_MEANS, WAIT_FALSE_MEANS
+                )
+            else:
+                choice = await self._jev.choose_scored(question, options, state)
         except JevError as error:
             raise JevStopped(str(error)) from error
         if choice.wait is not None and choice.wait >= WAIT_AT:
-            # 기다린다. 이후 흐름은 `none_fits` 와 같다 — 유예 동안 화면을 기다리고 다시 묻는다.
-            # 기다림으로 정했으니 그 확신은 기다림 질문의 답이다.
+            # 기다린다. 유예 동안 화면을 기다리고 다시 묻는다. 기다림으로 정했으니 그 확신은 기다림 질문의 답이다.
             return JevChoice(NONE_FITS, choice.wait, choice.probabilities, choice.wait)
         return choice
 
@@ -1490,6 +1517,9 @@ def _joined(plays: list[tuple[int, StepPlay]], label: str, turn_key: str = "plan
         started_at=first.started_at,
         ended_at=last.ended_at,
         replan_requested=last.replan_requested,
+        later_step=last.later_step,
+        left_scene=last.left_scene,
+        rewritten=any(play.rewritten for play in plays),
         end_state_version=last.end_state_version,
         check=last.check,
         evidence=evidence,
@@ -1589,10 +1619,10 @@ def recent_action_lines(turns: list[dict], limit: int = RECENT_ACTIONS_SHOWN) ->
 def _turn_log(record: dict) -> TurnLogPayload:
     """The turn as a `LOG`: a readable line, and the record itself."""
     parts = [f"turn {record['turn']}", f"done={record.get('done')}"]
-    if "goal_ask" in record:
-        parts.append(f"goal ask {record['goal_ask']}")
+    if record.get("later_done"):
+        parts.append("later step done: " + ", ".join(str(number) for number in record["later_done"]))
     if "picked" in record:
-        parts.append(f"picked {record['picked']}")
+        parts.append(("ran the only option " if record.get("picked_by") == "only_option" else "picked ") + str(record["picked"]))
     if "outcome" in record:
         parts.append(record["outcome"] + (f": {record['reason']}" if record.get("reason") else ""))
     if "repair" in record:

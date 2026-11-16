@@ -248,8 +248,8 @@ def test_the_planner_sees_each_developer_macro_with_its_build() -> None:
     assert "from macros import" not in user
     # 기본 planner prompt 는 v4 다. v4 의 rules 는 v2 에 ```observe·```check 블록을 더한 것이고, 목록과 같은 말을 하는
     # reuse-first 규칙은 그대로 담는다.
-    assert _config().prompt_version == "v6"
-    assert system == prompt_text(RULES_ROLE, "v6", summary_language="Korean")
+    assert _config().prompt_version == "v7"
+    assert system == prompt_text(RULES_ROLE, "v7", summary_language="Korean")
     assert "- Reuse first. Before you write an action, read the developer macros the request lists." in system
     assert (
         "- `tap_start()` — written against build 1.2.0 (beta)\n"
@@ -270,10 +270,12 @@ def test_a_parameterless_developer_macro_is_picked_by_jev_and_runs_in_a_step_wit
     state, failure = _run(fake, Answered(_answer(ONLY_DONE, "tap_start")), (_macro("tap_start", TAP_START),), jev)
 
     assert failure is None and state.step_results[0].passed
-    (pick,) = jev.asked("choice")[:1]
-    options = pick["questions"]["answer"]["criteria"]
-    assert set(options) == {"developer:tap_start"} and "wait" in pick["questions"]
-    assert options["developer:tap_start"]["what"].startswith("Press Start on the title screen.")
+    # 선택지가 하나라 Jev 는 고르지 않는다. 준비 조건이 없어 기다림만 묻는다(pe11).
+    assert jev.asked("choice") == [] and len(jev.asked("noul")) == 1
+    turn = next(f["payload"]["turn"] for f in fake.frames("LOG") if f["payload"].get("kind") == "turn")
+    assert turn["options"] == ["developer:tap_start"] and turn["picked_by"] == "only_option"
+    plan = next(f["payload"] for f in fake.frames("LOG") if f["payload"].get("kind") == "step_macros")
+    assert plan["decision"]["descriptions"]["developer:tap_start"].startswith("Press Start on the title screen.")
     assert fake.frames("MACRO_READ") == []
     (action,) = fake.frames("ACTION")
     assert action["payload"]["message"] == "click(start)"
@@ -288,7 +290,8 @@ def test_a_developer_macro_with_parameters_runs_with_the_arguments_the_planner_b
     state, failure = _run(fake, Answered(answer), (_macro("press", PRESS),), jev)
 
     assert failure is None and state.step_results[0].passed
-    description = jev.asked("choice")[0]["questions"]["answer"]["criteria"]["developer:press"]["what"]
+    plan = next(f["payload"] for f in fake.frames("LOG") if f["payload"].get("kind") == "step_macros")
+    description = plan["decision"]["descriptions"]["developer:press"]
     assert description == 'Press `target` and wait for the map.\n\nCalled in this step as `press(find(name="Start"))`.'
     assert fake.actions[0][0] == "move_mouse" and fake.actions[0][1][0] == "Root/Start"
     assert fake.scene == "Map"
@@ -568,10 +571,9 @@ def test_a_target_its_macro_would_refuse_is_no_option_and_an_action_off_its_scre
     state, failure = _run(fake, Answered(answer), (_macro("strike", STRIKE), _macro("wave", WAVE)), jev)
 
     assert failure is None and state.step_results[0].passed
-    options = jev.asked("choice")[0]["questions"]["answer"]["criteria"]
-    assert "developer:strike @ Root/Start" in options and "developer:strike @ Root/Quit" not in options
-    assert "developer:wave" not in options
     turn = next(f["payload"]["turn"] for f in fake.frames("LOG") if f["payload"].get("kind") == "turn")
+    # 남은 선택지는 하나라 Jev 를 부르지 않고 실행한다(pe11).
+    assert turn["options"] == ["developer:strike @ Root/Start"] and jev.asked("choice") == []
     assert turn["not_ready"] == ["developer:wave"]
     assert turn["not_ready_targets"] == ["developer:strike @ Root/Quit (unmet)"]
     assert turn["target"] == "Root/Start"

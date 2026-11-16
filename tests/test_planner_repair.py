@@ -383,9 +383,10 @@ def test_after_an_action_passes_the_next_turn_offers_only_what_follows_it() -> N
 
     play = asyncio.run(go())
 
-    first, second = jev.asked("choice")
+    # 둘째 turn 은 `after` 로 좁혀 선택지가 하나라 Jev 를 부르지 않는다(pe11).
+    (first,) = jev.asked("choice")
     assert "press_start" in first["questions"]["answer"]["criteria"]
-    assert "press_start" not in second["questions"]["answer"]["criteria"]
+    assert play.turns[1]["options"] == ["look_around"] and play.turns[1]["picked_by"] == "only_option"
     assert play.turns[1]["after"] == ["look_around"] and play.turns[1]["picked"] == "look_around"
 
 

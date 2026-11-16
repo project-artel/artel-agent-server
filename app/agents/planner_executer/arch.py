@@ -69,7 +69,20 @@ from pydantic import BaseModel, ConfigDict, Field
 # pe10-pause-planning: 본 planner 가 계획을 쓰거나 다시 쓰는 동안, 미리 쓴 계획을 기다리는 동안 게임 시간을 멈춘다
 # (`pause_while_planning`, SDK `pause_time`). 계획을 쓰는 60~140초 동안 게임이 돌아 지나가는 상태(타이핑 중인 대사)가
 # 사라지고, 계획이 그때 본 값에 묶이던 것을 막는다(Voyager·Cradle 처럼 멈춘다). orchestration 은 멈춘 동안의 화면을 녹화하지 않는다.
-PLANNER_EXECUTER_LABEL = "pe10-pause-planning"
+# pe11-code-decides-flow: Jev 는 준비된 선택지가 둘 이상일 때 하나를 고르기만 한다. 흐름은 코드가 정한다. try 8~25 의 Jev 판단
+# 1,147건을 대 보니, 선택지가 하나인 고르기가 60% 였고 Jev 는 그 동작을 고르거나 `EXPAND_STATE` 로 두 turn 미룬 뒤 결국
+# 골랐다. 기다림 질문은 1,014번 중 한 번도 0.7 을 넘지 않았고, 목표 확인은 "아니다"인 동안 입력을 더 보내거나(try 11) 시작부터
+# 참인 경우 반반으로 답했다(try 17·18·24).
+# - 선택지가 하나면 묻지 않고 실행한다. 기다림은 준비 조건으로 정하고, 준비 조건이 없는 선택지가 있을 때만 묻는다.
+# - `EXPAND_STATE`·`REPLAN` 선택지와 목표 확인(`_ask_goal`)을 없앴다. Jev state 에 `hidden`·`omitted_objects` 를 싣지 않는다.
+# - 멈춤은 정해진 경우뿐이다: 이 step 의 `done()` 이 참이 됨, 묶음의 뒤 step `done_k` 가 참이 됨(그 사이 step 은 입력 없이 끝난다),
+#   동작이 있는 step 이 시작부터 `done()` 참, 씬이 바뀌고 유예 동안 끝 조건이 거짓(`off_plan`, planner 가 새 씬에서 다시 쓴다),
+#   그리고 지금 있는 상한.
+# - planner 가 게임을 멈춘 채 계획을 쓰면, 받은 화면에서 `done()` 과 묶음의 `done_k` 를 읽어 이미 참이면 거절하고 다시 쓰게
+#   한다. planner·editor 가 쓴 코드의 `ask`·`decide` 는 거절한다.
+# - 노브 `done_by`·`pick_wait`·`max_done_disagreements`·`max_expansions_per_step` 를 지우고 `max_scene_replans_per_step` 를 더했다.
+# prompt 는 qa_planner v7 을 읽는다.
+PLANNER_EXECUTER_LABEL = "pe11-code-decides-flow"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1
@@ -84,13 +97,11 @@ class PlannerExecuterArchSpec(BaseModel):
     # Turns and wall-clock one step may take. A step can be a whole level.
     max_turns_per_step: int = Field(default=300, ge=1, le=10_000)
     step_budget_seconds: float = Field(default=480.0, gt=0, le=3_600)
-    # Jev 가 `none_fits` 를 고르는 상태가 이만큼 이어지면 play 를 멈춘다. 카운트다운, 팝업, 장면 전환은
-    # 1–2초에 지나간다.
+    # 준비된 행동이 없거나 기다림으로 정한 상태가 이만큼 이어지면 play 를 멈춘다. 씬이 바뀐 뒤 끝 조건을 기다리는 유예도 이것이다.
+    # 카운트다운, 팝업, 장면 전환은 1–2초에 지나간다.
     no_action_grace_seconds: float = Field(default=3.0, gt=0, le=120)
     # action 의 macro 가 이만큼 연달아 실패하면 play 를 멈춘다.
     max_failures_in_a_row: int = Field(default=3, ge=1, le=50)
-    # `done()` 이 참인데 Jev 가 목표에 닿지 않았다고 본 횟수가 이만큼이면 play 를 멈춘다.
-    max_done_disagreements: int = Field(default=3, ge=1, le=50)
     # planner 의 답이 거절될 때 다시 쓰게 하는 횟수. 다 쓰고도 거절되면 그 step 은 FAILED 다.
     max_rewrites: int = Field(default=2, ge=0, le=5)
     # FREE 시나리오: 한 라운드가 끝나고 미룬 case 가 남았을 때 `reset_game` 으로 다시 시작하는 횟수.
@@ -134,12 +145,6 @@ class PlannerExecuterArchSpec(BaseModel):
     # 선언은 orchestration(MCP 로 등록한 것)에서, `qa_facts_dir` 이 있으면 그 디렉터리에서 읽는다. 선언이 없으면 `off` 와 같다.
     # pe9 부터 기본으로 켠다: 로컬 try 9 에서 `tutorial_waiting_for_key` 등을 실으니 Jev 가 대사 대기를 0.95 이상으로 골랐다.
     facts: Literal["off", "on"] = "on"
-    # Jev 의 고르기에 "지금 기다려야 하나" 를 어떻게 묻는가. `noul` 은 같은 요청에 noul 로 따로 묻고 0.7 이상이면 기다린다
-    # (pe9). `option` 은 예전처럼 `none_fits` 를 선택지에 섞는다.
-    pick_wait: Literal["option", "noul"] = "noul"
-    # `done()`(또는 step 의 완료 조건)이 참일 때 누가 멈춤을 정하는가. `code` 는 바로 멈춘다(pe9). `jev` 는 예전처럼 Jev 에게
-    # 목표 도달을 묻고, 아니라고 하면 동작을 계속 고른다.
-    done_by: Literal["code", "jev"] = "code"
     # 앞 step 이 도는 동안 다음 step 의 계획을 미리 쓰는가(pe9). planner 가 step 마다 약 60초 행동을 막는 동안 게임은 계속 돌아,
     # 곧 지나가는 상태(타이핑 중인 대사)가 다음 step 이 시작할 때 이미 없었다(로컬 try 22 step 3). `on` 이면 따로 쓰고, 앞 step
     # 에서 씬이 바뀌면 새 씬에서 다시 쓰며, 쓸 때의 씬이 지금 씬과 다르면 버리고 새로 쓴다.
@@ -153,10 +158,11 @@ class PlannerExecuterArchSpec(BaseModel):
     # Jev 가 읽을 범위를 planner 가 정한다(ARTEL-1295 C). `all` 은 live object 전부. `planner` 는 `state_set` 일 때만
     # 뜻이 있다 — `PulseMemory` 출처는 범위를 좁히지 않는다.
     observation: Literal["planner", "all"] = "planner"
-    # Jev 가 `EXPAND_STATE` 를 고를 수 있는 횟수(step 마다). 단계가 둘이라 2 를 넘어도 더 넓어지지 않는다.
-    max_expansions_per_step: int = Field(default=2, ge=0, le=2)
-    # Jev 가 `REPLAN` 을 골라 planner 가 step 을 다시 쓰는 횟수(step 마다). 0 이면 선택지에 없다. 기본은 꺼 둔다.
+    # 준비된 행동이 없거나 모두 빠져 executer 가 planner 에게 step 을 다시 쓰게 하는 횟수(step 마다). 0 이면 그 자리에서 멈춘다.
     max_replans_per_step: int = Field(default=0, ge=0, le=5)
+    # ORDERED step 에서 씬이 바뀌고 유예 동안 끝 조건이 거짓이면(`off_plan`) planner 가 새 씬에서 다시 쓰는 횟수(step 마다, pe11).
+    # 0 이면 그 자리에서 멈추고 판정한다.
+    max_scene_replans_per_step: int = Field(default=1, ge=0, le=5)
     # 한 action 이 한 step 안에서 실패하거나 입력 없이 끝난 횟수(누적)가 이만큼이면 그 step 의 선택지에서 뺀다. editor 가
     # 고친 action 은 다시 0 부터 센다. 전투의 `end_turn` 처럼 가끔 대기 시간을 넘겼다가 다음에 통과하는 action 이 있어
     # `repair_after` 보다 넉넉히 둔다.

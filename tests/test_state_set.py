@@ -220,10 +220,9 @@ def test_play_stops_when_the_state_set_cannot_be_read_and_does_not_fall_back() -
     assert jev.bodies == []
 
 
-# ── C: planner 가 정하는 범위, EXPAND_STATE, REPLAN (ARTEL-1295) ─────────────────
+# ── C: planner 가 정하는 범위 (ARTEL-1295). pe11 부터 Jev 는 범위를 넓히거나 다시 계획하라고 고르지 않는다 ─────
 
 
-from app.agents.planner_executer.executer import EXPAND_STATE, REPLAN  # noqa: E402
 from app.agents.planner_executer.macros import StepObserve  # noqa: E402
 from app.agents.planner_executer.planner import read_observe, split_observe_block  # noqa: E402
 from app.agents.qa.macro.errors import MacroRejection  # noqa: E402
@@ -313,44 +312,34 @@ def _play_planned(fake: FakeGame, jev: FakeJev, state, observe: StepObserve | No
     return asyncio.run(go())
 
 
-def test_over_the_limit_the_state_says_how_many_objects_it_left_out_and_offers_expand() -> None:
+def test_over_the_limit_the_record_says_how_many_objects_were_left_out_and_jev_is_not_offered_more() -> None:
+    """pe11: 빠진 객체 수와 가린 것의 목록은 turn 기록에만 남는다. Jev 에게는 범위를 넓히는 선택지도, 그 근거도 보내지 않는다."""
     fake = _menu()
-    jev = FakeJev(picks=("press_start",), goal=(0.9,))
+    jev = FakeJev(picks=("press_start",))
 
     play = _play_planned(fake, jev, FakeBigStateSet(fake), None, jev_state_chars=6_000)
 
     first = jev.asked("choice")[0]
     assert first["state"]["objects"][0]["path"] == "Root/Start"  # 활성 씬이 먼저다
-    assert first["state"]["omitted_objects"] > 0
-    assert EXPAND_STATE in first["questions"]["answer"]["criteria"]
-    assert REPLAN not in first["questions"]["answer"]["criteria"]
+    assert "omitted_objects" not in first["state"] and "hidden" not in first["state"]
+    assert set(first["questions"]["answer"]["criteria"]) == {"press_start", "look_around"}
     assert play.turns[0]["omitted_objects"] > 0 and play.stopped == "done"
 
 
-def test_expand_state_widens_the_view_one_step_at_a_time() -> None:
+def test_the_observe_view_stays_as_planned_and_what_it_hid_goes_to_the_turn_record() -> None:
+    """범위는 planner 의 ```observe 그대로다. 가린 것은 planner 복구가 읽도록 turn 기록의 `hidden` 에 남는다."""
     fake = _menu()
-    jev = FakeJev(picks=(EXPAND_STATE, EXPAND_STATE, "press_start"), goal=(0.9,))
+    jev = FakeJev(picks=("press_start",))
     observe = StepObserve(paths=("Nowhere",), members=("Player.hp",))
 
-    play = _play_planned(fake, jev, FakeStateSet(fake), observe)
+    play = _play_planned(fake, jev, FakeStateSet(fake), observe, can_replan=True)
 
-    states = [body["state"] for body in jev.asked("choice")]
-    assert states[0]["objects"] == []  # 범위 밖이라 아무것도 없다
-    assert states[1]["objects"] == [{"path": "Root/Start", "text": "Start", "members": {}}]  # path 를 풀었다
-    assert EXPAND_STATE not in jev.asked("choice")[2]["questions"]["answer"]["criteria"]  # 다 넓혔다
-    assert [turn.get("expanded_to") for turn in play.turns[:2]] == [1, 2]
+    state = jev.asked("choice")[0]["state"]
+    assert state["objects"] == []  # 범위 밖이라 아무것도 없다
+    assert "hidden" not in state
+    assert play.turns[0]["hidden"]["objects"]
+    assert "level" not in play.turns[0]["view"]
     assert play.stopped == "done"
-
-
-def test_replan_stops_play_for_the_runner_and_is_offered_only_when_allowed() -> None:
-    fake = _menu()
-    jev = FakeJev(picks=(REPLAN,), goal=(0.9,))
-
-    play = _play_planned(fake, jev, FakeStateSet(fake), None, can_replan=True)
-
-    assert REPLAN in jev.asked("choice")[0]["questions"]["answer"]["criteria"]
-    assert play.replan_requested and play.stopped.startswith("REPLAN:")
-    assert play.played()["end_state_version"] == 2
 
 
 def test_the_whole_view_of_pe9_is_kept_with_observation_all() -> None:

@@ -124,6 +124,13 @@ class Written:
     source: str
     macros: StepMacros | None
     refusal: str | None = None
+    # 계획 검사(`Planner.start_check`)가 마지막 답까지 거절했는데 그대로 받았다(pe11). runner 는 이 계획을 검사를 거치지 않은
+    # 것으로 넘긴다 — 동작이 있는 step 이 시작부터 `done()` 참이면 입력 없이 멈춘다.
+    unchecked: bool = False
+
+
+# 계획을 받은 화면에서 읽는 검사(pe11): `(macros, step)` → 거절 문장, 통과면 `None`. runner 가 게임을 멈춘 채 준다.
+StartCheck = Callable[[StepMacros, int], Awaitable[str | None]]
 
 
 @dataclass(frozen=True)
@@ -377,6 +384,9 @@ class Planner:
         self._ask = ask or self._ask_model
         # step 의 대상 계약. runner 가 런 시작 때 채운다. 계획 대상이 아니라 요청에 읽기 전용으로 붙는다.
         self.targets: StepContracts | None = None
+        # 받은 화면에서 끝 조건을 읽는 검사(pe11). ORDERED 런에서 runner 가 채운다. 미리 쓰는 planner 는 쓰지 않는다 — 그 계획은
+        # 쓸 때가 아니라 받을 때 검사한다.
+        self.start_check: StartCheck | None = None
         # 지금 쓰는 답에 붙일 화면 한 장. `_write` 가 매번 새로 찍는다.
         self._image: ScreenImage | None = None
         # 이 빌드가 읽는 입력(SDK `list_inputs`). `_write`·`plan_scene` 이 매번 새로 묻는다 — Input System action 은
@@ -417,8 +427,8 @@ class Planner:
     async def replan(
         self, scenario: QaScenario, step: int, reason: str, turns: list[str], transition: dict | None = None
     ) -> Written:
-        """Step `step` written again: the decision model chose `REPLAN` (ARTEL-1295 C), or an action got stuck
-        under `repair="planner"`.
+        """Step `step` written again: no action was ready or every action was out, the scene changed under the plan
+        (`off_plan`, pe11), or an action got stuck under `repair="planner"`.
 
         `reason` is why play stopped, `turns` the last action turns as `recent_action_lines` writes them. The
         planner sees both above the current screen; the rest of the request is `write`'s. `transition` rides the
@@ -644,6 +654,18 @@ class Planner:
                 refused = self._ledger.check(written.macros, self._developer, self._channel.scene.pulse)
                 if refused is not None:
                     raise MacroRejection(refused)
+                if self.start_check is not None and not self._ahead and kind in ("step", "replan"):
+                    # 받은 화면에서 끝 조건이 이미 참이면 play 는 한 번도 움직이지 않고 끝난다(pe11). 예전에는 Jev 에게 물었지만
+                    # 답은 반반이었다. 다시 쓰게 하고, 마지막 답까지 그러면 그대로 받는다 — play 없이 실패로 떨어뜨리지 않는다.
+                    started = await self.start_check(written.macros, step)
+                    if started is not None:
+                        if attempt < self._spec.max_rewrites:
+                            raise MacroRejection(started)
+                        written = replace(written, unchecked=True)
+                        await note_decision(
+                            self._channel, f"{kind}_start_unchecked",
+                            f"{label}: the last answer was taken although {clip(started, MAX_QUOTE_CHARS)}", step,
+                        )
             except MacroRejection as rejection:
                 written = Written(source, None, rejection.render())
                 await note_decision(

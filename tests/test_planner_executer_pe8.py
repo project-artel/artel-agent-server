@@ -118,6 +118,11 @@ def test_the_line_is_empty_when_nothing_is_blocked_or_a_blocked_action_still_has
 # --- runner: 판정이 다음 step 과 겹쳐 돈다 --------------------------------------------------------
 
 
+# 맵에 머무는 둘째 step 의 계획: 보기만 한다. 첫 step 이 맵을 열면 `done()` 이 바로 참이다. 동작을 가진 계획(`MACROS`)이면
+# 받은 화면에서 이미 참이라 계획 검사가 거절한다(pe11).
+LOOK = 'def done() -> bool:\n    return scene() == "Map"\n'
+
+
 def _two_steps() -> QaScenario:
     return QaScenario(
         title="Start twice",
@@ -152,7 +157,7 @@ def test_the_next_step_is_planned_while_the_last_one_is_judged_and_verdicts_keep
 
     async def go():
         fake.push_reading()
-        runner = PlannerExecuterRunner(config, ask=Planning(MACROS, MACROS), judge=judge, jev=JevClient(post=FakeJev()))
+        runner = PlannerExecuterRunner(config, ask=Planning(MACROS, LOOK), judge=judge, jev=JevClient(post=FakeJev()))
         return await runner.run_with_deadline(fake.channel, _two_steps())
 
     state, failure = asyncio.run(go())
@@ -178,7 +183,7 @@ def test_an_error_while_judging_still_ends_the_run(monkeypatch) -> None:
     async def go():
         fake.push_reading()
         runner = PlannerExecuterRunner(
-            config, ask=Asked(MACROS, MACROS), judge=lambda *a: None, jev=JevClient(post=FakeJev())
+            config, ask=Asked(MACROS, LOOK), judge=lambda *a: None, jev=JevClient(post=FakeJev())
         )
         return await runner.run_with_deadline(fake.channel, _two_steps())
 
@@ -231,16 +236,6 @@ def test_a_high_wait_answer_waits_like_none_fits_and_none_fits_is_no_longer_an_o
     assert fake.actions == [] and play.stopped.startswith("no action fit")
 
 
-def test_the_old_way_is_kept_behind_the_knob() -> None:
-    fake = _menu()
-    jev = FakeJev(picks=("press_start",), goal=(0.9,))
-
-    _play(fake, jev, pick_wait="option")
-
-    first = jev.asked("choice")[0]
-    assert "none_fits" in first["questions"]["answer"]["criteria"] and "wait" not in first["questions"]
-
-
 # --- pe9: planner 의 하위 목표(```goals, prompt v6) ------------------------------------------------
 
 from app.agents.planner_executer.macros import read_goals  # noqa: E402
@@ -289,9 +284,12 @@ def test_jev_reads_the_current_goal_instead_of_the_step_and_moves_on_when_it_is_
 
     async def go():
         fake.push_reading()
-        macros = await parse_step(GOALS_MACROS, RegisteredMacros(fake.channel))
+        # 완료 조건이 끝내 참이 되지 않아야 둘째 하위 목표까지 간다. 참이 되면 코드가 바로 멈춘다(pe11).
+        source = GOALS_MACROS.replace('def done() -> bool:\n    return scene() == "Map"', 'def done() -> bool:\n    return scene() == "Never"')
+        assert source != GOALS_MACROS
+        macros = await parse_step(source, RegisteredMacros(fake.channel))
         goals, probes = await read_goals(
-            "open_map: Press Start to open the map.\nstay: Stay on the map.\n", GOALS_MACROS, RegisteredMacros(fake.channel)
+            "open_map: Press Start to open the map.\nstay: Stay on the map.\n", source, RegisteredMacros(fake.channel)
         )
         from dataclasses import replace
 
@@ -299,7 +297,7 @@ def test_jev_reads_the_current_goal_instead_of_the_step_and_moves_on_when_it_is_
         from app.agents.planner_executer.executer import Executer
 
         spec = PlannerExecuterArchSpec(
-            no_action_grace_seconds=0.1, state_source="pulse_memory", max_turns_per_step=3, done_by="jev"
+            no_action_grace_seconds=0.1, state_source="pulse_memory", max_turns_per_step=3
         )
         return await Executer(fake.channel, spec, JevClient(post=jev)).play(
             1, "Press Start and look at the map.", replace(macros, goals=goals, goal_probes=probes)
@@ -344,20 +342,28 @@ def test_play_stops_the_moment_done_turns_true_without_asking_jev() -> None:
     assert jev.asked("noul") == []
 
 
-def test_a_done_already_true_at_the_start_of_a_step_with_actions_is_confirmed_by_jev() -> None:
-    """처음부터 참인 완료 조건은 이 step 의 결과가 아닐 수 있다(try 14 step 4). 동작이 있는 step 이면 Jev 에게 확인받는다."""
-    agreed = FakeGame("Map", {"Root/Stage": {"text": "Stage 0"}})
-    jev = FakeJev(picks=("look_around",), goal=(0.9,))
+def test_a_done_true_from_the_start_stops_an_acting_step_without_input_unless_the_runner_checked_it() -> None:
+    """처음부터 참인 완료 조건은 이 step 의 결과가 아닐 수 있다(try 14 step 4). pe11 부터 Jev 에게 묻지 않는다. 계획 검사를 거치지
+    않았으면 입력 없이 `done_at_start` 로 멈춘다. runner 가 계획을 받을 때 거짓으로 읽었으면 그 뒤에 참이 된 것이라 `done` 이다."""
+    unchecked = FakeGame("Map", {"Root/Stage": {"text": "Stage 0"}})
+    jev = FakeJev(picks=("look_around",))
 
-    play = _play(agreed, jev)
+    play = _play(unchecked, jev)
 
-    assert play.stopped == "done" and agreed.actions == []
-    assert len(jev.asked("noul")) == 1
+    assert play.stopped == "done_at_start" and unchecked.actions == [] and jev.bodies == []
 
-    doubted = FakeGame("Map", {"Root/Stage": {"text": "Stage 0"}})
-    play = _play(doubted, FakeJev(picks=("look_around",), goal=(0.1,)), max_done_disagreements=2)
+    checked = FakeGame("Map", {"Root/Stage": {"text": "Stage 0"}})
 
-    assert play.stopped.startswith("done() and Jev disagree")
+    async def go():
+        checked.push_reading()
+        from app.agents.planner_executer.arch import PlannerExecuterArchSpec
+        from app.agents.planner_executer.executer import Executer
+
+        macros = await parse_step(MACROS, RegisteredMacros(checked.channel))
+        spec = PlannerExecuterArchSpec(no_action_grace_seconds=0.1, state_source="pulse_memory")
+        return await Executer(checked.channel, spec, JevClient(post=jev)).play(1, "Press Start.", macros, checked=True)
+
+    assert asyncio.run(go()).stopped == "done" and checked.actions == []
 
 
 def test_a_step_that_only_looks_takes_a_done_true_from_the_start() -> None:
@@ -732,7 +738,7 @@ def _run_ahead(fake, asked, monkeypatch, scenes=None):
 
 def test_the_next_step_is_written_ahead_while_the_step_before_it_plays_and_used_on_the_same_scene(monkeypatch) -> None:
     fake = _menu()
-    asked = Asked(MACROS, MACROS)
+    asked = Asked(MACROS, LOOK)
 
     state, failure = _run_ahead(fake, asked, monkeypatch, scenes=["Menu", "Menu"])
 
@@ -747,7 +753,7 @@ def test_the_next_step_is_written_ahead_while_the_step_before_it_plays_and_used_
 
 def test_a_plan_written_ahead_on_another_scene_is_dropped_and_the_step_is_written_again(monkeypatch) -> None:
     fake = _menu()
-    asked = Asked(MACROS, MACROS, MACROS)
+    asked = Asked(MACROS, LOOK, LOOK)
 
     # 쓰기 시작할 때 Menu, step 1 이 끝날 때 Battle → 끝날 때 다시 쓰기 시작(Battle), 쓰려 할 때 Menu → 기다리지 않고 버림.
     state, failure = _run_ahead(fake, asked, monkeypatch, scenes=["Menu", "Battle", "Battle", "Menu", "Menu"])

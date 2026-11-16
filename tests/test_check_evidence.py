@@ -169,7 +169,7 @@ def test_each_turn_log_carries_the_state_jev_read_and_its_view() -> None:
 
     turns = [frame["payload"]["turn"] for frame in fake.frames("LOG") if frame["payload"].get("kind") == "turn"]
     picked = next(turn for turn in turns if turn.get("picked"))
-    assert picked["view"] == {"paths": None, "members": None, "level": 0}
+    assert picked["view"] == {"paths": None, "members": None}
     assert picked["jev_state"]["objects"][0]["path"] == "Root/Start"
 
 

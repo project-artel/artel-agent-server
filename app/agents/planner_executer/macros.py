@@ -258,6 +258,26 @@ class DeveloperAction:
     ready: MacroDefinition | None = None
 
 
+# planner·editor 가 쓴 글에서 받지 않는 호출(pe11). 둘 다 그 자리의 판단을 decision model 에게 넘긴다. 대상 고르기는 executer 가
+# 대상마다 선택지를 펼쳐 Jev 에게 묻고, 끝·준비·효과는 상태에서 읽는 predicate 로 쓴다. try 24 step 3 의
+# `while ask("뒤에 대사가 더 있나?")` 는 상태에 없는 것을 Jev 에게 물었다.
+DECISION_CALLS = ("ask", "decide")
+
+
+def reject_decision_calls(source: str) -> None:
+    """글의 어느 `def` 든 `ask`·`decide` 를 부르면 `MacroRejection`. 가져온 developer macro 의 본문은 이 글이 아니라 보지 않는다."""
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in DECISION_CALLS:
+            raise MacroRejection(
+                f"`{node.func.id}(...)` hands a judgement to the decision model, and plans do not use it. The executer "
+                "already offers one option per target object and asks the decision model to pick among the ready options. "
+                "Read when to act, when an action worked and when the step is done from the game's state in a predicate; "
+                "what the state cannot tell, leave to another end condition.",
+                node.lineno,
+            )
+
+
 async def parse_step(
     source: str,
     registered: RegisteredMacros,
@@ -284,6 +304,7 @@ async def parse_step(
     defs = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
     if PROBE in {node.name for node in defs}:
         raise MacroRejection(f"`{PROBE}` is a name the executer uses; name the def otherwise.")
+    reject_decision_calls(source)
     goal = next((node for node in defs if node.name == DONE), None)
     if goal is None or not _returns(goal, "bool") or goal.args.args:
         raise MacroRejection(
@@ -381,6 +402,7 @@ async def parse_guidance_step(
     defs = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
     if PROBE in {node.name for node in defs}:
         raise MacroRejection(f"`{PROBE}` is a name the executer uses; name the def otherwise.")
+    reject_decision_calls(source)
     goal = next((node for node in defs if node.name == DONE), None)
     if goal is None or not _returns(goal, "bool") or goal.args.args:
         raise MacroRejection(

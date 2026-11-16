@@ -53,6 +53,9 @@ from app.agents.planner_executer.developer_macros import (
     LoadedDeveloperMacros,
 )
 from app.agents.planner_executer.executer import (
+    GOAL_STOPS,
+    PASSED_IN_EARLIER_STEP,
+    RESULT_IN_EARLIER_STEP,
     Executer,
     StepPlay,
     merge_plays,
@@ -247,6 +250,8 @@ class PlannerExecuterRunner:
             # 대상 계약: 첫 계획 전에 대상의 뜻을 한 번 고정한다. planner 는 읽기만 한다.
             targets = await self._resolve_targets(channel, scenario, executer) if self._spec.target_contract == "on" else None
             planner.targets = targets
+            # 계획을 받은 화면에서 끝 조건을 읽는다(pe11). planner 는 게임을 멈춘 채 쓰므로 그 화면이 play 가 시작할 화면이다.
+            planner.start_check = lambda macros, step: self._start_refusal(executer, macros, step)
             # 판정(evaluator·실패 분석)은 다음 step 의 계획·플레이와 겹쳐 돈다. 런 418 에서 실패한 step 마다 판정 두 호출이
             # 약 30초씩 다음 계획을 막았고, 다음 planner 는 앞 판정을 읽지 않는다. 판정끼리는 앞 판정이 끝난 뒤에 시작하므로
             # evaluator 가 읽는 앞 step 들의 판정과 STATUS 의 순서는 그대로다. 끝 화면은 다음 step 전에 지금 찍는다.
@@ -258,6 +263,8 @@ class PlannerExecuterRunner:
             held: list[Held] = []
             # 다음 step 의 미리 쓴 계획(pe9 `plan_ahead`).
             early: Early | None = None
+            # 묶음의 앞 step 이 뒤 step `done_k` 로 멈췄으면 그 k(pe11). 그 사이 step 과 k 는 입력 없이 끝난다.
+            ended_through: int | None = None
 
             def release() -> None:
                 nonlocal settling, held
@@ -278,32 +285,64 @@ class PlannerExecuterRunner:
                         targets = targets.with_step(target)
                         planner.targets = targets
                         await note_decision(channel, "step_target", f"Step {step}: target {target.status}", step, **target.logged())
+                    written: Written | None = None
+                    # 이 step 의 계획이 시작 화면에서 끝 조건을 거짓으로 읽었나(pe11). 묶음의 뒤 step 은 앞 step 의 마지막 turn 이 읽었다.
+                    checked = False
+                    finished: str | None = None
                     if step in ahead:
                         if early is not None:
                             # 묶음이 이 step 을 맡았는데 미리 쓴 계획이 있다면 그것은 쓰지 않는다.
                             early.task.cancel()
                             early = None
-                        written = Written("", ahead.pop(step))
-                        await note_decision(
-                            channel, "segment_step", f"Step {step}: played with the plan written for the earlier step", step,
-                            goals=[name for name, _goal in written.macros.goals] or None,
-                        )
-                    else:
+                        candidate = ahead.pop(step)
+                        if ended_through is not None and step <= ended_through:
+                            # 앞 step 이 이 step 의 결과에서(또는 그 뒤에서) 멈췄다. 결과는 앞 step 기록에 있다.
+                            finished = RESULT_IN_EARLIER_STEP if step == ended_through else PASSED_IN_EARLIER_STEP
+                            written, checked = Written("", candidate), True
+                        elif (candidate.actions or candidate.contracts) and await executer.holds(candidate.probe, step):
+                            # 앞 step 이 제 완료 조건에서 멈췄는데 이 step 의 완료 조건이 벌써 참이다. "뒤 step 의 `done_` 은 앞 step 이
+                            # 멈춘 곳에서 거짓이어야 한다" 를 어긴 계획이다. 묶음을 끊고 이 step 을 새로 쓴다.
+                            ahead.clear()
+                            await note_decision(
+                                channel, "segment_broken",
+                                f"Step {step}: the segment plan was dropped: this step's done() already holds where the earlier step stopped",
+                                step,
+                            )
+                        else:
+                            written, checked = Written("", candidate), True
+                        if written is not None:
+                            await note_decision(
+                                channel, "segment_step", f"Step {step}: played with the plan written for the earlier step", step,
+                                goals=[name for name, _goal in written.macros.goals] or None,
+                                finished=finished,
+                            )
+                    if written is None:
                         ahead.clear()
                         used = None
                         async with self._game_paused(channel, step):
                             if early is not None and early.step == step:
                                 used = await self._use_early(channel, planner, early)
+                                if used is not None and used.macros is not None:
+                                    # 미리 쓴 계획은 다른 화면에서 썼다. 받는 지금 화면에서 끝 조건을 읽는다.
+                                    started = await self._start_refusal(executer, used.macros, step)
+                                    if started is not None:
+                                        await note_decision(
+                                            channel, "ahead_plan_dropped",
+                                            f"Step {step}: the plan written ahead was not used ({clip(started, MAX_REFUSAL_CHARS)})",
+                                            step, reason=clip(started, MAX_REFUSAL_CHARS), ahead=True,
+                                        )
+                                        used = None
                             elif early is not None:
                                 early.task.cancel()
                             early = None
                             written = used if used is not None else await planner.write(scenario, step)
+                        checked = written.macros is not None and not written.unchecked
                         if written.macros is not None and written.macros.segment:
                             ahead = {
                                 number: step_of_segment(written.macros, number)
                                 for number in written.macros.segment if number > step
                             }
-                            written = Written(written.source, step_of_segment(written.macros, step), written.refusal)
+                            written = Written(written.source, step_of_segment(written.macros, step), written.refusal, written.unchecked)
                     if written.macros is None:
                         release()
                         message = (
@@ -322,7 +361,9 @@ class PlannerExecuterRunner:
                         holder = [early]
                         following = asyncio.create_task(self._follow_scene(channel, scenario, step, holder))
                     try:
-                        play = await self._play_with_replans(scenario, step, planner, executer, written.macros, target)
+                        play = await self._play_with_replans(
+                            scenario, step, planner, executer, written.macros, target, checked=checked, finished=finished
+                        )
                     finally:
                         if following is not None:
                             following.cancel()
@@ -341,8 +382,13 @@ class PlannerExecuterRunner:
                             channel, state, scenario, step, False, message, self._engine_error(message)
                         ))
                         continue
-                    if play.stopped != "done":
+                    if play.later_step is not None:
+                        ended_through = play.later_step
+                    if (play.stopped not in GOAL_STOPS and play.stopped != PASSED_IN_EARLIER_STEP) or play.rewritten:
+                        # 뒤 step 의 계획은 이 step 이 끝 조건에서 멈춘 화면을 전제한다. 다시 쓴 계획은 묶음을 받지 않는다.
                         ahead.clear()
+                    if not ahead:
+                        ended_through = None
                     image = (
                         await capture_screen(channel, f"Step {step}: capturing the screen for the evaluator", step)
                         if self._spec.screen_images == "on"
@@ -629,17 +675,27 @@ class PlannerExecuterRunner:
         return contracts
 
     async def _play_with_replans(
-        self, scenario: QaScenario, step: int, planner: Planner, executer: Executer, macros, target: StepTarget | None = None
+        self,
+        scenario: QaScenario,
+        step: int,
+        planner: Planner,
+        executer: Executer,
+        macros,
+        target: StepTarget | None = None,
+        checked: bool = False,
+        finished: str | None = None,
     ) -> StepPlay | None:
-        """Play the step, and have the planner write it again while it is asked to and has budget left: Jev
-        chose `REPLAN` (ARTEL-1295 C), or an action got stuck under `repair="planner"`.
+        """Play the step, and have the planner write it again while it is asked to and has budget left: no action was
+        ready or every action was out, the scene changed under the plan (`off_plan`, pe11), or an action got stuck under
+        `repair="planner"`. `checked` and `finished` go to the first play (`Executer.play`); a plan written again carries
+        its own check.
 
         Every play of the step reaches the evaluator, joined (`merge_plays`), and the step's time budget runs on
         across them. A rewrite refused to the end ends play there; what was played before it is still judged.
         """
         spec = self._spec
         plays: list[StepPlay] = []
-        replans = repairs = 0
+        replans = repairs = scene_replans = 0
         started = executer.now()
         planner_repairs = spec.repair == "planner" and spec.editor == "on"
         while True:
@@ -654,6 +710,10 @@ class PlannerExecuterRunner:
                 can_ask_planner=planner_repairs and repairs < spec.max_repairs_per_step,
                 target=target,
                 history=[turn for earlier in plays for turn in earlier.turns],
+                checked=checked,
+                finished_earlier=finished if not plays else None,
+                scene_bound=True,
+                can_replan_scene=scene_replans < spec.max_scene_replans_per_step,
             )
             plays.append(play)
             self._ledger.record(step, play, macros, self._developer)
@@ -661,12 +721,16 @@ class PlannerExecuterRunner:
                 repairs += 1
                 reason, lines = repair_brief(play, self._developer)
                 transition = {"trigger": "repair", "attempt": repairs, "budget": spec.max_repairs_per_step}
+            elif play.replan_requested and play.left_scene is not None:
+                scene_replans += 1
+                reason, lines = play.stopped, recent_action_lines(play.turns)
+                transition = {"trigger": "scene", "attempt": scene_replans, "budget": spec.max_scene_replans_per_step}
             elif play.replan_requested:
                 replans += 1
                 reason, lines = play.stopped, recent_action_lines(play.turns)
                 transition = {"trigger": "replan", "attempt": replans, "budget": spec.max_replans_per_step}
             else:
-                return merge_plays(plays)
+                return _joined_rewrites(plays)
             # 자동 복구의 전이마다 이유·소비 예산·쓴 상태 버전을 남긴다(개선 계획 묶음 2).
             transition |= {
                 "stopped": clip(play.stopped, MAX_REFUSAL_CHARS),
@@ -680,8 +744,30 @@ class PlannerExecuterRunner:
                     f"PLANNER-REFUSED: the rewritten macros were still refused after {spec.max_rewrites} rewrites "
                     f"(asked because: {clip(play.stopped, MAX_REFUSAL_CHARS)})"
                 )
-                return merge_plays(plays)
+                return _joined_rewrites(plays)
             macros = written.macros
+            checked = not written.unchecked
+
+    async def _start_refusal(self, executer: Executer, macros: StepMacros, step: int) -> str | None:
+        """계획을 받은 지금 화면에서 끝 조건이 이미 참이면 그 까닭(planner 거절 문장), 아니면 `None`(pe11).
+
+        동작이 있는 step 의 `done()`, 그리고 묶음의 뒤 step `done_<k>()` 를 읽는다. 앞의 것이 참이면 play 는 입력 하나 없이 끝나고,
+        뒤의 것이 참이면 이 step 이 시작하자마자 그 step 의 결과로 끝난다. 예전에는 Jev 에게 목표 도달을 물었지만 답은 반반이었다
+        (try 17·18·24)."""
+        held = []
+        if (macros.actions or macros.contracts) and await executer.holds(macros.probe, step):
+            held.append("`done()`")
+        for number, (_goals, probe, _actions) in sorted(macros.segment.items()):
+            if number > step and probe is not None and await executer.holds(probe, number):
+                held.append(f"`done_{number}()`")
+        if not held:
+            return None
+        return (
+            f"{' and '.join(held)} already {'holds' if len(held) == 1 else 'hold'} on the screen this plan was written on, so "
+            "play would stop before any move. When this step's result is already on the screen, write the step with no "
+            "actions. Otherwise the predicate reads a state that is already there or comes back on its own: read what this "
+            "step's own moves change. A later step's `done_` must be false where the step before it stops."
+        )
 
     def _repair(self, scenario: QaScenario, step: int):
         """The editor for one step's play, or `None` when the run does not edit."""
@@ -983,6 +1069,13 @@ def repair_brief(play: StepPlay, developer: LoadedDeveloperMacros | None = None)
     return reason, recent_action_lines(play.turns[-REPAIR_TURNS_SHOWN:], REPAIR_TURNS_SHOWN)
 
 
+def _joined_rewrites(plays: list[StepPlay]) -> StepPlay:
+    """step 하나의 play 들을 한 기록으로(`merge_plays`). 둘 이상이면 다시 쓴 계획을 거쳤다는 것을 남긴다(pe11)."""
+    joined = merge_plays(plays)
+    joined.rewritten = len(plays) > 1
+    return joined
+
+
 def _unseen_text(play: StepPlay) -> str:
     """실패한 조건이 가리킨, 이 런에서 한 번도 보고되지 않은 객체. 조건이 틀렸을 수 있다는 것을 planner 가 알게 한다 — 실패
     문구("창이 열리지 않았다")만 보면 게임을 탓하고 같은 macro 를 다시 고른다(런 184)."""
@@ -1013,11 +1106,11 @@ def _developer_text(action: str | None, developer: LoadedDeveloperMacros | None)
 
 def _hidden_text(play: StepPlay) -> str:
     """마지막으로 Jev 에게서 가려졌던 객체·static 묶음. observe 범위가 결과를 가렸는지 planner 가 보게 한다(런 169 step 4: 적과
-    플레이어가 가려진 채 턴 종료만 되풀이했다)."""
+    플레이어가 가려진 채 턴 종료만 되풀이했다). pe11 부터 turn 기록의 `hidden` 에 있고, 그 전 기록은 Jev state 안에 있다."""
     for turn in reversed(play.turns):
         state = turn.get("jev_state")
-        if isinstance(state, dict) and state.get("hidden"):
-            hidden = state["hidden"]
+        hidden = turn.get("hidden") or (state.get("hidden") if isinstance(state, dict) else None)
+        if hidden:
             objects = ", ".join(f"{name} ×{count}" for name, count in (hidden.get("objects") or {}).items())
             statics = ", ".join(hidden.get("statics") or [])
             parts = [part for part in (f"objects {objects}" if objects else "", f"static values {statics}" if statics else "") if part]

@@ -124,7 +124,29 @@ def stop_note(stopped: str, language: OutputLanguage) -> str:
     Executer 의 진단이라 그대로 둔다."""
     if stopped == "done":
         return ""
-    return f" (executer 중단: {stopped})" if language == OutputLanguage.ko else f" (executer stopped: {stopped})"
+    note = STOP_NOTES.get(stopped, {}).get(language.value if language == OutputLanguage.ko else "en", stopped)
+    return f" (executer 중단: {note})" if language == OutputLanguage.ko else f" (executer stopped: {note})"
+
+
+# 코드가 정한 멈춤의 설명(pe11). 키는 executer 의 멈춤 이유다. 나머지 이유는 진단 문장 그대로 붙인다.
+STOP_NOTES: dict[str, dict[str, str]] = {
+    "later_done": {
+        "en": "a later step's done condition became true, so this step ended there",
+        "ko": "뒤 step 의 완료 조건이 참이 되어 여기서 끝남",
+    },
+    "result_in_earlier_step": {
+        "en": "this step's result happened while an earlier step was playing; no input was sent in this step",
+        "ko": "이 step 의 결과가 앞 step 을 하는 중에 났고, 이 step 에서는 입력을 보내지 않음",
+    },
+    "passed_in_earlier_step": {
+        "en": "an earlier step went past this step to a later step's result; no input was sent in this step",
+        "ko": "앞 step 이 이 step 을 지나 뒤 step 의 결과까지 감. 이 step 에서는 입력을 보내지 않음",
+    },
+    "done_at_start": {
+        "en": "the done condition held from the start; no input was sent",
+        "ko": "완료 조건이 시작부터 참이라 입력을 보내지 않음",
+    },
+}
 
 
 class Evaluator:
@@ -410,8 +432,14 @@ def turn_line(turn: dict) -> str:
         parts.append(f"(done() could not be read: {turn['done_error']})")
     if "goal_ask" in turn:
         parts.append(f"Jev on the goal being reached: {turn['goal_ask']}")
+    if turn.get("later_done"):
+        parts.append("a later step's done() became true: " + ", ".join(f"step {number}" for number in turn["later_done"]))
+    if turn.get("scene_left"):
+        parts.append(f"the scene changed from {turn['scene_left'].get('from')} to {turn['scene_left'].get('to')}")
     if "picked" in turn:
-        parts.append(f"Jev picked {turn['picked']}")
+        parts.append(
+            f"the only option ran: {turn['picked']}" if turn.get("picked_by") == "only_option" else f"Jev picked {turn['picked']}"
+        )
     if "outcome" in turn:
         parts.append(f"→ {turn['outcome']}" + (f": {turn['reason']}" if turn.get("reason") else ""))
         sent = turn.get("sent") or []

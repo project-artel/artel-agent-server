@@ -135,14 +135,15 @@ async def read_state(
 
 @dataclass(frozen=True)
 class StateView:
-    """Jev 에게 보일 범위(ARTEL-1298). Planner 의 ```observe 블록에서 오고, `EXPAND_STATE` 가 넓힌다.
+    """Jev 에게 보일 범위(ARTEL-1298). Planner 의 ```observe 블록에서 온다.
 
     `paths` 는 객체 경로 접두어, `members` 는 `Type.member` 짧은 이름이다. Planner 가 화면에서 읽은 글자 그대로라 selector 의
     `[n]` 이 붙었든 안 붙었든 맞춘다. `None` 은 그 축으로 거르지 않는다는 뜻이다.
 
     `planned` 면 범위가 씬 객체·DontDestroyOnLoad 객체·static 에 똑같이 걸린다. static 은 `statics` 키에 실리고, 범위에
-    안 든 것은 값 없이 `hidden` 에 그룹(객체는 최상위 경로마다 수, static 은 이름)으로만 적는다 — Jev 가 무엇이 가려졌는지
-    알아야 `EXPAND_STATE` 를 고를 수 있다. 활성 씬의 객체를 DontDestroyOnLoad 객체보다 앞에 세운다. `planned` 가 아니면
+    안 든 것은 값 없이 `hidden` 에 그룹(객체는 최상위 경로마다 수, static 은 이름)으로만 적는다 — executer 는 그것을 Jev 에게
+    보내지 않고 turn 기록에 남겨, planner 가 다시 쓸 때 범위가 결과를 가렸는지 본다(pe11). 활성 씬의 객체를 DontDestroyOnLoad
+    객체보다 앞에 세운다. `planned` 가 아니면
     예전 모양(`씬/selector` 순서, static 없음)이다.
     """
 
