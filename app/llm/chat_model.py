@@ -262,7 +262,7 @@ def _gpt(
         # Responses의 input_tokens에는 cache write도 포함된다. 원장에서는 이를 분리해
         # 일반 입력과 캐시 쓰기 단가를 같은 토큰에 두 번 적용하지 않는다.
         callbacks=[
-            UsageCallback(slug=model, input_includes_cache_write=True, key_source="user")
+            UsageCallback(slug=model, pricing=OPENAI_USAGE_PRICING, key_source="user")
         ],
     )
 
