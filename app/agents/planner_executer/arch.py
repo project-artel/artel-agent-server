@@ -125,7 +125,12 @@ from pydantic import BaseModel, ConfigDict, Field
 # - ```changes 의 replace·remove 가 action 말고 계획의 다른 `def`(`done`, `ready_<action>` 등)도 받는다. try 31~37 의 재계획
 #   거절 13건이 모두 이것이었다.
 # - 시작 검사는 묶음 계획이면 그 step 이 맡은 action 만 센다. 보기만 하는 step 1 이 step 2 의 action 때문에 거절됐다(try 31·34·35).
-PLANNER_EXECUTER_LABEL = "pe17-replan-keeps-segment"
+# pe18-evaluator-knows-facts: evaluator 가 개발자가 선언한 fact·rule·identity 를 런 시작부터 안다. 예전에는 Jev 와 planner
+# 만 받았고, evaluator 는 근거의 `static MapMove.StagePosition: 1` 같은 날 값만 봤다. 로컬 try 37·38 step 14 는 그 값이 "지도에서
+# 열린 가장 높은 스테이지"(`stages_unlocked_up_to`)인 줄 몰라 열림을 확인할 수 없다고 실패로 판정했다.
+# - 선언은 evaluator·실패 분석 system 글 끝에 붙는다. 런 내내 같으므로 step 마다 싣지 않는다.
+# - 판정 근거의 값 중 fact 의 source 에서 읽은 것에 `[fact <name>]` 을 붙인다.
+PLANNER_EXECUTER_LABEL = "pe18-evaluator-knows-facts"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1

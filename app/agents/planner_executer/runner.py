@@ -77,7 +77,7 @@ from app.agents.planner_executer.planner import Ask, Planner, Written
 from app.agents.planner_executer.ledger import ActionLedger
 from app.agents.planner_executer.prompts import screen, step_text
 from app.agents.planner_executer.screen_capture import capture_screen
-from app.agents.planner_executer.facts import NO_FACTS, GameFacts, load_game_facts, watch_facts
+from app.agents.planner_executer.facts import NO_FACTS, GameFacts, game_meanings, load_game_facts, watch_facts
 from app.agents.planner_executer.identities import GameIdentity
 from app.config import get_settings
 from app.agents.planner_executer.target import StepContracts, StepTarget, TargetResolver, guard, observe
@@ -237,11 +237,13 @@ class PlannerExecuterRunner:
         ) if (
             self._spec.editor == "on"
         ) else None
-        judge = Evaluator(self._config, self._judge)
+        # evaluator 는 개발자가 선언한 fact·rule·identity 를 런 시작부터 안다(pe18).
+        meanings = game_meanings(self._facts, self._identities)
+        judge = Evaluator(self._config, self._judge, meanings)
         self._coverage_judge = judge
         # 실패 분석과 런 리뷰(ARTEL-1267). `analysis="off"` 면 둘 다 없고 `STATUS` 는 pe2 그대로다.
         analysing = self._spec.analysis == "on"
-        self._analyzer = FailureAnalyzer(self._config, self._judge) if analysing else None
+        self._analyzer = FailureAnalyzer(self._config, self._judge, meanings) if analysing else None
         self._reviewer = RunReviewer(self._config, self._judge) if analysing else None
         self._reports: dict[int, FailureReport] = {}
         # 시나리오의 `observe` 이름을 SDK 에 한 번 청한다. 못 푼 이름은 case 별로 쥐고, 그 case 의

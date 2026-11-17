@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 
 from app.agents.evaluator.verdict import ATTEMPTS, MAX_TURNS_SHOWN, Judge, evidence_text, read_json, turn_line
 from app.agents.planner_executer.executer import StepPlay
+from app.agents.planner_executer.facts import NO_MEANINGS, GameMeanings
 from app.agents.planner_executer.prompts import FAILURE_ANALYSIS_ROLE, LANGUAGE_PLACEHOLDER, prompt_text, this_step
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.llm.chat_model import structured
@@ -270,10 +271,11 @@ def unobservable(missing: list[dict[str, Any]], message: str, play: StepPlay | N
 class FailureAnalyzer:
     """Asks the run's model why a judged step failed, from the same evidence the verdict read."""
 
-    def __init__(self, config: RunConfig, judge: Judge | None = None) -> None:
+    def __init__(self, config: RunConfig, judge: Judge | None = None, meanings: GameMeanings = NO_MEANINGS) -> None:
         self._config = config
         self._system: str | None = None
         self._judge = judge or self._ask_model
+        self._meanings = meanings
 
     async def analyze(self, scenario: QaScenario, step: int, play: StepPlay, verdict: str) -> FailureReport:
         """The analysis of a step the Evaluator judged failed with `verdict` as its message.
@@ -290,9 +292,9 @@ class FailureAnalyzer:
                 FAILURE_ANALYSIS_ROLE,
                 self._config.prompt_version,
                 **{LANGUAGE_PLACEHOLDER: LANGUAGE_DIRECTIVES[self._config.language]},
-            )
+            ) + (f"\n\n{self._meanings.text}\n" if self._meanings.text else "")
         inputs = sent_inputs(play)
-        user = analysis_request(scenario, step, play, verdict, inputs)
+        user = analysis_request(scenario, step, play, verdict, inputs, self._meanings)
         problem = ""
         for _ in range(ATTEMPTS):
             try:
@@ -386,7 +388,12 @@ def check_sentence(text: str, item: dict[str, Any], inputs: list[dict[str, Any]]
 
 
 def analysis_request(
-    scenario: QaScenario, step: int, play: StepPlay, verdict: str, inputs: list[dict[str, Any]]
+    scenario: QaScenario,
+    step: int,
+    play: StepPlay,
+    verdict: str,
+    inputs: list[dict[str, Any]],
+    meanings: GameMeanings = NO_MEANINGS,
 ) -> str:
     """What the analyzer reads: the verdict's evidence plus the numbered inputs the play sent."""
     shown = play.turns[-MAX_TURNS_SHOWN:]
@@ -403,7 +410,7 @@ def analysis_request(
         f"Inputs the play sent to the game, in order ({len(inputs)}). Each line: number, scene, what was "
         f"done and to what — the text on the object as the screen showed it, in quotes — and what the game "
         f"did with it. Write `reproduction` from these lines and cite each by its number:\n{listed}\n\n"
-        f"{evidence_text(play)}\n"
+        f"{evidence_text(play, meanings)}\n"
     )
 
 

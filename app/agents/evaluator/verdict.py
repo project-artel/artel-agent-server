@@ -26,6 +26,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, field_validator
 
 from app.agents.planner_executer.evidence import names_of, points_of, readings
+from app.agents.planner_executer.facts import NO_MEANINGS, GameMeanings
 from app.agents.planner_executer.executer import StepPlay
 from app.agents.planner_executer.target import evaluator_note
 from app.agents.planner_executer.prompts import (
@@ -218,12 +219,16 @@ STOP_NOTES: dict[str, dict[str, str]] = {
 
 
 class Evaluator:
-    def __init__(self, config: RunConfig, judge: Judge | None = None) -> None:
+    def __init__(self, config: RunConfig, judge: Judge | None = None, meanings: GameMeanings = NO_MEANINGS) -> None:
         self._config = config
         # v4 부터 판정 이유를 run 의 언어로 쓴다. 그 전 버전은 placeholder 가 없어 이 값을 쓰지 않는다.
         self._system = prompt_text(
             EVALUATOR_ROLE, config.prompt_version, **{LANGUAGE_PLACEHOLDER: LANGUAGE_DIRECTIVES[config.language]}
         )
+        # 개발자가 선언한 게임 값의 뜻은 런 내내 같다. step 마다 다시 싣지 않고 system 글 끝에 둔다.
+        self._meanings = meanings
+        if meanings.text:
+            self._system += "\n\n" + meanings.text + "\n"
         self._judge = judge or self._ask_model
         # 답의 모양은 prompt 가 묻는 대로다. v4 부터 evaluator 글이 `game_insight` 를, v8 부터 `checks` 를 묻는다.
         self._schema: type[Verdict] | type[GameVerdict] = (
@@ -242,7 +247,7 @@ class Evaluator:
         """The step's verdict. The message names the stop when it was not `done`. `earlier` is the run's verdicts
         before this step, one line each — a result an earlier step reached is told apart from one that never came.
         `segment` is the steps one plan played together when `play` is the whole group's record (pe9)."""
-        user = request(scenario, step, play, earlier, segment)
+        user = request(scenario, step, play, earlier, segment, self._meanings)
         if image is not None:
             user += (
                 f"\nA picture of the screen when step {step}'s own turns ended is attached.\n"
@@ -392,7 +397,12 @@ def _read_scene(answer: Any) -> SceneVerdicts:
 
 
 def request(
-    scenario: QaScenario, step: int, play: StepPlay, earlier: list[str] | None = None, segment: list[int] | None = None
+    scenario: QaScenario,
+    step: int,
+    play: StepPlay,
+    earlier: list[str] | None = None,
+    segment: list[int] | None = None,
+    meanings: GameMeanings = NO_MEANINGS,
 ) -> str:
     """What the evaluator reads about one step. `segment` is the steps one plan played together (pe9); the record is then
     the whole group's, and the note says why the step's own turns are not where its result has to be."""
@@ -415,7 +425,7 @@ def request(
         + (f", the first {skipped} left out" if skipped else "")
         + f"):\n{turns}\n\n"
         + ran_code(play, shown)
-        + f"{evidence_text(play)}\n"
+        + f"{evidence_text(play, meanings)}\n"
     )
 
 
@@ -471,9 +481,10 @@ def segment_note(step: int, segment: list[int] | None) -> str:
     )
 
 
-def evidence_text(play: StepPlay) -> str:
+def evidence_text(play: StepPlay, meanings: GameMeanings = NO_MEANINGS) -> str:
     """The active scene and the ```check values as the Evaluator's prompts draw them: each name once, with the
-    readings where it changed. The first and the last reading are always shown, so a value that held still says so."""
+    readings where it changed. The first and the last reading are always shown, so a value that held still says so.
+    A value read from a declared fact's source carries that fact's name (`meanings`)."""
     if play.state_source == "pulse_memory":
         return (
             "Game observations from PulseMemory (the SDK readings, not the executer's verdict):\n"
@@ -498,7 +509,8 @@ def evidence_text(play: StepPlay) -> str:
         lines.append("  (no reading succeeded)")
     names = names_of(read)
     for name in names:
-        lines.append(f"  {name}: {_series(name, read)}")
+        fact = meanings.label(name)
+        lines.append(f"  {name}{f' [fact {fact}]' if fact else ''}: {_series(name, read)}")
     if play.evidence_unknown:
         lines.append(
             "  names the plan listed that matched nothing in any reading — a wrong name, or an object that never came; "

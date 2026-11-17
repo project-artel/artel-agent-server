@@ -272,3 +272,53 @@ async def watch_facts(channel: "QaRunChannel", declared: GameFacts) -> list[dict
         names=names, resolved=returned.get("resolved") or [], unresolvable=missing,
     )
     return missing
+
+
+@dataclass(frozen=True)
+class GameMeanings:
+    """evaluator 가 런 시작부터 아는 게임 값의 뜻: 개발자가 선언한 fact·rule 과 identity 선언.
+
+    `text` 는 evaluator system 글 끝에 붙고, `labels` 는 판정 근거의 값 이름(`static MapMove.StagePosition`,
+    `Word[13] Player.Hp`) → fact 이름이다. 로컬 try 37·38 step 14 는 근거에 `static MapMove.StagePosition: 1` 만 보고 그 값이
+    "지도에서 열린 가장 높은 스테이지"(`stages_unlocked_up_to`)인 줄 몰라 열림을 확인할 수 없다고 판정했다."""
+
+    text: str = ""
+    labels: tuple[tuple[str, str], ...] = ()
+
+    def label(self, name: str) -> str | None:
+        for source, fact in self.labels:
+            if name == source or name.endswith(" " + source):
+                return fact
+        return None
+
+
+NO_MEANINGS = GameMeanings()
+
+
+def game_meanings(declared: GameFacts, identities: tuple = ()) -> GameMeanings:
+    """선언된 fact·rule·identity 로 evaluator 가 읽을 뜻. 선언이 없으면 `NO_MEANINGS`."""
+    lines: list[str] = []
+    if declared.facts:
+        lines.append(
+            "Game facts (declared by the game's developer). Each names one game value and says what it means. In the game "
+            "values of a step's record, a value read from a fact's source carries `[fact <name>]`; read it by the fact's "
+            "meaning."
+        )
+        lines += [f"- {fact.name} = `{_source_name(fact)}` ({fact.type}): {fact.definition()}" for fact in declared.facts]
+    if declared.rules:
+        lines.append("")
+        lines.append("Game rules (how the game works, declared by the developer; each names the facts it is about):")
+        lines += [f"- {rule.name} [{', '.join(rule.facts)}]: {rule.says}" for rule in declared.rules]
+    if identities:
+        lines.append("")
+        lines.append("What these game values mean (declared by the game's developer):")
+        lines += [item.line() for item in identities]
+    if not lines:
+        return NO_MEANINGS
+    labels = tuple((_source_name(fact), fact.name) for fact in declared.facts)
+    return GameMeanings("\n".join(lines), labels)
+
+
+def _source_name(fact: GameFact) -> str:
+    """판정 근거가 그 fact 의 값을 부르는 이름. static 은 `static <member>`, object member 는 `<경로> <member>` 의 뒤쪽이다."""
+    return f"static {fact.member}" if fact.scope == "statics" else fact.member
