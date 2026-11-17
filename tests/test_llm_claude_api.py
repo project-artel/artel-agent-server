@@ -34,7 +34,7 @@ from app.llm.chat_model import (
 )
 from app.llm.claude_api import ClaudeApiChat, forces_a_tool
 from app.llm.models import ReasoningConfig, ReasoningEffort
-from app.llm.usage import UsageBuffer, UsageCallback, set_usage_scope
+from app.llm.usage import ANTHROPIC_USAGE_PRICING, UsageBuffer, UsageCallback, set_usage_scope
 
 OPUS = "claude/claude-opus-5-5"
 SONNET = "claude/claude-sonnet-5-5"
@@ -331,7 +331,7 @@ def test_a_claude_call_is_priced_from_the_catalog(cache_creation) -> None:
     )
     sender = _RecordingSender()
     buffer = UsageBuffer(base_url="http://orchestration.test", send=sender, flush_size=1)
-    callback = UsageCallback(buffer, slug=OPUS, input_includes_cache_write=True)
+    callback = UsageCallback(buffer, slug=OPUS, pricing=ANTHROPIC_USAGE_PRICING)
 
     async def scenario() -> None:
         set_usage_scope("QA_RUN", 11)
@@ -358,7 +358,7 @@ def test_the_claude_client_reports_usage_under_the_catalog_id(keys) -> None:
     (usage,) = [cb for cb in model.callbacks if isinstance(cb, UsageCallback)]
 
     assert usage._slug == OPUS
-    assert usage._input_includes_cache_write is True
+    assert usage._pricing is ANTHROPIC_USAGE_PRICING
 
 
 # --- preserved thinking -------------------------------------------------------

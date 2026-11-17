@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 
 from app.llm.usage import (
+    OPENAI_USAGE_PRICING,
     USAGE_PATH,
     UsageBuffer,
     UsageCallback,
@@ -95,7 +96,7 @@ def test_chat_usage_becomes_one_record_in_the_wire_shape() -> None:
     assert record["referenceId"] == 42
     assert record["provider"] == "anthropic"
     assert record["model"] == "anthropic/claude-sonnet-5.5"
-    assert record["inputTokens"] == 12043
+    assert record["inputTokens"] == 11531
     assert record["outputTokens"] == 318
     assert record["cachedInputTokens"] == 10240
     assert record["cacheWriteTokens"] == 512
@@ -105,6 +106,16 @@ def test_chat_usage_becomes_one_record_in_the_wire_shape() -> None:
     assert record["costEstimated"] is False
     assert record["latencyMs"] >= 0
     assert record["calledAt"].endswith("Z")
+
+
+def test_openai_cache_writes_are_excluded_from_regular_input() -> None:
+    usage = {"input_tokens": 12000, "input_token_details": {"cache_read": 4000}}
+    raw_usage = {"input_tokens_details": {"cache_write_tokens": 7000}}
+
+    writes = OPENAI_USAGE_PRICING.cache_write_tokens(usage, raw_usage)
+    assert writes == 7000
+    assert OPENAI_USAGE_PRICING.input_tokens(usage, writes) == 5000
+    assert OPENAI_USAGE_PRICING.reported_cost({"cost": 0}) is None
 
 
 def test_cache_writes_survive_the_ephemeral_ttl_shape() -> None:
@@ -176,7 +187,7 @@ def test_cost_is_omitted_when_openrouter_did_not_report_one() -> None:
     assert "costUsd" not in record
     # 금액이 없으면 출처도 없다. 받는 쪽이 둘의 유무를 묶어 검사한다.
     assert "costEstimated" not in record
-    assert record["inputTokens"] == 12043
+    assert record["inputTokens"] == 11531
 
 
 def test_a_claude_api_call_is_priced_from_the_catalog_when_nobody_billed_it() -> None:
@@ -201,9 +212,9 @@ def test_a_claude_api_call_is_priced_from_the_catalog_when_nobody_billed_it() ->
     asyncio.run(scenario())
 
     (record,) = sender.payloads[0]["records"]
-    # input 12,043 중 10,240 이 캐시 읽기, 정가 대상은 1,803. 캐시 쓰기 512, 출력 318.
+    # input 12,043 중 10,240 이 캐시 읽기, 정가 대상은 1,291. 캐시 쓰기 512, 출력 318.
     expected = (
-        1_803 * 0.10 + 10_240 * 0.01 + 512 * 0.125 + 318 * 0.50
+        1_291 * 0.10 + 10_240 * 0.01 + 512 * 0.125 + 318 * 0.50
     ) / 1_000_000
     assert record["costUsd"] == pytest.approx(expected)
     # 우리가 계산한 값이다. provider 가 청구한 값과 한 칸에 섞이면 안 된다.
@@ -233,7 +244,7 @@ def test_an_unpriced_model_leaves_the_cost_empty_rather_than_guessing() -> None:
     assert "costUsd" not in record
     assert "costEstimated" not in record
     # 토큰은 그대로 남는다 — 값을 못 매긴 것이지 못 잰 것이 아니다.
-    assert record["inputTokens"] == 12043
+    assert record["inputTokens"] == 11531
     assert record["cacheWriteTokens"] == 512
 
 
