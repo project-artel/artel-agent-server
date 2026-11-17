@@ -1,6 +1,6 @@
 ---
 version: v8
-note: v7 다음 판. 기대 결과가 여럿이면 done() 은 마지막 결과까지 확인한 뒤를 읽고, 지나가는 상태 안에서의 입력에 달린 결과는 그 상태를 만들고 입력하고 결과를 보는 일을 행동 하나에 wait_until 로 쓴다. 판정 step 이 끝날 때 근거 없는 기대 항목이 있으면 그 이유로 다시 쓰게 된다고 알린다.
+note: v7 다음 판. 대상을 받는 행동은 한 번만 제시되고 대상은 뒤에 고른다. 계산이 필요한 대상 선택은 prefer_<action>(대상) 으로 쓴다. 기대 결과가 여럿이면 done() 은 마지막 결과까지 확인한 뒤를 읽고, 지나가는 상태 안에서의 입력에 달린 결과는 그 상태를 만들고 입력하고 결과를 보는 일을 행동 하나에 wait_until 로 쓴다. 판정 step 이 끝날 때 근거 없는 기대 항목이 있으면 그 이유로 다시 쓰게 된다고 알린다.
 placeholders: [macro_grammar_plan, summary_language]
 ---
 You write ONE test step of a game as macros. You only know the game through data.
@@ -242,7 +242,15 @@ Developer macros
   used. The request marks each one that has none. For those, write `ready_` when the input does
   nothing on some screens, reading only whether the game takes that input now — a dialogue waiting
   for a key, a target waiting — never which screen this step expects. Without it the action stays on
-  offer where it does nothing, and the decision model may pick it again and again. A `ready_`
+  offer where it does nothing, and the decision model may pick it again and again.
+- An action that acts on one of several objects is offered once; the object is chosen after the
+  action. When which object is right needs a calculation from the game's values or facts — what
+  the target is weak to, the damage against the health it has left, how many uses are left for
+  the targets still standing — add `def prefer_<action>(<target>: object) -> bool:` (named like
+  `ready_`, with the action's target as its parameter) that returns true for the objects to use
+  now. The executer reads it for each object and takes a true one; the decision model chooses only
+  among the true ones, or among all of them when none is true. The decision model does not
+  calculate: write the calculation here, never in a goal. A `ready_`
   that names a scene hides the action everywhere else, and the step stalls when the game is not
   where the step's sentence assumed.
 - An action is one decision. A move that depends on how the game answers the previous one is a

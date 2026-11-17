@@ -45,6 +45,7 @@ from app.agents.planner_executer.macro_host import ChannelMacroHost
 from app.agents.planner_executer.macros import (
     EFFECT_FLAG,
     GOAL_FLAG,
+    PREFER_FLAG,
     READY_FLAG,
     PROBE_FLAG,
     ActionPick,
@@ -707,7 +708,13 @@ class Executer:
                 # 준비됐다고 알 수 없는 선택지. 둘 이상 중에서 고를 때만 같은 요청에 기다림을 묻는다. 선택지가 하나면 묻지 않고
                 # 실행한다(pe13): try 26~33 의 기다림 답 422개 중 기준(0.7)을 넘은 것이 없었고, 대사를 넘기는 동안 turn 마다
                 # Jev 호출이 하나씩 붙었다.
-                undeclared = [key for key in options if key not in declared] if len(options) > 1 else []
+                # 대상이 여럿인 행동은 행동 하나로 묶어 먼저 묻고, 대상은 그 다음에 정한다(pe14). 카드마다 선택지였을 때 카드 놓기는
+                # 손패 수만큼 쪼개져 '턴 종료' 하나와 한 분포를 나눠 가졌고, 로컬 try 34 step 10 은 턴 종료를 19번 연달아 골랐다.
+                offered, targets_of = group_targets(options, macros, self._shown_words)
+                undeclared = (
+                    [key for key in offered if not any(member in declared for member in targets_of.get(key, [key]))]
+                    if len(offered) > 1 else []
+                )
                 if undeclared:
                     record["wait_asked_because"] = undeclared
                 goal_text = None
@@ -722,14 +729,35 @@ class Executer:
                 record["question"] = asked + (
                     f"\nHow to play it: {macros.guidance}" if macros.guidance else ""
                 ) + blocked_actions_line(not_ready, options, macros)
-                record["options"] = list(options)
+                record["options"] = list(offered)
                 recent = recent_action_lines(earlier + play.turns[:-1])
                 if recent:
                     record["recent_actions"] = recent
-                choice = await self._pick(record["question"], options, recent, state, ask_wait=bool(undeclared))
+                choice = await self._pick(record["question"], offered, recent, state, ask_wait=bool(undeclared))
                 record["picked"] = picked = choice.choice
-                # 선택지가 하나면 Jev 는 고르지 않았다(기다림만 물었을 수 있다).
-                record["picked_by"] = "only_option" if len(options) == 1 else "jev"
+                # 선택지가 하나면 Jev 는 고르지 않았다.
+                record["picked_by"] = "only_option" if len(offered) == 1 else "jev"
+                members = targets_of.get(picked)
+                if members is not None:
+                    # 묶은 행동을 골랐다. 대상이 하나면 그것이다. 여럿이면 planner 의 `prefer_` 가 참인 대상으로 좁히고, 그래도
+                    # 여럿이면 같은 화면으로 어느 대상인지 한 번 더 묻는다.
+                    record["target_options"] = list(members)
+                    preferred = await self._preferred(picked, members, instances, macros, step, record)
+                    narrowed_targets = {key: options[key] for key in (preferred or members)}
+                    aimed = await self._pick(
+                        f"{record['question']}\nThe player will {picked.removeprefix(DEVELOPER_ACTION_PREFIX)} now. "
+                        "Which one should it act on to reach the goal?",
+                        narrowed_targets, recent, state, ask_wait=False,
+                    )
+                    record["target_picked_by"] = (
+                        "prefer" if preferred and len(narrowed_targets) == 1
+                        else "only_option" if len(narrowed_targets) == 1 else "jev"
+                    )
+                    if aimed.confidence is not None and len(narrowed_targets) > 1:
+                        record["target_confidence"] = aimed.confidence
+                    if aimed.probabilities is not None:
+                        record["target_probabilities"] = aimed.probabilities
+                    record["picked"] = picked = aimed.choice
                 if choice.wait is not None:
                     record["wait"] = choice.wait
                 if choice.confidence is not None:
@@ -1206,6 +1234,22 @@ class Executer:
         names = chosen + [fact.name for fact in self._game_facts.facts if fact.name not in chosen]
         return [(name, fact.scope, fact.member) for name in names if (fact := self._game_facts.get(name)) is not None]
 
+    async def _preferred(
+        self, action: str, members: list[str], instances: dict, macros: StepMacros, step: int, record: dict
+    ) -> list[str]:
+        """`members` 중 planner 의 `prefer_<action>` 이 참인 대상(pe14). 규칙이 없거나 참인 것이 없으면 빈 목록이다."""
+        rule = macros.prefers.get(action)
+        if rule is None or len(members) < 2:
+            return []
+        read: dict[str, str] = {}
+        for key in members:
+            instance = instances.get(key)
+            binding = instance.binding if instance is not None else ((None, key.split(PICK_SEPARATOR, 1)[1]),)
+            probe = await rule.probe(binding)
+            read[key] = "unknown" if probe is None else await self._predicate(probe, step, PREFER_FLAG)
+        record["prefer"] = read
+        return [key for key, value in read.items() if value == "met"]
+
     async def _contract_ready(
         self, macros: StepMacros, name: str, binding: tuple[tuple[str, str], ...]
     ) -> MacroDefinition | None:
@@ -1618,6 +1662,35 @@ def annotate_options(
             notes.append(f"Tried {idle} time{'s' if idle != 1 else ''} in this step without a visible effect.")
         described[key] = text + ("\n\n" + " ".join(notes) if notes else "")
     return described
+
+
+def group_targets(
+    options: dict[str, str], macros: Any, shown: Callable[[str], list[str]]
+) -> tuple[dict[str, str], dict[str, list[str]]]:
+    """대상마다 펼친 선택지를 행동마다 하나로 묶는다(pe14). `(묶은 선택지, 행동 → 그 대상 선택지들)`.
+
+    대상이 하나뿐인 행동도 묶는다 — 선택지 수가 화면의 객체 수를 따라 흔들리지 않게. 묶은 선택지의 설명은 행동의 설명에
+    대상들이 화면에 띄운 글자를 붙인 것이다. 대상이 없는 행동은 그대로다."""
+    offered: dict[str, str] = {}
+    targets_of: dict[str, list[str]] = {}
+    for key, text in options.items():
+        if PICK_SEPARATOR not in key:
+            offered[key] = text
+            continue
+        action = key.split(PICK_SEPARATOR, 1)[0]
+        targets_of.setdefault(action, []).append(key)
+    for action, members in targets_of.items():
+        try:
+            base = macros.description(action)
+        except KeyError:
+            base = options[members[0]]
+        listed = []
+        for member in members:
+            target = member.split(PICK_SEPARATOR, 1)[1]
+            words = shown(target)
+            listed.append(f"`{target}`" + (" (" + ", ".join(f'"{word}"' for word in words) + ")" if words else ""))
+        offered[action] = base + "\n\nIt acts on one of these, chosen next: " + "; ".join(listed) + "."
+    return offered, targets_of
 
 
 def blocked_actions_line(not_ready: list[str], options: dict[str, str], macros: StepMacros) -> str:

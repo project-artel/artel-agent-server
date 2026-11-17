@@ -105,7 +105,12 @@ from pydantic import BaseModel, ConfigDict, Field
 # - planner 요청의 developer macro 목록이 제 준비 조건이 없는 macro 를 표시한다.
 # - 선언된 fact 는 planner 가 고르지 않아도 모두 Jev 에게 싣는다. 고른 것을 앞에 둔다.
 # - 선택지가 하나면 기다림을 묻지 않고 실행한다. try 26~33 의 기다림 답 422개 중 기준을 넘은 것이 없었다.
-PLANNER_EXECUTER_LABEL = "pe14-ready-not-repeat"
+# pe15-one-option-per-action: 대상을 받는 행동은 한 번만 제시하고 대상은 뒤에 고른다. 로컬 try 34 step 10 은 카드 놓기가 손패
+# 수만큼 쪼개진 채 '턴 종료' 하나와 한 분포를 나눠 가져, 턴 종료를 19번 연달아 골랐다.
+# - Jev 는 먼저 행동을 고른다. 묶은 행동을 고르면 대상이 하나일 때 그것이고, 여럿이면 planner 의 `prefer_<action>(<대상>)` 이
+#   참인 대상으로 좁힌 뒤, 그래도 여럿이면 Jev 가 대상을 한 번 더 고른다. 계산이 필요한 대상 선택은 Jev 가 하지 못한다(PoC
+#   스테이지 2: 규칙을 질문에 적어 줘도 배분을 낭비해 졌다) — 계산식은 planner 가 쓰고 계산은 코드가 한다.
+PLANNER_EXECUTER_LABEL = "pe15-one-option-per-action"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1

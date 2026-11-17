@@ -573,7 +573,8 @@ def test_a_target_its_macro_would_refuse_is_no_option_and_an_action_off_its_scre
     assert failure is None and state.step_results[0].passed
     turn = next(f["payload"]["turn"] for f in fake.frames("LOG") if f["payload"].get("kind") == "turn")
     # 남은 선택지는 하나라 Jev 를 부르지 않고 실행한다(pe11).
-    assert turn["options"] == ["developer:strike @ Root/Start"] and jev.asked("choice") == []
+    assert turn["options"] == ["developer:strike"] and turn["target_options"] == ["developer:strike @ Root/Start"]
+    assert jev.asked("choice") == []
     assert turn["not_ready"] == ["developer:wave"]
     assert turn["not_ready_targets"] == ["developer:strike @ Root/Quit (unmet)"]
     assert turn["target"] == "Root/Start"

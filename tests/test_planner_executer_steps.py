@@ -52,12 +52,20 @@ class FakeJev:
         self.picks = itertools.chain(picks, itertools.repeat(picks[-1])) if picks else None
         self.goal = itertools.chain(goal, itertools.repeat(goal[-1])) if goal else None
         self.bodies: list[dict] = []
+        # 대상까지 정한 답(`<행동> @ <대상>`)을 행동만 묻는 질문에 받으면 행동으로 답하고, 대상은 다음 질문에 쓴다(pe14).
+        self._aimed: str | None = None
 
     async def __call__(self, body: dict) -> dict:
         self.bodies.append(body)
         if body["questions"]["answer"]["type"] == "choice":
-            pick = next(self.picks)
             offered = list(body["questions"]["answer"]["criteria"])
+            if self._aimed is not None and self._aimed in offered:
+                pick, self._aimed = self._aimed, None
+            else:
+                self._aimed = None
+                pick = next(self.picks)
+                if pick not in offered and " @ " in pick and pick.split(" @ ", 1)[0] in offered:
+                    pick, self._aimed = pick.split(" @ ", 1)[0], pick
             answers: dict = {}
             if "wait" in body["questions"]:
                 # pe9: `none_fits` 는 선택지가 아니라 같은 요청의 기다림 noul 이다. 정해 둔 답이 `none_fits` 면 기다림으로 답한다.

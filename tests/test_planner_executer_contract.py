@@ -68,7 +68,7 @@ def _play(fake: FakeGame, jev: FakeJev, source: str = SOURCE, actions: str = ACT
     return asyncio.run(go())
 
 
-def test_each_ready_object_is_its_own_option_and_only_the_picked_one_gets_the_input() -> None:
+def test_each_ready_object_is_its_own_target_and_only_the_picked_one_gets_the_input() -> None:
     fake = _table()
     _take_reaction(fake, "Card[1]")
     jev = FakeJev(picks=("take @ Card[1]",))
@@ -76,7 +76,8 @@ def test_each_ready_object_is_its_own_option_and_only_the_picked_one_gets_the_in
     play = _play(fake, jev)
 
     turn = play.turns[0]
-    assert {"take @ Card[0]", "take @ Card[1]"} <= set(turn["options"]) and "take @ Card[2]" not in turn["options"]
+    assert turn["options"] == ["take"]  # 행동은 하나로 묶고 대상은 다음에 고른다(pe14)
+    assert {"take @ Card[0]", "take @ Card[1]"} <= set(turn["target_options"]) and "take @ Card[2]" not in turn["target_options"]
     assert turn["not_ready_targets"] == ["take @ Card[2] (unmet)"]
     assert turn["picked"] == "take @ Card[1]" and turn["target"] == "Card[1]"
     pressed = [params[0] for method, params in fake.actions if method == "move_mouse"]

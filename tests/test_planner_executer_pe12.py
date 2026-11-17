@@ -309,3 +309,77 @@ def test_a_single_option_runs_without_asking_jev_anything() -> None:
 
     assert jev.bodies == [] and play.turns[0]["picked_by"] == "only_option"
     assert "wait_asked_because" not in play.turns[0]
+
+
+def test_an_action_with_several_targets_is_one_option_listing_them() -> None:
+    from app.agents.planner_executer.executer import group_targets
+
+    options = {
+        "developer:place @ Card[1]": "Place a card.\n\nThis option acts on `Card[1]`.",
+        "developer:place @ Card[2]": "Place a card.\n\nThis option acts on `Card[2]`.",
+        "developer:end_turn": "End the turn.",
+    }
+    macros = SimpleNamespace(description=lambda name: {"developer:place": "Place a card."}[name])
+
+    offered, targets_of = group_targets(options, macros, lambda target: ["Fire"] if target == "Card[1]" else [])
+
+    assert list(offered) == ["developer:end_turn", "developer:place"]
+    assert targets_of == {"developer:place": ["developer:place @ Card[1]", "developer:place @ Card[2]"]}
+    assert offered["developer:place"].startswith("Place a card.")
+    assert '`Card[1]` ("Fire"); `Card[2]`' in offered["developer:place"]
+
+
+# --- pe14: prefer_ ---------------------------------------------------------------------------------
+
+import pytest  # noqa: E402
+
+from app.agents.planner_executer.macros import RegisteredMacros, parse_step  # noqa: E402
+from app.agents.qa.macro.errors import MacroRejection  # noqa: E402
+from tests.planner_executer_fakes import FakeGame  # noqa: E402
+
+PREFERRING = MACROS + """
+
+def prefer_strike(enemy: object) -> bool:
+    return text(enemy) == "Weak"
+"""
+
+
+def _two_enemies() -> FakeGame:
+    return FakeGame("Menu", {"Root/Start": {"text": "Start"}, "Root/A": {"text": "Weak"}, "Root/B": {"text": "Strong"}})
+
+
+def test_the_executer_takes_the_target_the_planner_s_prefer_rule_holds_for() -> None:
+    fake = _two_enemies()
+
+    async def go():
+        fake.push_reading()
+        macros = await parse_step(PREFERRING, RegisteredMacros(fake.channel), contract_keys=("developer:strike",))
+        executer = Executer(fake.channel, _config().arch.planner, JevClient(post=FakeJev()))
+        record: dict = {}
+        preferred = await executer._preferred(
+            "developer:strike", ["developer:strike @ Root/A", "developer:strike @ Root/B"], {}, macros, 1, record
+        )
+        return preferred, record
+
+    preferred, record = asyncio.run(go())
+
+    assert preferred == ["developer:strike @ Root/A"]
+    assert record["prefer"] == {"developer:strike @ Root/A": "met", "developer:strike @ Root/B": "unmet"}
+
+
+@pytest.mark.parametrize(
+    "source, refusal",
+    [
+        (MACROS + "\n\ndef prefer_nothing(x: object) -> bool:\n    return True\n", "matches no action"),
+        (MACROS + "\n\ndef prefer_strike() -> bool:\n    return True\n", "with the action's target as its parameter"),
+    ],
+)
+def test_a_prefer_rule_must_name_an_action_and_take_its_target(source: str, refusal: str) -> None:
+    fake = _two_enemies()
+
+    async def go():
+        fake.push_reading()
+        return await parse_step(source, RegisteredMacros(fake.channel), contract_keys=("developer:strike",))
+
+    with pytest.raises(MacroRejection, match=refusal):
+        asyncio.run(go())

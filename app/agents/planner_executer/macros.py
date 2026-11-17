@@ -40,6 +40,10 @@ DONE = "done"
 PROBE = "executer_probe_done"
 PROBE_FLAG = "done"
 _PROBE_SOURCE = f'\n\ndef {PROBE}() -> None:\n    if {DONE}():\n        flag("{PROBE_FLAG}")\n'
+# 대상을 받는 행동의 선호 조건: `prefer_<action>(<대상>) -> bool`(pe14). 묶은 행동을 고른 뒤 코드가 대상마다 읽어, 참인 대상
+# 중에서 고른다. 계산이 필요한 선택(배분·상성)은 Jev 가 하지 못한다 — 계산식은 planner 가 쓰고 계산은 코드가 한다.
+PREFER_PREFIX = "prefer_"
+PREFER_FLAG = "prefer"
 # A FREE scene plan's goal per case: `done_<case_id>` (ARTEL-1149).
 GOAL_PREFIX = "done_"
 # 행동의 효과 조건: `effect_<action>() -> bool`. developer macro 는 `developer:` 를 떼고, `#2` 는 `_2` 로 쓴다.
@@ -125,10 +129,73 @@ class StepMacros:
     # 이름들, 그 step 의 완료 probe, 그 step 에서 고를 수 있는 action). 지금 step 의 probe 는 `None` 이고 `done()` 을 쓴다.
     segment: dict[int, tuple[tuple[str, ...], "MacroDefinition | None", tuple[str, ...]]] = field(default_factory=dict)
 
+    # 대상을 받는 행동마다 planner 가 쓴 `prefer_<action>(<대상>)`(pe14).
+    prefers: dict[str, "PreferRule"] = field(default_factory=dict)
+
     def description(self, action: str) -> str:
         if action in self.descriptions:
             return self.descriptions[action]
         return self.actions[action].entry.docstring or ""
+
+
+def prefer_name(action: str) -> str:
+    """행동 이름에 맞는 선호 조건의 이름. `developer:place_card` → `prefer_place_card`."""
+    return PREFER_PREFIX + action.removeprefix("developer:").replace("#", "_")
+
+
+@dataclass
+class PreferRule:
+    """planner 가 쓴 `prefer_<action>(<param>, ...)`. 대상의 주소를 넣어 읽는 probe 를 만든다(pe14)."""
+
+    name: str
+    params: tuple[str, ...]
+    source: str
+    registered: "RegisteredMacros"
+    _probes: dict[tuple[str, ...], MacroDefinition] = field(default_factory=dict)
+
+    async def probe(self, binding: tuple[tuple[str | None, str], ...]) -> MacroDefinition | None:
+        """`binding` 은 `(param, selector)` 들이다. param 이름이 맞는 것을 넣고, 이름이 없으면 순서대로 넣는다. 못 맞추면 `None`."""
+        named = {param: selector for param, selector in binding if param}
+        unnamed = [selector for param, selector in binding if not param]
+        args: list[str] = []
+        for param in self.params:
+            if param in named:
+                args.append(named[param])
+            elif unnamed:
+                args.append(unnamed.pop(0))
+            else:
+                return None
+        key = tuple(args)
+        if key not in self._probes:
+            entry = f"executer_probe_{self.name}"
+            call = ", ".join(f"selector({_quoted(arg)})" for arg in args)
+            wrapper = f'\n\ndef {entry}() -> None:\n    if {self.name}({call}):\n        flag("{PREFER_FLAG}")\n'
+            self._probes[key] = await self.registered.parse(entry, self.source.rstrip("\n") + wrapper)
+        return self._probes[key]
+
+
+def _quoted(text: str) -> str:
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _prefer_rules(
+    defs: list[ast.FunctionDef], actions: list[str], source: str, registered: "RegisteredMacros"
+) -> dict[str, PreferRule]:
+    """`prefer_<action>(<대상>) -> bool` 마다 그 행동의 선호 조건. 맞는 행동이 없거나 모양이 틀리면 거절한다."""
+    by_name = {prefer_name(action): action for action in actions}
+    rules: dict[str, PreferRule] = {}
+    for node in defs:
+        if not node.name.startswith(PREFER_PREFIX):
+            continue
+        if node.name not in by_name:
+            known = ", ".join(sorted(by_name)) or "(none)"
+            raise MacroRejection(f"`{node.name}` matches no action; a `prefer_` predicate is named after its action: {known}.")
+        if not _returns(node, "bool") or not node.args.args:
+            raise MacroRejection(
+                f"`{node.name}` must be `def {node.name}(<target>: object) -> bool:` with the action's target as its parameter."
+            )
+        rules[by_name[node.name]] = PreferRule(node.name, tuple(arg.arg for arg in node.args.args), source, registered)
+    return rules
 
 
 class _ImportResolver:
@@ -326,7 +393,8 @@ async def parse_step(
     effects = {key: probe for key, probe in effects.items() if key not in contract_keys}
     readies = _with_developer_readies(readies, developer_actions)
     picks = {key: action.pick for key, action in developer_actions.items() if action.pick is not None}
-    return StepMacros(source, parsed, probe, descriptions, effects=effects, readies=readies, picks=picks)
+    prefers = _prefer_rules(defs, named, source, registered)
+    return StepMacros(source, parsed, probe, descriptions, effects=effects, readies=readies, picks=picks, prefers=prefers)
 
 
 def _with_developer_readies(
