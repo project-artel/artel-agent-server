@@ -134,7 +134,15 @@ from pydantic import BaseModel, ConfigDict, Field
 #   그 fact 로 확인할 결과를 확인할 수 없다고 판정했다(로컬 try 39 step 5, `map_spot`).
 # - 묶음의 마지막 step 이 `done()` 자리에서 판정을 받았어도 앞 step 이 기다리면 화면을 다시 찍는다. 묶음 판정이 그림 없이
 #   나가 화면으로만 보이는 결과를 확인하지 못했다(로컬 try 41 step 18).
-PLANNER_EXECUTER_LABEL = "pe18-evaluator-knows-facts"
+# pe19-replan-when-nothing-ready: 준비된 행동이 없으면 planner 가 한 번 다시 쓴다(`max_replans_per_step` 기본값 0 → 1).
+# 이 길은 처음부터 있었지만 기본값이 0 이라 한 번도 돌지 않았다. 그동안 "준비된 행동 없음" 은 유예 3초 뒤 곧바로 판정이었고,
+# 계획 실수 하나가 그대로 step 실패가 됐다.
+# - try 42 step 9: 미리 쓴 8~9 묶음에서 step 9 몫에 `advance_dialogue` 가 빠졌다(try 35~43 의 9번 중 1번). 기록 대사가 입력을
+#   막아 시전의 준비 조건이 거짓으로 남았다.
+# - try 43 step 4: planner 가 `ready_advance_dialogue` 를 입력을 받지 않는 안내 글자 `AdvancePrompt` 의 `actionable()` 로 썼다
+#   (try 26~43 의 준비 조건 96개 중 1개). 키를 받는 것은 `ChatWindow` 이고 planner 화면에도 그렇게 나와 있었다.
+# 둘 다 다시 쓰는 요청에는 멈춘 까닭(`<action> (unmet)`)과 지금 화면, 지금 계획이 함께 간다.
+PLANNER_EXECUTER_LABEL = "pe19-replan-when-nothing-ready"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1
@@ -218,7 +226,8 @@ class PlannerExecuterArchSpec(BaseModel):
     # 뜻이 있다 — `PulseMemory` 출처는 범위를 좁히지 않는다.
     observation: Literal["planner", "all"] = "planner"
     # 준비된 행동이 없거나 모두 빠져 executer 가 planner 에게 step 을 다시 쓰게 하는 횟수(step 마다). 0 이면 그 자리에서 멈춘다.
-    max_replans_per_step: int = Field(default=0, ge=0, le=5)
+    # pe19 부터 1 이다. 0 이던 동안 계획 실수 하나가 그대로 step 실패가 됐다(로컬 try 42 step 9, try 43 step 4).
+    max_replans_per_step: int = Field(default=1, ge=0, le=5)
     # ORDERED step 에서 씬이 바뀌고 유예 동안 끝 조건이 거짓이면(`off_plan`) planner 가 새 씬에서 다시 쓰는 횟수(step 마다, pe11).
     # 0 이면 그 자리에서 멈추고 판정한다.
     max_scene_replans_per_step: int = Field(default=1, ge=0, le=5)

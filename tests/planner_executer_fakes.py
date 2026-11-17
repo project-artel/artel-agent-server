@@ -155,6 +155,8 @@ class FakeGame:
                             **({"id": body["id"]} if "id" in body else {}),
                             "text": body.get("text"),
                             "rect": body.get("rect"),
+                            # 입력을 받는 객체(SDK 의 `offers`). `actionable()` 이 이것으로 가른다.
+                            **({"offers": body["offers"]} if "offers" in body else {}),
                             "members": [
                                 {
                                     "on": name.split(".")[0],
