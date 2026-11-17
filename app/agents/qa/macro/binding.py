@@ -663,7 +663,10 @@ def read(memories: MacroMemories, scope: MacroScope, call: MacroReaderCall) -> A
     if reader == "actionable":
         # `offers` 가 그 선이다. `id` 는 거의 모든 객체에 실리므로 그것으로 가르면
         # 아무것도 안 걸러진다. 배선이 있어도 덮여 있으면 누름이 덮개에 떨어진다(ARTEL-1436).
-        return bool(found.record.offers) and found.record.visible is not False
+        # SDK 는 코드로 클릭을 붙인 버튼도 클릭을 받는 타입이라는 사실로 `offers` 에 싣는다. 그래서 배선만으로는 비활성
+        # 버튼(`interactable` 거짓)이 걸러지지 않는다 — uGUI 상태로 거른다.
+        interactable = (getattr(found.record, "ui", None) or {}).get("interactable")
+        return bool(found.record.offers) and found.record.visible is not False and interactable is not False
     if reader == "text":
         return found.record.text
     if reader == "member":
