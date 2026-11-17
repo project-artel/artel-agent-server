@@ -114,6 +114,8 @@ class CheckedVerdict(GameVerdict):
     """prompt v8 부터의 답: 기대 항목마다 `checks` 를 함께 낸다. 통과는 모델이 아니라 `settle_checks` 가 정한다."""
 
     checks: list[ItemCheck] = []
+    # 이 step 에서 시작하는 TC 의 사전 조건이 step 의 행동 때 성립했나(pe16). 사전 조건이 없거나 기록으로 알 수 없으면 `None`.
+    precondition_held: bool | None = None
 
 
 def settle_checks(checks: list[ItemCheck]) -> tuple[list[ItemCheck], bool | None]:
@@ -151,6 +153,8 @@ class StepVerdict:
     checks: tuple[dict[str, Any], ...] = ()
     missing: tuple[str, ...] = ()
     contradicted: tuple[str, ...] = ()
+    # 사전 조건이 깨진 채 진행됐다(pe16). 통과가 아니지만 게임 결함도 아니다 — 판정을 실패와 따로 읽게 한다.
+    precondition_unmet: bool = False
 
     def details(self) -> dict[str, Any]:
         """step `STATUS` 의 `verdict`."""
@@ -163,6 +167,8 @@ class StepVerdict:
             details["game_insight"] = self.game_insight
         if self.checks:
             details["checks"] = list(self.checks)
+        if self.precondition_unmet:
+            details["precondition"] = "unmet"
         return details
 
 
@@ -173,6 +179,11 @@ def stop_note(stopped: str, language: OutputLanguage) -> str:
         return ""
     note = STOP_NOTES.get(stopped, {}).get(language.value if language == OutputLanguage.ko else "en", stopped)
     return f" (executer 중단: {note})" if language == OutputLanguage.ko else f" (executer stopped: {note})"
+
+
+def precondition_head(language: OutputLanguage) -> str:
+    """사전 조건 불충족 판정의 이유 앞에 붙는 말. 실패와 섞이지 않게 사람이 먼저 읽는 자리에 둔다."""
+    return "사전 조건 불충족: " if language == OutputLanguage.ko else "Precondition not met: "
 
 
 def overrule_note(said: bool, passed: bool, checks: list[ItemCheck], language: OutputLanguage) -> str:
@@ -251,15 +262,21 @@ class Evaluator:
             note = stop_note(play.stopped, self._config.language)
             checks, settled = settle_checks(list(getattr(verdict, "checks", []) or []))
             passed = verdict.passed if settled is None else settled
+            unmet = getattr(verdict, "precondition_held", None) is False
+            if unmet:
+                # 사전 조건이 깨진 채 한 행동의 결과는 그 TC 의 판정이 아니다.
+                passed = False
             missing = tuple(check.expected for check in checks if check.met == "unknown")
-            overruled = overrule_note(verdict.passed, passed, checks, self._config.language)
+            overruled = "" if unmet else overrule_note(verdict.passed, passed, checks, self._config.language)
+            head = precondition_head(self._config.language) if unmet else ""
             return StepVerdict(
-                passed, verdict.reason + overruled + note, verdict.state_detail, getattr(verdict, "insight", ""),
+                passed, head + verdict.reason + overruled + note, verdict.state_detail, getattr(verdict, "insight", ""),
                 verdict.evidence_sufficient and not missing, image.capture_id if image is not None else None,
                 game_insight=getattr(verdict, "game_insight", ""),
                 checks=tuple(check.model_dump() for check in checks),
                 missing=missing,
                 contradicted=tuple(check.expected for check in checks if check.met == "no"),
+                precondition_unmet=unmet,
             )
         return StepVerdict(False, f"EVALUATOR-ERROR: no readable verdict in {ATTEMPTS} answers ({problem})")
 
@@ -390,6 +407,7 @@ def request(
     return (
         history
         + f"The step:\n{this_step(scenario, step)}\n\n"
+        + precondition_note(getattr(play, "precondition", None))
         + evaluator_note(getattr(play, "target", None))
         + segment_note(step, segment)
         + f"Why play stopped: {play.stopped}\n\n"
@@ -398,6 +416,26 @@ def request(
         + f"):\n{turns}\n\n"
         + ran_code(play, shown)
         + f"{evidence_text(play)}\n"
+    )
+
+
+def precondition_note(checked: dict | None) -> str:
+    """case 시작 때 사전 조건을 화면과 대조한 결과(pe16). 대조하지 않았으면 빈 글이다."""
+    if not checked:
+        return ""
+    status = checked.get("status")
+    said = {
+        "held": "it held",
+        "unmet": "it did not hold",
+        "unknown": "the screen could not tell either way",
+    }.get(status, "it was not checked")
+    rewritten = (
+        " The plan was then written again to make it hold before the step's own move; judge from the turns whether it did."
+        if checked.get("rewritten") else ""
+    )
+    return (
+        f"The test case's precondition, checked against the screen when this case started: \"{checked.get('condition')}\" — "
+        f"{said}.{rewritten}\n\n"
     )
 
 

@@ -366,7 +366,8 @@ class PlannerExecuterRunner:
                         following = asyncio.create_task(self._follow_scene(channel, scenario, step, holder))
                     try:
                         play = await self._play_with_replans(
-                            scenario, step, planner, executer, written.macros, target, checked=checked, finished=finished
+                            scenario, step, planner, executer, written.macros, target, checked=checked, finished=finished,
+                            precondition=case_precondition(scenario, step) if finished is None else None,
                         )
                     finally:
                         if following is not None:
@@ -594,7 +595,9 @@ class PlannerExecuterRunner:
             # 로컬 try 20 은 묶음 끝 화면을 붙여 step 1 의 타이틀을 못 보고 실패로 판정했다.
             # 묶음 기록은 같지만 멈춘 이유는 step 마다 다르다. 마지막 step 의 이유를 모든 step 에 붙이면, 뒤 step 의 결과로 끝난
             # step 에 "입력을 보내지 않음" 이 달렸다(로컬 try 26 step 3·4).
-            judged = replace(whole, stopped=held.play.stopped) if len(group) > 1 else None
+            judged = (
+                replace(whole, stopped=held.play.stopped, precondition=held.play.precondition) if len(group) > 1 else None
+            )
             await self._settle(
                 channel, state, scenario, held.step, judge, held.play, held.image,
                 held.target, contracted, judged=judged, segment=steps if len(group) > 1 else None,
@@ -697,8 +700,12 @@ class PlannerExecuterRunner:
         target: StepTarget | None = None,
         checked: bool = False,
         finished: str | None = None,
+        precondition: str | None = None,
     ) -> StepPlay | None:
-        """Play the step, and have the planner write it again while it is asked to and has budget left: no action was
+        """`precondition` 은 이 step 에서 시작하는 TC 의 사전 조건이다(pe16). play 전에 화면과 대조하고, 성립하지 않으면 planner 가
+        그것을 먼저 맞추도록 한 번 다시 쓴다. 대조 결과는 판정에 함께 간다.
+
+        Play the step, and have the planner write it again while it is asked to and has budget left: no action was
         ready or every action was out, the scene changed under the plan (`off_plan`, pe11), or an action got stuck under
         `repair="planner"`. `checked` and `finished` go to the first play (`Executer.play`); a plan written again carries
         its own check.
@@ -711,6 +718,26 @@ class PlannerExecuterRunner:
         replans = repairs = scene_replans = coverages = 0
         started = executer.now()
         planner_repairs = spec.repair == "planner" and spec.editor == "on"
+        checked_precondition: dict | None = None
+        if precondition and spec.precondition_check == "on":
+            checked_precondition = await executer.precondition(precondition)
+            await note_decision(
+                executer.channel, "precondition_check",
+                f"Step {step}: the test case's precondition {checked_precondition['status']}", step, **checked_precondition,
+            )
+            if checked_precondition["status"] == "unmet":
+                reason = (
+                    "Before this step's own move, this test case's precondition must hold, and it does not on the screen "
+                    f"now: \"{precondition}\". Plan the moves that make it hold first — close what covers the screen, "
+                    "finish what is still in progress — then the step's move."
+                )
+                transition = {"trigger": "precondition", "attempt": 1, "budget": 1, "precondition": precondition}
+                async with self._game_paused(executer.channel, step):
+                    written = await planner.replan(scenario, step, reason, [], transition)
+                if written.macros is not None:
+                    macros = written.macros
+                    checked = not written.unchecked
+                    checked_precondition["rewritten"] = True
         while True:
             remaining = spec.step_budget_seconds - (executer.now() - started)
             play = await executer.play(
@@ -748,7 +775,7 @@ class PlannerExecuterRunner:
                 and coverages < spec.max_coverage_rewrites
                 and verdict_step(scenario, step)
             ):
-                joined = _joined_rewrites(plays)
+                joined = _with_precondition(_joined_rewrites(plays), checked_precondition)
                 missing, verdict = await self._missing_results(executer, scenario, step, joined)
                 if not missing:
                     joined.judged = verdict
@@ -762,7 +789,7 @@ class PlannerExecuterRunner:
                 lines = recent_action_lines(play.turns)
                 transition = {"trigger": "coverage", "attempt": coverages, "budget": spec.max_coverage_rewrites, "missing": list(missing)}
             else:
-                return _joined_rewrites(plays)
+                return _with_precondition(_joined_rewrites(plays), checked_precondition)
             # 자동 복구의 전이마다 이유·소비 예산·쓴 상태 버전을 남긴다(개선 계획 묶음 2).
             transition |= {
                 "stopped": clip(play.stopped, MAX_REFUSAL_CHARS),
@@ -776,7 +803,7 @@ class PlannerExecuterRunner:
                     f"PLANNER-REFUSED: the rewritten macros were still refused after {spec.max_rewrites} rewrites "
                     f"(asked because: {clip(play.stopped, MAX_REFUSAL_CHARS)})"
                 )
-                return _joined_rewrites(plays)
+                return _with_precondition(_joined_rewrites(plays), checked_precondition)
             macros = written.macros
             checked = not written.unchecked
 
@@ -1172,6 +1199,24 @@ def _hidden_text(play: StepPlay) -> str:
 
 # 앞선 step 판정 한 줄에 싣는 이유의 길이.
 MAX_EARLIER_REASON_CHARS = 300
+
+
+def case_precondition(scenario: QaScenario, step: int) -> str | None:
+    """`step` 에서 TC 가 시작하면 그 TC 의 사전 조건, 아니면 `None`(pe16). 사전 조건은 TC 의 첫 step 을 하기 전에 성립해야 한다."""
+    item = scenario.steps[step - 1]
+    if item.case_id is None or item.case is None or not (item.case.precondition or "").strip():
+        return None
+    earlier = scenario.steps[step - 2].case_id if step > 1 else None
+    return item.case.precondition.strip() if earlier != item.case_id else None
+
+
+def _with_precondition(play: StepPlay, checked: dict | None) -> StepPlay:
+    """play 에 사전 조건 대조 결과를 붙인다. 맞추려고 계획을 다시 썼으면 묶음의 뒤 step 계획은 버린다(`rewritten`)."""
+    if checked is not None:
+        play.precondition = checked
+        if checked.get("rewritten"):
+            play.rewritten = True
+    return play
 
 
 def verdict_step(scenario: QaScenario, step: int) -> bool:

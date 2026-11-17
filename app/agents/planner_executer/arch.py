@@ -110,7 +110,13 @@ from pydantic import BaseModel, ConfigDict, Field
 # - Jev 는 먼저 행동을 고른다. 묶은 행동을 고르면 대상이 하나일 때 그것이고, 여럿이면 planner 의 `prefer_<action>(<대상>)` 이
 #   참인 대상으로 좁힌 뒤, 그래도 여럿이면 Jev 가 대상을 한 번 더 고른다. 계산이 필요한 대상 선택은 Jev 가 하지 못한다(PoC
 #   스테이지 2: 규칙을 질문에 적어 줘도 배분을 낭비해 졌다) — 계산식은 planner 가 쓰고 계산은 코드가 한다.
-PLANNER_EXECUTER_LABEL = "pe15-one-option-per-action"
+# pe16-precondition-check: TC 의 사전 조건을 확인한다. 지금까지 사전 조건은 planner·evaluator 에게 글로만 갔고, 할 일을 정한 규칙도
+# 코드의 확인도 없었다 — 로컬 try 35 step 15 는 "맵에 창이나 대화가 떠 있지 않다" 가 깨진 채(팁 대화창) 진행됐고, 남은 창이 step 16
+# 의 구매 버튼을 가렸다.
+# - TC 가 시작하는 step 에서 play 전에 Jev noul 로 사전 조건 글을 화면 전체와 대조한다(성립 ≥ 0.6, 불성립 ≤ 0.3, 그 사이는 확인 불가).
+# - 불성립이면 planner 가 그것을 먼저 맞추도록 한 번 다시 쓴다. planner 는 평소에는 사전 조건을 따로 다루지 않는다.
+# - evaluator 는 `precondition_held` 를 낸다. 거짓이면 통과로 두지 않고 "사전 조건 불충족" 으로 실패와 따로 적는다.
+PLANNER_EXECUTER_LABEL = "pe16-precondition-check"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1
@@ -135,6 +141,9 @@ class PlannerExecuterArchSpec(BaseModel):
     # case 의 판정 step 이 제 `done()` 으로 멈추면 evaluator 로 기대 항목의 근거를 본다. 근거 없는 항목이 있으면 planner 가
     # 그 항목을 이유로 step 을 다시 쓰고 이어서 돈다(pe12). evaluator 호출이 그 step 마다 하나 더 든다.
     coverage_check: Literal["off", "on"] = "on"
+    # TC 가 시작하는 step 에서 그 TC 의 사전 조건을 Jev 로 화면과 대조한다. 성립하지 않으면 planner 가 맞추도록 한 번 다시 쓰고,
+    # 판정은 사전 조건 불충족을 실패와 따로 적는다(pe16). Jev 호출이 TC 마다 하나 더 든다.
+    precondition_check: Literal["off", "on"] = "on"
     max_coverage_rewrites: int = Field(default=1, ge=0, le=3)
     # FREE 시나리오: 한 라운드가 끝나고 미룬 case 가 남았을 때 `reset_game` 으로 다시 시작하는 횟수.
     free_max_resets: int = Field(default=1, ge=0, le=10)

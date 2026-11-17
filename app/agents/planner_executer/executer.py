@@ -119,6 +119,14 @@ WAIT_TRUE_MEANS = "the game is busy and an input now would be ignored or come to
 WAIT_FALSE_MEANS = "the game is waiting for the player's input, including a dialogue that waits for a key press"
 # 기다림으로 읽는 noul 값. TypeSafe 문서의 시작값이다. 그 아래는 고른 action 을 한다.
 WAIT_AT = 0.7
+# case 시작 시 TC 사전 조건을 화면과 대조하는 질문(pe16). 사전 조건 글은 사람이 쓴 문장이라 코드가 읽지 못하고, Jev 는 문장과
+# 화면 글자를 맞추는 일을 잘한다. 계산이 아니라 대조다.
+PRECONDITION_QUESTION = "Does this hold in the game right now: {condition}"
+PRECONDITION_TRUE_MEANS = "the screen and the game's values show that it holds now"
+PRECONDITION_FALSE_MEANS = "the screen or the game's values show that it does not hold now"
+# 사전 조건 답을 성립·불성립으로 읽는 경계. 그 사이는 화면으로 가릴 수 없는 것(저장소의 값 등)으로 보고 막지 않는다.
+PRECONDITION_HOLDS_AT = 0.6
+PRECONDITION_FAILS_AT = 0.3
 # 선택지 대상이 화면에 띄운 글자를 몇 개, 몇 자까지 붙이는가.
 SHOWN_WORDS = 4
 SHOWN_WORD_CHARS = 40
@@ -347,6 +355,8 @@ class StepPlay:
     state_source: Literal["state_set", "pulse_memory"] = "state_set"
     # planner·editor 가 쓴 행동의 코드(`macros.action_code`, pe13). evaluator 는 이 중 실제로 돈 행동의 코드를 읽는다.
     action_sources: dict[str, str] = field(default_factory=dict)
+    # case 시작 시 TC 사전 조건을 대조한 결과(pe16). `Executer.precondition` 의 답에 `rewritten`(맞추려고 다시 썼나)을 더한다.
+    precondition: dict[str, Any] | None = None
 
     def played(self) -> dict:
         """step `STATUS` 의 `played`: 영상 구간을 자를 기준. `docs/evaluator-analysis-frames.md`."""
@@ -402,6 +412,8 @@ class Executer:
     ) -> None:
         self._channel = channel
         self._spec = spec
+        # 사전 조건을 물을 때만 참이다: Jev 에게 ```observe 로 좁히지 않은 화면 전체를 보인다(pe16).
+        self._whole_view = False
         # 개발자가 선언한 fact. planner 가 step 마다 고른 것만 Jev state 의 `facts` 로 싣는다.
         self._game_facts = facts if spec.facts == "on" else NO_FACTS
         # 지금 play 에서 고른 fact: `(이름, scope, source 이름)`. `play` 가 매번 정한다.
@@ -1027,6 +1039,30 @@ class Executer:
             if name in macros.readies
         }
 
+    async def precondition(self, condition: str) -> dict[str, Any]:
+        """TC 사전 조건이 지금 성립하는가(pe16). `{"condition", "status": held|unmet|unknown, "probability"}`.
+
+        planner 의 ```observe 로 좁히지 않은 화면 전체로 묻는다 — 사전 조건을 깨는 창은 계획이 보려던 범위 밖에 있기 쉽다(로컬
+        try 35 step 15: 맵에 팁 대화창이 떠 있었다). Jev 가 답하지 못하면 `unknown` 이다."""
+        self._whole_view = True
+        try:
+            state = await self._state()
+        finally:
+            self._whole_view = False
+        try:
+            probability = await self._jev.probability(
+                PRECONDITION_QUESTION.format(condition=condition), state,
+                true_means=PRECONDITION_TRUE_MEANS, false_means=PRECONDITION_FALSE_MEANS,
+            )
+        except JevError:
+            return {"condition": condition, "status": "unknown", "probability": None}
+        status = (
+            "held" if probability >= PRECONDITION_HOLDS_AT
+            else "unmet" if probability <= PRECONDITION_FAILS_AT
+            else "unknown"
+        )
+        return {"condition": condition, "status": status, "probability": round(probability, 2)}
+
     async def _state(self) -> dict[str, Any]:
         """What a keyword-less macro `ask`/`decide` sends Jev: the scene and every live object.
 
@@ -1451,8 +1487,8 @@ class Executer:
         return self._spec.observation == "planner" and self._spec.state_source == "state_set"
 
     def _view(self) -> StateView:
-        """지금 Jev 에게 보일 범위: planner 의 ```observe."""
-        if not self._planned():
+        """지금 Jev 에게 보일 범위: planner 의 ```observe. 사전 조건을 물을 때는 화면 전체다."""
+        if not self._planned() or self._whole_view:
             return EVERYTHING
         observe = self._observe or StepObserve()
         # 범위는 씬 객체·DontDestroyOnLoad 객체·static 에 똑같이 걸리고, 가린 것은 `hidden` 에 그룹으로만 남는다.

@@ -383,3 +383,92 @@ def test_a_prefer_rule_must_name_an_action_and_take_its_target(source: str, refu
 
     with pytest.raises(MacroRejection, match=refusal):
         asyncio.run(go())
+
+
+# --- pe16: TC 사전 조건 --------------------------------------------------------------------------
+
+from app.agents.planner_executer.runner import case_precondition  # noqa: E402
+
+
+def test_a_precondition_belongs_to_the_first_step_of_its_case() -> None:
+    scenario = QaScenario(
+        title="Case of two steps",
+        steps=[
+            QaStep(action="Open.", case_id=5, case=QaCaseRef(id=5, precondition="The map shows no window.", expected="x")),
+            QaStep(action="Close.", case_id=5, case=QaCaseRef(id=5, precondition="The map shows no window.", expected="x")),
+            QaStep(action="Wait."),
+        ],
+    )
+
+    assert [case_precondition(scenario, step) for step in (1, 2, 3)] == ["The map shows no window.", None, None]
+
+
+@pytest.mark.parametrize("answer, status", [(0.9, "held"), (0.1, "unmet"), (0.45, "unknown")])
+def test_the_precondition_is_read_against_the_whole_screen(answer: float, status: str) -> None:
+    fake = _menu()
+    jev = FakeJev(goal=(answer,))
+
+    async def go():
+        fake.push_reading()
+        executer = Executer(fake.channel, _config().arch.planner, JevClient(post=jev))
+        return await executer.precondition("The menu shows Start.")
+
+    checked = asyncio.run(go())
+
+    assert checked["status"] == status and checked["condition"] == "The menu shows Start."
+    (asked,) = jev.asked("noul")
+    assert "Does this hold in the game right now: The menu shows Start." in asked["questions"]["answer"]["instructions"]
+
+
+def _with_precondition_scenario() -> QaScenario:
+    return QaScenario(
+        title="Start",
+        steps=[QaStep(
+            action="Press Start.", case_id=5,
+            case=QaCaseRef(id=5, precondition="No window covers the menu.", expected="The map opens."),
+        )],
+    )
+
+
+def test_an_unmet_precondition_has_the_planner_write_the_step_again_to_make_it_hold() -> None:
+    fake = _menu()
+    calls: list[str] = []
+    judged: list[str] = []
+
+    async def asked(system: str, user: str) -> str:
+        calls.append(user)
+        if len(calls) == 1:
+            return f"```python\n{MACROS}```"
+        # 다시 쓰기는 지금 계획(첫 판)에 대한 수정이다. 바꿀 것이 없다는 답도 받는다.
+        return '```changes\n{"base": 1, "replace": {}, "remove": {}, "add": []}\n```'
+
+    async def judge(system: str, user: str):
+        judged.append(user)
+        return {"passed": True, "reason": "ok", "state_detail": "", "game_insight": "", "checks": [], "precondition_held": None}
+
+    config = _config(no_action_grace_seconds=0.2, analysis="off", coverage_check="off")
+
+    async def go():
+        fake.push_reading()
+        runner = PlannerExecuterRunner(config, ask=asked, judge=judge, jev=JevClient(post=FakeJev(goal=(0.1,))))
+        return await runner.run_with_deadline(fake.channel, _with_precondition_scenario())
+
+    state, failure = asyncio.run(go())
+
+    assert failure is None and state.finished
+    checked = [f["payload"]["decision"] for f in fake.frames("LOG") if f["payload"].get("kind") == "precondition_check"]
+    assert len(checked) == 1 and checked[0]["status"] == "unmet"
+    assert len(calls) >= 2 and "No window covers the menu." in calls[1]
+    assert 'precondition, checked against the screen when this case started: "No window covers the menu."' in judged[0]
+    assert "written again to make it hold" in judged[0]
+
+
+def test_a_step_run_with_its_precondition_broken_is_recorded_apart_from_a_failure() -> None:
+    async def judge(system: str, user: str):
+        return {**VERDICT_WITH_CHECKS, "checks": [{**VERDICT_WITH_CHECKS["checks"][1]}], "precondition_held": False}
+
+    verdict = asyncio.run(Evaluator(_config(), judge).judge(_scenario(), 1, PLAYED))
+
+    assert verdict.passed is False and verdict.precondition_unmet
+    assert verdict.message.startswith("Precondition not met: ") or verdict.message.startswith("사전 조건 불충족: ")
+    assert verdict.details()["precondition"] == "unmet"

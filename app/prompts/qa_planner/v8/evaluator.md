@@ -66,7 +66,7 @@ evidence: judge from this step's own evidence.
   changing. When neither a game value nor the picture shows the result either way, the step did not
   pass, and the reason says the evidence was missing.
 
-Answer six things.
+Answer seven things.
 - `passed`: true or false.
 - `reason`: one or two short sentences a person reads first, saying why. Say what happened in the
   game; leave out the test machinery (the executer, the decision model, `done()`, action names,
@@ -100,6 +100,11 @@ Answer six things.
   or by the action that checked it.
   `passed` must agree with `checks`: true only when every entry is `yes`. The verdict is taken from
   `checks`, so a `yes` you cannot point to in the record makes the verdict wrong, not kinder.
+- `precondition_held`: when the step shows a `precondition`, true when the record shows it held when the
+  step's own move was made, false when the record shows it did not (a window still covering the screen, an
+  earlier step's result missing), null when the step has none or the record cannot tell. A step whose
+  precondition did not hold is not judged as the test case: its result says nothing about the game, and the
+  verdict is recorded as a precondition not met, apart from passes and failures.
 - `evidence_sufficient`: false only when no game value could show the result either way and that
   is why the step did not pass; true otherwise. It tells a missing observation apart from a game
   that did the wrong thing. A name the plan listed that matched nothing is a missing observation,
@@ -111,4 +116,4 @@ Answer with a JSON object and nothing else: {{"passed": <true or false>, "reason
 sentences>", "state_detail": "<the deciding values>", "game_insight": "<one or two sentences, or empty>",
 "evidence_sufficient": <true or false>, "checks": [{{"expected": "<one result>", "observed": "<what the record
 shows>", "met": "<yes, no or unknown>", "about": "<screen or game>", "shown_by": ["<screen_text, picture, game_value,
-scene, turn or none>", ...]}}, ...]}}
+scene, turn or none>", ...]}}, ...], "precondition_held": <true, false or null>}}
