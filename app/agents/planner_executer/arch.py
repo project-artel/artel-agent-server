@@ -132,6 +132,8 @@ from pydantic import BaseModel, ConfigDict, Field
 # - 판정 근거의 값 중 fact 의 source 에서 읽은 것에 `[fact <name>]` 을 붙인다.
 # - 판정 근거는 선언된 fact 값을 check 와 상관없이 매 기록에 `fact <name>` 으로 읽는다. 선언만 알고 값이 없으면 evaluator 가
 #   그 fact 로 확인할 결과를 확인할 수 없다고 판정했다(로컬 try 39 step 5, `map_spot`).
+# - 묶음의 마지막 step 이 `done()` 자리에서 판정을 받았어도 앞 step 이 기다리면 화면을 다시 찍는다. 묶음 판정이 그림 없이
+#   나가 화면으로만 보이는 결과를 확인하지 못했다(로컬 try 41 step 18).
 PLANNER_EXECUTER_LABEL = "pe18-evaluator-knows-facts"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.

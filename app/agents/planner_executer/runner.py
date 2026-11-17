@@ -139,6 +139,15 @@ class Held:
     # 판정 step 이 `done()` 으로 멈춘 자리에서 이미 받은 판정(pe12). 묶음이 아니면 이것을 그대로 쓴다 — 같은 기록, 같은 화면이다.
     verdict: Any = None
 
+def keeps_judgement_at_done(play: StepPlay, ahead: dict, held: list) -> bool:
+    """`done()` 자리에서 받은 판정(pe12)을 그대로 쓰나. 그 판정의 화면도 그때 찍었으므로 쓰면 다시 찍지 않는다.
+
+    묶음이 뒤 step 으로 이어지거나(`ahead`) 앞 step 이 판정을 기다리면(`held`) 이 step 은 묶음 전체 기록으로 다시 판정받는다.
+    예전에는 앞 step 이 기다리는 경우를 보지 않아 화면을 찍지 않았고, 다시 받는 판정이 그림 없이 나갔다 — 로컬 try 41 step 18 은
+    coverage check 에서 그림으로 "오른쪽의 슬라임" 을 확인해 통과했는데, 16~18 묶음 판정에서 그것을 확인할 수 없다고 실패했다."""
+    return getattr(play, "judged", None) is not None and not ahead and not held
+
+
 class PlannerExecuterRunner:
     def __init__(
         self,
@@ -401,8 +410,7 @@ class PlannerExecuterRunner:
                         ahead = dict(rewritten_ahead)
                     if not ahead:
                         ended_through = None
-                    # `done()` 자리에서 이미 판정을 받았고 묶음이 이어지지 않으면 그 판정을 쓴다. 화면도 그때 찍었다(pe12).
-                    reuse = getattr(play, "judged", None) is not None and not ahead
+                    reuse = keeps_judgement_at_done(play, ahead, held)
                     image = (
                         await capture_screen(channel, f"Step {step}: capturing the screen for the evaluator", step)
                         if self._spec.screen_images == "on" and not reuse

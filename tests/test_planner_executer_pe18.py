@@ -142,3 +142,18 @@ def test_a_fact_unknown_at_every_reading_is_left_out_of_the_evaluator_s_values()
 
     assert "fact map_spot: 0 (unchanged from start to end)" in text
     assert "fact player_hp" not in text
+
+
+# --- 묶음으로 다시 판정받는 step 은 화면을 다시 찍는다 ------------------------------------------------------
+
+
+def test_a_judgement_at_done_is_kept_only_when_no_segment_waits_on_it() -> None:
+    """로컬 try 41 step 18: coverage check 의 판정을 쓴다고 보고 화면을 찍지 않았는데, 16~18 묶음으로 그림 없이 다시 판정받았다."""
+    from app.agents.planner_executer.runner import keeps_judgement_at_done
+
+    judged = StepPlay("done", judged=object())
+
+    assert keeps_judgement_at_done(judged, {}, []) is True
+    assert keeps_judgement_at_done(judged, {}, [object()]) is False, "앞 step 이 기다리면 묶음으로 다시 판정받는다"
+    assert keeps_judgement_at_done(judged, {19: object()}, []) is False
+    assert keeps_judgement_at_done(StepPlay("done"), {}, []) is False
