@@ -553,7 +553,7 @@ WAIT = '''def wait_a_bit() -> None:
 STRIKE_CONTRACT = {"params": {"enemy": {"holds": "Game.Enemy::hp"}}, "effect": {"mode": "transition", "within": 0.5}}
 
 
-def test_a_registered_contract_is_used_in_legacy_mode_and_the_planner_s_ready_for_it_is_ignored() -> None:
+def test_a_registered_contract_is_used_in_legacy_mode_and_the_planner_s_ready_for_it_is_kept_for_when_it_has_none() -> None:
     fake = _menu()
 
     async def go():
@@ -576,7 +576,8 @@ def test_a_registered_contract_is_used_in_legacy_mode_and_the_planner_s_ready_fo
 
     assert list(contracts) == ["developer:strike"] and list(actions) == ["developer:wait_a_bit"]
     assert pairs == (("developer:strike", 'strike(pick("Enemy"))'), ("developer:wait_a_bit", "wait_a_bit"))
-    assert "developer:strike" not in macros.readies
+    # 계약에 준비 조건이 없을 때 executer 가 쓴다(pe13). 계약에 있으면 계약 것이 이긴다(`Executer._contract_ready`).
+    assert "developer:strike" in macros.readies
 
 
 def test_a_legacy_step_with_a_contracted_developer_macro_runs_end_to_end() -> None:

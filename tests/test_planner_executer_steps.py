@@ -356,11 +356,10 @@ def test_jev_is_told_what_the_last_action_turns_did_when_it_picks_again() -> Non
     (first,) = jev.asked("choice")
     # 첫 turn 에는 지난 action 이 없어 state 가 전과 같다.
     assert "recent_actions" not in first["state"]
-    # 입력 없이 끝난 `look_around` 가 잠시 빠져 둘째 turn 은 선택지가 하나다. 고르기는 묻지 않지만, 준비 조건이 없어 기다림을
-    # 물을 때 지난 action 을 함께 보낸다(pe11).
-    (wait,) = jev.asked("noul")
-    assert wait["state"]["recent_actions"] == ["turn 0: look_around → passed, sent no input to the game"]
-    assert play.turns[1]["recent_actions"] == wait["state"]["recent_actions"]
+    # 입력 없이 끝난 `look_around` 가 잠시 빠져 둘째 turn 은 선택지가 하나다. 고르기도 기다림도 묻지 않는다(pe13). 지난 action 은
+    # turn 기록에 남는다.
+    assert jev.asked("noul") == []
+    assert play.turns[1]["recent_actions"] == ["turn 0: look_around → passed, sent no input to the game"]
     assert play.turns[1]["picked_by"] == "only_option"
     assert play.stopped == "done"
 
@@ -536,12 +535,13 @@ def test_play_stops_at_the_time_budget() -> None:
 
     class Later(FakeJev):
         async def __call__(self, body: dict) -> dict:
-            clock.now += 10
+            clock.now += 20
             return await super().__call__(body)
 
+    # 선택지가 하나인 turn 은 Jev 를 부르지 않는다(pe13). 첫 고르기에서 예산이 넘어간다.
     play = _play(_menu(), Later(picks=("look_around",)), clock=clock, step_budget_seconds=15)
 
-    assert play.stopped == "step budget 15s" and len(play.turns) == 2
+    assert play.stopped == "step budget 15s"
 
 
 def test_a_jev_error_stops_play_with_the_error() -> None:

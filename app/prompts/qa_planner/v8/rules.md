@@ -239,8 +239,10 @@ Developer macros
   reads. The executer offers the action only while it is true, and reads it again just before running;
   a predicate it cannot read does not hide the action. Keep `require` in the action as well.
 - A developer macro that has its own ready condition keeps it; a `ready_` you write for it is not
-  used. For one without, write `ready_` only to read whether the game takes that input now — a
-  dialogue waiting for a key, a target waiting — never which screen this step expects. A `ready_`
+  used. The request marks each one that has none. For those, write `ready_` when the input does
+  nothing on some screens, reading only whether the game takes that input now — a dialogue waiting
+  for a key, a target waiting — never which screen this step expects. Without it the action stays on
+  offer where it does nothing, and the decision model may pick it again and again. A `ready_`
   that names a scene hides the action everywhere else, and the step stalls when the game is not
   where the step's sentence assumed.
 - An action is one decision. A move that depends on how the game answers the previous one is a

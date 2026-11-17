@@ -224,3 +224,88 @@ def test_every_evidence_name_and_every_change_reaches_the_evaluator() -> None:
 
     assert "Obj[149] text" in text and "more names left out" not in text
     assert "turn 19: 19" in text and "changes …" not in text
+
+
+# --- pe13: 준비 조건, 기다림, fact -------------------------------------------------------------------
+
+from types import SimpleNamespace  # noqa: E402
+
+from app.agents.planner_executer.developer_macros import DeveloperMacro, load_developer_macros  # noqa: E402
+from app.agents.planner_executer.executer import Executer  # noqa: E402
+from app.agents.planner_executer.prompts import developer_macro_list  # noqa: E402
+
+
+class _Binder:
+    def __init__(self, own=None) -> None:
+        self.own = own
+
+    async def ready(self, name, binding):
+        return self.own
+
+
+def test_a_contract_without_a_ready_of_its_own_takes_the_planner_s() -> None:
+    executer = Executer(_menu().channel, _config().arch.planner, JevClient(post=FakeJev()))
+    planner_ready, contract_ready = object(), object()
+
+    async def go():
+        bare = SimpleNamespace(binder=_Binder(), readies={"developer:advance": planner_ready})
+        owned = SimpleNamespace(binder=_Binder(contract_ready), readies={"developer:advance": planner_ready})
+        return (
+            await executer._contract_ready(bare, "developer:advance", ()),
+            await executer._contract_ready(owned, "developer:advance", ()),
+            await executer._contract_ready(bare, "developer:advance", (("target", "Enemy[0]"),)),
+        )
+
+    bare, owned, bound = asyncio.run(go())
+
+    assert bare is planner_ready and owned is contract_ready and bound is None
+
+
+PRESS = '''def press_any_key() -> None:
+    """Press Space once."""
+    press_key("Space", 0.05)
+'''
+GUARDED = '''def open_menu() -> None:
+    """Open the menu."""
+    require(scene() == "Menu", "Go to the menu first.")
+    press_key("M", 0.05)
+'''
+
+
+def test_the_planner_is_told_which_developer_macros_have_no_ready_condition() -> None:
+    loaded = asyncio.run(load_developer_macros((
+        DeveloperMacro("press_any_key", PRESS, "1.0", None, False, None),
+        DeveloperMacro("open_menu", GUARDED, "1.0", None, False, None),
+    )))
+
+    text = developer_macro_list(loaded.usable.values())
+
+    assert "write `ready_press_any_key()`" in text
+    assert "ready_open_menu" not in text
+
+
+def test_every_declared_fact_goes_to_jev_with_the_planner_s_choice_first(tmp_path) -> None:
+    from tests.test_planner_executer_facts import _declare
+
+    declared = _declare(tmp_path)
+    executer = Executer(_menu().channel, _config().arch.planner, JevClient(post=FakeJev()), facts=declared)
+    every = [fact.name for fact in declared.facts]
+
+    chosen = executer._fact_sources_for(SimpleNamespace(facts=("player_hp",)))
+    none_chosen = executer._fact_sources_for(SimpleNamespace(facts=()))
+
+    assert [name for name, _scope, _member in none_chosen] == every and len(every) == 3
+    assert [name for name, _scope, _member in chosen] == ["player_hp"] + [name for name in every if name != "player_hp"]
+
+
+def test_a_single_option_runs_without_asking_jev_anything() -> None:
+    from tests.test_planner_executer_pe11 import ONLY_PRESS
+    from tests.test_planner_executer_steps import _play
+
+    jev = FakeJev(picks=("press_start",))
+    source = ONLY_PRESS.replace('\n\ndef ready_press_start() -> bool:\n    return scene() == "Menu"\n', "")
+
+    play = _play(_menu(), jev, source)
+
+    assert jev.bodies == [] and play.turns[0]["picked_by"] == "only_option"
+    assert "wait_asked_because" not in play.turns[0]

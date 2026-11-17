@@ -467,11 +467,7 @@ class Executer:
         self._evidence_last = None
         self._switching = {}
         self._observe = getattr(macros, "observe", None)
-        self._fact_sources = [
-            (name, fact.scope, fact.member)
-            for name in getattr(macros, "facts", ())
-            if (fact := self._game_facts.get(name)) is not None
-        ]
+        self._fact_sources = self._fact_sources_for(macros)
         await self._settle()
         play = StepPlay(
             "turn limit",
@@ -691,8 +687,8 @@ class Executer:
                 if not options:
                     await self._send(record)
                     left = (
-                        f"every action failed or sent no input {spec.max_misses_per_action} times in this step, or was "
-                        f"picked {spec.max_same_action_in_a_row} times in a row without progress ({', '.join(dropped)})"
+                        f"every action failed or sent no input {spec.max_misses_per_action} times in this step "
+                        f"({', '.join(dropped)})"
                     )
                     # 게임 action 이 다 빠져도 복구할 길이 남았으면 그쪽으로 간다(개선 계획 묶음 2). 전에는 `REPLAN` 예산이 남아도
                     # 선택지를 만들기 전에 멈췄다.
@@ -708,8 +704,10 @@ class Executer:
                 earlier = [{**turn, "earlier_plan": True} for turn in history or []]
                 # 선택지마다 지금 사실을 붙인다(pe9): 대상이 화면에 띄운 글자, 연달아 고른 횟수, 효과 없이 끝난 시도.
                 options = annotate_options(options, earlier + play.turns[:-1], self._shown_words)
-                # 준비됐다고 알 수 없는 선택지. 하나라도 있으면 기다림을 묻는다(선택지 수와 상관없이).
-                undeclared = [key for key in options if key not in declared]
+                # 준비됐다고 알 수 없는 선택지. 둘 이상 중에서 고를 때만 같은 요청에 기다림을 묻는다. 선택지가 하나면 묻지 않고
+                # 실행한다(pe13): try 26~33 의 기다림 답 422개 중 기준(0.7)을 넘은 것이 없었고, 대사를 넘기는 동안 turn 마다
+                # Jev 호출이 하나씩 붙었다.
+                undeclared = [key for key in options if key not in declared] if len(options) > 1 else []
                 if undeclared:
                     record["wait_asked_because"] = undeclared
                 goal_text = None
@@ -915,23 +913,13 @@ class Executer:
                     last_picked = picked
                 picked_on = fingerprint
                 last_no_effect = no_effect_shown(record)
-                if same_in_a_row >= spec.max_same_action_in_a_row:
+                if same_in_a_row >= spec.max_same_action_in_a_row and can_ask_planner:
+                    # 같은 행동을 연달아 고르면 planner 에게 다시 쓰게 할 수 있다(`repair="planner"`). 그 밖에는 빼지 않는다(pe13):
+                    # 빼면 그 step 이 끝날 때까지 돌아오지 않아, 로컬 try 33 step 9 는 시전 뒤 뜬 대사를 넘길 행동이 없어 멈췄다.
                     repeated = f"`{picked}` was picked {same_in_a_row} times in a row"
-                    if can_ask_planner:
-                        play.repair_request = {"action": picked, "misses": None, "reason": f"{repeated} without the step moving on"}
-                        play.stopped = f"REPAIR: {repeated}"
-                        break
-                    if picked not in dropped:
-                        # 복구 예산이 없으면 멈추지 않고 그 action 을 뺀다. 남은 action 이 있으면 잇고, 없으면 선택지를 만들 때
-                        # 근거와 함께 멈춘다(개선 계획 묶음 2). 런 180 은 `end_turn` 6연속에서 바로 멈췄다.
-                        dropped.append(picked)
-                        record["dropped"] = f"{repeated} without the step moving on"
-                        await channel.note(
-                            f"`{picked}` is out of this step's choices: {repeated} without the step moving on",
-                            LogCategory.THOUGHT,
-                            step,
-                        )
-                    same_in_a_row = 0
+                    play.repair_request = {"action": picked, "misses": None, "reason": f"{repeated} without the step moving on"}
+                    play.stopped = f"REPAIR: {repeated}"
+                    break
                 if not sent:
                     # 보낸 것이 없으면 화면도 그대로다. 다음 reading 을 기다려 같은 화면에 바로 다시
                     # 묻지 않는다. 보낸 것이 있으면 `act_and_look` 이 이미 기다렸다.
@@ -1196,7 +1184,7 @@ class Executer:
                 binding = tuple((param, selector) for param, (selector, _id) in zip(contract.params, combo))
                 ids = {selector: object_id for selector, object_id in combo}
                 key = name if not binding else f"{name}{PICK_SEPARATOR}{' + '.join(selector for _p, selector in binding)}"
-                probe = await macros.binder.ready(name, binding)
+                probe = await self._contract_ready(macros, name, binding)
                 ready = "met" if probe is None else await self._predicate(probe, step, READY_FLAG)
                 if ready != "met":
                     unready.append(f"{key} ({ready})")
@@ -1208,6 +1196,29 @@ class Executer:
                     description += "\n\nThis option acts on " + ", ".join(f"`{selector}` as {param}" for param, selector in binding) + "."
                 instances[key] = ContractInstance(name, binding, ids, description)
         return instances, unready, declared
+
+    def _fact_sources_for(self, macros: Any) -> list[tuple[str, str, str]]:
+        """Jev 에게 실을 fact: 선언된 것 전부, planner 가 고른 것을 앞에(pe13).
+
+        planner 가 고른 것만 실었더니 v8 계획이 ```facts 를 빼, 넘길 대사가 없다는 `tutorial_waiting_for_key` 없이 Jev 가 대사
+        넘기기를 여섯 번 골랐다(로컬 try 33 step 9). Jev 는 raw 값보다 이름 붙은 사실을 읽는다."""
+        chosen = [name for name in getattr(macros, "facts", ()) if self._game_facts.get(name) is not None]
+        names = chosen + [fact.name for fact in self._game_facts.facts if fact.name not in chosen]
+        return [(name, fact.scope, fact.member) for name in names if (fact := self._game_facts.get(name)) is not None]
+
+    async def _contract_ready(
+        self, macros: StepMacros, name: str, binding: tuple[tuple[str, str], ...]
+    ) -> MacroDefinition | None:
+        """계약 행동의 준비 조건. 계약에 있으면 그것이고, 없으면 planner 가 쓴 `ready_<action>` 이다(인자 없는 행동만).
+
+        예전에는 계약이 등록된 developer macro 면 계약에 준비 조건이 없어도 planner 의 `ready_` 를 버렸다. planner 규칙은 그런
+        행동에 "지금 그 입력을 받는지" 를 `ready_` 로 쓰라고 했는데 코드가 듣지 않았다 — 로컬 try 33 step 9 는 넘길 대사가 없는데
+        대사 넘기기가 선택지에 남아 Jev 가 여섯 번 골랐다(try 26~33 의 계획 93개 중 3개가 그 `ready_` 를 썼고 모두 버려졌다)."""
+        assert macros.binder is not None
+        probe = await macros.binder.ready(name, binding)
+        if probe is None and not binding:
+            probe = macros.readies.get(name)
+        return probe
 
     def _alive(self, instance: "ContractInstance") -> bool:
         """바인딩한 객체가 지금도 같은 객체로 켜져 있는가. id 를 모르면 selector 로만 본다(약한 식별).
@@ -1240,7 +1251,7 @@ class Executer:
         if not self._alive(instance):
             record["result"] = "stale_target"
             return None
-        probe = await macros.binder.ready(instance.action, instance.binding)
+        probe = await self._contract_ready(macros, instance.action, instance.binding)
         if probe is not None:
             ready = await self._predicate(probe, step, READY_FLAG)
             if ready != "met":

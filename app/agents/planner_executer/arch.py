@@ -98,7 +98,14 @@ from pydantic import BaseModel, ConfigDict, Field
 #   step 8~10 묶음(이름 139개)에서 `HintText[0]` 이 켜진 것만 보이고 그 글자는 안 보여 step 9 가 근거 없음으로 떨어졌다.
 # - planner·editor 가 쓴 행동 중 돈 것의 코드를 판정 요청에 싣는다. try 31 step 3 은 타이핑 중 입력을 `wait_until` 로 확인한
 #   행동이 통과했는데, 판정은 그 코드를 못 봐 근거 없음으로 읽고 step 을 다시 쓰게 했다.
-PLANNER_EXECUTER_LABEL = "pe13-evaluator-sees-all"
+# pe14-ready-not-repeat: 쓸모없는 행동은 반복 횟수가 아니라 준비 조건으로 막는다. 로컬 try 33 step 9 는 넘길 대사가 없는데 대사
+# 넘기기를 Jev 가 여섯 번 골랐고, 반복 상한이 그것을 선택지에서 빼자 시전 뒤 뜬 대사를 넘길 행동이 없어 멈췄다.
+# - 반복 상한으로 행동을 빼지 않는다. 연속 횟수는 `repair="planner"` 일 때 planner 에게 넘기는 데만 쓴다.
+# - 계약이 등록된 developer macro 에 준비 조건이 없으면 planner 의 `ready_<action>` 을 쓴다(인자 없는 행동). 예전에는 버렸다.
+# - planner 요청의 developer macro 목록이 제 준비 조건이 없는 macro 를 표시한다.
+# - 선언된 fact 는 planner 가 고르지 않아도 모두 Jev 에게 싣는다. 고른 것을 앞에 둔다.
+# - 선택지가 하나면 기다림을 묻지 않고 실행한다. try 26~33 의 기다림 답 422개 중 기준을 넘은 것이 없었다.
+PLANNER_EXECUTER_LABEL = "pe14-ready-not-repeat"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1
@@ -146,8 +153,8 @@ class PlannerExecuterArchSpec(BaseModel):
     max_repairs_per_step: int = Field(default=2, ge=0, le=10)
     # action 이 돌았는데 게임에 입력을 하나도 보내지 않은 turn 이 이만큼 이어지면 play 를 멈춘다. 어느 action 이든 센다.
     max_idle_turns_in_a_row: int = Field(default=10, ge=1, le=1_000)
-    # 같은 action 을 이만큼 연달아 고르면 진척이 없는 것으로 본다. `repair="planner"` 면 planner 에게 step 을 다시 쓰게 하고,
-    # 아니면 play 를 멈춘다. 그 action 이 통과하고 입력도 보내 다른 규칙에 안 걸리는 반복을 잡는다.
+    # 같은 action 을 이만큼 연달아 고르면 진척이 없는 것으로 본다. `repair="planner"` 면 planner 에게 step 을 다시 쓰게 한다.
+    # 그 밖에는 아무것도 하지 않는다 — 행동을 빼지 않는다(pe14).
     max_same_action_in_a_row: int = Field(default=6, ge=2, le=1_000)
     # planner(step 을 쓰거나 다시 쓸 때)와 evaluator(판정할 때)가 화면 한 장을 그림으로 본다. Jev 에게는 보내지 않는다.
     screen_images: Literal["off", "on"] = "on"

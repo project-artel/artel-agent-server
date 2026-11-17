@@ -28,7 +28,7 @@ import hashlib
 import json
 from collections.abc import Iterable
 
-from app.agents.planner_executer.developer_macros import UsableDeveloperMacro
+from app.agents.planner_executer.developer_macros import UsableDeveloperMacro, leading_requires
 from app.agents.qa.macro.model import MacroDefinition
 from app.agents.qa.macro.grammar import TOOLS, ToolSpec
 from app.agents.qa.macro.key_codes import KEY_INPUT_RULES
@@ -251,7 +251,23 @@ def developer_macro_list(usable: Iterable[UsableDeveloperMacro]) -> str | None:
         lines.append(f"- `{_call(item.definition)}` — {written}")
         docstring = item.definition.entry.docstring or ""
         lines.extend(f"    {line}" if line else "" for line in docstring.splitlines())
+        if not _has_own_ready(item):
+            lines.append(
+                f"    (No ready condition of its own. If its input does nothing on some screens, write "
+                f"`ready_{macro.name}()` reading whether the game takes that input now.)"
+            )
     return "\n".join(lines)
+
+
+def _has_own_ready(item: UsableDeveloperMacro) -> bool:
+    """developer macro 가 제 준비 조건을 가졌나: 등록 계약의 `ready`, 계약이 없으면 앞부분 `require`(pe13).
+
+    없는 macro 는 아무 화면에서나 선택지에 남는다. planner 규칙이 그런 macro 에 `ready_` 를 쓰라고 했지만 어느 macro 가
+    그런지는 목록에 없어, try 26~33 의 계획 93개 중 3개만 썼다."""
+    if item.contract is not None:
+        return item.contract.has_ready
+    whole, by_parameter = leading_requires(item.macro.source, item.macro.name)
+    return bool(whole or by_parameter)
 
 
 def registered_action_list(usable: Iterable[UsableDeveloperMacro]) -> str | None:
