@@ -72,13 +72,14 @@ def _play(fake: FakeGame, jev: FakeJev, guidance: str | None = "Strike the weake
     return asyncio.run(go())
 
 
-def test_every_live_holder_is_an_option_and_only_the_picked_one_gets_the_input() -> None:
+def test_every_live_holder_is_a_target_and_only_the_picked_one_gets_the_input() -> None:
     fake = _battle()
     jev = FakeJev(picks=("developer:strike @ Enemy(Clone)[1]",))
 
     turn = _play(fake, jev).turns[0]
 
-    assert {"developer:strike @ Enemy(Clone)[1]", "developer:strike @ Enemy(Clone)[2]"} <= set(turn["options"])
+    assert turn["options"] == ["developer:strike"]  # 행동은 하나로 묶고 대상은 다음에 고른다(pe14)
+    assert {"developer:strike @ Enemy(Clone)[1]", "developer:strike @ Enemy(Clone)[2]"} <= set(turn["target_options"])
     assert not any("Enemy(Clone)[0]" in option for option in turn["options"]), "a switched-off holder is no option"
     assert turn["question"].endswith("How to play it: Strike the weaker enemy first.")
     pressed = [params[0] for method, params in fake.actions if method == "move_mouse"]

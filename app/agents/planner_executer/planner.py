@@ -10,8 +10,11 @@ names — `claude/` to the Claude API, `gpt/` to the OpenAI API, anything else t
 and its usage reaches Orchestration under the run's scope.
 """
 
+import asyncio
 import json
+import logging
 import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 
@@ -28,6 +31,7 @@ from app.agents.planner_executer.developer_macros import (
     NO_DEVELOPER_MACROS,
     LoadedDeveloperMacros,
     bind_developer_calls,
+    bind_developer_calls_with_contracts,
     bind_guidance_calls,
     split_developer_block,
     DEVELOPER_ACTION_PREFIX,
@@ -41,6 +45,8 @@ from app.agents.planner_executer.macros import (
     parse_guidance_step,
     parse_scene,
     parse_step,
+    read_goals,
+    read_segment,
 )
 from app.agents.planner_executer.facts import NO_FACTS, GameFacts, check_guidance_facts, planner_text, read_facts_block
 from app.agents.planner_executer.target import StepContracts, planner_note
@@ -57,6 +63,7 @@ from app.agents.planner_executer.prompts import (
     screen,
     step_text,
     this_step,
+    upcoming_steps,
     travel_step,
 )
 from app.agents.planner_executer.ledger import ActionLedger
@@ -73,6 +80,8 @@ from app.qa.schemas import QaScenario
 
 _FENCE = re.compile(r"```(?:python)?\s*\n(.*?)```", re.DOTALL)
 _PLAN_BLOCK = re.compile(r"```plan\s*\n(.*?)```", re.DOTALL)
+logger = logging.getLogger(__name__)
+
 _OBSERVE_BLOCK = re.compile(r"```observe\s*\n(.*?)```", re.DOTALL)
 _CHECK_BLOCK = re.compile(r"```check\s*\n(.*?)```", re.DOTALL)
 _SUMMARY_BLOCK = re.compile(r"```summary\s*\n(.*?)```", re.DOTALL)
@@ -80,6 +89,8 @@ _GUIDANCE_SUMMARY_BLOCK = re.compile(r"```guidance_summary\s*\n(.*?)```", re.DOT
 _AFTER_BLOCK = re.compile(r"```after\s*\n(.*?)```", re.DOTALL)
 _GUIDANCE_BLOCK = re.compile(r"```guidance\s*\n(.*?)```", re.DOTALL)
 _FACTS_BLOCK = re.compile(r"```facts\s*\n(.*?)```", re.DOTALL)
+_GOALS_BLOCK = re.compile(r"```goals\s*\n(.*?)```", re.DOTALL)
+_SEGMENT_BLOCK = re.compile(r"```segment\s*\n(.*?)```", re.DOTALL)
 # 사람이 읽는 계획 요약의 언어. prompt 의 `summary_language` 자리에 들어간다.
 SUMMARY_LANGUAGES = {"ko": "Korean", "en": "English"}
 # observe 블록 하나에 받는 이름 수. 범위를 좁히는 것이 블록의 쓸모라 넉넉하게만 막는다.
@@ -113,6 +124,13 @@ class Written:
     source: str
     macros: StepMacros | None
     refusal: str | None = None
+    # 계획 검사(`Planner.start_check`)가 마지막 답까지 거절했는데 그대로 받았다(pe11). runner 는 이 계획을 검사를 거치지 않은
+    # 것으로 넘긴다 — 동작이 있는 step 이 시작부터 `done()` 참이면 입력 없이 멈춘다.
+    unchecked: bool = False
+
+
+# 계획을 받은 화면에서 읽는 검사(pe11): `(macros, step)` → 거절 문장, 통과면 `None`. runner 가 게임을 멈춘 채 준다.
+StartCheck = Callable[[StepMacros, int], Awaitable[str | None]]
 
 
 @dataclass(frozen=True)
@@ -203,6 +221,16 @@ def read_after(text: str | None, actions: list[str]) -> dict[str, tuple[str, ...
         for action in named(first):
             after[action] = followers
     return after
+
+
+def split_segment_block(answer: str) -> tuple[str, str | None]:
+    """The answer without its ```segment block, and the block's text."""
+    return _split_block(answer, _SEGMENT_BLOCK)
+
+
+def split_goals_block(answer: str) -> tuple[str, str | None]:
+    """The answer without its ```goals block, and the block's text."""
+    return _split_block(answer, _GOALS_BLOCK)
 
 
 def split_facts_block(answer: str) -> tuple[str, str | None]:
@@ -321,8 +349,14 @@ class Planner:
         ledger: ActionLedger | None = None,
         facts: GameFacts = NO_FACTS,
         inputs: InputsReader | None = None,
+        ahead: bool = False,
     ) -> None:
         self._config = config
+        # 앞 step 이 도는 동안 다음 step 을 미리 쓰는 planner 인가(pe9 `plan_ahead`). 로그 이름과 진행 표시가 달라, 화면은 이것을
+        # 지금 step 의 계획으로 읽지 않는다. 쓴 계획은 runner 가 확인한 뒤 본 planner 로 넘긴다(`adopt`).
+        self._ahead = ahead
+        # 마지막으로 쓴 계획의 로그 내용 `(message, step, fields)`. 미리 쓴 계획을 쓸 때 runner 가 `step_macros` 로 다시 남긴다.
+        self.logged: tuple[str, int, dict] | None = None
         # 개발자가 선언한 fact·rule. `facts="on"` 일 때만 요청에 싣고 ```facts 블록을 읽는다.
         self._game_facts = facts if spec.facts == "on" else NO_FACTS
         self._facts_text = planner_text(self._game_facts)
@@ -350,6 +384,9 @@ class Planner:
         self._ask = ask or self._ask_model
         # step 의 대상 계약. runner 가 런 시작 때 채운다. 계획 대상이 아니라 요청에 읽기 전용으로 붙는다.
         self.targets: StepContracts | None = None
+        # 받은 화면에서 끝 조건을 읽는 검사(pe11). ORDERED 런에서 runner 가 채운다. 미리 쓰는 planner 는 쓰지 않는다 — 그 계획은
+        # 쓸 때가 아니라 받을 때 검사한다.
+        self.start_check: StartCheck | None = None
         # 지금 쓰는 답에 붙일 화면 한 장. `_write` 가 매번 새로 찍는다.
         self._image: ScreenImage | None = None
         # 이 빌드가 읽는 입력(SDK `list_inputs`). `_write`·`plan_scene` 이 매번 새로 묻는다 — Input System action 은
@@ -366,11 +403,32 @@ class Planner:
         self._draft = None
         return await self._write(scenario, step, this_step(scenario, step), f"Step {step}", "step")
 
+    async def write_ahead(self, scenario: QaScenario, step: int, playing: int) -> Written:
+        """Step `step` written while step `playing` is still being played on the screen this request shows (pe9)."""
+        self._draft = None
+        note = (
+            f"This plan is written ahead, while step {playing} is still being played on the screen below. Write step "
+            f"{step} for the screen step {playing} will leave behind: do not plan step {playing}'s moves, and do not "
+            f"expect what step {playing} is about to change to be as it is now."
+        )
+        return await self._write(scenario, step, this_step(scenario, step), f"Step {step} (ahead)", "step", note)
+
+    def adopt(self, other: "Planner") -> None:
+        """미리 쓴 planner 의 계획을 이 planner 의 지금 계획으로 받는다. 복구·재계획은 그 계획에 대한 수정으로 받는다."""
+        if other._draft is None:
+            return
+        self._draft_version += 1
+        self._draft = replace(other._draft, version=self._draft_version)
+
+    @property
+    def draft_version(self) -> int:
+        return self._draft_version
+
     async def replan(
         self, scenario: QaScenario, step: int, reason: str, turns: list[str], transition: dict | None = None
     ) -> Written:
-        """Step `step` written again: the decision model chose `REPLAN` (ARTEL-1295 C), or an action got stuck
-        under `repair="planner"`.
+        """Step `step` written again: no action was ready or every action was out, the scene changed under the plan
+        (`off_plan`, pe11), or an action got stuck under `repair="planner"`.
 
         `reason` is why play stopped, `turns` the last action turns as `recent_action_lines` writes them. The
         planner sees both above the current screen; the rest of the request is `write`'s. `transition` rides the
@@ -510,6 +568,7 @@ class Planner:
                 LogCategory.THOUGHT,
                 step,
             )
+            self._progress = (label, step)
             answer = normalize_paths(await self._ask(self._system, self._request(scenario, step, shown, feedback)))
             rest, summary = split_summary_block(answer)
             rest, guidance_summary = split_guidance_summary_block(rest)
@@ -521,6 +580,8 @@ class Planner:
             rest, actions_text = split_actions_block(rest)
             rest, guidance_text = split_guidance_block(rest)
             rest, facts_text = split_facts_block(rest)
+            rest, goals_text = split_goals_block(rest)
+            rest, segment_text = split_segment_block(rest)
             contract_mode = self._spec.actions == "contract"
             guidance_mode = self._spec.actions == "guidance"
             source = extract_code(rest)
@@ -536,6 +597,7 @@ class Planner:
                     actions_text = actions_text if actions_text is not None else base.actions_text
                     guidance_text = guidance_text if guidance_text is not None else base.guidance_text
                     facts_text = facts_text if facts_text is not None else base.facts_text
+                    goals_text = goals_text if goals_text is not None else base.goals_text
                     summary = summary or base.summary
                     # 지침을 바꾸지 않은 수정이면 사람에게 보이는 지침도 그대로다.
                     guidance_summary = guidance_summary or (base.guidance_summary if guidance_text == base.guidance_text else None)
@@ -549,25 +611,66 @@ class Planner:
                     )
                     # 지침 모드의 ```developer 줄은 이름 하나라 줄과 행동 키가 하나씩 맞는다.
                     pairs = tuple((DEVELOPER_ACTION_PREFIX + call.removesuffix("()"), call) for call in calls)
-                else:
+                elif contract_mode:
                     developer_actions = await bind_developer_calls(calls, self._developer)
-                    macros = await parse_step(
-                        source, self._registered, developer_actions, (actions_text or "") if contract_mode else None
-                    )
+                    macros = await parse_step(source, self._registered, developer_actions, actions_text or "")
                     pairs = tuple(zip(developer_actions, calls))
+                else:
+                    # legacy: 계약을 등록한 developer macro 는 그 계약(준비·효과·대상)으로 돈다(pe9).
+                    developer_actions, developer_contracts, developer_binder, pairs = (
+                        await bind_developer_calls_with_contracts(calls, self._developer)
+                    )
+                    macros = await parse_step(
+                        source, self._registered, developer_actions, None, contract_keys=tuple(developer_contracts)
+                    )
+                    if developer_contracts:
+                        macros = replace(
+                            macros, contracts=developer_contracts, binder=developer_binder,
+                            descriptions={
+                                **macros.descriptions,
+                                **{key: contract.description for key, contract in developer_contracts.items()},
+                            },
+                        )
                 after = read_after(after_text, [*macros.actions, *macros.contracts])
+                goals, goal_probes = await read_goals(goals_text, source, self._registered)
+                # 묶음은 처음 쓰는 계획에만 받는다. 다시 쓰는 계획(복구·재계획)은 그 step 하나를 고친다.
+                segment = (
+                    await read_segment(
+                        segment_text, source, self._registered, step, tuple(name for name, _ in goals),
+                        tuple([*macros.actions, *macros.contracts]),
+                    )
+                    if base is None and kind == "step" else {}
+                )
                 if self._game_facts.facts:
                     check_guidance_facts(macros.guidance, fact_names, self._game_facts)
-                written = Written(source, replace(macros, observe=observe, check=check, after=after, facts=fact_names))
+                written = Written(
+                    source,
+                    replace(
+                        macros, observe=observe, check=check, after=after, facts=fact_names, goals=goals,
+                        goal_probes=goal_probes, segment=segment,
+                    ),
+                )
                 # 계획 검증(파서와 따로): 이 런에서 통과할 수 없다고 확인된 버전을 다시 고르지 않았는가.
                 refused = self._ledger.check(written.macros, self._developer, self._channel.scene.pulse)
                 if refused is not None:
                     raise MacroRejection(refused)
+                if self.start_check is not None and not self._ahead and kind in ("step", "replan"):
+                    # 받은 화면에서 끝 조건이 이미 참이면 play 는 한 번도 움직이지 않고 끝난다(pe11). 예전에는 Jev 에게 물었지만
+                    # 답은 반반이었다. 다시 쓰게 하고, 마지막 답까지 그러면 그대로 받는다 — play 없이 실패로 떨어뜨리지 않는다.
+                    started = await self.start_check(written.macros, step)
+                    if started is not None:
+                        if attempt < self._spec.max_rewrites:
+                            raise MacroRejection(started)
+                        written = replace(written, unchecked=True)
+                        await note_decision(
+                            self._channel, f"{kind}_start_unchecked",
+                            f"{label}: the last answer was taken although {clip(started, MAX_QUOTE_CHARS)}", step,
+                        )
             except MacroRejection as rejection:
                 written = Written(source, None, rejection.render())
                 await note_decision(
                     self._channel,
-                    f"{kind}_macros_refused",
+                    f"{'ahead' if self._ahead else kind}_macros_refused",
                     f"{label}: the macros were refused (answer {attempt + 1} of {self._spec.max_rewrites + 1}): "
                     f"{clip(written.refusal, MAX_QUOTE_CHARS)}",
                     step,
@@ -593,16 +696,12 @@ class Planner:
                 self._draft_version, source, pairs,
                 tuple([*written.macros.actions, *written.macros.contracts]),
                 observe_text, check_text, after_text, summary, actions_text, guidance_text, guidance_summary,
-                facts_text,
+                facts_text, goals_text,
             )
             actions = [*written.macros.actions, *written.macros.contracts]
             observe = written.macros.observe
             check = written.macros.check
-            await note_decision(
-                self._channel,
-                f"{kind}_macros",
-                f"{label}: {len(actions)} actions — {', '.join(actions)}",
-                step,
+            fields = dict(
                 actions=actions,
                 source=clip(source, MAX_SOURCE_CHARS),
                 observe=None if observe is None else {"paths": observe.paths, "members": observe.members},
@@ -621,10 +720,18 @@ class Planner:
                 } or None,
                 guidance=written.macros.guidance,
                 facts=list(written.macros.facts) or None,
+                goals=[{"name": name, "goal": goal} for name, goal in written.macros.goals] or None,
+                segment={
+                    str(number): {"goals": list(names), "actions": list(actions)}
+                    for number, (names, _probe, actions) in written.macros.segment.items()
+                } or None,
                 guidance_summary=guidance_summary.strip() if guidance_summary else None,
                 changes=changes.logged() if changes is not None else None,
                 descriptions={name: written.macros.description(name) for name in actions},
             )
+            message = f"{label}: {len(actions)} actions — {', '.join(actions)}"
+            self.logged = (message, step, fields)
+            await note_decision(self._channel, f"{'ahead' if self._ahead else kind}_macros", message, step, **fields)
             break
         return written
 
@@ -645,6 +752,7 @@ class Planner:
             + self._ledger.lessons(self._channel.scene.pulse)
             + (f"{self._inputs}\n\n" if self._inputs else "")
             + f"Write step {step} now:\n{shown}\n\n"
+            + upcoming_steps(scenario, step)
             + planner_note(
                 self.targets, step, step_text(scenario.steps[step]) if self.targets is not None and step < len(scenario.steps) else None
             )
@@ -653,11 +761,99 @@ class Planner:
         )
 
     async def _ask_model(self, system: str, user: str) -> str:
+        """planner 의 답. 받는 동안 `planner_progress` 를 몇 초마다 남긴다(pe9).
+
+        planner 호출은 40~90초 걸리고, 그동안 화면에는 "작성 중" 만 떠 정말 일하는지 알 수 없었다. 답을 chunk 로 받아 지금까지
+        쓴 글자 수와 끝부분을 남긴다. 추론 model 은 답을 쓰기 전 30초 넘게 글자 없이 생각하므로, provider 가 주는 추론 요약
+        (OpenAI `summary`, Claude `thinking`)의 끝부분도 함께 남긴다. 요약을 거절하는 key 면 다음부터 요약 없이 받고, 받는 길이
+        실패하면 예전처럼 한 번에 받는다.
+        """
         if self._model is None:
             self._model = build_chat_model(self._config.model, self._config.reasoning)
         images = [self._image.block()] if self._image is not None else None
-        answer = await self._model.ainvoke(prompt_messages(self._config.model, system, user, self._stable_prefix, images))
-        return _text(answer.content)
+        messages = prompt_messages(self._config.model, system, user, self._stable_prefix, images)
+        label, step = getattr(self, "_progress", ("Plan", None))
+        started = time.monotonic()
+        parts: list[str] = []
+        thoughts: list[str] = []
+        model, summarised = self._streaming_model()
+
+        async def report() -> None:
+            text = "".join(parts)
+            seconds = round(time.monotonic() - started)
+            await note_decision(
+                self._channel, "planner_progress",
+                f"{label}: the planner is writing ({seconds}s, {len(text)} characters so far)", step,
+                elapsed=seconds, chars=len(text), tail=text[-PROGRESS_TAIL_CHARS:],
+                thinking="".join(thoughts)[-PROGRESS_TAIL_CHARS:], ahead=self._ahead or None,
+            )
+
+        async def tick() -> None:
+            while True:
+                await asyncio.sleep(PROGRESS_SECONDS)
+                try:
+                    await report()
+                except Exception:  # noqa: BLE001 - 진행 표시는 계획을 막지 않는다
+                    logger.debug("[QA] planner progress note failed", exc_info=True)
+
+        ticker = asyncio.create_task(tick())
+        try:
+            try:
+                async for chunk in model.astream(messages):
+                    parts.append(_text(chunk.content))
+                    thoughts.append(_thought(chunk))
+                logger.info(
+                    "[QA] planner stream: %d chunks, %d answer chars, %d summary chars, summary asked=%s",
+                    len(parts), len("".join(parts)), len("".join(thoughts)), summarised,
+                )
+            except Exception:  # noqa: BLE001 - 받는 길이 안 되면 한 번에 받는다
+                if parts and "".join(parts):
+                    raise
+                if summarised:
+                    self._no_summaries = True
+                logger.warning("[QA] planner streaming failed; asking once without streaming", exc_info=True)
+                answer = await self._model.ainvoke(messages)
+                return _text(answer.content)
+            return "".join(parts)
+        finally:
+            ticker.cancel()
+
+
+    def _streaming_model(self):
+        """추론 요약을 함께 달라고 묶은 model 과, 묶었는지. OpenAI 추론 model 에만 묶는다."""
+        reasoning = getattr(self._model, "reasoning", None)
+        if (
+            getattr(self, "_no_summaries", False)
+            or not isinstance(reasoning, dict)
+            or reasoning.get("effort") in (None, "none")
+            or "summary" in reasoning
+        ):
+            return self._model, False
+        return self._model.bind(reasoning={**reasoning, "summary": "auto"}), True
+
+
+# planner 진행을 남기는 간격과, 함께 싣는 답 끝부분의 길이.
+PROGRESS_SECONDS = 2.0
+PROGRESS_TAIL_CHARS = 400
+
+
+def _thought(chunk) -> str:
+    """chunk 에 실린 추론 요약. OpenAI 는 `reasoning` block 의 `summary`(v0 는 `additional_kwargs`), Claude 는 `thinking` block."""
+    content = getattr(chunk, "content", None)
+    blocks = list(content) if isinstance(content, list) else []
+    extra = (getattr(chunk, "additional_kwargs", None) or {}).get("reasoning")
+    if isinstance(extra, dict):
+        # langchain-openai 의 v0 형식은 `type` 없이 `{"summary": [...]}` 만 둔다.
+        blocks.append({"type": "reasoning", **extra})
+    out: list[str] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "reasoning":
+            out.extend(str(part.get("text", "")) for part in block.get("summary") or [] if isinstance(part, dict))
+        elif block.get("type") == "thinking":
+            out.append(str(block.get("thinking", "")))
+    return "".join(out)
 
 
 def _text(content) -> str:

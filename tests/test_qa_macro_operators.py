@@ -20,13 +20,14 @@ from app.agents.qa.macro.errors import MacroRejection
 from app.agents.qa.macro.grammar import MacroOperator, MacroShape
 from app.agents.qa.macro.parser import macro_definition_from_source
 
-# 일곱 행 곱하기 여섯 연산자. `True` 가 되는 칸, `False` 가 거절되는 칸이다.
+# 여덟 행 곱하기 여섯 연산자. `True` 가 되는 칸, `False` 가 거절되는 칸이다.
 #
 # - number 만 순서 비교가 된다. `==` 도 되지만 위태롭다 — 거절이 아니라 권고다.
 # - string 과 bool 의 순서 비교는 뜻이 없다.
 # - vector 는 `>` 가 성분별인지 크기인지가 추측이고, `==` 는 number 의 위태로움이
 #   성분마다 겹친다.
 # - object 의 같음은 pulse 키로 가른다.
+# - null 은 비교에 적힌 `None` 리터럴의 모양이다. 다른 쪽이 null 로 도착했는지만 묻는다.
 # - 그 밖의 shape 는 전부 거절한다. 조용히 거짓이 되면 `require` 가 게임 결함처럼
 #   실패한다.
 EXPECTED: dict[tuple[MacroShape, MacroOperator], bool] = {
@@ -66,6 +67,12 @@ EXPECTED: dict[tuple[MacroShape, MacroOperator], bool] = {
     (MacroShape.object_, MacroOperator.less): False,
     (MacroShape.object_, MacroOperator.greater_or_equal): False,
     (MacroShape.object_, MacroOperator.less_or_equal): False,
+    (MacroShape.null, MacroOperator.equal): True,
+    (MacroShape.null, MacroOperator.not_equal): True,
+    (MacroShape.null, MacroOperator.greater): False,
+    (MacroShape.null, MacroOperator.less): False,
+    (MacroShape.null, MacroOperator.greater_or_equal): False,
+    (MacroShape.null, MacroOperator.less_or_equal): False,
     (MacroShape.other, MacroOperator.equal): False,
     (MacroShape.other, MacroOperator.not_equal): False,
     (MacroShape.other, MacroOperator.greater): False,
@@ -83,7 +90,7 @@ def test_the_matrix_this_file_checks_against_has_every_cell() -> None:
     그러면 "한 칸도 빼지 않고 돌린다" 는 말이 거짓이 되는데, 통과하는 테스트는 그것을
     말해 주지 않는다. 그래서 개수를 먼저 단정한다.
     """
-    assert len(EXPECTED) == 42
+    assert len(EXPECTED) == 48
     assert len(EXPECTED) == len(MacroShape) * len(MacroOperator)
     assert set(EXPECTED) == {
         (shape, operator) for shape in MacroShape for operator in MacroOperator
@@ -177,7 +184,7 @@ def test_the_vector_rows_cannot_be_reached_at_all_from_a_declaration(
 
 # --- 산술 표 (ARTEL-1066) --------------------------------------------------------
 #
-# 일곱 행 곱하기 여섯 연산. 숫자 `def` 의 산술식은 number 끼리만 된다. 문자열 잇기와
+# 여덟 행 곱하기 여섯 연산. 숫자 `def` 의 산술식은 number 끼리만 된다. 문자열 잇기와
 # vector 연산은 이번에 열지 않았다. 위 `EXPECTED` 와 같은 이유로 손으로 적은 기대다 —
 # number 행만 참이라는 것을 행마다 다시 적는 대신, 그 결정을 한 줄로 적는다.
 ARITHMETIC_EXPECTED: dict[tuple[MacroShape, grammar.MacroArithmetic], bool] = {
@@ -188,7 +195,7 @@ ARITHMETIC_EXPECTED: dict[tuple[MacroShape, grammar.MacroArithmetic], bool] = {
 
 
 def test_the_arithmetic_matrix_has_every_cell() -> None:
-    assert len(ARITHMETIC_EXPECTED) == 42
+    assert len(ARITHMETIC_EXPECTED) == 48
     assert len(grammar.ARITHMETIC_TABLE) == len(ARITHMETIC_EXPECTED)
 
 
@@ -219,7 +226,10 @@ _ARRIVED: dict[MacroShape, object] = {
 
 @pytest.mark.parametrize(
     "shape, arithmetic",
-    sorted(ARITHMETIC_EXPECTED, key=lambda cell: (cell[0].value, cell[1].value)),
+    sorted(
+        (cell for cell in ARITHMETIC_EXPECTED if cell[0] is not MacroShape.null),
+        key=lambda cell: (cell[0].value, cell[1].value),
+    ),
 )
 def test_the_evaluator_follows_the_arithmetic_table_for_every_arrived_shape(
     shape: MacroShape, arithmetic: grammar.MacroArithmetic

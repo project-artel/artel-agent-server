@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.agents.planner_executer.arch import PLANNER_EXECUTER_LABEL, PlannerExecuterArchSpec
-from app.agents.planner_executer.prompts import MACRO_GRAMMAR
+from app.agents.planner_executer.prompts import MACRO_GRAMMAR, MACRO_GRAMMAR_PLAN
 from app.agents.planner_executer.runner import PlannerExecuterRunner
 from app.agents.qa.arch import QA_ARCH_LABEL, QaArchError, QaArchSpec
 from app.agents.qa.runner import QaRunner
@@ -59,7 +59,7 @@ def test_the_planner_executer_run_is_filed_under_its_own_label_and_digest() -> N
 
     assert config.arch.engine == "planner_executer"
     assert config.arch.planner == PlannerExecuterArchSpec()
-    assert config.agent_arch == PLANNER_EXECUTER_LABEL == "pe7-state-change-progress"
+    assert config.agent_arch == PLANNER_EXECUTER_LABEL == "pe16-precondition-check"
     assert config.agent_fingerprint != agent.agent_fingerprint
     assert config.decision_model == resolve_decision_model()
     assert config.citation_reporting is False and config.compaction_model is None
@@ -80,23 +80,27 @@ def test_a_relabelled_planner_executer_run_keeps_its_digest() -> None:
 def test_the_planner_prompt_is_recorded_with_the_macro_grammar_it_reads() -> None:
     config = resolve_run_config(arch=PLANNER_EXECUTER)
 
-    assert config.prompt_version == "v5"
+    assert config.prompt_version == "v8"
     roles = (
         "rules", "rules_contract", "rules_guidance", "evaluator", "scene_rules", "scene_evaluator", "failure_analysis", "run_review",
         "macro_repair", "target_resolver",
     )
-    assert set(config.prompt_hashes) == {*roles, "macro_grammar"}
+    # v7 부터 `decide`·`ask` 를 뺀 계획용 문법을 읽는다(pe11). v8 은 기대 항목별 판정을 더한다(pe12).
+    assert set(config.prompt_hashes) == {*roles, "macro_grammar_plan"}
     locked = read_lock()["prompts"]
     for role in roles:
-        assert locked[f"qa_planner/v5/{role}"] == config.prompt_hashes[role]
-    assert config.prompt_hashes["macro_grammar"] == hashlib.sha256(MACRO_GRAMMAR.encode()).hexdigest()
+        assert locked[f"qa_planner/v8/{role}"] == config.prompt_hashes[role]
+    assert config.prompt_hashes["macro_grammar_plan"] == hashlib.sha256(MACRO_GRAMMAR_PLAN.encode()).hexdigest()
+    assert resolve_run_config(arch=PLANNER_EXECUTER, prompt_version="v6").prompt_hashes["macro_grammar"] == (
+        hashlib.sha256(MACRO_GRAMMAR.encode()).hexdigest()
+    )
 
 
 def test_the_planner_defaults_to_the_newest_prompt_and_v1_can_still_be_pinned() -> None:
     """`qa_planner` has no `*_PROMPT_VERSION` setting, so the newest version is the default. The
     tool loop's `qa_run` default is not moved by it."""
-    assert available_versions("qa_planner") == ("v1", "v2", "v3", "v4", "v5")
-    assert resolve_version("qa_planner") == "v5"
+    assert available_versions("qa_planner") == ("v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8")
+    assert resolve_version("qa_planner") == "v8"
     assert resolve_run_config().prompt_version == resolve_version("qa_run")
 
     # v1 has neither `failure_analysis` nor `macro_repair`, so a pinned run turns both off to be built.
@@ -160,6 +164,18 @@ def test_v5_lets_the_picture_decide_a_result_a_player_sees() -> None:
     assert "When it says what a player sees" in new and "the picture is direct evidence" in new
     assert "When it says something the screen does not show" in new and "the values decide" in new
     assert "judge from the values" in new
+
+
+def test_v6_changes_only_the_rules_and_asks_for_goals() -> None:
+    """v6 은 legacy rules 만 바꾼다: step 을 ```goals 하위 목표로 쪼개고, developer macro 의 ready_ 로 화면을 고정하지 않는다."""
+    assert set(roles_in("qa_planner", "v6")) == set(roles_in("qa_planner", "v5"))
+    for role in roles_in("qa_planner", "v5"):
+        if role != "rules":
+            assert load_prompt("qa_planner", role, "v6").body == load_prompt("qa_planner", role, "v5").body
+    rules = load_prompt("qa_planner", "rules", "v6").body
+    assert "```goals" in rules and "def goal_<name>() -> bool:" in rules
+    assert "The decision model never reads the step's sentence." in rules
+    assert "never which screen this step expects" in rules
 
 
 def test_editor_on_is_refused_on_a_prompt_version_without_its_prompt() -> None:

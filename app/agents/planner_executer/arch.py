@@ -57,7 +57,66 @@ from pydantic import BaseModel, ConfigDict, Field
 # pe7(ARTEL-1453): executer 는 같은 action 연속 횟수를 Jev 가 읽는 state 가 바뀌면 처음부터 센다. 효과를 선언하지 않은 대사
 # 넘기기가 6번째에 빠지던 것을 막는다. action 이 없는 step 은 Jev 에게 묻지 않고 `done()` 을 유예 동안 기다린다. parser 는 reader
 # 자리의 `find(...)` 와 action 없는 step 을 받고, 빈 ```check 는 없는 것으로 읽는다. macro 문법 글에 reader 의 `find(...)` 를 더했다.
-PLANNER_EXECUTER_LABEL = "pe7-state-change-progress"
+# pe8: Jev 의 고르기 질문이 준비 조건 때문에 빠진 이 step 의 행동을 함께 말한다. parser 는 `-> bool` 호출과 bool 리터럴의
+# `==`·`!=` 와 비교의 `None` 리터럴을 받는다. step 판정(evaluator·실패 분석)은 다음 step 의 계획·플레이와 겹쳐 돈다.
+# pe9: 선택지 설명에 대상이 화면에 띄운 글자, 연달아 고른 횟수, 효과 없이 끝난 시도를 붙인다. `none_fits` 는 선택지에서 빼고
+# 같은 요청의 기다림 noul 로 묻는다(`pick_wait`). 막힌 행동 줄은 무엇이 막혔는지만 말한다. `facts` 를 기본으로 켠다.
+# planner 가 ```goals 를 쓰면(prompt v6) Jev 는 step 문장 대신 지금 하위 목표를 읽는다. developer macro 가 제 준비 조건을
+# 가지면 planner 의 `ready_` 보다 그것이 이긴다. step 경계: 완료 조건이 참이면 바로 멈추고(`done_by`), 효과가 이미 참이던 시도도
+# 효과 없음으로 센다. planner 는 뒤 step 을 보고, 같은 씬의 뒤 step 을 ```segment 로 함께 계획하면 runner 가 그 계획으로 잇는다.
+# pe9-plan-ahead: 앞 step 이 도는 동안 다음 step 의 계획을 미리 쓴다(`plan_ahead`). 한 계획이 함께 돈 step 들은 묶음이 끝난 뒤
+# 묶음 전체 기록으로 판정하고, 근거를 읽을 때마다 지금 씬에 보이는 글자를 함께 적는다.
+# pe10-pause-planning: 본 planner 가 계획을 쓰거나 다시 쓰는 동안, 미리 쓴 계획을 기다리는 동안 게임 시간을 멈춘다
+# (`pause_while_planning`, SDK `pause_time`). 계획을 쓰는 60~140초 동안 게임이 돌아 지나가는 상태(타이핑 중인 대사)가
+# 사라지고, 계획이 그때 본 값에 묶이던 것을 막는다(Voyager·Cradle 처럼 멈춘다). orchestration 은 멈춘 동안의 화면을 녹화하지 않는다.
+# pe11-code-decides-flow: Jev 는 준비된 선택지가 둘 이상일 때 하나를 고르기만 한다. 흐름은 코드가 정한다. try 8~25 의 Jev 판단
+# 1,147건을 대 보니, 선택지가 하나인 고르기가 60% 였고 Jev 는 그 동작을 고르거나 `EXPAND_STATE` 로 두 turn 미룬 뒤 결국
+# 골랐다. 기다림 질문은 1,014번 중 한 번도 0.7 을 넘지 않았고, 목표 확인은 "아니다"인 동안 입력을 더 보내거나(try 11) 시작부터
+# 참인 경우 반반으로 답했다(try 17·18·24).
+# - 선택지가 하나면 묻지 않고 실행한다. 기다림은 준비 조건으로 정하고, 준비 조건이 없는 선택지가 있을 때만 묻는다.
+# - `EXPAND_STATE`·`REPLAN` 선택지와 목표 확인(`_ask_goal`)을 없앴다. Jev state 에 `hidden`·`omitted_objects` 를 싣지 않는다.
+# - 멈춤은 정해진 경우뿐이다: 이 step 의 `done()` 이 참이 됨, 묶음의 뒤 step `done_k` 가 참이 됨(그 사이 step 은 입력 없이 끝난다),
+#   동작이 있는 step 이 시작부터 `done()` 참, 씬이 바뀌고 유예 동안 끝 조건이 거짓(`off_plan`, planner 가 새 씬에서 다시 쓴다),
+#   그리고 지금 있는 상한.
+# - planner 가 게임을 멈춘 채 계획을 쓰면, 받은 화면에서 `done()` 과 묶음의 `done_k` 를 읽어 이미 참이면 거절하고 다시 쓰게
+#   한다. planner·editor 가 쓴 코드의 `ask`·`decide` 는 거절한다.
+# - 노브 `done_by`·`pick_wait`·`max_done_disagreements`·`max_expansions_per_step` 를 지우고 `max_scene_replans_per_step` 를 더했다.
+# prompt 는 qa_planner v7 을 읽는다.
+# pe12-verify-coverage: 판정 step 이 기대 결과를 다 보이기 전에 끝나지 않게 한다. 로컬 try 14~29 의 step 3("타이핑 중이면
+# 즉시 완성 / 다 나온 뒤면 다음 대사")은 통과·실패가 우연으로 갈렸다. planner 의 `done()` 이 첫 결과 직후 참이 되어 둘째
+# 결과의 입력이 한 번도 가지 않았고(16·17·18·22·29), 같은 기록을 evaluator 가 두 번은 통과시켰다(27·28, 화면 글자가 아니라
+# 목표 문장 값을 읽었다).
+# - evaluator(prompt v8)는 기대 항목마다 `checks` 를 낸다. 통과는 코드가 모든 항목이 yes 일 때만 정하고, 화면을 말하는
+#   항목은 게임 값만으로 yes 가 되지 않는다(`settle_checks`).
+# - case 의 판정 step 이 제 `done()` 으로 멈추면 그 자리에서 evaluator 를 돌린다. 근거 없는 항목만 있으면(반대로 나온 항목
+#   없이) 그 항목을 이유로 planner 가 step 을 다시 쓰고 이어서 돈다(`coverage_check`, `max_coverage_rewrites`).
+# - planner(prompt v8)는 기대 결과가 여럿이면 마지막 결과 뒤를 `done()` 으로 읽고, 지나가는 상태 안의 입력에 달린 결과는
+#   상태 기다리기·입력·결과 기다리기를 행동 하나에 `wait_until` 로 쓴다.
+# prompt 는 qa_planner v8 을 읽는다.
+# pe13-evaluator-sees-all: evaluator 가 근거를 잘리지 않은 채, 돈 행동의 코드와 함께 읽는다.
+# - 근거 값의 이름 80개·이름당 변화 12개·변화 목록 40줄 상한을 없앴다. 판독값 끝에 붙는 화면 글자부터 잘려, 로컬 try 31 의
+#   step 8~10 묶음(이름 139개)에서 `HintText[0]` 이 켜진 것만 보이고 그 글자는 안 보여 step 9 가 근거 없음으로 떨어졌다.
+# - planner·editor 가 쓴 행동 중 돈 것의 코드를 판정 요청에 싣는다. try 31 step 3 은 타이핑 중 입력을 `wait_until` 로 확인한
+#   행동이 통과했는데, 판정은 그 코드를 못 봐 근거 없음으로 읽고 step 을 다시 쓰게 했다.
+# pe14-ready-not-repeat: 쓸모없는 행동은 반복 횟수가 아니라 준비 조건으로 막는다. 로컬 try 33 step 9 는 넘길 대사가 없는데 대사
+# 넘기기를 Jev 가 여섯 번 골랐고, 반복 상한이 그것을 선택지에서 빼자 시전 뒤 뜬 대사를 넘길 행동이 없어 멈췄다.
+# - 반복 상한으로 행동을 빼지 않는다. 연속 횟수는 `repair="planner"` 일 때 planner 에게 넘기는 데만 쓴다.
+# - 계약이 등록된 developer macro 에 준비 조건이 없으면 planner 의 `ready_<action>` 을 쓴다(인자 없는 행동). 예전에는 버렸다.
+# - planner 요청의 developer macro 목록이 제 준비 조건이 없는 macro 를 표시한다.
+# - 선언된 fact 는 planner 가 고르지 않아도 모두 Jev 에게 싣는다. 고른 것을 앞에 둔다.
+# - 선택지가 하나면 기다림을 묻지 않고 실행한다. try 26~33 의 기다림 답 422개 중 기준을 넘은 것이 없었다.
+# pe15-one-option-per-action: 대상을 받는 행동은 한 번만 제시하고 대상은 뒤에 고른다. 로컬 try 34 step 10 은 카드 놓기가 손패
+# 수만큼 쪼개진 채 '턴 종료' 하나와 한 분포를 나눠 가져, 턴 종료를 19번 연달아 골랐다.
+# - Jev 는 먼저 행동을 고른다. 묶은 행동을 고르면 대상이 하나일 때 그것이고, 여럿이면 planner 의 `prefer_<action>(<대상>)` 이
+#   참인 대상으로 좁힌 뒤, 그래도 여럿이면 Jev 가 대상을 한 번 더 고른다. 계산이 필요한 대상 선택은 Jev 가 하지 못한다(PoC
+#   스테이지 2: 규칙을 질문에 적어 줘도 배분을 낭비해 졌다) — 계산식은 planner 가 쓰고 계산은 코드가 한다.
+# pe16-precondition-check: TC 의 사전 조건을 확인한다. 지금까지 사전 조건은 planner·evaluator 에게 글로만 갔고, 할 일을 정한 규칙도
+# 코드의 확인도 없었다 — 로컬 try 35 step 15 는 "맵에 창이나 대화가 떠 있지 않다" 가 깨진 채(팁 대화창) 진행됐고, 남은 창이 step 16
+# 의 구매 버튼을 가렸다.
+# - TC 가 시작하는 step 에서 play 전에 Jev noul 로 사전 조건 글을 화면 전체와 대조한다(성립 ≥ 0.6, 불성립 ≤ 0.3, 그 사이는 확인 불가).
+# - 불성립이면 planner 가 그것을 먼저 맞추도록 한 번 다시 쓴다. planner 는 평소에는 사전 조건을 따로 다루지 않는다.
+# - evaluator 는 `precondition_held` 를 낸다. 거짓이면 통과로 두지 않고 "사전 조건 불충족" 으로 실패와 따로 적는다.
+PLANNER_EXECUTER_LABEL = "pe16-precondition-check"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1
@@ -72,15 +131,20 @@ class PlannerExecuterArchSpec(BaseModel):
     # Turns and wall-clock one step may take. A step can be a whole level.
     max_turns_per_step: int = Field(default=300, ge=1, le=10_000)
     step_budget_seconds: float = Field(default=480.0, gt=0, le=3_600)
-    # Jev 가 `none_fits` 를 고르는 상태가 이만큼 이어지면 play 를 멈춘다. 카운트다운, 팝업, 장면 전환은
-    # 1–2초에 지나간다.
+    # 준비된 행동이 없거나 기다림으로 정한 상태가 이만큼 이어지면 play 를 멈춘다. 씬이 바뀐 뒤 끝 조건을 기다리는 유예도 이것이다.
+    # 카운트다운, 팝업, 장면 전환은 1–2초에 지나간다.
     no_action_grace_seconds: float = Field(default=3.0, gt=0, le=120)
     # action 의 macro 가 이만큼 연달아 실패하면 play 를 멈춘다.
     max_failures_in_a_row: int = Field(default=3, ge=1, le=50)
-    # `done()` 이 참인데 Jev 가 목표에 닿지 않았다고 본 횟수가 이만큼이면 play 를 멈춘다.
-    max_done_disagreements: int = Field(default=3, ge=1, le=50)
     # planner 의 답이 거절될 때 다시 쓰게 하는 횟수. 다 쓰고도 거절되면 그 step 은 FAILED 다.
     max_rewrites: int = Field(default=2, ge=0, le=5)
+    # case 의 판정 step 이 제 `done()` 으로 멈추면 evaluator 로 기대 항목의 근거를 본다. 근거 없는 항목이 있으면 planner 가
+    # 그 항목을 이유로 step 을 다시 쓰고 이어서 돈다(pe12). evaluator 호출이 그 step 마다 하나 더 든다.
+    coverage_check: Literal["off", "on"] = "on"
+    # TC 가 시작하는 step 에서 그 TC 의 사전 조건을 Jev 로 화면과 대조한다. 성립하지 않으면 planner 가 맞추도록 한 번 다시 쓰고,
+    # 판정은 사전 조건 불충족을 실패와 따로 적는다(pe16). Jev 호출이 TC 마다 하나 더 든다.
+    precondition_check: Literal["off", "on"] = "on"
+    max_coverage_rewrites: int = Field(default=1, ge=0, le=3)
     # FREE 시나리오: 한 라운드가 끝나고 미룬 case 가 남았을 때 `reset_game` 으로 다시 시작하는 횟수.
     free_max_resets: int = Field(default=1, ge=0, le=10)
     # FREE 시나리오: case 하나를 돌아 보는 횟수. 목표에 닿지 못한 실패는 이 횟수까지 미룬다.
@@ -103,8 +167,8 @@ class PlannerExecuterArchSpec(BaseModel):
     max_repairs_per_step: int = Field(default=2, ge=0, le=10)
     # action 이 돌았는데 게임에 입력을 하나도 보내지 않은 turn 이 이만큼 이어지면 play 를 멈춘다. 어느 action 이든 센다.
     max_idle_turns_in_a_row: int = Field(default=10, ge=1, le=1_000)
-    # 같은 action 을 이만큼 연달아 고르면 진척이 없는 것으로 본다. `repair="planner"` 면 planner 에게 step 을 다시 쓰게 하고,
-    # 아니면 play 를 멈춘다. 그 action 이 통과하고 입력도 보내 다른 규칙에 안 걸리는 반복을 잡는다.
+    # 같은 action 을 이만큼 연달아 고르면 진척이 없는 것으로 본다. `repair="planner"` 면 planner 에게 step 을 다시 쓰게 한다.
+    # 그 밖에는 아무것도 하지 않는다 — 행동을 빼지 않는다(pe14).
     max_same_action_in_a_row: int = Field(default=6, ge=2, le=1_000)
     # planner(step 을 쓰거나 다시 쓸 때)와 evaluator(판정할 때)가 화면 한 장을 그림으로 본다. Jev 에게는 보내지 않는다.
     screen_images: Literal["off", "on"] = "on"
@@ -119,18 +183,27 @@ class PlannerExecuterArchSpec(BaseModel):
     # ORDERED 시나리오에만 쓰인다. prompt v4 부터 있는 `target_resolver` 를 읽는다. `off` 면 대상을 정하지 않는다.
     target_contract: Literal["off", "on"] = "off"
     # 개발자가 선언한 fact·rule(`facts.py`). `on` 이면 planner 가 읽고 step 마다 쓸 fact 를 고르며, Jev state 에 그 값이 실린다.
-    # 선언은 `qa_facts_dir` 에서 읽는다. 선언이 없으면 `off` 와 같다.
-    facts: Literal["off", "on"] = "off"
+    # 선언은 orchestration(MCP 로 등록한 것)에서, `qa_facts_dir` 이 있으면 그 디렉터리에서 읽는다. 선언이 없으면 `off` 와 같다.
+    # pe9 부터 기본으로 켠다: 로컬 try 9 에서 `tutorial_waiting_for_key` 등을 실으니 Jev 가 대사 대기를 0.95 이상으로 골랐다.
+    facts: Literal["off", "on"] = "on"
+    # 앞 step 이 도는 동안 다음 step 의 계획을 미리 쓰는가(pe9). planner 가 step 마다 약 60초 행동을 막는 동안 게임은 계속 돌아,
+    # 곧 지나가는 상태(타이핑 중인 대사)가 다음 step 이 시작할 때 이미 없었다(로컬 try 22 step 3). `on` 이면 따로 쓰고, 앞 step
+    # 에서 씬이 바뀌면 새 씬에서 다시 쓰며, 쓸 때의 씬이 지금 씬과 다르면 버리고 새로 쓴다.
+    plan_ahead: Literal["off", "on"] = "on"
+    # 계획을 기다리는 동안 게임 시간을 멈추는가(pe10). `on` 이면 본 planner 의 쓰기·다시 쓰기와 미리 쓴 계획을 기다리는 동안
+    # `pause_time` 을 보내고 끝나면 `resume_time` 을 보낸다. unscaled 시간으로 도는 게임은 멈추지 않는다.
+    pause_while_planning: Literal["off", "on"] = "on"
     # Executer 가 Jev 에게 보내는 state 의 출처(ARTEL-1297). `state_set` 은 Orchestration 의 `STATE_SET`,
     # `pulse_memory` 는 Agent 가 합친 `PulseMemory`. 둘을 같은 빌드에서 비교하려고 knob 으로 둔다.
     state_source: Literal["state_set", "pulse_memory"] = "state_set"
     # Jev 가 읽을 범위를 planner 가 정한다(ARTEL-1295 C). `all` 은 live object 전부. `planner` 는 `state_set` 일 때만
     # 뜻이 있다 — `PulseMemory` 출처는 범위를 좁히지 않는다.
     observation: Literal["planner", "all"] = "planner"
-    # Jev 가 `EXPAND_STATE` 를 고를 수 있는 횟수(step 마다). 단계가 둘이라 2 를 넘어도 더 넓어지지 않는다.
-    max_expansions_per_step: int = Field(default=2, ge=0, le=2)
-    # Jev 가 `REPLAN` 을 골라 planner 가 step 을 다시 쓰는 횟수(step 마다). 0 이면 선택지에 없다. 기본은 꺼 둔다.
+    # 준비된 행동이 없거나 모두 빠져 executer 가 planner 에게 step 을 다시 쓰게 하는 횟수(step 마다). 0 이면 그 자리에서 멈춘다.
     max_replans_per_step: int = Field(default=0, ge=0, le=5)
+    # ORDERED step 에서 씬이 바뀌고 유예 동안 끝 조건이 거짓이면(`off_plan`) planner 가 새 씬에서 다시 쓰는 횟수(step 마다, pe11).
+    # 0 이면 그 자리에서 멈추고 판정한다.
+    max_scene_replans_per_step: int = Field(default=1, ge=0, le=5)
     # 한 action 이 한 step 안에서 실패하거나 입력 없이 끝난 횟수(누적)가 이만큼이면 그 step 의 선택지에서 뺀다. editor 가
     # 고친 action 은 다시 0 부터 센다. 전투의 `end_turn` 처럼 가끔 대기 시간을 넘겼다가 다음에 통과하는 action 이 있어
     # `repair_after` 보다 넉넉히 둔다.

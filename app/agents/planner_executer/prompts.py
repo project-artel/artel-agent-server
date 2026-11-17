@@ -28,7 +28,7 @@ import hashlib
 import json
 from collections.abc import Iterable
 
-from app.agents.planner_executer.developer_macros import UsableDeveloperMacro
+from app.agents.planner_executer.developer_macros import UsableDeveloperMacro, leading_requires
 from app.agents.qa.macro.model import MacroDefinition
 from app.agents.qa.macro.grammar import TOOLS, ToolSpec
 from app.agents.qa.macro.key_codes import KEY_INPUT_RULES
@@ -72,7 +72,29 @@ ACTION_SIGNATURES = "**The actions and their arguments.**\n" + "\n".join(_signat
 # 키 이름 규칙과 입력을 읽는 방식별 action(ARTEL-1432). `GRAMMAR` 에 넣지 않는 것은 그 글이 `qa_run` 의 `skill_macro.md` 에
 # 글자 그대로 있어야 해서다 — 바꾸면 prompt 새 버전이 든다. 여기 더한 글은 `prompt_hashes["macro_grammar"]` 에 기록된다.
 MACRO_GRAMMAR = f"{GRAMMAR}\n\n{ACTION_SIGNATURES}\n\n{KEY_INPUT_RULES}\n\n{NUMBER_EQUALITY}"
-_FILLS = {MACRO_GRAMMAR_PLACEHOLDER: MACRO_GRAMMAR}
+# 계획(planner·editor)이 읽는 문법 글(v7+, pe11). 공용 `GRAMMAR` 에서 decision model 을 부르는 `decide`·`ask` 의 절을 뺀다 — 계획
+# 의 글은 그 둘을 거절한다(`macros.reject_decision_calls`). 공용 글은 tool loop 의 `skill_macro.md` 와 같아야 해서 그대로 둔다.
+MACRO_GRAMMAR_PLAN_PLACEHOLDER = "macro_grammar_plan"
+_DECISION_SECTIONS = ("**Deciding.**", "**Asking.**", "**What Jev reads.**")
+_DECISION_LINE = "- `match decide(\"<question>\", ...):` with one `case \"<imported macro>\":` per\n  option — Jev picks the case that runs\n"
+PLAN_DECISION_NOTE = (
+    "**No decision model in a plan.** `decide(...)` and `ask(...)` are refused in what you write: wherever this text "
+    "mentions them, they do not apply. The executer asks the decision model only to pick between the options that can "
+    "run; a condition reads the game's state."
+)
+
+
+def _plan_grammar(grammar: str) -> str:
+    """`grammar` 에서 `decide`·`ask` 를 설명하는 문단과 목록 줄을 빼고, 계획에서는 둘을 쓰지 않는다는 문단을 붙인다."""
+    if _DECISION_LINE not in grammar or not all(head in grammar for head in _DECISION_SECTIONS):
+        raise RuntimeError("the macro grammar no longer has the decide/ask sections the plan grammar removes")
+    paragraphs = grammar.replace(_DECISION_LINE, "").split("\n\n")
+    kept = [paragraph for paragraph in paragraphs if not paragraph.startswith(_DECISION_SECTIONS)]
+    return "\n\n".join([*kept, PLAN_DECISION_NOTE])
+
+
+MACRO_GRAMMAR_PLAN = f"{_plan_grammar(GRAMMAR)}\n\n{ACTION_SIGNATURES}\n\n{KEY_INPUT_RULES}\n\n{NUMBER_EQUALITY}"
+_FILLS = {MACRO_GRAMMAR_PLACEHOLDER: MACRO_GRAMMAR, MACRO_GRAMMAR_PLAN_PLACEHOLDER: MACRO_GRAMMAR_PLAN}
 # 런마다 다른 값으로 채우는 자리. `static_pieces` 는 이것을 hash 하지 않는다 — 언어는 `RunConfig.language` 로
 # 따로 기록된다. `prompt_text` 를 부르는 쪽이 값을 넘긴다.
 LANGUAGE_PLACEHOLDER = "language_directive"
@@ -119,6 +141,18 @@ def step_text(item: QaStep) -> str:
     if item.case and item.case.test_step:
         return item.case.test_step.strip()
     return "(no action)"
+
+
+# planner 에게 보여 줄 뒤 step 수. 같은 씬에서 이어지는 묶음을 고르고, 어디까지가 이 step 인지 알게 하려고 보인다.
+UPCOMING_STEPS_SHOWN = 6
+
+
+def upcoming_steps(scenario: QaScenario, step: int, count: int = UPCOMING_STEPS_SHOWN) -> str:
+    """`step` 다음의 step 들. 이 step 이 어디서 끝나는지는 다음 step 이 정한다 — TC 가 없는 step 은 기대 결과가 없다."""
+    following = [this_step(scenario, number) for number in range(step + 1, min(len(scenario.steps), step + count) + 1)]
+    if not following:
+        return "Steps after this one: none — this is the last step.\n\n"
+    return "Steps after this one, in order (do not do them in this step; plan them only in a ```segment block):\n" + "\n".join(following) + "\n\n"
 
 
 def this_step(scenario: QaScenario, step: int) -> str:
@@ -217,7 +251,23 @@ def developer_macro_list(usable: Iterable[UsableDeveloperMacro]) -> str | None:
         lines.append(f"- `{_call(item.definition)}` — {written}")
         docstring = item.definition.entry.docstring or ""
         lines.extend(f"    {line}" if line else "" for line in docstring.splitlines())
+        if not _has_own_ready(item):
+            lines.append(
+                f"    (No ready condition of its own. If its input does nothing on some screens, write "
+                f"`ready_{macro.name}()` reading whether the game takes that input now.)"
+            )
     return "\n".join(lines)
+
+
+def _has_own_ready(item: UsableDeveloperMacro) -> bool:
+    """developer macro 가 제 준비 조건을 가졌나: 등록 계약의 `ready`, 계약이 없으면 앞부분 `require`(pe13).
+
+    없는 macro 는 아무 화면에서나 선택지에 남는다. planner 규칙이 그런 macro 에 `ready_` 를 쓰라고 했지만 어느 macro 가
+    그런지는 목록에 없어, try 26~33 의 계획 93개 중 3개만 썼다."""
+    if item.contract is not None:
+        return item.contract.has_ready
+    whole, by_parameter = leading_requires(item.macro.source, item.macro.name)
+    return bool(whole or by_parameter)
 
 
 def registered_action_list(usable: Iterable[UsableDeveloperMacro]) -> str | None:

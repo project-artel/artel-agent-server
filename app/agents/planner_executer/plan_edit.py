@@ -40,6 +40,8 @@ class PlanDraft:
     guidance_summary: str | None = None
     # ```facts 블록.
     facts_text: str | None = None
+    # ```goals 블록(prompt v6).
+    goals_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -139,6 +141,7 @@ def shown(draft: PlanDraft) -> str:
     for name, text in (
         ("guidance", draft.guidance_text), ("actions", draft.actions_text), ("observe", draft.observe_text),
         ("check", draft.check_text), ("after", draft.after_text), ("facts", draft.facts_text),
+        ("goals", draft.goals_text),
     ):
         if text and text.strip():
             parts.append(f"```{name}\n{text.strip()}\n```")

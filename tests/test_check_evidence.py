@@ -169,7 +169,7 @@ def test_each_turn_log_carries_the_state_jev_read_and_its_view() -> None:
 
     turns = [frame["payload"]["turn"] for frame in fake.frames("LOG") if frame["payload"].get("kind") == "turn"]
     picked = next(turn for turn in turns if turn.get("picked"))
-    assert picked["view"] == {"paths": None, "members": None, "level": 0}
+    assert picked["view"] == {"paths": None, "members": None}
     assert picked["jev_state"]["objects"][0]["path"] == "Root/Start"
 
 
@@ -230,7 +230,9 @@ def test_unmatched_paths_count_inactive_and_stale_objects_as_matched() -> None:
 def test_without_a_check_block_the_active_scene_is_still_read() -> None:
     play = _play_checked(_menu(), None)
 
-    assert all(entry["values"].keys() == {"(active scene)"} for entry in play.evidence)
+    # check 가 없어도 활성 씬과 화면 글자(pe9)는 읽는다. 그 밖의 값은 없다.
+    assert all("(active scene)" in entry["values"] for entry in play.evidence)
+    assert all(name == "(active scene)" or name.endswith(" text") for entry in play.evidence for name in entry["values"])
     assert "the plan named no values (no ```check block)" in evidence_text(play)
 
 
@@ -340,3 +342,94 @@ def test_a_play_records_what_changed_and_each_turn_names_its_frame() -> None:
     assert all("frame" in turn for turn in play.turns)
     (log,) = [frame["payload"] for frame in fake.frames("LOG") if frame["payload"].get("kind") == "evidence"]
     assert "Root/Stage: appeared" in log["evidence"]["changes"]
+
+
+def test_every_reading_also_keeps_the_words_on_screen_whatever_the_check_named() -> None:
+    from app.qa.state_set import visible_texts
+
+    def entity(path: str, text: str | None, scene: str = "StoryScene", active: bool = True) -> dict:
+        fragments = {"text": {"status": "KNOWN", "value": text}} if text is not None else {}
+        return {"entity_id": path, "scope": scene, "path": path, "selector": path, "active": active, "status": "KNOWN", "fragments": fragments}
+
+    snapshot = StateSnapshot.model_validate({
+        "state_version": 3, "sync": "SYNCED", "scene": "StoryScene",
+        "entities": [
+            entity("Canvas/ChatText", "안녕"),
+            entity("Canvas/Hidden", "숨은 글자", active=False),
+            entity("Canvas/Empty", ""),
+            entity("Canvas/Frame", None),
+            entity("Title/Label", "시작하기", scene="TitleScene"),
+        ],
+    })
+
+    texts = visible_texts(snapshot)
+
+    assert texts == {"Canvas/ChatText text": "안녕"}, "지금 씬에서 켜진 객체의 글자만"
+    # 개수 상한이 없다(pe11): 상한에 걸려 빠진 이름은 근거 로그에서 사라진 것(`(absent)`)으로 읽혔다.
+    many = StateSnapshot.model_validate({
+        "state_version": 3, "sync": "SYNCED", "scene": "StoryScene",
+        "entities": [entity(f"Canvas/Line{index:02d}", f"line {index}") for index in range(40)],
+    })
+    assert len(visible_texts(many)) == 40
+
+
+def test_the_words_of_objects_that_outlive_scenes_are_read_too() -> None:
+    """로컬 try 27 step 9: 튜토리얼 안내가 `@persistent` 아래에 있어 화면에 뜬 글자가 근거에 없었다."""
+    from app.qa.state_set import visible_texts
+
+    def entity(path: str, text: str, scope: str, active: bool = True) -> dict:
+        return {"entity_id": path, "scope": scope, "path": path, "selector": path, "active": active, "status": "KNOWN",
+                "fragments": {"text": {"status": "KNOWN", "value": text}}}
+
+    snapshot = StateSnapshot.model_validate({
+        "state_version": 3, "sync": "SYNCED", "scene": "Battle",
+        "entities": [
+            entity("@persistent/Tutorial/Hint", "적을 클릭하세요.", "persistent"),
+            entity("@persistent/Settings/Title", "설정", "persistent", active=False),
+            entity("Canvas/Hp", "100", "Battle"),
+        ],
+    })
+
+    assert visible_texts(snapshot) == {"@persistent/Tutorial/Hint text": "적을 클릭하세요.", "Canvas/Hp text": "100"}
+
+
+def test_objects_that_come_or_go_switched_off_are_not_listed_as_changes() -> None:
+    """로컬 try 27 step 10: 변화 40줄 중 34줄이 새 씬에서 다시 만들어진, 꺼져 있는 설정 메뉴 창의 `appeared` 였다."""
+    from app.qa.state_set import state_changes
+
+    start = _snapshot([_enemy("1", "Enemy[0]"), {**_enemy("2", "Menu[0]"), "active": False}])
+    end = _snapshot([_enemy("1", "Enemy[0]"), {**_enemy("3", "Menu[1]"), "active": False}, _enemy("4", "Reward[0]")])
+
+    lines, _left_out = state_changes(start, end)
+
+    assert lines == ["Reward[0]: appeared"]
+
+
+def test_objects_switched_on_or_off_between_two_readings_are_found_unless_the_scene_changed() -> None:
+    from app.qa.state_set import switched_between
+
+    before = _snapshot([_enemy("1", "Overlay[0]") | {"active": False}, _enemy("2", "Enemy[0]")])
+    after = _snapshot([_enemy("1", "Overlay[0]"), _enemy("2", "Enemy[0]"), _enemy("3", "Card[0]"), _enemy("4", "Off[0]") | {"active": False}])
+
+    assert switched_between(before, after) == {"1": ("Overlay[0]", False), "3": ("Card[0]", None)}
+    other = after.model_copy(update={"scene": "Elsewhere"})
+    assert switched_between(before, other) == {}
+
+
+def test_each_reading_keeps_whether_an_object_that_switched_is_on() -> None:
+    """시작과 끝만 비교하면 play 안에서 켜졌다 꺼진 것을 못 본다(로컬 try 27 step 10 의 튜토리얼 강조 오버레이). 바뀐 객체는
+    직전 reading 과 그 뒤 reading 마다 켜짐이 적혀, 근거 로그가 켜진 구간을 보인다."""
+    from app.agents.planner_executer.evidence import evidence_log
+    from app.agents.planner_executer.executer import Executer
+
+    off = _snapshot([_enemy("1", "Overlay[0]") | {"active": False}])
+    on = _snapshot([_enemy("1", "Overlay[0]")])
+    executer = Executer(_menu().channel, PlannerExecuterArchSpec(), None)
+    readings = []
+    for snapshot in (off, off, on, off):
+        values: dict = {}
+        executer._note_switching(snapshot, values)
+        readings.append({"at": f"turn {len(readings)}", "values": values})
+
+    series = evidence_log(readings, [])["series"]["Overlay[0]"]
+    assert series == [["turn 0", "(absent)"], ["turn 1", "(inactive)"], ["turn 2", "(present)"], ["turn 3", "(inactive)"]]

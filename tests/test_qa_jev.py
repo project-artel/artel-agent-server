@@ -266,7 +266,8 @@ def test_choose_scored_keeps_the_scores_jev_returned() -> None:
 
     chosen = asyncio.run(JevClient(post).choose_scored("Pick.", {"attack": "Hit.", "heal": "Rest."}, {}))
 
-    assert chosen == JevChoice("heal", 0.45, {"heal": 0.54, "attack": 0.46})
+    # confidence 는 Jev 의 균등 대비 값(0.45)이 아니라 고른 선택지의 확률이다.
+    assert chosen == JevChoice("heal", 0.54, {"heal": 0.54, "attack": 0.46})
 
 
 @pytest.mark.parametrize(

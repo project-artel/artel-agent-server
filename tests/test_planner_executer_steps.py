@@ -52,16 +52,33 @@ class FakeJev:
         self.picks = itertools.chain(picks, itertools.repeat(picks[-1])) if picks else None
         self.goal = itertools.chain(goal, itertools.repeat(goal[-1])) if goal else None
         self.bodies: list[dict] = []
+        # 대상까지 정한 답(`<행동> @ <대상>`)을 행동만 묻는 질문에 받으면 행동으로 답하고, 대상은 다음 질문에 쓴다(pe14).
+        self._aimed: str | None = None
 
     async def __call__(self, body: dict) -> dict:
         self.bodies.append(body)
         if body["questions"]["answer"]["type"] == "choice":
-            pick = next(self.picks)
             offered = list(body["questions"]["answer"]["criteria"])
+            if self._aimed is not None and self._aimed in offered:
+                pick, self._aimed = self._aimed, None
+            else:
+                self._aimed = None
+                pick = next(self.picks)
+                if pick not in offered and " @ " in pick and pick.split(" @ ", 1)[0] in offered:
+                    pick, self._aimed = pick.split(" @ ", 1)[0], pick
+            answers: dict = {}
+            if "wait" in body["questions"]:
+                # pe9: `none_fits` 는 선택지가 아니라 같은 요청의 기다림 noul 이다. 정해 둔 답이 `none_fits` 면 기다림으로 답한다.
+                answers["wait"] = {"noul": 0.95 if pick == "none_fits" else 0.05}
             if pick not in offered:
                 # 실제 Jev 는 받은 선택지 안에서만 고른다. 정해 둔 답이 선택지에 없으면(잠시 뺀 action 등) 처음 action 을 고른다.
                 pick = next((name for name in offered if name not in _CONTROL), pick)
-            return {"answers": {"answer": {"choice": pick}}}
+            answers["answer"] = {"choice": pick}
+            return {"answers": answers}
+        if body["questions"]["answer"]["instructions"] == executer_module.WAIT_QUESTION:
+            # pe11: 선택지가 하나이고 준비 조건으로 알 수 없을 때는 기다림만 묻는다. 정해 둔 답이 `none_fits` 면 기다린다.
+            pick = next(self.picks) if self.picks else None
+            return {"answers": {"answer": {"noul": 0.95 if pick == "none_fits" else 0.05}}}
         return {"answers": {"answer": {"noul": next(self.goal)}}}
 
     def asked(self, kind: str) -> list[dict]:
@@ -118,7 +135,8 @@ def _scenario() -> QaScenario:
 def _config(**knobs):
     # 엔진의 흐름을 보는 테스트라 Executer 의 state 출처는 `PulseMemory` 로 둔다. orchestration 이 없다.
     # 화면 그림은 끈다: 켜면 `capture_screen` ACTION 이 action 순서에 끼어든다. 그림은 test_screen_images.py 가 본다.
-    knobs = {"state_source": "pulse_memory", "screen_images": "off", **knobs}
+    # 미리 쓰기도 끈다: 켜면 planner 호출 수와 순서가 앞 step 의 실행과 겹친다. 미리 쓰기는 test_planner_executer_pe8.py 가 본다.
+    knobs = {"state_source": "pulse_memory", "screen_images": "off", "plan_ahead": "off", "pause_while_planning": "off", **knobs}
     return resolve_run_config(
         arch=QaArchSpec(engine="planner_executer", planner=PlannerExecuterArchSpec(**knobs))
     )
@@ -156,7 +174,7 @@ def _write(fake: FakeGame, asked: Asked, **knobs):
 
 
 def test_the_planner_writes_macros_from_the_rules_the_grammar_the_map_and_the_screen() -> None:
-    from app.agents.qa.macro.reference import GRAMMAR, NUMBER_EQUALITY
+    from app.agents.qa.macro.reference import NUMBER_EQUALITY
 
     fake = _menu()
     fake.channel.scene.scene_context = SceneContext(
@@ -176,7 +194,9 @@ def test_the_planner_writes_macros_from_the_rules_the_grammar_the_map_and_the_sc
     assert written.macros.description("press_start").startswith("Press Start on the title screen.")
     system, user = asked.calls[0]
     assert system.startswith("You write ONE test step of a game as macros.")
-    assert GRAMMAR in system and system.rstrip().endswith(NUMBER_EQUALITY)
+    # v7 은 decision model 을 부르는 `decide`·`ask` 절을 뺀 문법을 읽는다(pe11).
+    assert "No decision model in a plan." in system and "**Deciding.**" not in system
+    assert system.rstrip().endswith(NUMBER_EQUALITY)
     assert "Scenes in this build" in user and '- click "Start" — starts a game' in user
     assert '"verify": "The map opens."' in user
     assert "Current screen:" in user and "Root/Start" in user
@@ -296,9 +316,9 @@ def test_an_import_resolves_against_the_builds_registered_macros() -> None:
 # --- the executer --------------------------------------------------------------------------------
 
 
-def test_jev_picks_an_action_and_confirms_the_goal_before_play_stops() -> None:
+def test_jev_picks_between_the_ready_actions_and_play_stops_on_done_without_asking_jev() -> None:
     fake = _menu()
-    jev = FakeJev(picks=("press_start",), goal=(0.9,))
+    jev = FakeJev(picks=("press_start",))
 
     play = _play(fake, jev)
 
@@ -311,16 +331,18 @@ def test_jev_picks_an_action_and_confirms_the_goal_before_play_stops() -> None:
     assert question["criteria"] == {
         "press_start": {"what": "Press Start on the title screen. The right move while the menu shows Start."},
         "look_around": {"what": "Wait for the screen to settle. The right move while nothing can be pressed yet."},
-        "none_fits": {"what": "None of the other options fits the current state."},
     }
+    # 두 action 모두 준비 조건이 없어 게임이 입력을 받는지 코드가 모른다. 그래서 같은 요청에 기다림 noul 을 함께 묻는다.
+    assert pick["questions"]["wait"]["type"] == "noul"
+    assert pick["questions"]["wait"]["instructions"].startswith("Is the game busy right now")
     assert pick["state"] == {"scene": "Menu", "objects": [{"path": "Root/Start", "text": "Start", "members": {}}]}
-    (goal,) = jev.asked("noul")
-    assert goal["questions"]["answer"]["instructions"] == "Has this step's goal been reached? The step: Press Start."
-    assert goal["state"]["scene"] == "Map"
+    # 완료는 코드가 판정한다(pe11): 목표 도달을 Jev 에게 묻지 않는다.
+    assert jev.asked("noul") == []
     first, second = play.turns
     assert first["done"] is False and first["picked"] == "press_start" and first["outcome"] == "passed"
+    assert first["picked_by"] == "jev" and first["wait_asked_because"] == ["press_start", "look_around"]
     assert first["sent"][0]["summary"] == "click(start)"
-    assert second["done"] is True and second["goal_ask"] == 0.9 and "picked" not in second
+    assert second["done"] is True and "goal_ask" not in second and "picked" not in second
     assert [log["turn"] for log in _turn_logs(fake)] == [0, 1]
 
 
@@ -339,11 +361,14 @@ def test_jev_is_told_what_the_last_action_turns_did_when_it_picks_again() -> Non
 
     play = _play(fake, jev)
 
-    first, second = jev.asked("choice")
+    (first,) = jev.asked("choice")
     # 첫 turn 에는 지난 action 이 없어 state 가 전과 같다.
     assert "recent_actions" not in first["state"]
-    assert second["state"]["recent_actions"] == ["turn 0: look_around → passed, sent no input to the game"]
-    assert play.turns[1]["recent_actions"] == second["state"]["recent_actions"]
+    # 입력 없이 끝난 `look_around` 가 잠시 빠져 둘째 turn 은 선택지가 하나다. 고르기도 기다림도 묻지 않는다(pe13). 지난 action 은
+    # turn 기록에 남는다.
+    assert jev.asked("noul") == []
+    assert play.turns[1]["recent_actions"] == ["turn 0: look_around → passed, sent no input to the game"]
+    assert play.turns[1]["picked_by"] == "only_option"
     assert play.stopped == "done"
 
 
@@ -374,14 +399,17 @@ def test_nothing_fitting_waits_for_the_screen_and_stops_after_the_grace() -> Non
     assert all(turn["picked"] == "none_fits" for turn in play.turns)
 
 
-def test_when_jev_does_not_confirm_the_goal_play_goes_on_and_then_stops_on_the_disagreement() -> None:
+def test_an_acting_step_whose_done_holds_from_the_start_stops_without_input_and_without_asking_jev() -> None:
+    """pe11: 예전에는 Jev 에게 목표 도달을 물었지만 답은 반반이었다(try 17·18·24). 계획 검사를 거치지 않은 play 는 입력 없이
+    `done_at_start` 로 멈추고 evaluator 가 기록으로 판정한다."""
     fake = FakeGame("Map", {"Root/Stage": {"text": "Stage 0"}})  # `done()` 이 처음부터 참이다
+    jev = FakeJev(picks=("look_around",))
 
-    play = _play(fake, FakeJev(picks=("look_around",), goal=(0.2,)), max_done_disagreements=2)
+    play = _play(fake, jev)
 
-    assert [turn["goal_ask"] for turn in play.turns] == [0.2, 0.2]
-    assert play.turns[0]["picked"] == "look_around"  # 맞지 않으면 play 를 이어 간다
-    assert play.stopped.startswith("done() and Jev disagree")
+    assert play.stopped == executer_module.DONE_AT_START
+    assert jev.bodies == [] and fake.actions == []
+    assert len(play.turns) == 1 and "picked" not in play.turns[0]
 
 
 def test_actions_failing_in_a_row_stop_play() -> None:
@@ -515,12 +543,13 @@ def test_play_stops_at_the_time_budget() -> None:
 
     class Later(FakeJev):
         async def __call__(self, body: dict) -> dict:
-            clock.now += 10
+            clock.now += 20
             return await super().__call__(body)
 
+    # 선택지가 하나인 turn 은 Jev 를 부르지 않는다(pe13). 첫 고르기에서 예산이 넘어간다.
     play = _play(_menu(), Later(picks=("look_around",)), clock=clock, step_budget_seconds=15)
 
-    assert play.stopped == "step budget 15s" and len(play.turns) == 2
+    assert play.stopped == "step budget 15s"
 
 
 def test_a_jev_error_stops_play_with_the_error() -> None:
@@ -672,6 +701,19 @@ def test_one_step_is_written_played_judged_and_reported() -> None:
     assert action["payload"]["message"] == "click(start)"
 
 
+def test_game_time_is_paused_while_the_plan_is_written() -> None:
+    """pe10: 계획을 쓰는 동안 `pause_time`, 다 쓰면 `resume_time` 을 보내고 그 뒤에 step 의 행동을 보낸다."""
+    fake = _menu()
+    judge, _seen = _judge({"passed": True, "reason": "The map scene shows Stage 0.", "state_detail": "", "insight": ""})
+
+    state, failure = _run(fake, Asked(MACROS), judge, FakeJev(), pause_while_planning="on")
+
+    assert failure is None and state.finished
+    sent = [f["payload"]["actions"][0]["method"] for f in fake.frames("ACTION")]
+    assert sent[:2] == ["pause_time", "resume_time"]
+    assert [f["payload"]["message"] for f in fake.frames("ACTION")][2] == "click(start)"
+
+
 def test_a_step_whose_macros_stay_refused_fails_without_play() -> None:
     fake = _menu()
     no_goal = MACROS.replace("def done() -> bool:", "def finished() -> bool:")
@@ -695,7 +737,8 @@ def test_turn_records_go_out_as_logs_with_the_jev_answers() -> None:
 
     first, second = _turn_logs(fake)
     assert first["picked"] == "press_start" and first["options"] == ["press_start", "look_around"]
-    assert second["done"] is True and second["goal_ask"] == 0.9
+    assert first["picked_by"] == "jev" and first["wait"] == 0.05
+    assert second["done"] is True and "goal_ask" not in second
     json.dumps(first)
 
 
@@ -735,8 +778,10 @@ def test_two_actions_that_take_turns_doing_nothing_are_dropped_and_play_stops() 
     # `press_start` 의 실패가 입력을 보내므로 그 사이 `look_around` 의 입력 없는 통과는 헛돎이 아니다. `press_start` 가
     # 빠진 뒤 입력이 오가지 않는데 또 입력 없이 끝나면 그때부터 센다.
     assert [turn.get("misses") for turn in play.turns if turn.get("picked") == "look_around"] == [None, None, 1, 2, 3]
-    # 연속 규칙은 어느 것도 걸리지 않았다: 실패 사이에 입력 없는 통과가, 입력 없는 turn 사이에 실패가 끼었다.
-    assert "press_start" not in jev.asked("choice")[-1]["questions"]["answer"]["criteria"]
+    # 연속 규칙은 어느 것도 걸리지 않았다: 실패 사이에 입력 없는 통과가, 입력 없는 turn 사이에 실패가 끼었다. `press_start` 가
+    # 빠진 뒤에는 선택지가 하나라 Jev 가 고르지 않는다(pe11).
+    dropped_at = max(index for index, name in enumerate(picked) if name == "press_start")
+    assert all(turn.get("picked_by") == "only_option" for turn in play.turns[dropped_at + 1:] if turn.get("picked"))
 
 
 def test_a_run_pinned_to_v3_is_not_asked_for_game_insight() -> None:
@@ -759,6 +804,6 @@ def test_a_turn_records_the_scores_jev_gave_its_pick() -> None:
     play = _play(_menu(), Scored())
     scored, unscored = play.turns[0], _play(_menu(), FakeJev()).turns[0]
 
-    assert scored["confidence"] == 0.81
+    assert scored["confidence"] == 0.86  # 고른 선택지의 확률. Jev 의 confidence(0.81)는 균등 대비 값이다.
     assert scored["probabilities"] == {"press_start": 0.86, "none_fits": 0.14}
     assert "confidence" not in unscored and "probabilities" not in unscored

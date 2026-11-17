@@ -2690,6 +2690,17 @@ def test_actionable_is_false_only_when_the_sdk_says_the_object_is_not_visible(
     assert result.passed is passed
 
 
+@pytest.mark.parametrize("interactable, passed", [(True, True), (False, False), (None, True)])
+def test_actionable_is_false_for_a_button_the_game_has_disabled(interactable: bool | None, passed: bool) -> None:
+    """SDK 는 코드로 클릭을 붙인 버튼도 offers 에 싣는다. 배선만으로는 비활성 버튼이 걸러지지 않아 uGUI 상태로 거른다."""
+    obj = card(LOADING_BUTTON, instance_id=70, offers=WIRED)
+    if interactable is not None:
+        obj["ui"] = {"interactable": interactable}
+    result = run_model(FakeHost(scene_with(obj, scene="Title")), actionable_start())
+
+    assert result.passed is passed
+
+
 def test_a_require_failing_on_a_covered_object_says_it_is_covered() -> None:
     result = run_model(FakeHost(start_button(False)), actionable_start())
 

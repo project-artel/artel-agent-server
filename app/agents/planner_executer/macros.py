@@ -25,8 +25,9 @@ source is parsed once more with a generated entry, `executer_probe_done`, that d
 """
 
 import ast
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+import re
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from dataclasses import dataclass, field, replace
 
 from app.agents.qa.macro.errors import MacroRejection
 from app.agents.qa.macro.model import MacroDefinition
@@ -39,6 +40,10 @@ DONE = "done"
 PROBE = "executer_probe_done"
 PROBE_FLAG = "done"
 _PROBE_SOURCE = f'\n\ndef {PROBE}() -> None:\n    if {DONE}():\n        flag("{PROBE_FLAG}")\n'
+# 대상을 받는 행동의 선호 조건: `prefer_<action>(<대상>) -> bool`(pe14). 묶은 행동을 고른 뒤 코드가 대상마다 읽어, 참인 대상
+# 중에서 고른다. 계산이 필요한 선택(배분·상성)은 Jev 가 하지 못한다 — 계산식은 planner 가 쓰고 계산은 코드가 한다.
+PREFER_PREFIX = "prefer_"
+PREFER_FLAG = "prefer"
 # A FREE scene plan's goal per case: `done_<case_id>` (ARTEL-1149).
 GOAL_PREFIX = "done_"
 # 행동의 효과 조건: `effect_<action>() -> bool`. developer macro 는 `developer:` 를 떼고, `#2` 는 `_2` 로 쓴다.
@@ -116,11 +121,81 @@ class StepMacros:
     guidance: str | None = None
     # planner 의 ```facts 블록: 이 step 에서 Jev 가 매 turn 값을 읽을 선언 fact 의 이름.
     facts: tuple[str, ...] = ()
+    # planner 의 ```goals 블록(prompt v6): 순서 있는 하위 목표 (이름, 문장). Jev 는 step 문장 대신 지금 하위 목표를 읽는다.
+    goals: tuple[tuple[str, str], ...] = ()
+    # 하위 목표마다 `goal_<이름>() -> bool` 을 읽는 probe. 참이면 다음 하위 목표로 넘어간다.
+    goal_probes: dict[str, "MacroDefinition"] = field(default_factory=dict)
+    # planner 의 ```segment 블록: 같은 씬에서 이어지는 step 들을 이 계획이 함께 맡는다. step 번호 → (그 step 의 하위 목표
+    # 이름들, 그 step 의 완료 probe, 그 step 에서 고를 수 있는 action). 지금 step 의 probe 는 `None` 이고 `done()` 을 쓴다.
+    segment: dict[int, tuple[tuple[str, ...], "MacroDefinition | None", tuple[str, ...]]] = field(default_factory=dict)
+
+    # 대상을 받는 행동마다 planner 가 쓴 `prefer_<action>(<대상>)`(pe14).
+    prefers: dict[str, "PreferRule"] = field(default_factory=dict)
 
     def description(self, action: str) -> str:
         if action in self.descriptions:
             return self.descriptions[action]
         return self.actions[action].entry.docstring or ""
+
+
+def prefer_name(action: str) -> str:
+    """행동 이름에 맞는 선호 조건의 이름. `developer:place_card` → `prefer_place_card`."""
+    return PREFER_PREFIX + action.removeprefix("developer:").replace("#", "_")
+
+
+@dataclass
+class PreferRule:
+    """planner 가 쓴 `prefer_<action>(<param>, ...)`. 대상의 주소를 넣어 읽는 probe 를 만든다(pe14)."""
+
+    name: str
+    params: tuple[str, ...]
+    source: str
+    registered: "RegisteredMacros"
+    _probes: dict[tuple[str, ...], MacroDefinition] = field(default_factory=dict)
+
+    async def probe(self, binding: tuple[tuple[str | None, str], ...]) -> MacroDefinition | None:
+        """`binding` 은 `(param, selector)` 들이다. param 이름이 맞는 것을 넣고, 이름이 없으면 순서대로 넣는다. 못 맞추면 `None`."""
+        named = {param: selector for param, selector in binding if param}
+        unnamed = [selector for param, selector in binding if not param]
+        args: list[str] = []
+        for param in self.params:
+            if param in named:
+                args.append(named[param])
+            elif unnamed:
+                args.append(unnamed.pop(0))
+            else:
+                return None
+        key = tuple(args)
+        if key not in self._probes:
+            entry = f"executer_probe_{self.name}"
+            call = ", ".join(f"selector({_quoted(arg)})" for arg in args)
+            wrapper = f'\n\ndef {entry}() -> None:\n    if {self.name}({call}):\n        flag("{PREFER_FLAG}")\n'
+            self._probes[key] = await self.registered.parse(entry, self.source.rstrip("\n") + wrapper)
+        return self._probes[key]
+
+
+def _quoted(text: str) -> str:
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _prefer_rules(
+    defs: list[ast.FunctionDef], actions: list[str], source: str, registered: "RegisteredMacros"
+) -> dict[str, PreferRule]:
+    """`prefer_<action>(<대상>) -> bool` 마다 그 행동의 선호 조건. 맞는 행동이 없거나 모양이 틀리면 거절한다."""
+    by_name = {prefer_name(action): action for action in actions}
+    rules: dict[str, PreferRule] = {}
+    for node in defs:
+        if not node.name.startswith(PREFER_PREFIX):
+            continue
+        if node.name not in by_name:
+            known = ", ".join(sorted(by_name)) or "(none)"
+            raise MacroRejection(f"`{node.name}` matches no action; a `prefer_` predicate is named after its action: {known}.")
+        if not _returns(node, "bool") or not node.args.args:
+            raise MacroRejection(
+                f"`{node.name}` must be `def {node.name}(<target>: object) -> bool:` with the action's target as its parameter."
+            )
+        rules[by_name[node.name]] = PreferRule(node.name, tuple(arg.arg for arg in node.args.args), source, registered)
+    return rules
 
 
 class _ImportResolver:
@@ -250,13 +325,37 @@ class DeveloperAction:
     ready: MacroDefinition | None = None
 
 
+# planner·editor 가 쓴 글에서 받지 않는 호출(pe11). 둘 다 그 자리의 판단을 decision model 에게 넘긴다. 대상 고르기는 executer 가
+# 대상마다 선택지를 펼쳐 Jev 에게 묻고, 끝·준비·효과는 상태에서 읽는 predicate 로 쓴다. try 24 step 3 의
+# `while ask("뒤에 대사가 더 있나?")` 는 상태에 없는 것을 Jev 에게 물었다.
+DECISION_CALLS = ("ask", "decide")
+
+
+def reject_decision_calls(source: str) -> None:
+    """글의 어느 `def` 든 `ask`·`decide` 를 부르면 `MacroRejection`. 가져온 developer macro 의 본문은 이 글이 아니라 보지 않는다."""
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in DECISION_CALLS:
+            raise MacroRejection(
+                f"`{node.func.id}(...)` hands a judgement to the decision model, and plans do not use it. The executer "
+                "already offers one option per target object and asks the decision model to pick among the ready options. "
+                "Read when to act, when an action worked and when the step is done from the game's state in a predicate; "
+                "what the state cannot tell, leave to another end condition.",
+                node.lineno,
+            )
+
+
 async def parse_step(
     source: str,
     registered: RegisteredMacros,
     developer_actions: Mapping[str, DeveloperAction] | None = None,
     contracts_text: str | None = None,
+    contract_keys: tuple[str, ...] = (),
 ) -> StepMacros:
     """The step's macros, or `MacroRejection` with what to write instead.
+
+    `contract_keys` 는 legacy 모드에서 등록 계약으로 도는 developer macro 의 키다. planner 가 그 이름으로 쓴 `effect_` 는
+    쓰지 않는다 — 등록된 계약이 이긴다. `ready_` 는 남긴다: 계약에 준비 조건이 없으면 executer 가 그것을 쓴다(pe13).
 
     The parser checks each action and `done`; this adds what the executer needs of the source as
     a whole — a `done` predicate, no parameters, a docstring on each action. A step may have no action at
@@ -272,6 +371,7 @@ async def parse_step(
     defs = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
     if PROBE in {node.name for node in defs}:
         raise MacroRejection(f"`{PROBE}` is a name the executer uses; name the def otherwise.")
+    reject_decision_calls(source)
     goal = next((node for node in defs if node.name == DONE), None)
     if goal is None or not _returns(goal, "bool") or goal.args.args:
         raise MacroRejection(
@@ -287,11 +387,14 @@ async def parse_step(
     parsed = await _parse_actions(actions, source, registered, developer_actions)
     probe = await registered.parse(PROBE, source.rstrip("\n") + _PROBE_SOURCE)
     descriptions = {key: action.description for key, action in developer_actions.items()}
-    effects = await _parse_predicates(defs, list(parsed), source, registered, EFFECT_PREFIX, effect_name, EFFECT_FLAG)
-    readies = await _parse_predicates(defs, list(parsed), source, registered, READY_PREFIX, ready_name, READY_FLAG)
+    named = [*parsed, *contract_keys]
+    effects = await _parse_predicates(defs, named, source, registered, EFFECT_PREFIX, effect_name, EFFECT_FLAG)
+    readies = await _parse_predicates(defs, named, source, registered, READY_PREFIX, ready_name, READY_FLAG)
+    effects = {key: probe for key, probe in effects.items() if key not in contract_keys}
     readies = _with_developer_readies(readies, developer_actions)
     picks = {key: action.pick for key, action in developer_actions.items() if action.pick is not None}
-    return StepMacros(source, parsed, probe, descriptions, effects=effects, readies=readies, picks=picks)
+    prefers = _prefer_rules(defs, named, source, registered)
+    return StepMacros(source, parsed, probe, descriptions, effects=effects, readies=readies, picks=picks, prefers=prefers)
 
 
 def _with_developer_readies(
@@ -299,7 +402,9 @@ def _with_developer_readies(
 ) -> dict[str, MacroDefinition]:
     """planner 의 `ready_<action>` 에, 그것이 없는 developer macro 의 앞부분 `require` probe 를 더한다."""
     derived = {key: action.ready for key, action in developer_actions.items() if action.ready is not None}
-    return {**derived, **readies}
+    # developer macro 가 제 준비 조건을 가지면 그것이 이긴다(pe9). planner 의 `ready_` 는 step 이 기대하는 화면을 적는 일이
+    # 잦았다 — 로컬 try 8·9 step 11~18 은 그 조건이 다른 화면에서 거짓이라 "준비된 동작 없음" 으로 줄줄이 멈췄다.
+    return {**readies, **derived}
 
 
 async def _parse_contract_step(
@@ -364,6 +469,7 @@ async def parse_guidance_step(
     defs = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
     if PROBE in {node.name for node in defs}:
         raise MacroRejection(f"`{PROBE}` is a name the executer uses; name the def otherwise.")
+    reject_decision_calls(source)
     goal = next((node for node in defs if node.name == DONE), None)
     if goal is None or not _returns(goal, "bool") or goal.args.args:
         raise MacroRejection(
@@ -393,6 +499,143 @@ async def parse_guidance_step(
     return StepMacros(
         source, parsed, probe, descriptions, readies=readies, contracts=dict(contracts), binder=binder,
         guidance=guidance.strip() if guidance and guidance.strip() else None,
+    )
+
+
+GOAL_DEF_PREFIX = "goal_"
+GOAL_FLAG = "goal"
+_GOAL_LINE = re.compile(r"^\s*([a-z][a-z0-9_]{0,39})\s*:\s*(\S.*)$")
+
+
+async def read_goals(
+    text: str | None, source: str, registered: RegisteredMacros
+) -> tuple[tuple[tuple[str, str], ...], dict[str, MacroDefinition]]:
+    """```goals 블록의 하위 목표와 그 완료 조건 probe. 블록이 없으면 둘 다 비어 있다.
+
+    줄마다 `<이름>: <목표>` 이고, 이름마다 source 에 `def goal_<이름>() -> bool:` 이 있어야 한다. 이름이 틀린 조건은 조용히 안
+    읽히므로 거절한다.
+    """
+    if text is None or not text.strip():
+        return (), {}
+    goals: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        matched = _GOAL_LINE.match(line)
+        if matched is None:
+            raise MacroRejection(
+                "each line of the ```goals block is `<name>: <goal>` with a lowercase name of letters, digits and `_`."
+            )
+        name, goal = matched.group(1), matched.group(2).strip()
+        if any(name == seen for seen, _ in goals):
+            raise MacroRejection(f"the goal `{name}` is listed twice in the ```goals block.")
+        goals.append((name, goal))
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as error:
+        raise MacroRejection(f"this is not valid Python syntax — {error.msg}.", error.lineno) from None
+    defs = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    probes: dict[str, MacroDefinition] = {}
+    for name, _goal in goals:
+        node = defs.get(GOAL_DEF_PREFIX + name)
+        if node is None:
+            raise MacroRejection(
+                f"the goal `{name}` needs `def {GOAL_DEF_PREFIX}{name}() -> bool:` in the ```python block, reading when it is reached."
+            )
+        if not _returns(node, "bool") or node.args.args:
+            raise MacroRejection(f"`{GOAL_DEF_PREFIX}{name}` must be `def {GOAL_DEF_PREFIX}{name}() -> bool:` with no parameters.")
+        entry = f"executer_probe_{GOAL_DEF_PREFIX}{name}"
+        probe_source = f'\n\ndef {entry}() -> None:\n    if {GOAL_DEF_PREFIX}{name}():\n        flag("{GOAL_FLAG}")\n'
+        probes[name] = await registered.parse(entry, source.rstrip("\n") + probe_source)
+    return tuple(goals), probes
+
+
+_SEGMENT_LINE = re.compile(r"^\s*(\d+)\s*:\s*([^|]*)\|(.*)$")
+SEGMENT_DONE_PREFIX = "done_"
+
+
+async def read_segment(
+    text: str | None,
+    source: str,
+    registered: RegisteredMacros,
+    step: int,
+    goal_names: tuple[str, ...],
+    action_names: tuple[str, ...] = (),
+) -> dict[int, tuple[tuple[str, ...], MacroDefinition | None, tuple[str, ...]]]:
+    """```segment 블록: 이 계획이 맡는 연속 step 과 step 마다의 하위 목표·완료 조건·action. 블록이 없으면 비어 있다.
+
+    줄마다 `<step 번호>: <하위 목표 이름>, ... | <action 이름>, ...` 이다. 첫 줄은 지금 step 이고 그 뒤는 바로 다음 step
+    부터 빠짐없이 이어진다. 뒤 step 마다 `def done_<번호>() -> bool:` 이 있어야 한다. 하위 목표는 ```goals 에, action 은
+    이 계획에 있는 것이어야 한다. action 을 step 마다 나누는 것은, 묶음의 action 이 모든 step 에 열리면 보기만 하는 step 이
+    다음 step 의 버튼을 누르기 때문이다(로컬 try 13 step 1 이 '시작하기' 를 눌렀다).
+    """
+    if text is None or not text.strip():
+        return {}
+    rows: list[tuple[int, tuple[str, ...]]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        matched = _SEGMENT_LINE.match(line)
+        if matched is None:
+            raise MacroRejection(
+                "each line of the ```segment block is `<step number>: <goal name>, ... | <action>, ...`; a step that only "
+                "looks lists no action after the `|`."
+            )
+        names = tuple(name.strip() for name in matched.group(2).split(",") if name.strip())
+        actions: list[str] = []
+        for raw in (name.strip() for name in matched.group(3).split(",") if name.strip()):
+            known = raw if raw in action_names else f"developer:{raw}" if f"developer:{raw}" in action_names else None
+            if known is None:
+                listed = ", ".join(action_names) or "(none)"
+                raise MacroRejection(f"the ```segment block names `{raw}`, which is not an action of this plan: {listed}.")
+            actions.append(known)
+        unknown = [name for name in names if name not in goal_names]
+        if unknown:
+            raise MacroRejection(
+                f"the ```segment block names goals that are not in the ```goals block: {', '.join(unknown)}."
+            )
+        rows.append((int(matched.group(1)), names, tuple(actions)))
+    numbers = [number for number, _names, _actions in rows]
+    if numbers != list(range(step, step + len(rows))):
+        raise MacroRejection(
+            f"the ```segment block lists consecutive steps starting with the step you are writing ({step}); it lists {numbers}."
+        )
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as error:
+        raise MacroRejection(f"this is not valid Python syntax — {error.msg}.", error.lineno) from None
+    defs = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    segment: dict[int, tuple[tuple[str, ...], MacroDefinition | None, tuple[str, ...]]] = {}
+    for number, names, actions in rows:
+        if number == step:
+            segment[number] = (names, None, actions)
+            continue
+        name = f"{SEGMENT_DONE_PREFIX}{number}"
+        node = defs.get(name)
+        if node is None or not _returns(node, "bool") or node.args.args:
+            raise MacroRejection(
+                f"step {number} is in the ```segment block, so the source needs `def {name}() -> bool:` reading that step's result."
+            )
+        entry = f"executer_probe_{name}"
+        probe_source = f'\n\ndef {entry}() -> None:\n    if {name}():\n        flag("{PROBE_FLAG}")\n'
+        segment[number] = (names, await registered.parse(entry, source.rstrip("\n") + probe_source), actions)
+    return segment
+
+
+def step_of_segment(macros: StepMacros, step: int) -> StepMacros:
+    """묶음 계획에서 `step` 하나를 맡는 모양. 완료 probe 와 하위 목표를 그 step 의 것으로 바꾼다. 묶음이 없으면 그대로다."""
+    if step not in macros.segment:
+        return macros
+    names, probe, actions = macros.segment[step]
+    goals = tuple(goal for goal in macros.goals if goal[0] in names) if names else macros.goals
+    return replace(
+        macros,
+        probe=probe or macros.probe,
+        goals=goals,
+        goal_probes={name: macros.goal_probes[name] for name, _goal in goals if name in macros.goal_probes},
+        actions={name: action for name, action in macros.actions.items() if name in actions},
+        contracts={name: contract for name, contract in macros.contracts.items() if name in actions},
+        after={first: nexts for first, nexts in macros.after.items() if first in actions},
     )
 
 
@@ -526,3 +769,31 @@ def _returns(node: ast.FunctionDef, name: str) -> bool:
     if name == "None":
         return isinstance(annotation, ast.Constant) and annotation.value is None
     return isinstance(annotation, ast.Name) and annotation.id == name
+
+
+def action_code(source: str, names: "Iterable[str]") -> dict[str, str]:
+    """planner 가 쓴 행동마다 그 `def` 와, 그 안에서 부르는 같은 계획의 `def` 의 코드(pe13). evaluator 가 행동이 무엇을
+    확인했는지 읽는다 — 이름과 "passed" 만으로는 그 행동 안의 `wait_until` 이 무엇을 기다렸는지 모른다(로컬 try 31 step 3).
+    읽지 못하는 글이면 빈 dict 다."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {}
+    defs = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    code: dict[str, str] = {}
+    for name in names:
+        if name not in defs:
+            continue
+        seen: list[str] = []
+        pending = [name]
+        while pending:
+            current = pending.pop(0)
+            if current in seen or current not in defs:
+                continue
+            seen.append(current)
+            for call in ast.walk(defs[current]):
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in defs:
+                    pending.append(call.func.id)
+        code[name] = "\n\n".join(ast.get_source_segment(source, defs[each]) or "" for each in seen)
+    return code
+

@@ -233,6 +233,43 @@ async def bind_developer_calls(
 
 
 _ACTION_NAME = re.compile(r"^[A-Za-z_]\w*(\(\))?$")
+_CALL_NAME = re.compile(r"^\s*([A-Za-z_]\w*)")
+
+
+async def bind_developer_calls_with_contracts(
+    calls: list[str], loaded: LoadedDeveloperMacros
+) -> tuple[dict[str, DeveloperAction], dict[str, ActionContract], DispatchBinder, tuple[tuple[str, str], ...]]:
+    """legacy 모드의 ```developer 블록. 계약을 등록한 macro 는 그 계약으로, 나머지는 예전처럼 호출로 묶는다.
+
+    `(legacy 행동, 계약 행동, 계약 binder, (행동 키, ```developer 줄) 쌍)`. 계약 행동은 등록된 `ready_`·`effect_` 와 `holds`
+    로 돈다: 준비 조건이 거짓인 대상은 선택지에서 빠지고, 효과가 나타났는지가 기록된다. 전에는 legacy 모드가 계약을 읽지
+    않아, 로컬 try 14 step 8 에서 이미 칸에 든 카드를 다시 눌러 손패로 되돌리고도 효과 없음으로 세지 못했다. 계약 행동의
+    대상은 planner 가 적은 인자가 아니라 계약의 `holds` 로 executer 가 펼친다.
+    """
+    actions: dict[str, DeveloperAction] = {}
+    contracts: dict[str, ActionContract] = {}
+    binders: dict[str, tuple[ContractBinder, str]] = {}
+    pairs: list[tuple[str, str]] = []
+    for call in calls:
+        matched = _CALL_NAME.match(call)
+        usable = loaded.usable.get(matched.group(1)) if matched else None
+        if usable is not None and usable.contract is not None and usable.contract_error is None:
+            name = matched.group(1)
+            key = DEVELOPER_ACTION_PREFIX + name
+            if key not in contracts:
+                contracts[key] = replace(usable.contract, description=usable.definition.entry.docstring or "")
+                binders[key] = (ContractBinder(usable.macro.source, {name: usable.contract}, loaded.resolver.parse), name)
+                pairs.append((key, call))
+            continue
+        bound = await bind_developer_calls([call], loaded)
+        for key, action in bound.items():
+            unique, count = key, 2
+            while unique in actions:
+                unique = f"{key.split('#', 1)[0]}#{count}"
+                count += 1
+            actions[unique] = action
+            pairs.append((unique, call))
+    return actions, contracts, DispatchBinder(binders), tuple(pairs)
 
 
 async def bind_guidance_calls(
