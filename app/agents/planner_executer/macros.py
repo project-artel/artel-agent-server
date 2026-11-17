@@ -554,6 +554,15 @@ _SEGMENT_LINE = re.compile(r"^\s*(\d+)\s*:\s*([^|]*)\|(.*)$")
 SEGMENT_DONE_PREFIX = "done_"
 
 
+def segment_first_step(text: str | None) -> int | None:
+    """```segment 블록의 첫 줄이 말하는 step. 읽을 줄이 없으면 `None`."""
+    for line in (text or "").splitlines():
+        matched = _SEGMENT_LINE.match(line)
+        if matched is not None:
+            return int(matched.group(1))
+    return None
+
+
 async def read_segment(
     text: str | None,
     source: str,

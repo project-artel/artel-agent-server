@@ -47,6 +47,7 @@ from app.agents.planner_executer.macros import (
     parse_step,
     read_goals,
     read_segment,
+    segment_first_step,
 )
 from app.agents.planner_executer.facts import NO_FACTS, GameFacts, check_guidance_facts, planner_text, read_facts_block
 from app.agents.planner_executer.target import StepContracts, planner_note
@@ -221,6 +222,26 @@ def read_after(text: str | None, actions: list[str]) -> dict[str, tuple[str, ...
         for action in named(first):
             after[action] = followers
     return after
+
+
+def plan_segment(
+    kind: str, base: PlanDraft | None, segment_text: str | None, step: int
+) -> tuple[str | None, int | None, bool]:
+    """이 답이 쓰는 ```segment 와 그 묶음을 처음 쓴 step, 지금 계획에서 이어 받았는가.
+
+    처음 쓰는 계획은 보낸 블록을 지금 step 부터 읽는다. 다시 쓴 계획은 보낸 블록이 없으면 지금 계획의 것을 이어 받고, 보낸 블록은
+    지금 step 부터일 수도 처음 쓴 step 부터 통째일 수도 있어(로컬 try 38 step 18 은 보이는 묶음 16~18 을 그대로 다시 보냈다) 첫 줄의
+    step 을 그 묶음을 쓴 step 으로 읽는다. 그 밖의 계획(이동 등)은 묶음을 받지 않는다."""
+    if kind == "step" and base is None:
+        return segment_text, (step if segment_text else None), False
+    if kind == "replan" and base is not None:
+        if segment_text is not None:
+            first = segment_first_step(segment_text)
+            return segment_text, (first if first is not None and first <= step else step), False
+        if base.segment_text:
+            return base.segment_text, base.segment_step, True
+        return None, None, False
+    return None, None, False
 
 
 def split_segment_block(answer: str) -> tuple[str, str | None]:
@@ -636,23 +657,13 @@ class Planner:
                 # 묶음은 처음 쓰는 계획과, 그 계획을 다시 쓴 계획이 받는다. 다시 쓴 답이 ```segment 를 보내지 않으면 지금 계획의
                 # 묶음을 이어 받는다. 예전에는 다시 쓰면 묶음만 버리고 뒤 step 의 하위 목표·action 은 남겨, 그 step 하나가 뒤 step
                 # 들의 입력까지 보냈다(로컬 try 36·37 step 16 이 17·18 을 지나갔다).
-                segment_step: int | None = None
-                carried = False
-                if kind == "step" and base is None:
-                    segment_step = step if segment_text else None
-                elif kind == "replan" and base is not None:
-                    if segment_text is not None:
-                        segment_step = step
-                    elif base.segment_text:
-                        segment_text, segment_step, carried = base.segment_text, base.segment_step, True
-                else:
-                    segment_text = None
+                segment_text, segment_step, carried = plan_segment(kind, base, segment_text, step)
                 try:
                     segment = (
                         await read_segment(
                             segment_text, source, self._registered, step, tuple(name for name, _ in goals),
                             tuple([*macros.actions, *macros.contracts]),
-                            written_at=segment_step if carried else None,
+                            written_at=segment_step if kind == "replan" else None,
                         )
                         if segment_text else {}
                     )

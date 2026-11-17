@@ -206,3 +206,41 @@ def test_a_looking_first_step_is_not_refused_for_the_next_step_s_action() -> Non
     assert failure is None and state.finished
     assert _logs(fake, "step_macros_refused") == []
     assert len(calls) == 1
+
+
+# --- 다시 쓴 답이 보낸 묶음 ------------------------------------------------------------------------------
+
+from app.agents.planner_executer.planner import plan_segment  # noqa: E402
+
+KEPT = PlanDraft(1, "", (), (), segment_text="16: a | x\n17: b | y\n18: c | z\n", segment_step=16)
+
+
+def test_a_rewrite_that_sends_the_whole_segment_again_reads_it_from_the_step_that_first_wrote_it() -> None:
+    """로컬 try 38 step 18: 다시 쓰는 요청에 보인 묶음 16~18 을 그대로 다시 보냈고, 지금 step 부터가 아니라고 거절됐다."""
+    assert plan_segment("replan", KEPT, KEPT.segment_text, 18) == (KEPT.segment_text, 16, False)
+
+
+def test_a_rewrite_that_sends_a_segment_from_this_step_writes_it_here() -> None:
+    assert plan_segment("replan", KEPT, "18: c | z\n", 18) == ("18: c | z\n", 18, False)
+
+
+def test_a_rewrite_that_sends_no_segment_keeps_the_plan_s() -> None:
+    assert plan_segment("replan", KEPT, None, 17) == (KEPT.segment_text, 16, True)
+
+
+def test_a_first_plan_reads_its_segment_from_this_step_and_a_travel_takes_none() -> None:
+    assert plan_segment("step", None, "3: a | x\n4: b | y\n", 3) == ("3: a | x\n4: b | y\n", 3, False)
+    assert plan_segment("travel", None, "3: a | x\n", 3) == (None, None, False)
+
+
+def test_a_resent_whole_segment_drops_the_rows_already_played() -> None:
+    async def go():
+        fake = _menu()
+        return await read_segment(
+            THREE_ROWS, THREE_STEPS, RegisteredMacros(fake.channel), 3, ("open_map", "stay"),
+            ("press_start", "look_around"), written_at=1,
+        )
+
+    segment = asyncio.run(go())
+
+    assert sorted(segment) == [3] and segment[3][1] is not None
