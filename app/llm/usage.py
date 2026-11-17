@@ -1,9 +1,8 @@
 """Per-call LLM token and cost collection, batched to Orchestration.
 
-Every model call this server makes leaves through OpenRouter, which reports the
-token counts and — when the request asks for it — the money it actually charged.
-Nothing read those numbers, so LLM spend left no trace. This module reads them
-where the calls really happen: a LangChain callback for chat models, an httpx
+Chat providers report different usage fields. OpenRouter can also report the
+amount it charged. This module accounts for them in a LangChain callback for
+chat models and an httpx
 response hook for embeddings. Middleware would only have covered the two agents
 built on ``create_agent``; the structured-output chains and the embedding client
 never enter that graph.
@@ -179,6 +178,45 @@ def _cache_write_of(usage: dict[str, Any]) -> int:
     return int(details.get("cache_creation") or 0)
 
 
+class CatalogUsagePricing:
+    estimate_cost = staticmethod(_estimate_cost)
+
+    def cache_write_tokens(self, usage: dict[str, Any], raw_usage: dict[str, Any]) -> int:
+        raise NotImplementedError
+
+    def input_tokens(self, usage: dict[str, Any], cache_write_tokens: int) -> int:
+        return max(usage.get("input_tokens", 0) - cache_write_tokens, 0)
+
+    def reported_cost(self, raw_usage: dict[str, Any]) -> float | None:
+        return None
+
+
+class OpenAIUsagePricing(CatalogUsagePricing):
+    def cache_write_tokens(self, usage: dict[str, Any], raw_usage: dict[str, Any]) -> int:
+        details = raw_usage.get("input_tokens_details") or {}
+        return int(details.get("cache_write_tokens") or _cache_write_of(usage))
+
+
+class AnthropicUsagePricing(CatalogUsagePricing):
+    def cache_write_tokens(self, usage: dict[str, Any], raw_usage: dict[str, Any]) -> int:
+        return _cache_write_of(usage)
+
+
+class OpenRouterUsagePricing(CatalogUsagePricing):
+    def cache_write_tokens(self, usage: dict[str, Any], raw_usage: dict[str, Any]) -> int:
+        details = raw_usage.get("prompt_tokens_details") or {}
+        return int(details.get("cache_write_tokens") or _cache_write_of(usage))
+
+    def reported_cost(self, raw_usage: dict[str, Any]) -> float | None:
+        cost = raw_usage.get("cost")
+        return float(cost) if isinstance(cost, (int, float)) else None
+
+
+OPENROUTER_USAGE_PRICING = OpenRouterUsagePricing()
+OPENAI_USAGE_PRICING = OpenAIUsagePricing()
+ANTHROPIC_USAGE_PRICING = AnthropicUsagePricing()
+
+
 def _build_record(
     model: str,
     *,
@@ -188,6 +226,7 @@ def _build_record(
     cache_write_tokens: int = 0,
     reasoning_tokens: int = 0,
     cost_usd: float | None = None,
+    pricing: CatalogUsagePricing = OPENROUTER_USAGE_PRICING,
     started_at: datetime,
     latency_ms: int,
     key_source: KeySource = "platform",
@@ -222,7 +261,7 @@ def _build_record(
     # 돈을 추정치로 덮으면 그 행은 영영 되돌릴 수 없다.
     estimated = cost_usd is None
     if estimated:
-        cost_usd = _estimate_cost(
+        cost_usd = pricing.estimate_cost(
             model,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -366,7 +405,7 @@ class UsageCallback(AsyncCallbackHandler):
         self,
         buffer: UsageBuffer | None = None,
         slug: str | None = None,
-        input_includes_cache_write: bool = False,
+        pricing: CatalogUsagePricing = OPENROUTER_USAGE_PRICING,
         key_source: KeySource = "platform",
     ) -> None:
         self._buffer = buffer
@@ -379,11 +418,7 @@ class UsageCallback(AsyncCallbackHandler):
         # 전체가 되어 `provider VARCHAR(40)` 을 넘긴다. 같은 함정을 embedding 쪽이
         # 먼저 밟았고(`_record_from_embedding`), 거기서 쓴 처방과 같다.
         self._slug = slug
-        # langchain-anthropic 은 `input_tokens` 에 `cache_read` 와 `cache_creation` 을 모두
-        # 더해 준다. 받는 쪽 규칙은 cache write 를 `inputTokens` 밖에 두는 것이라(Bedrock 이
-        # 그렇게 온다) True 이면 그 몫을 뺀다. 빼지 않으면 cache write 가 입력 단가와 쓰기
-        # 단가로 두 번 계산된다.
-        self._input_includes_cache_write = input_includes_cache_write
+        self._pricing = pricing
         # ponytail: a run that ends without either end or error callback leaves
         # its entry here. Bound it (TTL or deque) if that ever adds up — one
         # abandoned run costs a timestamp pair.
@@ -409,7 +444,7 @@ class UsageCallback(AsyncCallbackHandler):
                 response,
                 started,
                 self._slug,
-                self._input_includes_cache_write,
+                self._pricing,
                 self._key_source,
             )
             if record is not None:
@@ -423,7 +458,7 @@ def _record_from_response(
     response: LLMResult,
     started: tuple[float, datetime] | None,
     slug: str | None = None,
-    input_includes_cache_write: bool = False,
+    pricing: CatalogUsagePricing = OPENROUTER_USAGE_PRICING,
     key_source: KeySource = "platform",
 ) -> dict[str, Any] | None:
     generations = response.generations[0] if response.generations else []
@@ -444,23 +479,19 @@ def _record_from_response(
     # 슬래시가 없으면 vendor 를 잃은 이름이다. 카탈로그 값이 그것을 아직 갖고 있다.
     if "/" not in model and slug:
         model = slug
-    cost = raw_usage.get("cost")
     now = time.monotonic()
-    cache_write_tokens = _cache_write_of(usage)
-    input_tokens = usage.get("input_tokens", 0)
-    if input_includes_cache_write:
-        input_tokens = max(input_tokens - cache_write_tokens, 0)
-
+    cache_write_tokens = pricing.cache_write_tokens(usage, raw_usage)
     return _build_record(
         model,
-        input_tokens=input_tokens,
+        input_tokens=pricing.input_tokens(usage, cache_write_tokens),
         output_tokens=usage.get("output_tokens", 0),
         cached_input_tokens=(usage.get("input_token_details") or {}).get(
             "cache_read", 0
         ),
         cache_write_tokens=cache_write_tokens,
         reasoning_tokens=(usage.get("output_token_details") or {}).get("reasoning", 0),
-        cost_usd=float(cost) if isinstance(cost, (int, float)) else None,
+        cost_usd=pricing.reported_cost(raw_usage),
+        pricing=pricing,
         started_at=started[1] if started else datetime.now(UTC),
         latency_ms=int((now - started[0]) * 1000) if started else 0,
         key_source=key_source,
