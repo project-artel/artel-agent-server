@@ -26,7 +26,13 @@ from app.llm.api_key import (
 from app.llm.cache_boundary import first_per_call, with_breakpoint
 from app.llm.claude_api import ClaudeApiChat
 from app.llm.credentials import LlmKeyService, bound_llm_key, session_chat_models
-from app.llm.usage import KeySource, UsageCallback
+from app.llm.usage import (
+    ANTHROPIC_USAGE_PRICING,
+    OPENAI_USAGE_PRICING,
+    OPENROUTER_USAGE_PRICING,
+    KeySource,
+    UsageCallback,
+)
 
 
 # Not a knob, but recorded with every run: a comparison between two models is
@@ -181,7 +187,7 @@ def _claude(
         # langchain-anthropic 의 `input_tokens` 는 cache write 를 포함한다.
         callbacks=[
             UsageCallback(
-                slug=model, input_includes_cache_write=True, key_source=key_source
+                slug=model, pricing=ANTHROPIC_USAGE_PRICING, key_source=key_source
             ),
             *_platform_key_refresh(key_source, rejected=is_key_rejected_by_anthropic),
         ],
@@ -419,7 +425,7 @@ def _build_chat_model(
         timeout=settings.openrouter_timeout_seconds,
         max_retries=settings.openrouter_max_retries,
         callbacks=[
-            UsageCallback(key_source=key_source),
+            UsageCallback(pricing=OPENROUTER_USAGE_PRICING, key_source=key_source),
             *_platform_key_refresh(key_source, rejected=is_unauthorized),
         ],
     )
