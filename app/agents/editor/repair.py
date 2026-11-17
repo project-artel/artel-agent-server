@@ -142,12 +142,19 @@ class MacroEditor:
                 contracts = None
                 if self._spec.actions == "contract":
                     contracts = _contracts_text(macros)
-                parsed = await parse_step(source, self._registered, developer_actions, contracts)
+                # legacy 모드에서 등록 계약으로 도는 다른 developer macro 는 그대로 둔다(pe9). 고치는 행동은 editor 의 def 가 맡는다.
+                kept = {} if contracts is not None else {key: c for key, c in macros.contracts.items() if key != action}
+                parsed = await parse_step(source, self._registered, developer_actions, contracts, contract_keys=tuple(kept))
+                if kept:
+                    parsed = replace(
+                        parsed, contracts={**kept, **parsed.contracts}, binder=macros.binder,
+                        descriptions={**parsed.descriptions, **{key: c.description for key, c in kept.items()}},
+                    )
                 available = set(parsed.actions) | set(parsed.contracts)
-                # editor가 받지 않는 계획 범위와 순서는 유지한다. 제거한 행동을 가리키는 순서만 제외한다.
+                # editor가 받지 않는 계획 범위와 순서는 유지한다. 제거한 행동을 가리키는 순서만 제외한다. 하위 목표도 그대로다.
                 parsed = replace(
                     parsed, observe=macros.observe, check=macros.check, facts=macros.facts,
-                    guidance=macros.guidance,
+                    guidance=macros.guidance, goals=macros.goals, goal_probes=macros.goal_probes,
                     after={
                         name: tuple(next_action for next_action in following if next_action in available)
                         for name, following in macros.after.items() if name in available
@@ -231,8 +238,14 @@ class MacroEditor:
             "Developer source for reference only. Its imports refer to other developer macros, "
             "not the build's registered macros. Write the needed logic in replacement defs; "
             "do not copy these imports into your answer.\n",
-            f"The selected call with its bound arguments:\n```python\n{macros.actions[action].source.rstrip()}\n```\n",
         ]
+        if action in macros.actions:
+            sections.append(
+                f"The selected call with its bound arguments:\n```python\n{macros.actions[action].source.rstrip()}\n```\n"
+            )
+        else:
+            # 등록 계약으로 도는 행동(pe9 legacy 모드)은 묶인 호출이 없다. 대상은 계약의 `holds` 로 executer 가 펼친다.
+            sections.append("It runs on its registered contract: the executer picks its target each turn.\n")
         pending = [name]
         seen: set[str] = set()
         while pending:

@@ -1856,6 +1856,9 @@ class _FunctionReader:
                 node.lineno,
             )
         if isinstance(node, ast.Compare):
+            predicate = self._predicate_against_bool(node)
+            if predicate is not None:
+                return predicate
             return self._comparison(node)
         if isinstance(node, ast.Name):
             # 맨이름 하나는 조건이 아니다. 그래도 먼저 bind 됐는지 묻는다 — 소문자 `true`
@@ -1944,6 +1947,33 @@ class _FunctionReader:
         question, context = self._jev_call(node, ASK)
         return MacroAskCondition(question=question, context=context)
 
+    def _predicate_against_bool(self, node: ast.Compare) -> MacroPredicateCondition | None:
+        """`pred() == True`·`pred() == False`·`!=` 를 predicate 조건으로 읽는다. 그 모양이 아니면 `None`.
+
+        predicate 호출은 이미 참거짓이라 비교할 것이 없지만, 모델은 Python 처럼 `== False` 를 쓴다. 런 418 에서
+        planner 의 답 18개 중 3개가 이것으로 거절됐고, 다시 쓰는 데 호출 한 번(60~95초)씩이 들었다. 뜻이 하나뿐이라
+        받는다. `not` 은 여전히 거절이다 — 이 모양은 비교라서 받는 것이지 부정 연산자를 여는 것이 아니다.
+        """
+        if len(node.ops) != 1 or len(node.comparators) != 1:
+            return None
+        operator = _COMPARE_OPERATORS.get(type(node.ops[0]))
+        if operator not in (MacroOperator.equal, MacroOperator.not_equal):
+            return None
+        for call, other in ((node.left, node.comparators[0]), (node.comparators[0], node.left)):
+            literal = _literal(other)
+            if literal is None or literal.shape is not MacroShape.bool_:
+                continue
+            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)):
+                continue
+            signature = self.signatures.get(call.func.id)
+            if signature is None or signature.returns != "bool":
+                continue
+            condition = self._condition(call)
+            assert isinstance(condition, MacroPredicateCondition)
+            negated = (literal.value is False) == (operator is MacroOperator.equal)
+            return condition.model_copy(update={"negated": negated})
+        return None
+
     def _comparison(self, node: ast.Compare) -> MacroComparisonCondition:
         if len(node.ops) != 1 or len(node.comparators) != 1:
             raise MacroRejection(
@@ -1996,6 +2026,7 @@ class _FunctionReader:
             left_shape is not None
             and right_shape is not None
             and left_shape is not right_shape
+            and MacroShape.null not in (left_shape, right_shape)
         ):
             # 그냥 두면 영원히 거짓인 `require` 가 서고, 저자는 게임이 잘못된 줄 안다.
             # 조용히 틀리는 것이 에러보다 나쁘다.
@@ -2020,6 +2051,10 @@ class _FunctionReader:
     def _operand(
         self, node: ast.expr, side: str
     ) -> tuple[MacroOperand, MacroShape | None]:
+        if isinstance(node, ast.Constant) and node.value is None:
+            # 비교의 한쪽에만 서는 `None`. 다른 자리(인자·대입)의 `None` 은 `_literal` 이 받지 않아 예전처럼 거절된다.
+            null = MacroLiteral(shape=MacroShape.null, value=None)
+            return MacroLiteralOperand(literal=null), MacroShape.null
         literal = _literal(node)
         if literal is not None:
             return MacroLiteralOperand(literal=literal), literal.shape

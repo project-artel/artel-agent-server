@@ -167,14 +167,14 @@ def _repeat_play(can_ask_planner: bool) -> StepPlay:
     return asyncio.run(go())
 
 
-def test_without_a_repair_left_an_action_picked_six_times_in_a_row_is_dropped_and_play_goes_on() -> None:
-    """복구 예산이 없으면 멈추지 않고 그 action 을 빼며, 남은 action 이 다 빠지면 그때 멈춘다(개선 계획 묶음 2)."""
+def test_without_a_repair_left_an_action_picked_six_times_in_a_row_stays_on_offer() -> None:
+    """복구 예산이 없어도 같은 행동을 연달아 고른 것만으로 빼지 않는다(pe13). 뺀 행동은 그 step 이 끝날 때까지 돌아오지 않아, 로컬
+    try 33 step 9 는 시전 뒤 뜬 대사를 넘길 행동이 없어 멈췄다."""
     play = _repeat_play(can_ask_planner=False)
 
     picked = [turn.get("picked") for turn in play.turns]
-    assert picked[:6] == ["press_start"] * 6 and play.turns[5]["dropped"].startswith("`press_start` was picked 6 times")
-    assert "press_start" not in picked[6:] and "look_around" in picked[6:]
-    assert play.stopped.startswith("no action left:") and "(press_start, look_around)" in play.stopped
+    assert picked.count("press_start") > 6
+    assert not any("dropped" in turn for turn in play.turns)
 
 
 def test_the_same_action_repeated_while_the_screen_keeps_changing_is_not_dropped() -> None:
@@ -383,9 +383,10 @@ def test_after_an_action_passes_the_next_turn_offers_only_what_follows_it() -> N
 
     play = asyncio.run(go())
 
-    first, second = jev.asked("choice")
+    # 둘째 turn 은 `after` 로 좁혀 선택지가 하나라 Jev 를 부르지 않는다(pe11).
+    (first,) = jev.asked("choice")
     assert "press_start" in first["questions"]["answer"]["criteria"]
-    assert "press_start" not in second["questions"]["answer"]["criteria"]
+    assert play.turns[1]["options"] == ["look_around"] and play.turns[1]["picked_by"] == "only_option"
     assert play.turns[1]["after"] == ["look_around"] and play.turns[1]["picked"] == "look_around"
 
 
@@ -498,3 +499,36 @@ def test_the_after_block_reads_a_developer_call_as_its_action() -> None:
     after = read_after('{"developer:cast": ["developer:select(find(name=\\"Cat\\"))"]}', actions)
 
     assert after == {"developer:cast": ("developer:select", "developer:select#2")}
+
+
+def test_a_repeat_that_only_moves_numbers_on_screen_still_counts_as_no_progress() -> None:
+    """화면 글자도 fact 도 그대로이고 숫자만 바뀌면 진척이 아니다. 로컬 run 17 step 9 는 기다리는 것이 없는 화면에서 대사
+    넘기기를 40번 넘게 눌렀다 — state 전체의 지문이 타이머 값으로 매 turn 바뀌어 연속 횟수가 늘 처음부터 다시 세어졌다."""
+    import asyncio
+
+    from app.agents.planner_executer.arch import PlannerExecuterArchSpec
+    from app.agents.planner_executer.executer import Executer
+    from app.agents.planner_executer.macros import RegisteredMacros, parse_step
+    from app.qa.jev import JevClient
+
+    fake = _slow_menu()
+    ticks = iter(range(1, 1000))
+
+    def tick(game: FakeGame) -> None:
+        game.objects["Root/Timer"] = {"members": {"Clock.seconds": next(ticks)}}
+
+    fake.reactions[("press", "Root/Start")] = tick
+    spec = PlannerExecuterArchSpec(no_action_grace_seconds=0.2, state_source="pulse_memory", repair="planner")
+
+    async def go() -> StepPlay:
+        fake.push_reading()
+        macros = await parse_step(PATIENT, RegisteredMacros(fake.channel))
+        return await Executer(fake.channel, spec, JevClient(post=FakeJev())).play(
+            1, "Press Start until the map opens.", macros, None, can_ask_planner=True
+        )
+
+    play = asyncio.run(go())
+
+    # 숫자만 바뀐 반복은 진척이 아니라서 연속 횟수가 쌓이고, 복구 예산이 있으면 planner 에게 넘긴다. 행동을 빼지는 않는다(pe13).
+    assert play.repair_request is not None and "picked 6 times in a row" in play.repair_request["reason"]
+    assert not any("dropped" in turn for turn in play.turns)

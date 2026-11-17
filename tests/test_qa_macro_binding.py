@@ -448,7 +448,8 @@ _ARRIVED: dict[MacroShape, tuple[object, object]] = {
 }
 
 
-@pytest.mark.parametrize("shape, operator", CELLS)
+# `null` 행은 적힌 `None` 리터럴의 모양이라 도착하는 값으로는 닿지 않는다. 그 판정은 아래 `None` 비교 테스트가 본다.
+@pytest.mark.parametrize("shape, operator", [cell for cell in CELLS if cell[0] is not MacroShape.null])
 def test_every_cell_of_the_table_is_enforced_on_the_value_that_arrives(
     shape: MacroShape, operator: MacroOperator
 ) -> None:

@@ -20,10 +20,10 @@ import json
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app.agents.planner_executer.evidence import names_of, points_of, readings
 from app.agents.planner_executer.executer import StepPlay
@@ -56,10 +56,9 @@ MAX_TURNS_SHOWN_PER_CASE = 20
 # turns and its end screen, so they are asked about a few at a time.
 CASES_PER_JUDGEMENT = 5
 
-# Names drawn from the ```check values, and the changes drawn per name. A long step keeps the first
-# and the last changes, where it began and where it stopped.
-MAX_EVIDENCE_NAMES = 80
-MAX_EVIDENCE_CHANGES = 12
+# 근거 값에는 이름 수·변화 수 상한을 두지 않는다(pe13). 80개 상한은 판독값 끝에 붙는 화면 글자부터 잘랐다 — 로컬 try 31
+# step 8~10 묶음은 이름이 139개였고, evaluator 는 `HintText[0]` 이 켜진 것만 보고 그 글자("강조된 적을 클릭해…")는 못 봐
+# step 9 를 근거 없음으로 떨어뜨렸다. 묶음 하나의 근거 전체가 40KB 남짓이다.
 # A `flag(...)`'s observed values as one turn line shows them.
 MAX_FLAG_CHARS = 300
 
@@ -82,6 +81,24 @@ class Verdict(BaseModel):
     evidence_sufficient: bool = True
 
 
+class ItemCheck(BaseModel):
+    """기대 항목 하나의 판정(prompt v8). 무엇을 기대했고, 무엇을 보았고, 무엇이 그것을 보였나."""
+
+    expected: str
+    observed: str
+    met: Literal["yes", "no", "unknown"]
+    # 항목이 플레이어가 보는 것(`screen`)을 말하는가, 게임 안의 값(`game`)을 말하는가.
+    about: Literal["screen", "game"] = "game"
+    # 판정의 근거가 된 것들. `turn` 은 행동의 끝(입력 결과, `wait_until` 의 성공·실패)이다. 하나만 고르게 했더니 켜진 카드와
+    # 그 글자를 함께 본 항목이 `game_value` 하나로 적혀 화면 근거 없음으로 떨어졌다(로컬 try 32 step 7).
+    shown_by: list[Literal["screen_text", "picture", "game_value", "scene", "turn", "none"]] = ["none"]
+
+    @field_validator("shown_by", mode="before")
+    @classmethod
+    def _one_or_many(cls, value: Any) -> Any:
+        return [value] if isinstance(value, str) else value
+
+
 class GameVerdict(BaseModel):
     """prompt v4 부터의 답. `insight` 대신 `game_insight` 를 쓴다 — 어떤 값이 더 나은 근거였는지는 `reason` 에 들어가고, 이 칸은
     이 step 에서 게임이 보인 모습에 대한 평가다(통과했어도 남은 문제). v3 까지의 런은 `Verdict` 로 그대로 묻는다."""
@@ -91,6 +108,32 @@ class GameVerdict(BaseModel):
     state_detail: str
     game_insight: str = ""
     evidence_sufficient: bool = True
+
+
+class CheckedVerdict(GameVerdict):
+    """prompt v8 부터의 답: 기대 항목마다 `checks` 를 함께 낸다. 통과는 모델이 아니라 `settle_checks` 가 정한다."""
+
+    checks: list[ItemCheck] = []
+    # 이 step 에서 시작하는 TC 의 사전 조건이 step 의 행동 때 성립했나(pe16). 사전 조건이 없거나 기록으로 알 수 없으면 `None`.
+    precondition_held: bool | None = None
+
+
+def settle_checks(checks: list[ItemCheck]) -> tuple[list[ItemCheck], bool | None]:
+    """항목 판정을 기록 규칙으로 고치고 통과 여부를 정한다. 항목이 없으면 `None` 이다(모델의 `passed` 를 쓴다).
+
+    화면에 보이는 것을 말하는 항목은 게임 값으로 보인 것이 아니다. 값의 이름이 같은 것처럼 들려도 게임은 다른 것을 쥘 수 있다
+    — 로컬 try 27·28 은 대사의 목표 문장(`streamingText`)이 바뀐 것을 "끝까지 표시됨" 으로 읽고, 화면 글자는 끝까지 부분
+    문장이었는데 통과시켰다. 그런 항목은 `unknown` 으로 낮춘다. 통과는 모든 항목이 `yes` 일 때뿐이다.
+    """
+    if not checks:
+        return checks, None
+    settled = [
+        check.model_copy(update={"met": "unknown"})
+        if check.met == "yes" and check.about == "screen" and set(check.shown_by) <= {"game_value", "none"}
+        else check
+        for check in checks
+    ]
+    return settled, all(check.met == "yes" for check in settled)
 
 
 @dataclass(frozen=True)
@@ -106,6 +149,12 @@ class StepVerdict:
     screen_capture_id: str | None = None
     # 이 step 에서 게임이 보인 모습에 대한 평가(prompt v4 부터). 옛 `insight` 와 섞지 않는다.
     game_insight: str = ""
+    # 기대 항목별 판정(prompt v8). 근거가 없는 항목(`unknown`)은 `missing` 에 따로 둔다 — runner 가 판정 step 을 더 돌게 한다.
+    checks: tuple[dict[str, Any], ...] = ()
+    missing: tuple[str, ...] = ()
+    contradicted: tuple[str, ...] = ()
+    # 사전 조건이 깨진 채 진행됐다(pe16). 통과가 아니지만 게임 결함도 아니다 — 판정을 실패와 따로 읽게 한다.
+    precondition_unmet: bool = False
 
     def details(self) -> dict[str, Any]:
         """step `STATUS` 의 `verdict`."""
@@ -116,6 +165,10 @@ class StepVerdict:
             details["screen_capture_id"] = self.screen_capture_id
         if self.game_insight:
             details["game_insight"] = self.game_insight
+        if self.checks:
+            details["checks"] = list(self.checks)
+        if self.precondition_unmet:
+            details["precondition"] = "unmet"
         return details
 
 
@@ -124,7 +177,44 @@ def stop_note(stopped: str, language: OutputLanguage) -> str:
     Executer 의 진단이라 그대로 둔다."""
     if stopped == "done":
         return ""
-    return f" (executer 중단: {stopped})" if language == OutputLanguage.ko else f" (executer stopped: {stopped})"
+    note = STOP_NOTES.get(stopped, {}).get(language.value if language == OutputLanguage.ko else "en", stopped)
+    return f" (executer 중단: {note})" if language == OutputLanguage.ko else f" (executer stopped: {note})"
+
+
+def precondition_head(language: OutputLanguage) -> str:
+    """사전 조건 불충족 판정의 이유 앞에 붙는 말. 실패와 섞이지 않게 사람이 먼저 읽는 자리에 둔다."""
+    return "사전 조건 불충족: " if language == OutputLanguage.ko else "Precondition not met: "
+
+
+def overrule_note(said: bool, passed: bool, checks: list[ItemCheck], language: OutputLanguage) -> str:
+    """모델은 통과라 했는데 항목 판정이 통과를 막았을 때 이유 끝에 붙는 글. 판정과 이유가 어긋나 보이지 않게 한다."""
+    if said == passed or passed:
+        return ""
+    unmet = [check.expected for check in checks if check.met != "yes"]
+    if language == OutputLanguage.ko:
+        return " (근거로 확인되지 않은 기대 항목: " + "; ".join(unmet) + ")"
+    return " (expected results not shown by the evidence: " + "; ".join(unmet) + ")"
+
+
+# 코드가 정한 멈춤의 설명(pe11). 키는 executer 의 멈춤 이유다. 나머지 이유는 진단 문장 그대로 붙인다.
+STOP_NOTES: dict[str, dict[str, str]] = {
+    "later_done": {
+        "en": "a later step's done condition became true, so this step ended there",
+        "ko": "뒤 step 의 완료 조건이 참이 되어 여기서 끝남",
+    },
+    "result_in_earlier_step": {
+        "en": "this step's result happened while an earlier step was playing; no input was sent in this step",
+        "ko": "이 step 의 결과가 앞 step 을 하는 중에 났고, 이 step 에서는 입력을 보내지 않음",
+    },
+    "passed_in_earlier_step": {
+        "en": "an earlier step went past this step to a later step's result; no input was sent in this step",
+        "ko": "앞 step 이 이 step 을 지나 뒤 step 의 결과까지 감. 이 step 에서는 입력을 보내지 않음",
+    },
+    "done_at_start": {
+        "en": "the done condition held from the start; no input was sent",
+        "ko": "완료 조건이 시작부터 참이라 입력을 보내지 않음",
+    },
+}
 
 
 class Evaluator:
@@ -135,8 +225,10 @@ class Evaluator:
             EVALUATOR_ROLE, config.prompt_version, **{LANGUAGE_PLACEHOLDER: LANGUAGE_DIRECTIVES[config.language]}
         )
         self._judge = judge or self._ask_model
-        # 답의 모양은 prompt 가 묻는 대로다. v4 부터 evaluator 글이 `game_insight` 를 묻는다.
-        self._schema: type[Verdict] | type[GameVerdict] = GameVerdict if '"game_insight"' in self._system else Verdict
+        # 답의 모양은 prompt 가 묻는 대로다. v4 부터 evaluator 글이 `game_insight` 를, v8 부터 `checks` 를 묻는다.
+        self._schema: type[Verdict] | type[GameVerdict] = (
+            CheckedVerdict if '"checks"' in self._system else GameVerdict if '"game_insight"' in self._system else Verdict
+        )
 
     async def judge(
         self,
@@ -145,12 +237,18 @@ class Evaluator:
         play: StepPlay,
         earlier: list[str] | None = None,
         image: "ScreenImage | None" = None,
+        segment: list[int] | None = None,
     ) -> StepVerdict:
         """The step's verdict. The message names the stop when it was not `done`. `earlier` is the run's verdicts
-        before this step, one line each — a result an earlier step reached is told apart from one that never came."""
-        user = request(scenario, step, play, earlier)
+        before this step, one line each — a result an earlier step reached is told apart from one that never came.
+        `segment` is the steps one plan played together when `play` is the whole group's record (pe9)."""
+        user = request(scenario, step, play, earlier, segment)
         if image is not None:
-            user += "\nA picture of the screen when play stopped is attached.\n"
+            user += (
+                f"\nA picture of the screen when step {step}'s own turns ended is attached.\n"
+                if segment and len(segment) > 1
+                else "\nA picture of the screen when play stopped is attached.\n"
+            )
         self._image = image
         problem = ""
         for _ in range(ATTEMPTS):
@@ -162,10 +260,23 @@ class Evaluator:
                 problem = f"{type(error).__name__}: {str(error)[:200]}"
                 continue
             note = stop_note(play.stopped, self._config.language)
+            checks, settled = settle_checks(list(getattr(verdict, "checks", []) or []))
+            passed = verdict.passed if settled is None else settled
+            unmet = getattr(verdict, "precondition_held", None) is False
+            if unmet:
+                # 사전 조건이 깨진 채 한 행동의 결과는 그 TC 의 판정이 아니다.
+                passed = False
+            missing = tuple(check.expected for check in checks if check.met == "unknown")
+            overruled = "" if unmet else overrule_note(verdict.passed, passed, checks, self._config.language)
+            head = precondition_head(self._config.language) if unmet else ""
             return StepVerdict(
-                verdict.passed, verdict.reason + note, verdict.state_detail, getattr(verdict, "insight", ""),
-                verdict.evidence_sufficient, image.capture_id if image is not None else None,
+                passed, head + verdict.reason + overruled + note, verdict.state_detail, getattr(verdict, "insight", ""),
+                verdict.evidence_sufficient and not missing, image.capture_id if image is not None else None,
                 game_insight=getattr(verdict, "game_insight", ""),
+                checks=tuple(check.model_dump() for check in checks),
+                missing=missing,
+                contradicted=tuple(check.expected for check in checks if check.met == "no"),
+                precondition_unmet=unmet,
             )
         return StepVerdict(False, f"EVALUATOR-ERROR: no readable verdict in {ATTEMPTS} answers ({problem})")
 
@@ -280,8 +391,11 @@ def _read_scene(answer: Any) -> SceneVerdicts:
     return SceneVerdicts.model_validate(read_json(answer))
 
 
-def request(scenario: QaScenario, step: int, play: StepPlay, earlier: list[str] | None = None) -> str:
-    """What the evaluator reads about one step."""
+def request(
+    scenario: QaScenario, step: int, play: StepPlay, earlier: list[str] | None = None, segment: list[int] | None = None
+) -> str:
+    """What the evaluator reads about one step. `segment` is the steps one plan played together (pe9); the record is then
+    the whole group's, and the note says why the step's own turns are not where its result has to be."""
     shown = play.turns[-MAX_TURNS_SHOWN:]
     skipped = len(play.turns) - len(shown)
     turns = "\n".join(turn_line(turn) for turn in shown) or "  (no turn was played)"
@@ -293,12 +407,67 @@ def request(scenario: QaScenario, step: int, play: StepPlay, earlier: list[str] 
     return (
         history
         + f"The step:\n{this_step(scenario, step)}\n\n"
+        + precondition_note(getattr(play, "precondition", None))
         + evaluator_note(getattr(play, "target", None))
+        + segment_note(step, segment)
         + f"Why play stopped: {play.stopped}\n\n"
         f"Turns played ({len(play.turns)}"
         + (f", the first {skipped} left out" if skipped else "")
         + f"):\n{turns}\n\n"
-        f"{evidence_text(play)}\n"
+        + ran_code(play, shown)
+        + f"{evidence_text(play)}\n"
+    )
+
+
+def precondition_note(checked: dict | None) -> str:
+    """case 시작 때 사전 조건을 화면과 대조한 결과(pe16). 대조하지 않았으면 빈 글이다."""
+    if not checked:
+        return ""
+    status = checked.get("status")
+    said = {
+        "held": "it held",
+        "unmet": "it did not hold",
+        "unknown": "the screen could not tell either way",
+    }.get(status, "it was not checked")
+    rewritten = (
+        " The plan was then written again to make it hold before the step's own move; judge from the turns whether it did."
+        if checked.get("rewritten") else ""
+    )
+    return (
+        f"The test case's precondition, checked against the screen when this case started: \"{checked.get('condition')}\" — "
+        f"{said}.{rewritten}\n\n"
+    )
+
+
+def ran_code(play: StepPlay, turns: list[dict]) -> str:
+    """planner·editor 가 쓴 행동 중 위 turn 들에서 돈 것의 코드(pe13). 돈 것이 없으면 빈 글이다."""
+    ran: list[str] = []
+    for turn in turns:
+        name = str(turn.get("picked") or "").split(" @ ")[0]
+        if name in play.action_sources and name not in ran:
+            ran.append(name)
+    if not ran:
+        return ""
+    blocks = "\n\n".join(f"```python\n{play.action_sources[name]}\n```" for name in ran)
+    return (
+        "Code of the actions the plan wrote that ran above. An action that ended `passed` reached the end of its code, "
+        "so every `require` and `wait_until` it met on the way held; one that failed names in its turn the line that "
+        f"stopped it.\n{blocks}\n\n"
+    )
+
+
+def segment_note(step: int, segment: list[int] | None) -> str:
+    """한 계획이 함께 돈 step 들을 묶음째 판정할 때 붙는 글. 묶음이 아니면 빈 글이다."""
+    if not segment or len(segment) < 2:
+        return ""
+    steps = ", ".join(str(number) for number in segment)
+    return (
+        f"Steps {steps} were played under one plan, one after another, and the record below is the whole group's. "
+        "Where one step ended and the next began is the executer's guess, so a step's result often shows up in the "
+        f"turns marked with a neighbouring step. Judge step {step} on the whole record: it passed if, anywhere in the "
+        "record and whichever step's turns it falls in, the state the step starts from held, the step's move was made, "
+        "and what its expected result describes followed that move. A change that a different move caused does not "
+        "count for this step. It failed if the record never shows its move followed by that result.\n\n"
     )
 
 
@@ -328,10 +497,8 @@ def evidence_text(play: StepPlay) -> str:
     if not read:
         lines.append("  (no reading succeeded)")
     names = names_of(read)
-    for name in names[:MAX_EVIDENCE_NAMES]:
+    for name in names:
         lines.append(f"  {name}: {_series(name, read)}")
-    if len(names) > MAX_EVIDENCE_NAMES:
-        lines.append(f"  ({len(names) - MAX_EVIDENCE_NAMES} more names left out)")
     if play.evidence_unknown:
         lines.append(
             "  names the plan listed that matched nothing in any reading — a wrong name, or an object that never came; "
@@ -341,10 +508,10 @@ def evidence_text(play: StepPlay) -> str:
     if incomplete:
         lines.append(
             "  readings that could not cover every object (a size limit or the server left some out): "
-            + ", ".join(incomplete[:MAX_EVIDENCE_CHANGES])
+            + ", ".join(incomplete)
         )
     if failed:
-        lines.append("  readings that failed: " + "; ".join(failed[:MAX_EVIDENCE_CHANGES]))
+        lines.append("  readings that failed: " + "; ".join(failed))
     text = f"{head}:\n" + "\n".join(lines)
     if play.changes:
         more = f"\n  ({play.changes_left_out} more changes left out)" if play.changes_left_out else ""
@@ -363,13 +530,7 @@ def _series(name: str, read: list[dict]) -> str:
     last_at = read[-1]["at"]
     if len(points) == 1:
         return f"{points[0][1]} (unchanged from {read[0]['at']} to {last_at})"
-    if len(points) > MAX_EVIDENCE_CHANGES:
-        keep = MAX_EVIDENCE_CHANGES // 2
-        dropped = len(points) - 2 * keep
-        parts = [f"{at}: {value}" for at, value in points[:keep]] + [f"… {dropped} changes …"]
-        parts += [f"{at}: {value}" for at, value in points[-keep:]]
-    else:
-        parts = [f"{at}: {value}" for at, value in points]
+    parts = [f"{at}: {value}" for at, value in points]
     if points[-1][0] != last_at:
         parts.append(f"{last_at}: {points[-1][1]}")
     return " → ".join(parts)
@@ -378,13 +539,21 @@ def _series(name: str, read: list[dict]) -> str:
 def turn_line(turn: dict) -> str:
     """One turn of a play as the Evaluator's prompts draw it."""
     plan = f"plan {turn['plan']} · " if turn.get("plan") else ""
+    if turn.get("segment_step"):
+        plan = f"step {turn['segment_step']} · {plan}"
     parts = [f"  {plan}turn {turn['turn']} on {turn.get('scene')}: done()={turn.get('done')}"]
     if turn.get("done_error"):
         parts.append(f"(done() could not be read: {turn['done_error']})")
     if "goal_ask" in turn:
         parts.append(f"Jev on the goal being reached: {turn['goal_ask']}")
+    if turn.get("later_done"):
+        parts.append("a later step's done() became true: " + ", ".join(f"step {number}" for number in turn["later_done"]))
+    if turn.get("scene_left"):
+        parts.append(f"the scene changed from {turn['scene_left'].get('from')} to {turn['scene_left'].get('to')}")
     if "picked" in turn:
-        parts.append(f"Jev picked {turn['picked']}")
+        parts.append(
+            f"the only option ran: {turn['picked']}" if turn.get("picked_by") == "only_option" else f"Jev picked {turn['picked']}"
+        )
     if "outcome" in turn:
         parts.append(f"→ {turn['outcome']}" + (f": {turn['reason']}" if turn.get("reason") else ""))
         sent = turn.get("sent") or []

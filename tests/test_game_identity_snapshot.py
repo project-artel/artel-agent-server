@@ -43,7 +43,7 @@ def test_snapshot_survives_store_and_all_scenarios_without_latest_fetch(monkeypa
             async def between_scenarios(self, *args):
                 pass
 
-        def runner(*, config, identities):
+        def runner(*, config, identities, **_options):
             seen.append(identities)
             return Runner()
 

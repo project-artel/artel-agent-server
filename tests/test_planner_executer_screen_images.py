@@ -46,7 +46,8 @@ def test_the_planner_and_the_evaluator_each_take_one_picture_and_the_ids_reach_t
     state, failure = _run(fake, Asked(MACROS), judge, FakeJev(), screen_images="on")
 
     assert failure is None and state.finished
-    assert why == ["Step 1: capturing the screen for the planner", "Step 1: capturing the screen for the evaluator"]
+    # 판정 step 은 `done()` 자리에서 찍은 화면 한 장으로 기대 항목을 보고, 그 판정을 그대로 쓴다(pe12).
+    assert why == ["Step 1: capturing the screen for the planner", "Step 1: capturing the screen to check the expected results"]
     decision = next(f["payload"]["decision"] for f in fake.frames("LOG") if f["payload"].get("kind") == "step_macros")
     assert decision["screen_capture_id"] == "cap-7"
     (verdict,) = _verdicts(fake)

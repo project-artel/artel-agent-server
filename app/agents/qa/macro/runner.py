@@ -64,6 +64,7 @@ from app.agents.qa.macro.binding import (
     MacroScope,
     calculate,
     compare,
+    compare_condition,
     evaluate,
     operand_value,
     read_to_bind,
@@ -971,14 +972,14 @@ class _Runner:
             "`_evaluate` is synchronous and must never receive one"
         )
         if isinstance(condition, MacroPredicateCondition):
-            return self._call(frame, condition, observed)
+            return bool(self._call(frame, condition, observed)) != condition.negated
         if isinstance(condition, MacroComparisonCondition):
             # 양쪽을 runner 가 푼다. 숫자 `def` 호출과 산술식은 frame 이 있어야 풀리므로
             # `binding.evaluate` 로는 못 푼다. 그 밖의 피연산자는 `operand_value` 가 예전
             # 그대로 푼다.
             left = self._value(frame, condition.left, observed)
             right = self._value(frame, condition.right, observed)
-            return compare(self.memories(), left, condition.operator, right)
+            return compare_condition(self.memories(), condition, left, right)
         return evaluate(self.memories(), frame.scope, condition, observed)
 
     def _value(

@@ -135,14 +135,15 @@ async def read_state(
 
 @dataclass(frozen=True)
 class StateView:
-    """Jev 에게 보일 범위(ARTEL-1298). Planner 의 ```observe 블록에서 오고, `EXPAND_STATE` 가 넓힌다.
+    """Jev 에게 보일 범위(ARTEL-1298). Planner 의 ```observe 블록에서 온다.
 
     `paths` 는 객체 경로 접두어, `members` 는 `Type.member` 짧은 이름이다. Planner 가 화면에서 읽은 글자 그대로라 selector 의
     `[n]` 이 붙었든 안 붙었든 맞춘다. `None` 은 그 축으로 거르지 않는다는 뜻이다.
 
     `planned` 면 범위가 씬 객체·DontDestroyOnLoad 객체·static 에 똑같이 걸린다. static 은 `statics` 키에 실리고, 범위에
-    안 든 것은 값 없이 `hidden` 에 그룹(객체는 최상위 경로마다 수, static 은 이름)으로만 적는다 — Jev 가 무엇이 가려졌는지
-    알아야 `EXPAND_STATE` 를 고를 수 있다. 활성 씬의 객체를 DontDestroyOnLoad 객체보다 앞에 세운다. `planned` 가 아니면
+    안 든 것은 값 없이 `hidden` 에 그룹(객체는 최상위 경로마다 수, static 은 이름)으로만 적는다 — executer 는 그것을 Jev 에게
+    보내지 않고 turn 기록에 남겨, planner 가 다시 쓸 때 범위가 결과를 가렸는지 본다(pe11). 활성 씬의 객체를 DontDestroyOnLoad
+    객체보다 앞에 세운다. `planned` 가 아니면
     예전 모양(`씬/selector` 순서, static 없음)이다.
     """
 
@@ -450,6 +451,31 @@ def evidence_values(
     return EvidenceReading(values, unknown, clipped=clipped, omitted=snapshot.omitted_entities)
 
 
+# 근거 읽기마다 함께 적는 화면 글자 수. 글자가 많은 씬에서 check 의 값을 밀어내지 않게 상한을 둔다.
+def visible_texts(snapshot: StateSnapshot, scene: str | None = None) -> dict[str, Any]:
+    """지금 씬과 씬을 넘어 사는 객체(`@persistent`) 가운데 켜져 있는 것이 띄운 글자, `path text` 이름으로(pe9). check 와
+    상관없이 근거에 함께 적는다.
+
+    planner 의 check 는 계획을 쓸 때 보이는 객체만 적을 수 있어, 다음 씬에 나올 대사·안내의 글자는 근거에서 빠졌다. 로컬
+    try 21 step 2 는 타이틀에서 계획을 써 대사 객체가 check 에 없었고, "한 글자씩 나온다" 를 확인할 근거가 없어 실패했다.
+    읽을 때마다 글자를 적으면 글자가 늘어나는 모습이 기록에 남는다. 게임마다 다른 이름을 알 필요가 없다.
+
+    씬으로 거르는 것은 앞 씬에 남은 객체를 빼려는 것이다. `@persistent` 객체는 지금 화면에 그려지므로 뺄 이유가 없다 — 로컬
+    try 27 step 9 는 튜토리얼 안내가 `@persistent` 아래에 있어, 화면에 뜬 안내 글자가 근거에 없었다. 개수 상한은 두지 않는다:
+    상한에 걸려 빠진 이름은 근거 로그에서 `(absent)` 로 읽혀 사라진 것처럼 보였다. 크기는 근거 로그가 따로 지킨다.
+    """
+    active = (scene or snapshot.scene or "").strip()
+    texts: dict[str, Any] = {}
+    for entity in sorted(snapshot.entities, key=lambda entity: entity.address):
+        if not entity.active or entity.status != "KNOWN" or (active and entity.scene not in (active, PERSISTENT_SCENE)):
+            continue
+        text = entity.fragments.get("text")
+        if text is None or text.status != "KNOWN" or not text.value:
+            continue
+        texts[f"{entity.selector or entity.path or entity.entity_id} text"] = clip_value(text.value)
+    return texts
+
+
 def _evidence_entity(
     entity: StateEntity, is_cosmetic: Any, wanted: set[str] | None, seen: set[str]
 ) -> tuple[dict[str, Any], int]:
@@ -488,8 +514,27 @@ def _evidence_value(observation: StateObservation) -> Any:
     return UNKNOWN
 
 
-# step 이 시작한 뒤 바뀐 값을 evaluator 에게 줄 때의 줄 수 상한. planner 가 이름 붙이지 않은 변화라 넉넉히 두지 않는다.
-MAX_STATE_CHANGES = 40
+# step 이 시작한 뒤 바뀐 값은 모두 evaluator 에게 준다(pe13). planner 가 이름 붙이지 않은 변화에 결과가 있는 일이 있고,
+# 40줄 상한은 어느 것이 남을지를 순서가 정했다.
+
+
+def switched_between(before: StateSnapshot, after: StateSnapshot) -> dict[str, tuple[str, bool | None]]:
+    """두 reading 사이에 켜지거나 꺼진 객체, 그리고 켜진 채 새로 생긴 객체: `{entity_id: (이름, 앞 reading 의 켜짐)}`. 새로
+    생긴 객체는 앞 값이 `None` 이다. 씬이 바뀌었으면 비어 있다 — 씬이 통째로 바뀌는 것은 활성 씬 값이 말하고, 그 사이 모든
+    객체를 적으면 근거가 잡음으로 찬다(try 27 의 씬 전환에서 200개 넘게 바뀌었다).
+
+    시작과 끝만 비교하는 `state_changes` 는 play 안에서 켜졌다 꺼진 것을 못 본다. 로컬 try 27 step 10 의 튜토리얼 강조
+    오버레이는 2초쯤 켜졌다 꺼져, 끝 비교에 남지 않았다. reading 마다 이것을 적으면 그 사이의 화면이 근거에 남는다.
+    """
+    if before.scene != after.scene:
+        return {}
+    previous = {entity.entity_id: entity.active for entity in before.entities}
+    switched: dict[str, tuple[str, bool | None]] = {}
+    for entity in after.entities:
+        was = previous.get(entity.entity_id)
+        if (was is None and entity.active) or (was is not None and was != entity.active):
+            switched[entity.entity_id] = (entity.selector or entity.path or entity.entity_id, was)
+    return switched
 
 
 def state_changes(
@@ -509,7 +554,10 @@ def state_changes(
     for entity_id, entity in after.items():
         old = before.get(entity_id)
         if old is None:
-            lines.append(f"{described(entity)}: appeared")
+            # 꺼진 채 새로 생긴 객체는 화면에 없다. 다른 근거 칸처럼 화면에서 확인할 수 있는 것만 적는다 — 로컬 try 27 step 10
+            # 의 변화 40줄 중 34줄이 새 씬에서 다시 만들어진, 꺼져 있는 설정 메뉴 창이었다.
+            if entity.active:
+                lines.append(f"{described(entity)}: appeared")
             continue
         if old.active != entity.active:
             lines.append(f"{described(entity)}: {'switched on' if entity.active else 'switched off'}")
@@ -526,7 +574,7 @@ def state_changes(
                 )
     complete = end.omitted_entities == 0 and start.omitted_entities == 0
     for entity_id, entity in before.items():
-        if entity_id not in after:
+        if entity_id not in after and entity.active:
             lines.append(f"{described(entity)}: {'gone' if complete else 'not read at the end'}")
     old_statics = {entry.member_id: entry.observation for entry in start.statics}
     for entry in end.statics:
@@ -540,4 +588,4 @@ def state_changes(
                 f"{json.dumps(clip_value(previous.value), ensure_ascii=False, default=str)} → "
                 f"{json.dumps(clip_value(entry.observation.value), ensure_ascii=False, default=str)}"
             )
-    return lines[:MAX_STATE_CHANGES], max(len(lines) - MAX_STATE_CHANGES, 0)
+    return lines, 0

@@ -271,3 +271,47 @@ def test_contract_editor_수정은_계약과_계획_범위를_유지() -> None:
     assert repaired.macros.contracts["take"].effect == original.contracts["take"].effect
     assert repaired.macros.observe == original.observe and repaired.macros.check == original.check
     assert repaired.macros.after == original.after and repaired.macros.facts == original.facts
+
+
+def test_the_editor_can_rewrite_around_a_developer_macro_that_runs_on_its_contract() -> None:
+    """legacy 모드의 계약 행동에는 묶인 호출이 없다. run 16 은 editor 가 그것을 찾다 `KeyError` 로 멈췄다."""
+    from dataclasses import replace
+
+    from app.agents.planner_executer.developer_macros import (
+        DeveloperMacro,
+        bind_developer_calls_with_contracts,
+        load_developer_macros,
+    )
+
+    strike = (
+        'def strike(enemy: object) -> None:\n    """Strike one enemy."""\n    click(enemy)\n\n\n'
+        'def ready_strike(enemy: object) -> bool:\n    return member(enemy, "Game.Enemy::hp") > 0\n\n\n'
+        'def effect_strike(enemy: object) -> bool:\n    return member(enemy, "Enemy.hit") == True\n'
+    )
+    contract = {"params": {"enemy": {"holds": "Game.Enemy::hp"}}, "effect": {"mode": "transition", "within": 0.5}}
+    fake = _menu()
+    asked = Asked(MACROS)
+
+    async def go():
+        fake.push_reading()
+        developer = await load_developer_macros((DeveloperMacro("strike", strike, "1.4.0", None, False, contract),))
+        actions, contracts, binder, _pairs = await bind_developer_calls_with_contracts(['strike(pick("Enemy"))'], developer)
+        registered = RegisteredMacros(fake.channel)
+        macros = await parse_step(
+            'def done() -> bool:\n    return scene() == "Map"\n', registered, actions, None, contract_keys=tuple(contracts)
+        )
+        macros = replace(
+            macros, contracts=contracts, binder=binder,
+            descriptions={**macros.descriptions, **{key: c.description for key, c in contracts.items()}},
+        )
+        config = _config()
+        editor = MacroEditor(config, fake.channel, config.arch.planner, registered, ask=asked, developer=developer)
+        return await editor.repair(_scenario(), 1, macros, "developer:strike", TURNS)
+
+    repaired = asyncio.run(go())
+
+    assert repaired.macros is not None
+    user = asked.calls[0][1]
+    assert "It runs on its registered contract" in user and "Developer macro `strike`:" in user
+    # 고친 행동만 editor 의 def 로 바뀌고, 계약 행동 자리는 비워진다(다른 계약 행동이 있었다면 남는다).
+    assert "developer:strike" not in repaired.macros.contracts

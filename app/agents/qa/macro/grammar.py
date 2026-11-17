@@ -64,6 +64,9 @@ class MacroShape(StrEnum):
     vector2 = "vector2"
     vector3 = "vector3"
     object_ = "object"
+    # 비교의 한쪽에 적힌 `None` 리터럴의 모양이다. 도착한 값은 이 모양을 받지 않는다 — 도착한 null 은 여전히 `other` 다.
+    # `== None`·`!= None` 만 되고, 평가기는 다른 쪽 값이 null 인지만 본다.
+    null = "null"
     other = "other"
 
 
@@ -103,6 +106,7 @@ _ALLOWED_OPERATORS: dict[MacroShape, tuple[MacroOperator, ...]] = {
     MacroShape.vector2: (),
     MacroShape.vector3: (),
     MacroShape.object_: EQUALITY_OPERATORS,
+    MacroShape.null: EQUALITY_OPERATORS,
     MacroShape.other: (),
 }
 
@@ -171,6 +175,7 @@ _ALLOWED_ARITHMETIC: dict[MacroShape, tuple[MacroArithmetic, ...]] = {
     MacroShape.vector2: (),
     MacroShape.vector3: (),
     MacroShape.object_: (),
+    MacroShape.null: (),
     MacroShape.other: (),
 }
 

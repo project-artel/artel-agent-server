@@ -53,6 +53,9 @@ _OPERATOR_TABLE = "\n".join(
     f"- {_SHAPE_READS_AS.get(shape, f'a {shape.value}')} takes "
     f"{operator_names(allowed_operators(shape))}"
     for shape in MacroShape
+    # `null` 은 비교에 적힌 `None` 의 모양일 뿐 도착하는 값의 모양이 아니다. 표에 올리면 모델이 읽는 문법 글이 바뀌어
+    # 도구 루프의 프롬프트 버전까지 움직인다. `== None`·`!= None` 은 모델이 이미 그렇게 쓰므로 글 없이 받는다.
+    if shape is not MacroShape.null
 )
 
 _PAIRS = ", ".join(f"`{pair.opens}` / `{pair.closes}`" for pair in PAIRED_TOOLS)

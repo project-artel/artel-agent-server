@@ -159,7 +159,7 @@ def test_the_planner_chooses_facts_only_when_the_knob_is_on(tmp_path) -> None:
     assert written.macros is not None and written.macros.facts == ("cards_in_hand",)
     assert "Game facts (declared by the game's developer)" in sent[0] and "Hand.cards" not in sent[0]
 
-    off, sent_off = _write(tmp_path, ANSWER)
+    off, sent_off = _write(tmp_path, ANSWER, facts="off")
     assert off.macros is not None and off.macros.facts == ()
     assert "Game facts" not in sent_off[0]
 
@@ -306,5 +306,10 @@ def test_the_service_reads_declarations_once_per_run_only_when_facts_is_on(tmp_p
     assert [options["facts"] for options in seen] == [declared, declared]
 
     asked.clear()
-    seen, _ = _serve(monkeypatch, QaArchSpec(engine="planner_executer"), no_macros)
+    seen, _ = _serve(monkeypatch, QaArchSpec(engine="planner_executer", planner=PlannerExecuterArchSpec(facts="off")), no_macros)
     assert asked == [] and all("facts" not in options for options in seen)
+
+    # pe9 부터 기본으로 켜져 있다.
+    asked.clear()
+    seen, _ = _serve(monkeypatch, QaArchSpec(engine="planner_executer"), no_macros)
+    assert asked == [5]
