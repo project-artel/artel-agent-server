@@ -78,6 +78,9 @@ from app.qa.state_set import (
     read_state,
     render_jev_state,
     state_changes,
+    switched_between,
+    PRESENT,
+    INACTIVE,
 )
 
 # What the executer calls to read the game's state from Orchestration: `(qa_try_id, spec)` → snapshot.
@@ -411,6 +414,10 @@ class Executer:
         self._hidden: dict[str, Any] | None = None
         # 이 play 의 첫 근거 읽기 snapshot. 끝 읽기와 비교해 `StepPlay.changes` 를 만든다.
         self._evidence_start: StateSnapshot | None = None
+        # 직전 근거 reading 의 snapshot 과 그 기록, 그리고 이 play 에서 켜짐이 바뀐 적 있는 객체(`entity_id` → 이름). 바뀐 뒤로는
+        # reading 마다 켜짐을 적어, 근거 로그가 그 객체의 켜짐·꺼짐을 시점과 함께 보인다.
+        self._evidence_last: tuple[StateSnapshot, dict] | None = None
+        self._switching: dict[str, str] = {}
 
     async def play(
         self,
@@ -451,6 +458,8 @@ class Executer:
         # play 안의 `target` 은 고른 대상 객체의 이름이다. step 의 대상 계약은 이 이름으로 쥔다.
         step_target = target
         self._evidence_start = None
+        self._evidence_last = None
+        self._switching = {}
         self._observe = getattr(macros, "observe", None)
         self._fact_sources = [
             (name, fact.scope, fact.member)
@@ -1086,6 +1095,7 @@ class Executer:
                 entry["omitted"] = reading.omitted
         for name, text in visible_texts(snapshot, scene).items():
             values.setdefault(name, text)
+        self._note_switching(snapshot, values)
         if at == "start":
             self._evidence_start = snapshot
         elif at == "end" and self._evidence_start is not None:
@@ -1099,6 +1109,24 @@ class Executer:
         observe = self._observe
         missed = set(unmatched_paths(snapshot, observe.paths if observe is not None else None))
         play.observe_unknown = sorted(set(play.observe_unknown) & missed if read_before else missed)
+
+    def _note_switching(self, snapshot: StateSnapshot, values: dict[str, Any]) -> None:
+        """직전 reading 과 비교해 켜짐이 바뀐 객체를 이 reading 과 직전 reading 의 값에 적는다. 한 번 바뀐 객체는 그 뒤 reading
+        마다 켜짐을 적는다 — 이름이 빠진 reading 은 근거 로그에서 부재로 읽히기 때문이다. check 가 같은 이름을 이미 적었으면 두지
+        않는다."""
+        if self._evidence_last is not None:
+            previous, last_values = self._evidence_last
+            for entity_id, (name, was) in switched_between(previous, snapshot).items():
+                if entity_id not in self._switching:
+                    self._switching[entity_id] = name
+                    if was is not None:
+                        last_values.setdefault(name, PRESENT if was else INACTIVE)
+        current = {entity.entity_id: entity for entity in snapshot.entities}
+        for entity_id, name in self._switching.items():
+            entity = current.get(entity_id)
+            if entity is not None:
+                values.setdefault(name, PRESENT if entity.active else INACTIVE)
+        self._evidence_last = (snapshot, values)
 
     def _candidate_ids(self, names: tuple[str, ...]) -> list[tuple[str, int | None]]:
         """`_candidates` 의 selector 와 그 객체의 런타임 id. id 는 실행 직전에 같은 객체인지 확인하는 데 쓴다."""
