@@ -514,8 +514,8 @@ def _evidence_value(observation: StateObservation) -> Any:
     return UNKNOWN
 
 
-# step 이 시작한 뒤 바뀐 값을 evaluator 에게 줄 때의 줄 수 상한. planner 가 이름 붙이지 않은 변화라 넉넉히 두지 않는다.
-MAX_STATE_CHANGES = 40
+# step 이 시작한 뒤 바뀐 값은 모두 evaluator 에게 준다(pe13). planner 가 이름 붙이지 않은 변화에 결과가 있는 일이 있고,
+# 40줄 상한은 어느 것이 남을지를 순서가 정했다.
 
 
 def switched_between(before: StateSnapshot, after: StateSnapshot) -> dict[str, tuple[str, bool | None]]:
@@ -588,4 +588,4 @@ def state_changes(
                 f"{json.dumps(clip_value(previous.value), ensure_ascii=False, default=str)} → "
                 f"{json.dumps(clip_value(entry.observation.value), ensure_ascii=False, default=str)}"
             )
-    return lines[:MAX_STATE_CHANGES], max(len(lines) - MAX_STATE_CHANGES, 0)
+    return lines, 0

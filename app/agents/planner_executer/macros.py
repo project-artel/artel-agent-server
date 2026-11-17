@@ -26,7 +26,7 @@ source is parsed once more with a generated entry, `executer_probe_done`, that d
 
 import ast
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 
 from app.agents.qa.macro.errors import MacroRejection
@@ -702,3 +702,31 @@ def _returns(node: ast.FunctionDef, name: str) -> bool:
     if name == "None":
         return isinstance(annotation, ast.Constant) and annotation.value is None
     return isinstance(annotation, ast.Name) and annotation.id == name
+
+
+def action_code(source: str, names: "Iterable[str]") -> dict[str, str]:
+    """planner 가 쓴 행동마다 그 `def` 와, 그 안에서 부르는 같은 계획의 `def` 의 코드(pe13). evaluator 가 행동이 무엇을
+    확인했는지 읽는다 — 이름과 "passed" 만으로는 그 행동 안의 `wait_until` 이 무엇을 기다렸는지 모른다(로컬 try 31 step 3).
+    읽지 못하는 글이면 빈 dict 다."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {}
+    defs = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    code: dict[str, str] = {}
+    for name in names:
+        if name not in defs:
+            continue
+        seen: list[str] = []
+        pending = [name]
+        while pending:
+            current = pending.pop(0)
+            if current in seen or current not in defs:
+                continue
+            seen.append(current)
+            for call in ast.walk(defs[current]):
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in defs:
+                    pending.append(call.func.id)
+        code[name] = "\n\n".join(ast.get_source_segment(source, defs[each]) or "" for each in seen)
+    return code
+

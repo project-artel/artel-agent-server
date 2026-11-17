@@ -56,10 +56,9 @@ MAX_TURNS_SHOWN_PER_CASE = 20
 # turns and its end screen, so they are asked about a few at a time.
 CASES_PER_JUDGEMENT = 5
 
-# Names drawn from the ```check values, and the changes drawn per name. A long step keeps the first
-# and the last changes, where it began and where it stopped.
-MAX_EVIDENCE_NAMES = 80
-MAX_EVIDENCE_CHANGES = 12
+# 근거 값에는 이름 수·변화 수 상한을 두지 않는다(pe13). 80개 상한은 판독값 끝에 붙는 화면 글자부터 잘랐다 — 로컬 try 31
+# step 8~10 묶음은 이름이 139개였고, evaluator 는 `HintText[0]` 이 켜진 것만 보고 그 글자("강조된 적을 클릭해…")는 못 봐
+# step 9 를 근거 없음으로 떨어뜨렸다. 묶음 하나의 근거 전체가 40KB 남짓이다.
 # A `flag(...)`'s observed values as one turn line shows them.
 MAX_FLAG_CHARS = 300
 
@@ -391,7 +390,25 @@ def request(
         f"Turns played ({len(play.turns)}"
         + (f", the first {skipped} left out" if skipped else "")
         + f"):\n{turns}\n\n"
-        f"{evidence_text(play)}\n"
+        + ran_code(play, shown)
+        + f"{evidence_text(play)}\n"
+    )
+
+
+def ran_code(play: StepPlay, turns: list[dict]) -> str:
+    """planner·editor 가 쓴 행동 중 위 turn 들에서 돈 것의 코드(pe13). 돈 것이 없으면 빈 글이다."""
+    ran: list[str] = []
+    for turn in turns:
+        name = str(turn.get("picked") or "").split(" @ ")[0]
+        if name in play.action_sources and name not in ran:
+            ran.append(name)
+    if not ran:
+        return ""
+    blocks = "\n\n".join(f"```python\n{play.action_sources[name]}\n```" for name in ran)
+    return (
+        "Code of the actions the plan wrote that ran above. An action that ended `passed` reached the end of its code, "
+        "so every `require` and `wait_until` it met on the way held; one that failed names in its turn the line that "
+        f"stopped it.\n{blocks}\n\n"
     )
 
 
@@ -436,10 +453,8 @@ def evidence_text(play: StepPlay) -> str:
     if not read:
         lines.append("  (no reading succeeded)")
     names = names_of(read)
-    for name in names[:MAX_EVIDENCE_NAMES]:
+    for name in names:
         lines.append(f"  {name}: {_series(name, read)}")
-    if len(names) > MAX_EVIDENCE_NAMES:
-        lines.append(f"  ({len(names) - MAX_EVIDENCE_NAMES} more names left out)")
     if play.evidence_unknown:
         lines.append(
             "  names the plan listed that matched nothing in any reading — a wrong name, or an object that never came; "
@@ -449,10 +464,10 @@ def evidence_text(play: StepPlay) -> str:
     if incomplete:
         lines.append(
             "  readings that could not cover every object (a size limit or the server left some out): "
-            + ", ".join(incomplete[:MAX_EVIDENCE_CHANGES])
+            + ", ".join(incomplete)
         )
     if failed:
-        lines.append("  readings that failed: " + "; ".join(failed[:MAX_EVIDENCE_CHANGES]))
+        lines.append("  readings that failed: " + "; ".join(failed))
     text = f"{head}:\n" + "\n".join(lines)
     if play.changes:
         more = f"\n  ({play.changes_left_out} more changes left out)" if play.changes_left_out else ""
@@ -471,13 +486,7 @@ def _series(name: str, read: list[dict]) -> str:
     last_at = read[-1]["at"]
     if len(points) == 1:
         return f"{points[0][1]} (unchanged from {read[0]['at']} to {last_at})"
-    if len(points) > MAX_EVIDENCE_CHANGES:
-        keep = MAX_EVIDENCE_CHANGES // 2
-        dropped = len(points) - 2 * keep
-        parts = [f"{at}: {value}" for at, value in points[:keep]] + [f"… {dropped} changes …"]
-        parts += [f"{at}: {value}" for at, value in points[-keep:]]
-    else:
-        parts = [f"{at}: {value}" for at, value in points]
+    parts = [f"{at}: {value}" for at, value in points]
     if points[-1][0] != last_at:
         parts.append(f"{last_at}: {points[-1][1]}")
     return " → ".join(parts)

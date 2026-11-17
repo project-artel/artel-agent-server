@@ -12,6 +12,8 @@ running macros a planner wrote. You get:
 - the turns played: the scene, whether the step's `done()` held and what a decision model
   answered about it, which action was picked, how its macro ended, how many inputs it sent, and
   any values the macro flagged;
+- the code of the actions the planner wrote that ran: an action that ended `passed` held every
+  `require` and `wait_until` it met, so a `wait_until` in it is a check that held at that moment;
 - the game values read when play started, before every turn and when play stopped: the active
   scene always, and the values the planner named for judging this step. Each name is shown once
   with the readings where its value changed. An object reads `(present)` when it is live,

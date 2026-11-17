@@ -51,7 +51,9 @@ from app.agents.planner_executer.macros import (
     StepCheck,
     StepMacros,
     StepObserve,
+    action_code,
 )
+from app.agents.planner_executer.developer_macros import DEVELOPER_ACTION_PREFIX
 from app.agents.planner_executer.prompts import screen
 from app.agents.qa.macro.binding import MacroMemories, MacroScope
 from app.agents.qa.macro.context import build_context_state
@@ -342,6 +344,8 @@ class StepPlay:
     target: StepTarget | None = None
     # 판정 근거의 출처. PulseMemory run은 별도의 STATE_SET evidence 대신 시작·끝 관측값을 전달한다.
     state_source: Literal["state_set", "pulse_memory"] = "state_set"
+    # planner·editor 가 쓴 행동의 코드(`macros.action_code`, pe13). evaluator 는 이 중 실제로 돈 행동의 코드를 읽는다.
+    action_sources: dict[str, str] = field(default_factory=dict)
 
     def played(self) -> dict:
         """step `STATUS` 의 `played`: 영상 구간을 자를 기준. `docs/evaluator-analysis-frames.md`."""
@@ -477,6 +481,7 @@ class Executer:
             check=getattr(macros, "check", None),
             target=target,
             state_source=spec.state_source,
+            action_sources=_written_actions(macros),
         )
         await self._read_evidence(play, "start")
         started = clock()
@@ -870,6 +875,7 @@ class Executer:
                     await self._send(record)
                     if fixed is not None:
                         macros = fixed
+                        play.action_sources.update(_written_actions(macros))
                         failures = idle_turns = 0
                         misses.pop(picked, None)
                         # 고친 macro 는 새로 시험한다. 잠시 뺀 것과 입력 없이 끝난 기록도 비운다.
@@ -1499,6 +1505,12 @@ class Executer:
         await self._channel.emit(MessageType.LOG, _turn_log(record))
 
 
+def _written_actions(macros: Any) -> dict[str, str]:
+    """이 계획에서 planner·editor 가 쓴 행동(developer macro 가 아닌 것)의 코드."""
+    names = [name for name in getattr(macros, "actions", {}) if not name.startswith(DEVELOPER_ACTION_PREFIX)]
+    return action_code(getattr(macros, "source", "") or "", names)
+
+
 def merge_plays(plays: list[StepPlay]) -> StepPlay:
     """step 하나의 play 들(재계획·planner 복구로 이어진 것)을 evaluator 가 읽을 한 기록으로. 하나뿐이면 그대로다.
 
@@ -1559,6 +1571,7 @@ def _joined(plays: list[tuple[int, StepPlay]], label: str, turn_key: str = "plan
         repair_request=last.repair_request,
         changes=changes,
         changes_left_out=sum(play.changes_left_out for play in plays),
+        action_sources={name: code for play in plays for name, code in play.action_sources.items()},
         target=last.target,
         state_source=last.state_source,
     )

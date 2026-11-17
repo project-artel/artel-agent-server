@@ -152,3 +152,66 @@ def test_coverage_check_off_judges_once_after_play() -> None:
 
     assert len(judged) == 1
     assert not [f for f in fake.frames("LOG") if f["payload"].get("kind") == "coverage_check"]
+
+
+# --- pe13: evaluator 가 근거를 잘리지 않은 채, 돈 행동의 코드와 함께 읽는다 ---------------------------------
+
+from app.agents.evaluator.verdict import evidence_text, request  # noqa: E402
+from app.agents.planner_executer.executer import StepPlay  # noqa: E402
+from app.agents.planner_executer.macros import action_code  # noqa: E402
+
+CHECKING = """def typing() -> bool:
+    return scene() == "Story"
+
+
+def finish_typing() -> None:
+    \"\"\"Press while a line is typed and see it finish at once.\"\"\"
+    wait_until(typing(), 3, "no line is being typed")
+    press_key("Space", 0.05)
+    wait_until(scene() == "Story", 0.5, "the line did not finish at once")
+
+
+def other() -> None:
+    \"\"\"Not run.\"\"\"
+    press_key("A", 0.05)
+
+
+def done() -> bool:
+    return scene() == "Map"
+"""
+
+
+def test_an_action_s_code_comes_with_the_helpers_it_calls_and_nothing_else() -> None:
+    code = action_code(CHECKING, ["finish_typing", "missing"])
+
+    assert list(code) == ["finish_typing"]
+    assert "def finish_typing" in code["finish_typing"] and "def typing" in code["finish_typing"]
+    assert "def other" not in code["finish_typing"] and "def done" not in code["finish_typing"]
+
+
+def test_the_evaluator_reads_the_code_of_the_written_actions_that_ran() -> None:
+    play = StepPlay(
+        "done",
+        turns=[{"turn": 0, "picked": "finish_typing", "outcome": "passed", "sent": [{"ok": True}]}],
+        action_sources=action_code(CHECKING, ["finish_typing", "other"]),
+    )
+
+    user = request(_scenario(), 1, play)
+
+    assert "Code of the actions the plan wrote that ran above" in user
+    assert 'wait_until(scene() == "Story", 0.5, "the line did not finish at once")' in user
+    assert "def other" not in user
+
+
+def test_every_evidence_name_and_every_change_reaches_the_evaluator() -> None:
+    names = {f"Obj[{index}] text": f"line {index}" for index in range(150)}
+    evidence = [
+        {"at": "start", "values": {"(active scene)": "Battle", **names}},
+        *({"at": f"turn {turn}", "values": {"(active scene)": "Battle", **names, "Counter": turn}} for turn in range(20)),
+    ]
+    play = StepPlay("done", evidence=evidence)
+
+    text = evidence_text(play)
+
+    assert "Obj[149] text" in text and "more names left out" not in text
+    assert "turn 19: 19" in text and "changes …" not in text

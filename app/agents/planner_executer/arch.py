@@ -93,7 +93,12 @@ from pydantic import BaseModel, ConfigDict, Field
 # - planner(prompt v8)는 기대 결과가 여럿이면 마지막 결과 뒤를 `done()` 으로 읽고, 지나가는 상태 안의 입력에 달린 결과는
 #   상태 기다리기·입력·결과 기다리기를 행동 하나에 `wait_until` 로 쓴다.
 # prompt 는 qa_planner v8 을 읽는다.
-PLANNER_EXECUTER_LABEL = "pe12-verify-coverage"
+# pe13-evaluator-sees-all: evaluator 가 근거를 잘리지 않은 채, 돈 행동의 코드와 함께 읽는다.
+# - 근거 값의 이름 80개·이름당 변화 12개·변화 목록 40줄 상한을 없앴다. 판독값 끝에 붙는 화면 글자부터 잘려, 로컬 try 31 의
+#   step 8~10 묶음(이름 139개)에서 `HintText[0]` 이 켜진 것만 보이고 그 글자는 안 보여 step 9 가 근거 없음으로 떨어졌다.
+# - planner·editor 가 쓴 행동 중 돈 것의 코드를 판정 요청에 싣는다. try 31 step 3 은 타이핑 중 입력을 `wait_until` 로 확인한
+#   행동이 통과했는데, 판정은 그 코드를 못 봐 근거 없음으로 읽고 step 을 다시 쓰게 했다.
+PLANNER_EXECUTER_LABEL = "pe13-evaluator-sees-all"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1
