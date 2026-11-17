@@ -59,7 +59,7 @@ def test_the_planner_executer_run_is_filed_under_its_own_label_and_digest() -> N
 
     assert config.arch.engine == "planner_executer"
     assert config.arch.planner == PlannerExecuterArchSpec()
-    assert config.agent_arch == PLANNER_EXECUTER_LABEL == "pe11-code-decides-flow"
+    assert config.agent_arch == PLANNER_EXECUTER_LABEL == "pe12-verify-coverage"
     assert config.agent_fingerprint != agent.agent_fingerprint
     assert config.decision_model == resolve_decision_model()
     assert config.citation_reporting is False and config.compaction_model is None
@@ -80,16 +80,16 @@ def test_a_relabelled_planner_executer_run_keeps_its_digest() -> None:
 def test_the_planner_prompt_is_recorded_with_the_macro_grammar_it_reads() -> None:
     config = resolve_run_config(arch=PLANNER_EXECUTER)
 
-    assert config.prompt_version == "v7"
+    assert config.prompt_version == "v8"
     roles = (
         "rules", "rules_contract", "rules_guidance", "evaluator", "scene_rules", "scene_evaluator", "failure_analysis", "run_review",
         "macro_repair", "target_resolver",
     )
-    # v7 은 `decide`·`ask` 를 뺀 계획용 문법을 읽는다(pe11).
+    # v7 부터 `decide`·`ask` 를 뺀 계획용 문법을 읽는다(pe11). v8 은 기대 항목별 판정을 더한다(pe12).
     assert set(config.prompt_hashes) == {*roles, "macro_grammar_plan"}
     locked = read_lock()["prompts"]
     for role in roles:
-        assert locked[f"qa_planner/v7/{role}"] == config.prompt_hashes[role]
+        assert locked[f"qa_planner/v8/{role}"] == config.prompt_hashes[role]
     assert config.prompt_hashes["macro_grammar_plan"] == hashlib.sha256(MACRO_GRAMMAR_PLAN.encode()).hexdigest()
     assert resolve_run_config(arch=PLANNER_EXECUTER, prompt_version="v6").prompt_hashes["macro_grammar"] == (
         hashlib.sha256(MACRO_GRAMMAR.encode()).hexdigest()
@@ -99,8 +99,8 @@ def test_the_planner_prompt_is_recorded_with_the_macro_grammar_it_reads() -> Non
 def test_the_planner_defaults_to_the_newest_prompt_and_v1_can_still_be_pinned() -> None:
     """`qa_planner` has no `*_PROMPT_VERSION` setting, so the newest version is the default. The
     tool loop's `qa_run` default is not moved by it."""
-    assert available_versions("qa_planner") == ("v1", "v2", "v3", "v4", "v5", "v6", "v7")
-    assert resolve_version("qa_planner") == "v7"
+    assert available_versions("qa_planner") == ("v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8")
+    assert resolve_version("qa_planner") == "v8"
     assert resolve_run_config().prompt_version == resolve_version("qa_run")
 
     # v1 has neither `failure_analysis` nor `macro_repair`, so a pinned run turns both off to be built.

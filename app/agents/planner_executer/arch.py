@@ -82,7 +82,18 @@ from pydantic import BaseModel, ConfigDict, Field
 #   한다. planner·editor 가 쓴 코드의 `ask`·`decide` 는 거절한다.
 # - 노브 `done_by`·`pick_wait`·`max_done_disagreements`·`max_expansions_per_step` 를 지우고 `max_scene_replans_per_step` 를 더했다.
 # prompt 는 qa_planner v7 을 읽는다.
-PLANNER_EXECUTER_LABEL = "pe11-code-decides-flow"
+# pe12-verify-coverage: 판정 step 이 기대 결과를 다 보이기 전에 끝나지 않게 한다. 로컬 try 14~29 의 step 3("타이핑 중이면
+# 즉시 완성 / 다 나온 뒤면 다음 대사")은 통과·실패가 우연으로 갈렸다. planner 의 `done()` 이 첫 결과 직후 참이 되어 둘째
+# 결과의 입력이 한 번도 가지 않았고(16·17·18·22·29), 같은 기록을 evaluator 가 두 번은 통과시켰다(27·28, 화면 글자가 아니라
+# 목표 문장 값을 읽었다).
+# - evaluator(prompt v8)는 기대 항목마다 `checks` 를 낸다. 통과는 코드가 모든 항목이 yes 일 때만 정하고, 화면을 말하는
+#   항목은 게임 값만으로 yes 가 되지 않는다(`settle_checks`).
+# - case 의 판정 step 이 제 `done()` 으로 멈추면 그 자리에서 evaluator 를 돌린다. 근거 없는 항목만 있으면(반대로 나온 항목
+#   없이) 그 항목을 이유로 planner 가 step 을 다시 쓰고 이어서 돈다(`coverage_check`, `max_coverage_rewrites`).
+# - planner(prompt v8)는 기대 결과가 여럿이면 마지막 결과 뒤를 `done()` 으로 읽고, 지나가는 상태 안의 입력에 달린 결과는
+#   상태 기다리기·입력·결과 기다리기를 행동 하나에 `wait_until` 로 쓴다.
+# prompt 는 qa_planner v8 을 읽는다.
+PLANNER_EXECUTER_LABEL = "pe12-verify-coverage"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1
@@ -104,6 +115,10 @@ class PlannerExecuterArchSpec(BaseModel):
     max_failures_in_a_row: int = Field(default=3, ge=1, le=50)
     # planner 의 답이 거절될 때 다시 쓰게 하는 횟수. 다 쓰고도 거절되면 그 step 은 FAILED 다.
     max_rewrites: int = Field(default=2, ge=0, le=5)
+    # case 의 판정 step 이 제 `done()` 으로 멈추면 evaluator 로 기대 항목의 근거를 본다. 근거 없는 항목이 있으면 planner 가
+    # 그 항목을 이유로 step 을 다시 쓰고 이어서 돈다(pe12). evaluator 호출이 그 step 마다 하나 더 든다.
+    coverage_check: Literal["off", "on"] = "on"
+    max_coverage_rewrites: int = Field(default=1, ge=0, le=3)
     # FREE 시나리오: 한 라운드가 끝나고 미룬 case 가 남았을 때 `reset_game` 으로 다시 시작하는 횟수.
     free_max_resets: int = Field(default=1, ge=0, le=10)
     # FREE 시나리오: case 하나를 돌아 보는 횟수. 목표에 닿지 못한 실패는 이 횟수까지 미룬다.

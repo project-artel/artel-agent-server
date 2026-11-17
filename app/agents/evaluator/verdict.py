@@ -20,7 +20,7 @@ import json
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
@@ -82,6 +82,18 @@ class Verdict(BaseModel):
     evidence_sufficient: bool = True
 
 
+class ItemCheck(BaseModel):
+    """기대 항목 하나의 판정(prompt v8). 무엇을 기대했고, 무엇을 보았고, 무엇이 그것을 보였나."""
+
+    expected: str
+    observed: str
+    met: Literal["yes", "no", "unknown"]
+    # 항목이 플레이어가 보는 것(`screen`)을 말하는가, 게임 안의 값(`game`)을 말하는가.
+    about: Literal["screen", "game"] = "game"
+    # 판정의 근거가 된 것. `turn` 은 행동의 끝(입력 결과, `wait_until` 의 성공·실패)이다.
+    shown_by: Literal["screen_text", "picture", "game_value", "scene", "turn", "none"] = "none"
+
+
 class GameVerdict(BaseModel):
     """prompt v4 부터의 답. `insight` 대신 `game_insight` 를 쓴다 — 어떤 값이 더 나은 근거였는지는 `reason` 에 들어가고, 이 칸은
     이 step 에서 게임이 보인 모습에 대한 평가다(통과했어도 남은 문제). v3 까지의 런은 `Verdict` 로 그대로 묻는다."""
@@ -91,6 +103,30 @@ class GameVerdict(BaseModel):
     state_detail: str
     game_insight: str = ""
     evidence_sufficient: bool = True
+
+
+class CheckedVerdict(GameVerdict):
+    """prompt v8 부터의 답: 기대 항목마다 `checks` 를 함께 낸다. 통과는 모델이 아니라 `settle_checks` 가 정한다."""
+
+    checks: list[ItemCheck] = []
+
+
+def settle_checks(checks: list[ItemCheck]) -> tuple[list[ItemCheck], bool | None]:
+    """항목 판정을 기록 규칙으로 고치고 통과 여부를 정한다. 항목이 없으면 `None` 이다(모델의 `passed` 를 쓴다).
+
+    화면에 보이는 것을 말하는 항목은 게임 값으로 보인 것이 아니다. 값의 이름이 같은 것처럼 들려도 게임은 다른 것을 쥘 수 있다
+    — 로컬 try 27·28 은 대사의 목표 문장(`streamingText`)이 바뀐 것을 "끝까지 표시됨" 으로 읽고, 화면 글자는 끝까지 부분
+    문장이었는데 통과시켰다. 그런 항목은 `unknown` 으로 낮춘다. 통과는 모든 항목이 `yes` 일 때뿐이다.
+    """
+    if not checks:
+        return checks, None
+    settled = [
+        check.model_copy(update={"met": "unknown"})
+        if check.met == "yes" and check.about == "screen" and check.shown_by in ("game_value", "none")
+        else check
+        for check in checks
+    ]
+    return settled, all(check.met == "yes" for check in settled)
 
 
 @dataclass(frozen=True)
@@ -106,6 +142,10 @@ class StepVerdict:
     screen_capture_id: str | None = None
     # 이 step 에서 게임이 보인 모습에 대한 평가(prompt v4 부터). 옛 `insight` 와 섞지 않는다.
     game_insight: str = ""
+    # 기대 항목별 판정(prompt v8). 근거가 없는 항목(`unknown`)은 `missing` 에 따로 둔다 — runner 가 판정 step 을 더 돌게 한다.
+    checks: tuple[dict[str, Any], ...] = ()
+    missing: tuple[str, ...] = ()
+    contradicted: tuple[str, ...] = ()
 
     def details(self) -> dict[str, Any]:
         """step `STATUS` 의 `verdict`."""
@@ -116,6 +156,8 @@ class StepVerdict:
             details["screen_capture_id"] = self.screen_capture_id
         if self.game_insight:
             details["game_insight"] = self.game_insight
+        if self.checks:
+            details["checks"] = list(self.checks)
         return details
 
 
@@ -126,6 +168,16 @@ def stop_note(stopped: str, language: OutputLanguage) -> str:
         return ""
     note = STOP_NOTES.get(stopped, {}).get(language.value if language == OutputLanguage.ko else "en", stopped)
     return f" (executer 중단: {note})" if language == OutputLanguage.ko else f" (executer stopped: {note})"
+
+
+def overrule_note(said: bool, passed: bool, checks: list[ItemCheck], language: OutputLanguage) -> str:
+    """모델은 통과라 했는데 항목 판정이 통과를 막았을 때 이유 끝에 붙는 글. 판정과 이유가 어긋나 보이지 않게 한다."""
+    if said == passed or passed:
+        return ""
+    unmet = [check.expected for check in checks if check.met != "yes"]
+    if language == OutputLanguage.ko:
+        return " (근거로 확인되지 않은 기대 항목: " + "; ".join(unmet) + ")"
+    return " (expected results not shown by the evidence: " + "; ".join(unmet) + ")"
 
 
 # 코드가 정한 멈춤의 설명(pe11). 키는 executer 의 멈춤 이유다. 나머지 이유는 진단 문장 그대로 붙인다.
@@ -157,8 +209,10 @@ class Evaluator:
             EVALUATOR_ROLE, config.prompt_version, **{LANGUAGE_PLACEHOLDER: LANGUAGE_DIRECTIVES[config.language]}
         )
         self._judge = judge or self._ask_model
-        # 답의 모양은 prompt 가 묻는 대로다. v4 부터 evaluator 글이 `game_insight` 를 묻는다.
-        self._schema: type[Verdict] | type[GameVerdict] = GameVerdict if '"game_insight"' in self._system else Verdict
+        # 답의 모양은 prompt 가 묻는 대로다. v4 부터 evaluator 글이 `game_insight` 를, v8 부터 `checks` 를 묻는다.
+        self._schema: type[Verdict] | type[GameVerdict] = (
+            CheckedVerdict if '"checks"' in self._system else GameVerdict if '"game_insight"' in self._system else Verdict
+        )
 
     async def judge(
         self,
@@ -190,10 +244,17 @@ class Evaluator:
                 problem = f"{type(error).__name__}: {str(error)[:200]}"
                 continue
             note = stop_note(play.stopped, self._config.language)
+            checks, settled = settle_checks(list(getattr(verdict, "checks", []) or []))
+            passed = verdict.passed if settled is None else settled
+            missing = tuple(check.expected for check in checks if check.met == "unknown")
+            overruled = overrule_note(verdict.passed, passed, checks, self._config.language)
             return StepVerdict(
-                verdict.passed, verdict.reason + note, verdict.state_detail, getattr(verdict, "insight", ""),
-                verdict.evidence_sufficient, image.capture_id if image is not None else None,
+                passed, verdict.reason + overruled + note, verdict.state_detail, getattr(verdict, "insight", ""),
+                verdict.evidence_sufficient and not missing, image.capture_id if image is not None else None,
                 game_insight=getattr(verdict, "game_insight", ""),
+                checks=tuple(check.model_dump() for check in checks),
+                missing=missing,
+                contradicted=tuple(check.expected for check in checks if check.met == "no"),
             )
         return StepVerdict(False, f"EVALUATOR-ERROR: no readable verdict in {ATTEMPTS} answers ({problem})")
 

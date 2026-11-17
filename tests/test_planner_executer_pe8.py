@@ -153,7 +153,7 @@ def test_the_next_step_is_planned_while_the_last_one_is_judged_and_verdicts_keep
         judged.append(len(judged) + 1)
         return {"passed": True, "reason": f"step {len(judged)} ok", "state_detail": "", "insight": ""}
 
-    config = _config(no_action_grace_seconds=0.2, analysis="off")
+    config = _config(no_action_grace_seconds=0.2, analysis="off", coverage_check="off")
 
     async def go():
         fake.push_reading()
@@ -178,7 +178,7 @@ def test_an_error_while_judging_still_ends_the_run(monkeypatch) -> None:
 
     monkeypatch.setattr(runner_module, "earlier_verdicts", broken)
     fake = _menu()
-    config = _config(no_action_grace_seconds=0.2, analysis="off")
+    config = _config(no_action_grace_seconds=0.2, analysis="off", coverage_check="off")
 
     async def go():
         fake.push_reading()
@@ -448,7 +448,7 @@ def test_the_next_step_of_a_segment_is_played_without_asking_the_planner_again()
     async def judge(system: str, user: str):
         return {"passed": True, "reason": "ok", "state_detail": "", "insight": ""}
 
-    config = _config(no_action_grace_seconds=0.2, analysis="off")
+    config = _config(no_action_grace_seconds=0.2, analysis="off", coverage_check="off")
 
     async def go():
         fake.push_reading()
@@ -480,7 +480,7 @@ def test_the_steps_of_a_segment_are_judged_after_the_segment_on_its_whole_record
         assert any("turn" in f["payload"].get("kind", "") and f["payload"].get("step") == 2 for f in fake.frames("LOG"))
         return {"passed": True, "reason": "ok", "state_detail": "", "insight": ""}
 
-    config = _config(no_action_grace_seconds=0.2, analysis="off")
+    config = _config(no_action_grace_seconds=0.2, analysis="off", coverage_check="off")
 
     async def go():
         fake.push_reading()

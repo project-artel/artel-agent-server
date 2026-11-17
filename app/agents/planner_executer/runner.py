@@ -30,6 +30,7 @@ from typing import Any
 
 from app.agents.qa.reset import reset_game_cheat
 from app.agents.editor import MacroEditor
+from app.agents.evaluator.verdict import StepVerdict
 from app.agents.evaluator import (
     Evaluator,
     FailureAnalyzer,
@@ -135,6 +136,8 @@ class Held:
     play: StepPlay
     image: Any
     target: Any
+    # 판정 step 이 `done()` 으로 멈춘 자리에서 이미 받은 판정(pe12). 묶음이 아니면 이것을 그대로 쓴다 — 같은 기록, 같은 화면이다.
+    verdict: Any = None
 
 class PlannerExecuterRunner:
     def __init__(
@@ -235,6 +238,7 @@ class PlannerExecuterRunner:
             self._spec.editor == "on"
         ) else None
         judge = Evaluator(self._config, self._judge)
+        self._coverage_judge = judge
         # 실패 분석과 런 리뷰(ARTEL-1267). `analysis="off"` 면 둘 다 없고 `STATUS` 는 pe2 그대로다.
         analysing = self._spec.analysis == "on"
         self._analyzer = FailureAnalyzer(self._config, self._judge) if analysing else None
@@ -389,12 +393,14 @@ class PlannerExecuterRunner:
                         ahead.clear()
                     if not ahead:
                         ended_through = None
+                    # `done()` 자리에서 이미 판정을 받았고 묶음이 이어지지 않으면 그 판정을 쓴다. 화면도 그때 찍었다(pe12).
+                    reuse = getattr(play, "judged", None) is not None and not ahead
                     image = (
                         await capture_screen(channel, f"Step {step}: capturing the screen for the evaluator", step)
-                        if self._spec.screen_images == "on"
+                        if self._spec.screen_images == "on" and not reuse
                         else None
                     )
-                    held.append(Held(step, play, image, target))
+                    held.append(Held(step, play, image, target, play.judged if reuse else None))
                     if not ahead:
                         # 묶음이 끝났거나(남은 step 이 없다) 묶음이 아니었다. 묶음의 뒤 step 이 남아 있으면 그 step 까지 기다린다.
                         release()
@@ -592,6 +598,7 @@ class PlannerExecuterRunner:
             await self._settle(
                 channel, state, scenario, held.step, judge, held.play, held.image,
                 held.target, contracted, judged=judged, segment=steps if len(group) > 1 else None,
+                ready=held.verdict if len(group) == 1 else None,
             )
 
     async def _settle(
@@ -607,13 +614,16 @@ class PlannerExecuterRunner:
         contracted: bool,
         judged: StepPlay | None = None,
         segment: list[int] | None = None,
+        ready: "StepVerdict | None" = None,
     ) -> None:
         """한 step 의 판정: evaluator, 대상 계약 확인, 실패 분석, `STATUS`. 앞 step 의 판정이 끝난 뒤에 불린다.
 
         `judged` 는 evaluator·실패 분석이 읽을 기록이다. 묶음이면 묶음 전체의 것이고(`segment`), 아니면 이 step 의 play 다.
         """
         record = judged if judged is not None else play
-        if segment:
+        if ready is not None:
+            verdict = ready
+        elif segment:
             verdict = await judge.judge(scenario, step, record, earlier_verdicts(scenario, state), image, segment=segment)
         else:
             verdict = await judge.judge(scenario, step, record, earlier_verdicts(scenario, state), image)
@@ -698,7 +708,7 @@ class PlannerExecuterRunner:
         """
         spec = self._spec
         plays: list[StepPlay] = []
-        replans = repairs = scene_replans = 0
+        replans = repairs = scene_replans = coverages = 0
         started = executer.now()
         planner_repairs = spec.repair == "planner" and spec.editor == "on"
         while True:
@@ -732,6 +742,25 @@ class PlannerExecuterRunner:
                 replans += 1
                 reason, lines = play.stopped, recent_action_lines(play.turns)
                 transition = {"trigger": "replan", "attempt": replans, "budget": spec.max_replans_per_step}
+            elif (
+                play.stopped == "done"
+                and spec.coverage_check == "on"
+                and coverages < spec.max_coverage_rewrites
+                and verdict_step(scenario, step)
+            ):
+                joined = _joined_rewrites(plays)
+                missing, verdict = await self._missing_results(executer, scenario, step, joined)
+                if not missing:
+                    joined.judged = verdict
+                    return joined
+                coverages += 1
+                reason = (
+                    "done() held, but the record shows nothing for these expected results yet, so no verdict can pass: "
+                    + "; ".join(missing)
+                    + ". Plan the moves that show each of them; done() reads the state after the last of those moves."
+                )
+                lines = recent_action_lines(play.turns)
+                transition = {"trigger": "coverage", "attempt": coverages, "budget": spec.max_coverage_rewrites, "missing": list(missing)}
             else:
                 return _joined_rewrites(plays)
             # 자동 복구의 전이마다 이유·소비 예산·쓴 상태 버전을 남긴다(개선 계획 묶음 2).
@@ -750,6 +779,26 @@ class PlannerExecuterRunner:
                 return _joined_rewrites(plays)
             macros = written.macros
             checked = not written.unchecked
+
+    async def _missing_results(
+        self, executer: Executer, scenario: QaScenario, step: int, play: StepPlay
+    ) -> "tuple[tuple[str, ...], StepVerdict]":
+        """판정 step 이 `done()` 으로 멈춘 자리에서 근거가 아직 없는 기대 항목(pe12). 반대로 나온 항목이 있으면 비어 있다 —
+        그것은 더 돌아서 나올 결과가 아니라 판정이다. 게임을 멈춘 채 묻는다: 묻는 동안 화면이 다음 상태로 흘러가지 않게."""
+        async with self._game_paused(executer.channel, step):
+            image = (
+                await capture_screen(executer.channel, f"Step {step}: capturing the screen to check the expected results", step)
+                if self._spec.screen_images == "on"
+                else None
+            )
+            verdict = await self._coverage_judge.judge(scenario, step, play, image=image)
+        await note_decision(
+            executer.channel, "coverage_check",
+            f"Step {step}: done() held; expected results without evidence: {len(verdict.missing)}",
+            step, missing=list(verdict.missing) or None, contradicted=list(verdict.contradicted) or None,
+            checks=list(verdict.checks) or None,
+        )
+        return (() if verdict.contradicted else verdict.missing), verdict
 
     async def _start_refusal(self, executer: Executer, macros: StepMacros, step: int) -> str | None:
         """계획을 받은 지금 화면에서 끝 조건이 이미 참이면 그 까닭(planner 거절 문장), 아니면 `None`(pe11).
@@ -1123,6 +1172,15 @@ def _hidden_text(play: StepPlay) -> str:
 
 # 앞선 step 판정 한 줄에 싣는 이유의 길이.
 MAX_EARLIER_REASON_CHARS = 300
+
+
+def verdict_step(scenario: QaScenario, step: int) -> bool:
+    """`step` 이 case 의 판정 step 인가: case 의 마지막 step 이고 기대 결과가 있다(`this_step` 이 `verify` 를 싣는 step)."""
+    item = scenario.steps[step - 1]
+    if item.case_id is None or item.case is None or not item.case.expected:
+        return False
+    following = scenario.steps[step].case_id if step < len(scenario.steps) else None
+    return following != item.case_id
 
 
 def earlier_verdicts(scenario: QaScenario, state: QaRunState) -> list[str]:

@@ -316,6 +316,8 @@ class StepPlay:
     left_scene: str | None = None
     # step 이 planner 의 다시 쓰기를 거쳤다(재계획·복구). 다시 쓴 계획은 묶음을 받지 않으므로 runner 가 묶음을 버린다.
     rewritten: bool = False
+    # 판정 step 이 `done()` 으로 멈춘 자리에서 runner 가 받은 판정(pe12). 다시 판정하지 않고 그대로 쓴다.
+    judged: Any = None
     # play 가 멈출 때 Jev 가 마지막으로 읽은 `STATE_SET` 의 `stateVersion`. 판정의 근거를 Orchestration 상태에 잇는다.
     end_state_version: int | None = None
     # planner 의 ```check 범위와, 그 값을 play 시작·매 turn 시작·끝에 `STATE_SET` 에서 읽은 기록. 기록 하나는
