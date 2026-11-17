@@ -18,6 +18,10 @@ _STATUS_WORDS = {PRESENT, INACTIVE, STALE, UNKNOWN, ABSENT, NOT_READ}
 MAX_EVIDENCE_LOG_BYTES = 48_000
 
 
+# 판정 근거에서 선언된 fact 의 값이 붙는 이름의 앞머리(`fact map_spot`). check 와 상관없이 매 기록에 읽힌다(pe18).
+FACT_PREFIX = "fact "
+
+
 def readings(evidence: list[dict]) -> list[dict]:
     """값을 읽은 기록만."""
     return [entry for entry in evidence if "values" in entry]

@@ -300,9 +300,10 @@ def game_meanings(declared: GameFacts, identities: tuple = ()) -> GameMeanings:
     lines: list[str] = []
     if declared.facts:
         lines.append(
-            "Game facts (declared by the game's developer). Each names one game value and says what it means. In the game "
-            "values of a step's record, a value read from a fact's source carries `[fact <name>]`; read it by the fact's "
-            "meaning."
+            "Game facts (declared by the game's developer). Each names one game value and says what it means. The game "
+            "values of a step's record always include `fact <name>`, that fact's value at each reading (a fact the game "
+            f"did not report at any reading of the step is left out; one it did not report at some reading reads \"{UNKNOWN}\"). "
+            "Another value read from a fact's source carries `[fact <name>]`. Read these by the fact's meaning."
         )
         lines += [f"- {fact.name} = `{_source_name(fact)}` ({fact.type}): {fact.definition()}" for fact in declared.facts]
     if declared.rules:

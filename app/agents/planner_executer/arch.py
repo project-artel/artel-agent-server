@@ -130,6 +130,8 @@ from pydantic import BaseModel, ConfigDict, Field
 # 열린 가장 높은 스테이지"(`stages_unlocked_up_to`)인 줄 몰라 열림을 확인할 수 없다고 실패로 판정했다.
 # - 선언은 evaluator·실패 분석 system 글 끝에 붙는다. 런 내내 같으므로 step 마다 싣지 않는다.
 # - 판정 근거의 값 중 fact 의 source 에서 읽은 것에 `[fact <name>]` 을 붙인다.
+# - 판정 근거는 선언된 fact 값을 check 와 상관없이 매 기록에 `fact <name>` 으로 읽는다. 선언만 알고 값이 없으면 evaluator 가
+#   그 fact 로 확인할 결과를 확인할 수 없다고 판정했다(로컬 try 39 step 5, `map_spot`).
 PLANNER_EXECUTER_LABEL = "pe18-evaluator-knows-facts"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.

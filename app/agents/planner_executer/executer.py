@@ -40,7 +40,7 @@ from pydantic import BaseModel, Field
 from app.agents.planner_executer.arch import PlannerExecuterArchSpec
 from app.agents.planner_executer.contract import READY_PREFIX
 from app.agents.planner_executer.target import StepTarget, target_state
-from app.agents.planner_executer.evidence import evidence_log, readings
+from app.agents.planner_executer.evidence import FACT_PREFIX, evidence_log, readings
 from app.agents.planner_executer.macro_host import ChannelMacroHost
 from app.agents.planner_executer.macros import (
     EFFECT_FLAG,
@@ -1138,6 +1138,11 @@ class Executer:
         values: dict[str, Any] = {ACTIVE_SCENE: scene}
         unknown: list[str] = []
         entry: dict[str, Any] = {"at": at, "state_version": snapshot.state_version, "values": values}
+        if self._game_facts.facts:
+            # 선언된 fact 는 check 와 상관없이 `fact <name>` 으로 읽는다(pe18). evaluator 는 선언을 알기 때문에, 값이 없으면 그
+            # fact 가 말하는 결과를 확인할 수 없다고 판정한다 — 로컬 try 39 step 5 는 `map_spot` 을 찾다 실패했다.
+            facts, _reasons = declared_values(snapshot, [(fact.name, fact.scope, fact.member) for fact in self._game_facts.facts])
+            values.update({f"{FACT_PREFIX}{name}": value for name, value in facts.items()})
         names = play.target.names() if play.target is not None else []
         if names:
             # 대상을 가리키는 값은 check 범위와 상관없이 읽는다. check 의 경로가 좁으면 그 객체가 빠질 수 있다.

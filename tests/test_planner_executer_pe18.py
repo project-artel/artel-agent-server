@@ -97,3 +97,48 @@ def test_the_failure_analysis_reads_the_same_declarations() -> None:
     system, user = seen[0]
     assert "stages_unlocked_up_to = `static MapMove.StagePosition`" in system
     assert "[fact stages_unlocked_up_to]" in user
+
+
+# --- 판정 근거는 선언된 fact 값을 늘 읽는다 --------------------------------------------------------------
+
+
+def test_the_evidence_reads_every_declared_fact_whatever_the_check_names(tmp_path) -> None:
+    """로컬 try 39 step 5: 묶음 앞 step 의 check 에 `MapMove.position` 이 없어, 선언을 아는 evaluator 가 `map_spot` 을 찾다 실패했다."""
+    from app.agents.planner_executer.executer import Executer
+    from app.qa.jev import JevClient
+    from tests.test_planner_executer_facts import FakeGame, _declare, _snapshot
+    from tests.test_planner_executer_facts import _config as facts_config
+
+    declared = _declare(tmp_path)
+    config = facts_config(state_source="state_set", facts="on")
+
+    async def reader(_try_id, _spec):
+        return _snapshot(hand_status="UNREAD", static_value=2)
+
+    async def go():
+        fake = FakeGame("Battle", {})
+        executer = Executer(fake.channel, config.arch.planner, JevClient(post=None), state_reader=reader, facts=declared)
+        play = StepPlay("done")
+        await executer._read_evidence(play, "start")
+        return play
+
+    play = asyncio.run(go())
+
+    values = play.evidence[0]["values"]
+    assert values["fact player_hp"] == 90 and values["fact spells_in_flight"] == 2
+    assert values["fact cards_in_hand"] == "unknown"
+
+
+def test_a_fact_unknown_at_every_reading_is_left_out_of_the_evaluator_s_values() -> None:
+    play = StepPlay(
+        "done",
+        evidence=[
+            {"at": "start", "values": {"fact map_spot": 0, "fact player_hp": "unknown"}},
+            {"at": "end", "values": {"fact map_spot": 0, "fact player_hp": "unknown"}},
+        ],
+    )
+
+    text = evidence_text(play, game_meanings(FACTS))
+
+    assert "fact map_spot: 0 (unchanged from start to end)" in text
+    assert "fact player_hp" not in text

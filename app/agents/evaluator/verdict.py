@@ -25,8 +25,8 @@ from typing import TYPE_CHECKING, Any, Literal
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, field_validator
 
-from app.agents.planner_executer.evidence import names_of, points_of, readings
-from app.agents.planner_executer.facts import NO_MEANINGS, GameMeanings
+from app.agents.planner_executer.evidence import FACT_PREFIX, names_of, points_of, readings
+from app.agents.planner_executer.facts import NO_MEANINGS, UNKNOWN, GameMeanings
 from app.agents.planner_executer.executer import StepPlay
 from app.agents.planner_executer.target import evaluator_note
 from app.agents.planner_executer.prompts import (
@@ -509,6 +509,9 @@ def evidence_text(play: StepPlay, meanings: GameMeanings = NO_MEANINGS) -> str:
         lines.append("  (no reading succeeded)")
     names = names_of(read)
     for name in names:
+        if name.startswith(FACT_PREFIX) and all(entry["values"].get(name, UNKNOWN) == UNKNOWN for entry in read):
+            # 이 구간에 없는 객체의 fact(지도에서의 전투 값 등)는 줄만 늘린다.
+            continue
         fact = meanings.label(name)
         lines.append(f"  {name}{f' [fact {fact}]' if fact else ''}: {_series(name, read)}")
     if play.evidence_unknown:
