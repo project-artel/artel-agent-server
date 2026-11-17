@@ -70,7 +70,7 @@
     "qa_planner/v7/scene_evaluator": "d80d353a21509eca16112cd079ed558f9d1f4a37d731ba232ac687dceb9dada0",
     "qa_planner/v7/scene_rules": "d92474305376446defbd39b85249a06323c465067ea56f29888e401fdbf85abb",
     "qa_planner/v7/target_resolver": "8f2517a86dcb50b542c78019b389a05c7e7f899d4be72a724a8510a8b9fdcf61",
-    "qa_planner/v8/evaluator": "64bf7fcc2b2f8adeb0f17a636e72789278a6a317cae48c29c26b96e2c9c1222a",
+    "qa_planner/v8/evaluator": "4dcbcddb0f4b4718625fff9eabc7ba735c8ff0f64b4a19ef212b571a0d68fc06",
     "qa_planner/v8/failure_analysis": "758c8b4404bc58ad2365130951813296bceff75382dae8459abb019e78b84118",
     "qa_planner/v8/macro_repair": "97882e6a00282d5e7042db463fc2f2648250f3650ce0d3c0b41b0a0112117ace",
     "qa_planner/v8/rules": "4fd645de181ce37229cd80f9fe6ca01506f51bd529b6b76dc088641a7933bfb0",

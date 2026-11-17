@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app.agents.planner_executer.evidence import names_of, points_of, readings
 from app.agents.planner_executer.executer import StepPlay
@@ -89,8 +89,14 @@ class ItemCheck(BaseModel):
     met: Literal["yes", "no", "unknown"]
     # 항목이 플레이어가 보는 것(`screen`)을 말하는가, 게임 안의 값(`game`)을 말하는가.
     about: Literal["screen", "game"] = "game"
-    # 판정의 근거가 된 것. `turn` 은 행동의 끝(입력 결과, `wait_until` 의 성공·실패)이다.
-    shown_by: Literal["screen_text", "picture", "game_value", "scene", "turn", "none"] = "none"
+    # 판정의 근거가 된 것들. `turn` 은 행동의 끝(입력 결과, `wait_until` 의 성공·실패)이다. 하나만 고르게 했더니 켜진 카드와
+    # 그 글자를 함께 본 항목이 `game_value` 하나로 적혀 화면 근거 없음으로 떨어졌다(로컬 try 32 step 7).
+    shown_by: list[Literal["screen_text", "picture", "game_value", "scene", "turn", "none"]] = ["none"]
+
+    @field_validator("shown_by", mode="before")
+    @classmethod
+    def _one_or_many(cls, value: Any) -> Any:
+        return [value] if isinstance(value, str) else value
 
 
 class GameVerdict(BaseModel):
@@ -121,7 +127,7 @@ def settle_checks(checks: list[ItemCheck]) -> tuple[list[ItemCheck], bool | None
         return checks, None
     settled = [
         check.model_copy(update={"met": "unknown"})
-        if check.met == "yes" and check.about == "screen" and check.shown_by in ("game_value", "none")
+        if check.met == "yes" and check.about == "screen" and set(check.shown_by) <= {"game_value", "none"}
         else check
         for check in checks
     ]

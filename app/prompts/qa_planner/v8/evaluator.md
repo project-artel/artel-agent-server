@@ -90,11 +90,12 @@ Answer six things.
     shows it either way — the move it needs was never made, or nothing was read when it would show;
   - `about`: `screen` when it is something a player sees (a text shown, a window, an object on or off
     the screen), otherwise `game`;
-  - `shown_by`: what showed it — `screen_text` (a text or visibility reading of an object on screen),
-    `picture`, `game_value` (a member value), `scene`, `turn` (an action's end: its inputs, or the
-    `wait_until` that held or failed in it), or `none`.
+  - `shown_by`: every kind of reading that showed it, as a list — `screen_text` (an object on the
+    screen reading `(present)`, or its text), `picture`, `game_value` (a member value), `scene`, `turn`
+    (an action's end: its inputs, or the `wait_until` that held or failed in it), or `none`.
   A result about the screen is not shown by a game value alone: a value named like the text can hold
-  the text the game is about to show, not what is shown. A result that depends on when the input came
+  the text the game is about to show, not what is shown. When the picture is covered, the objects on
+  the screen and their texts in the readings still show it. A result that depends on when the input came
   (pressed while something was still in progress) is shown only by a reading right around that input
   or by the action that checked it.
   `passed` must agree with `checks`: true only when every entry is `yes`. The verdict is taken from
@@ -109,5 +110,5 @@ Answer six things.
 Answer with a JSON object and nothing else: {{"passed": <true or false>, "reason": "<one or two
 sentences>", "state_detail": "<the deciding values>", "game_insight": "<one or two sentences, or empty>",
 "evidence_sufficient": <true or false>, "checks": [{{"expected": "<one result>", "observed": "<what the record
-shows>", "met": "<yes, no or unknown>", "about": "<screen or game>", "shown_by": "<screen_text, picture, game_value, scene,
-turn or none>"}}, ...]}}
+shows>", "met": "<yes, no or unknown>", "about": "<screen or game>", "shown_by": ["<screen_text, picture, game_value,
+scene, turn or none>", ...]}}, ...]}}

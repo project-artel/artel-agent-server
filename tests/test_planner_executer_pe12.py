@@ -26,6 +26,15 @@ def test_the_verdict_passes_only_when_every_expected_result_is_met() -> None:
     assert settle_checks([_check("yes"), _check("unknown")])[1] is False
 
 
+def test_a_screen_result_shown_by_a_game_value_and_an_object_on_screen_is_met() -> None:
+    checks, passed = settle_checks([
+        ItemCheck(expected="two cards come into the hand", observed="two cards present, count 2", met="yes",
+                  about="screen", shown_by=["game_value", "screen_text"]),
+    ])
+
+    assert passed is True and checks[0].met == "yes"
+
+
 def test_a_result_about_the_screen_is_not_met_by_a_game_value_alone() -> None:
     checks, passed = settle_checks([
         _check("yes", about="screen", shown_by="game_value", expected="the line shows in full"),
