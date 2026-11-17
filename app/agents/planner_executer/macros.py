@@ -561,8 +561,12 @@ async def read_segment(
     step: int,
     goal_names: tuple[str, ...],
     action_names: tuple[str, ...] = (),
+    written_at: int | None = None,
 ) -> dict[int, tuple[tuple[str, ...], MacroDefinition | None, tuple[str, ...]]]:
     """```segment 블록: 이 계획이 맡는 연속 step 과 step 마다의 하위 목표·완료 조건·action. 블록이 없으면 비어 있다.
+
+    `written_at` 은 다시 쓴 계획이 이어 받은 블록을 처음 쓴 step 이다. 그 step 보다 뒤에서 다시 쓰면 지나간 step 의 줄은 버리고,
+    지금 step 의 완료 조건은 `done()` 이 아니라 `done_<step>()` 이다 — `done()` 은 블록을 처음 쓴 step 의 것이다.
 
     줄마다 `<step 번호>: <하위 목표 이름>, ... | <action 이름>, ...` 이다. 첫 줄은 지금 step 이고 그 뒤는 바로 다음 step
     부터 빠짐없이 이어진다. 뒤 step 마다 `def done_<번호>() -> bool:` 이 있어야 한다. 하위 목표는 ```goals 에, action 은
@@ -595,6 +599,12 @@ async def read_segment(
                 f"the ```segment block names goals that are not in the ```goals block: {', '.join(unknown)}."
             )
         rows.append((int(matched.group(1)), names, tuple(actions)))
+    if written_at is not None:
+        # 묶음의 마지막 step 에서 다시 써도 그 줄 하나는 남긴다. 그 step 이 맡은 action·하위 목표만 열리게 하는 것이 그 줄이다.
+        rows = [row for row in rows if row[0] >= step]
+        if not rows:
+            return {}
+    own_done = written_at is None or written_at == step
     numbers = [number for number, _names, _actions in rows]
     if numbers != list(range(step, step + len(rows))):
         raise MacroRejection(
@@ -607,7 +617,7 @@ async def read_segment(
     defs = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
     segment: dict[int, tuple[tuple[str, ...], MacroDefinition | None, tuple[str, ...]]] = {}
     for number, names, actions in rows:
-        if number == step:
+        if number == step and own_done:
             segment[number] = (names, None, actions)
             continue
         name = f"{SEGMENT_DONE_PREFIX}{number}"

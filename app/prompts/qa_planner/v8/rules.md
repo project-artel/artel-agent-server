@@ -33,11 +33,11 @@ When play gets stuck you are asked to write the step again, with the reason, the
 plan as it is now (its version and its blocks). Answer with the changes to that plan, not a new one:
 
     ```changes
-    {{"base": <the version shown>, "replace": {{"<action>": "<why>"}}, "remove": {{"<action>": "<why>"}}, "add": ["<new action>"]}}
+    {{"base": <the version shown>, "replace": {{"<action or def>": "<why>"}}, "remove": {{"<action or def>": "<why>"}}, "add": ["<new action>"]}}
     ```
 
 then only what changes: a ```python block with the new or replaced defs (`done` only if it changes),
-a ```developer block with developer macros to add, and ```goals, ```observe, ```check or ```after only
+a ```developer block with developer macros to add, and ```goals, ```segment, ```observe, ```check or ```after only
 if they change. Everything you do not name stays as it is. The whole plan is checked again after your changes,
 so a block that names a removed action must change too.
 

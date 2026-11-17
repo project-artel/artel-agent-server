@@ -116,7 +116,16 @@ from pydantic import BaseModel, ConfigDict, Field
 # - TC 가 시작하는 step 에서 play 전에 Jev noul 로 사전 조건 글을 화면 전체와 대조한다(성립 ≥ 0.6, 불성립 ≤ 0.3, 그 사이는 확인 불가).
 # - 불성립이면 planner 가 그것을 먼저 맞추도록 한 번 다시 쓴다. planner 는 평소에는 사전 조건을 따로 다루지 않는다.
 # - evaluator 는 `precondition_held` 를 낸다. 거짓이면 통과로 두지 않고 "사전 조건 불충족" 으로 실패와 따로 적는다.
-PLANNER_EXECUTER_LABEL = "pe16-precondition-check"
+# pe17-replan-keeps-segment: 다시 쓴 계획이 묶음을 이어 받는다. 예전에는 다시 쓰면 ```segment 만 버리고 뒤 step 의 하위 목표·
+# action 은 남겼다. 로컬 try 36·37 step 16 은 미리 쓴 계획이 16~18 묶음이었는데, 사전 조건 확인으로 다시 쓰자 한 step 이 창 닫기·
+# 전투 입장까지 맡아 17·18 을 지나갔고, 둘은 할 일 없이 제 구간만 보고 실패했다.
+# - 다시 쓴 답이 ```segment 를 보내지 않으면 지금 계획의 것을 이어 받는다. 묶음 중간 step 에서 다시 쓰면 지나간 줄은 버리고 그
+#   step 은 `done_<step>()` 으로 끝난다. 이 step 은 제 몫으로 돌고, 뒤 step 들은 다시 쓴 계획의 몫으로 돈다.
+# - 묶음이 뒤 step 으로 이어지는 step 에서는 coverage check 로 다시 쓰지 않는다. 묶음 전체 기록으로 함께 판정한다.
+# - ```changes 의 replace·remove 가 action 말고 계획의 다른 `def`(`done`, `ready_<action>` 등)도 받는다. try 31~37 의 재계획
+#   거절 13건이 모두 이것이었다.
+# - 시작 검사는 묶음 계획이면 그 step 이 맡은 action 만 센다. 보기만 하는 step 1 이 step 2 의 action 때문에 거절됐다(try 31·34·35).
+PLANNER_EXECUTER_LABEL = "pe17-replan-keeps-segment"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 1

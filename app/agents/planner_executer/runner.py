@@ -364,10 +364,12 @@ class PlannerExecuterRunner:
                         early = self._start_early(channel, scenario, step + 1, step)
                         holder = [early]
                         following = asyncio.create_task(self._follow_scene(channel, scenario, step, holder))
+                    rewritten_ahead: dict[int, StepMacros] = {}
                     try:
                         play = await self._play_with_replans(
                             scenario, step, planner, executer, written.macros, target, checked=checked, finished=finished,
                             precondition=case_precondition(scenario, step) if finished is None else None,
+                            rewritten_ahead=rewritten_ahead,
                         )
                     finally:
                         if following is not None:
@@ -389,9 +391,12 @@ class PlannerExecuterRunner:
                         continue
                     if play.later_step is not None:
                         ended_through = play.later_step
-                    if (play.stopped not in GOAL_STOPS and play.stopped != PASSED_IN_EARLIER_STEP) or play.rewritten:
-                        # 뒤 step 의 계획은 이 step 이 끝 조건에서 멈춘 화면을 전제한다. 다시 쓴 계획은 묶음을 받지 않는다.
+                    if play.stopped not in GOAL_STOPS and play.stopped != PASSED_IN_EARLIER_STEP:
+                        # 뒤 step 의 계획은 이 step 이 끝 조건에서 멈춘 화면을 전제한다.
                         ahead.clear()
+                    elif play.rewritten:
+                        # 다시 쓴 계획이 묶음을 이어 받았으면 뒤 step 은 그 계획의 몫으로 돈다. 이어 받지 않았으면 새로 쓴다.
+                        ahead = dict(rewritten_ahead)
                     if not ahead:
                         ended_through = None
                     # `done()` 자리에서 이미 판정을 받았고 묶음이 이어지지 않으면 그 판정을 쓴다. 화면도 그때 찍었다(pe12).
@@ -701,9 +706,13 @@ class PlannerExecuterRunner:
         checked: bool = False,
         finished: str | None = None,
         precondition: str | None = None,
+        rewritten_ahead: dict[int, StepMacros] | None = None,
     ) -> StepPlay | None:
         """`precondition` 은 이 step 에서 시작하는 TC 의 사전 조건이다(pe16). play 전에 화면과 대조하고, 성립하지 않으면 planner 가
         그것을 먼저 맞추도록 한 번 다시 쓴다. 대조 결과는 판정에 함께 간다.
+
+        다시 쓴 계획이 묶음을 이어 받았으면 이 step 은 그중 제 몫(`step_of_segment`)으로 돌고, 뒤 step 들의 몫은
+        `rewritten_ahead` 에 담는다. 마지막으로 다시 쓴 계획의 것만 남는다.
 
         Play the step, and have the planner write it again while it is asked to and has budget left: no action was
         ready or every action was out, the scene changed under the plan (`off_plan`, pe11), or an action got stuck under
@@ -735,7 +744,7 @@ class PlannerExecuterRunner:
                 async with self._game_paused(executer.channel, step):
                     written = await planner.replan(scenario, step, reason, [], transition)
                 if written.macros is not None:
-                    macros = written.macros
+                    macros = self._own_part(written.macros, step, rewritten_ahead)
                     checked = not written.unchecked
                     checked_precondition["rewritten"] = True
         while True:
@@ -774,6 +783,9 @@ class PlannerExecuterRunner:
                 and spec.coverage_check == "on"
                 and coverages < spec.max_coverage_rewrites
                 and verdict_step(scenario, step)
+                # 묶음이 뒤 step 으로 이어지면 묶음 전체 기록으로 함께 판정한다. 뒤 step 이 낼 결과를 이 step 에서 앞당겨 만들게
+                # 다시 쓰지 않는다(로컬 try 37 step 16 이 다음 전투를 보려고 17·18 의 입력을 보냈다).
+                and not any(number > step for number in getattr(macros, "segment", {}))
             ):
                 joined = _with_precondition(_joined_rewrites(plays), checked_precondition)
                 missing, verdict = await self._missing_results(executer, scenario, step, joined)
@@ -804,8 +816,16 @@ class PlannerExecuterRunner:
                     f"(asked because: {clip(play.stopped, MAX_REFUSAL_CHARS)})"
                 )
                 return _with_precondition(_joined_rewrites(plays), checked_precondition)
-            macros = written.macros
+            macros = self._own_part(written.macros, step, rewritten_ahead)
             checked = not written.unchecked
+
+    @staticmethod
+    def _own_part(macros: StepMacros, step: int, ahead: dict[int, StepMacros] | None) -> StepMacros:
+        """다시 쓴 계획에서 `step` 이 맡는 몫. 묶음이 이어지면 뒤 step 들의 몫을 `ahead` 에 담는다(앞의 것은 지운다)."""
+        if ahead is not None:
+            ahead.clear()
+            ahead.update({number: step_of_segment(macros, number) for number in macros.segment if number > step})
+        return step_of_segment(macros, step)
 
     async def _missing_results(
         self, executer: Executer, scenario: QaScenario, step: int, play: StepPlay
@@ -834,7 +854,10 @@ class PlannerExecuterRunner:
         뒤의 것이 참이면 이 step 이 시작하자마자 그 step 의 결과로 끝난다. 예전에는 Jev 에게 목표 도달을 물었지만 답은 반반이었다
         (try 17·18·24)."""
         held = []
-        if (macros.actions or macros.contracts) and await executer.holds(macros.probe, step):
+        # 묶음 계획이면 이 step 이 맡은 action 만 센다. 보기만 하는 첫 step 이 뒤 step 의 action 때문에 "동작이 있는 step" 으로 읽혀
+        # 거절되었다(로컬 try 31·34·35 step 1 — 제목 화면이 이미 떠 있는 것이 그 step 의 결과다).
+        own = step_of_segment(macros, step)
+        if (own.actions or own.contracts) and await executer.holds(macros.probe, step):
             held.append("`done()`")
         for number, (_goals, probe, _actions) in sorted(macros.segment.items()):
             if number > step and probe is not None and await executer.holds(probe, number):
@@ -1211,7 +1234,8 @@ def case_precondition(scenario: QaScenario, step: int) -> str | None:
 
 
 def _with_precondition(play: StepPlay, checked: dict | None) -> StepPlay:
-    """play 에 사전 조건 대조 결과를 붙인다. 맞추려고 계획을 다시 썼으면 묶음의 뒤 step 계획은 버린다(`rewritten`)."""
+    """play 에 사전 조건 대조 결과를 붙인다. 맞추려고 계획을 다시 썼으면 그것을 남긴다(`rewritten`): 묶음의 뒤 step 은 다시 쓴
+    계획의 몫으로 돈다."""
     if checked is not None:
         play.precondition = checked
         if checked.get("rewritten"):

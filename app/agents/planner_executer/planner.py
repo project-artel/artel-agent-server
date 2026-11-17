@@ -633,14 +633,37 @@ class Planner:
                         )
                 after = read_after(after_text, [*macros.actions, *macros.contracts])
                 goals, goal_probes = await read_goals(goals_text, source, self._registered)
-                # 묶음은 처음 쓰는 계획에만 받는다. 다시 쓰는 계획(복구·재계획)은 그 step 하나를 고친다.
-                segment = (
-                    await read_segment(
-                        segment_text, source, self._registered, step, tuple(name for name, _ in goals),
-                        tuple([*macros.actions, *macros.contracts]),
+                # 묶음은 처음 쓰는 계획과, 그 계획을 다시 쓴 계획이 받는다. 다시 쓴 답이 ```segment 를 보내지 않으면 지금 계획의
+                # 묶음을 이어 받는다. 예전에는 다시 쓰면 묶음만 버리고 뒤 step 의 하위 목표·action 은 남겨, 그 step 하나가 뒤 step
+                # 들의 입력까지 보냈다(로컬 try 36·37 step 16 이 17·18 을 지나갔다).
+                segment_step: int | None = None
+                carried = False
+                if kind == "step" and base is None:
+                    segment_step = step if segment_text else None
+                elif kind == "replan" and base is not None:
+                    if segment_text is not None:
+                        segment_step = step
+                    elif base.segment_text:
+                        segment_text, segment_step, carried = base.segment_text, base.segment_step, True
+                else:
+                    segment_text = None
+                try:
+                    segment = (
+                        await read_segment(
+                            segment_text, source, self._registered, step, tuple(name for name, _ in goals),
+                            tuple([*macros.actions, *macros.contracts]),
+                            written_at=segment_step if carried else None,
+                        )
+                        if segment_text else {}
                     )
-                    if base is None and kind == "step" else {}
-                )
+                except MacroRejection as rejection:
+                    if not carried:
+                        raise
+                    raise MacroRejection(
+                        f"{rejection.reason} (This is the ```segment block kept from the plan you changed. When your "
+                        "changes touch what it names, send the whole ```segment block again.)",
+                        rejection.line,
+                    ) from None
                 if self._game_facts.facts:
                     check_guidance_facts(macros.guidance, fact_names, self._game_facts)
                 written = Written(
@@ -697,6 +720,8 @@ class Planner:
                 tuple([*written.macros.actions, *written.macros.contracts]),
                 observe_text, check_text, after_text, summary, actions_text, guidance_text, guidance_summary,
                 facts_text, goals_text,
+                segment_text if written.macros.segment else None,
+                segment_step if written.macros.segment else None,
             )
             actions = [*written.macros.actions, *written.macros.contracts]
             observe = written.macros.observe

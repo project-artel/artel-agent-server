@@ -42,6 +42,9 @@ class PlanDraft:
     facts_text: str | None = None
     # ```goals 블록(prompt v6).
     goals_text: str | None = None
+    # ```segment 블록과, 그 블록을 처음 쓴 step(`done()` 이 그 step 의 완료 조건이다). 다시 쓴 계획도 이것을 이어 받는다.
+    segment_text: str | None = None
+    segment_step: int | None = None
 
 
 @dataclass(frozen=True)
@@ -63,11 +66,16 @@ def split_changes_block(answer: str) -> tuple[str, str | None]:
 
 
 def read_changes(text: str | None, draft: PlanDraft) -> Changes:
-    """```changes 블록, 또는 `MacroRejection`. 이름은 지금 계획의 행동이어야 하고, 교체·제거에는 이유가 있어야 한다."""
+    """```changes 블록, 또는 `MacroRejection`. 이름은 지금 계획의 행동이나 그 밖의 `def`(`done`, `done_<k>`, `ready_<action>`,
+    `goal_<name>` 같은 것)여야 하고, 교체·제거에는 이유가 있어야 한다.
+
+    예전에는 행동 이름만 받았다. planner 는 "새로 쓰거나 바꾼 `def`" 를 바꾼다고 적으며 `done` 같은 이름을 넣었고, 로컬 try 31~37 의
+    재계획 거절 13건이 모두 그것이었다 — 같은 이름의 새 `def` 는 원래도 덮어쓰는데 이름을 적었다는 이유로 답 하나를 버렸다."""
     shape = (
-        '{"base": <the plan version shown>, "replace": {"<action>": "<why>"}, "remove": {"<action>": "<why>"}, '
+        '{"base": <the plan version shown>, "replace": {"<action or def>": "<why>"}, "remove": {"<action or def>": "<why>"}, '
         '"add": ["<new action>"]}'
     )
+    defs = _pieces(draft.source)[1]
     if text is None or not text.strip():
         raise MacroRejection(f"a rewrite answers with a ```changes block: {shape}.")
     try:
@@ -86,10 +94,11 @@ def read_changes(text: str | None, draft: PlanDraft) -> Changes:
         part = block.get(key) or {}
         if not isinstance(part, dict) or not all(isinstance(why, str) and why.strip() for why in part.values()):
             raise MacroRejection(f'"{key}" in the ```changes block maps each action to the reason, as a non-empty string.')
-        unknown = [name for name in part if name not in draft.actions]
+        unknown = [name for name in part if name not in draft.actions and name not in defs]
         if unknown:
             raise MacroRejection(
-                f'"{key}" names {", ".join(unknown)}, which is not an action of the plan: {", ".join(draft.actions)}.'
+                f'"{key}" names {", ".join(unknown)}, which is neither an action nor a def of the plan. Actions: '
+                f'{", ".join(draft.actions) or "(none)"}; defs: {", ".join(defs) or "(none)"}.'
             )
         picked[key] = dict(part)
     add = block.get("add") or []
@@ -100,7 +109,7 @@ def read_changes(text: str | None, draft: PlanDraft) -> Changes:
 
 def merge(draft: PlanDraft, changes: Changes, source: str, calls: list[str]) -> tuple[str, list[str]]:
     """지금 계획에 수정을 합친 `(macro 글, ```developer 줄들)`. 교체·제거한 행동과 그 효과·준비 조건 predicate 는 빠지고,
-    새 글의 `def` 는 같은 이름을 덮거나 더해진다. 그 밖의 `def` 와 `import` 는 그대로다."""
+    교체·제거한 그 밖의 `def` 도 빠진다. 새 글의 `def` 는 같은 이름을 덮거나 더해진다. 그 밖의 `def` 와 `import` 는 그대로다."""
     gone = set(changes.replace) | set(changes.remove)
     dropped = gone | {effect_name(name) for name in gone} | {ready_name(name) for name in gone}
     old_imports, old_defs = _pieces(draft.source)
@@ -141,7 +150,7 @@ def shown(draft: PlanDraft) -> str:
     for name, text in (
         ("guidance", draft.guidance_text), ("actions", draft.actions_text), ("observe", draft.observe_text),
         ("check", draft.check_text), ("after", draft.after_text), ("facts", draft.facts_text),
-        ("goals", draft.goals_text),
+        ("goals", draft.goals_text), ("segment", draft.segment_text),
     ):
         if text and text.strip():
             parts.append(f"```{name}\n{text.strip()}\n```")

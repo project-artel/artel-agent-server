@@ -80,7 +80,7 @@ def test_a_rewrite_keeps_what_it_does_not_name_and_drops_what_it_replaces() -> N
     [
         (None, "a rewrite answers with a ```changes block"),
         ('{"base": 1}', "based on plan 1, but the plan now is 2"),
-        ('{"base": 2, "remove": {"nope": "x"}}', "not an action of the plan"),
+        ('{"base": 2, "remove": {"nope": "x"}}', "neither an action nor a def of the plan"),
         ('{"base": 2, "remove": {"press_start": ""}}', "maps each action to the reason"),
     ],
 )
