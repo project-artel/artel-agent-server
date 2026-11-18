@@ -29,15 +29,15 @@ from app.agents.qa.vision import (
 )
 from app.llm.catalog import get_model_catalog
 from app.qa.channel import QaRunChannel
-from app.qa.schemas import QaStepResult, QaCaseAttemptResult
 from app.qa.envelope import LogCategory, MessageType
+from app.qa.schemas import QaCaseAttemptResult, QaStepResult
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake image body"
 
 
 @pytest.mark.parametrize("status", [200, 204, 404])
 def test_every_call_prefers_live_jpeg_and_falls_back_to_sdk(monkeypatch, status):
-    state = SimpleNamespace(take_pending_captures=lambda: [])
+    state = SimpleNamespace(take_pending_captures=list)
     arch = SimpleNamespace(screen_capture=ScreenCaptureMode.every_call)
     middleware = QaCaptureVisionMiddleware(state, SimpleNamespace(qa_try_id=42), arch)
     auto_capture = AsyncMock(return_value=None)
@@ -922,3 +922,51 @@ def test_trimming_does_not_touch_ordinary_messages() -> None:
     assert isinstance(trimmed[2].content, str)
     assert trimmed[3].content[1]["type"] == "image_url"
     assert trimmed[4].content[1]["type"] == "image_url"
+
+
+# --- `capture_after`: 행동 결과와 화면을 한 번에 ---
+
+
+def answer_each(channel: QaRunChannel, sent: list[dict], replies: list[list[dict]]):
+    """ACTION 이 하나씩 올 때마다 차례로 답한다."""
+
+    async def reply() -> None:
+        for results in replies:
+            already = len(actions(sent))
+            # 행동 뒤 화면이 가라앉기를 기다리는 시간이 있어서, 다음 ACTION 은 바로 오지 않는다.
+            for _ in range(400):
+                if len(actions(sent)) > already:
+                    break
+                await asyncio.sleep(0.005)
+            channel.on_action_result({"correlationId": actions(sent)[-1]["messageId"], "payload": {"results": results}})
+
+    return asyncio.create_task(reply())
+
+
+def test_capture_after_는_행동이_끝난_뒤_화면을_찍어_같은_결과에_붙인다() -> None:
+    async def run() -> None:
+        channel, state, tools, sent = make()
+
+        answer_each(channel, sent, [[{"id": 1, "success": True}], [capture_result()]])
+        result = await tools["click_button"].ainvoke(
+            {"step": 1, "target_id": 42, "thought": "누른 뒤 화면을 본다", "capture_after": True}
+        )
+
+        assert [frame["payload"]["actions"][0]["method"] for frame in actions(sent)] == ["button_click", "capture_screen"]
+        assert "image follows" in result
+        assert len(state.take_pending_captures()) == 1
+
+    asyncio.run(run())
+
+
+def test_capture_after_가_없으면_찍지_않는다() -> None:
+    async def run() -> None:
+        channel, state, tools, sent = make()
+
+        answer_each(channel, sent, [[{"id": 1, "success": True}]])
+        await tools["click_button"].ainvoke({"step": 1, "target_id": 42, "thought": "누른다"})
+
+        assert [frame["payload"]["actions"][0]["method"] for frame in actions(sent)] == ["button_click"]
+        assert state.take_pending_captures() == []
+
+    asyncio.run(run())

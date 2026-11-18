@@ -122,3 +122,37 @@ def test_OpenRouter_Anthropic_은_답_메시지에는_경계를_달지_않는다
     payload = _openrouter()._get_request_payload(messages)
 
     assert "cache_control" not in json.dumps(payload)
+
+
+def test_turn_scoped_메시지는_clear_at_system_메시지로_user_뒤에_간다() -> None:
+    from langchain_core.messages import (
+        AIMessage,
+        HumanMessage,
+        SystemMessage,
+        ToolMessage,
+    )
+
+    from app.llm.cache_boundary import per_call, turn_scoped
+    from app.llm.claude_api import CLEAR_AT_BETA, ClaudeApiChat, _with_stored_breakpoint
+
+    messages = [
+        SystemMessage(content="rules"),
+        HumanMessage(content="start"),
+        AIMessage(content="", tool_calls=[{"name": "click", "args": {}, "id": "1"}]),
+        ToolMessage(content="clicked", tool_call_id="1"),
+        turn_scoped(HumanMessage(content="pulse 1")),
+        AIMessage(content="", tool_calls=[{"name": "click", "args": {}, "id": "2"}]),
+        ToolMessage(content="clicked again", tool_call_id="2"),
+        per_call(turn_scoped(HumanMessage(content="pulse 2"))),
+    ]
+    model = ClaudeApiChat(model="claude-sonnet-5-5", api_key="sk-ant-test")
+
+    payload = model._get_request_payload(_with_stored_breakpoint(messages))
+
+    roles = [message["role"] for message in payload["messages"]]
+    assert roles == ["user", "assistant", "user", "system", "assistant", "user", "system"]
+    assert payload["messages"][3] == {"role": "system", "content": "pulse 1", "clear_at": "next_user_message"}
+    assert payload["messages"][-1]["content"] == "pulse 2"
+    # 저장된 대화 끝 경계는 system 메시지가 아니라 그 앞 user 메시지의 마지막 block 에 있다.
+    assert "cache_control" in json.dumps(payload["messages"][-2])
+    assert CLEAR_AT_BETA in payload["betas"]

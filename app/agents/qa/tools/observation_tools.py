@@ -121,8 +121,7 @@ def build_capture_tool(ctx: ToolContext) -> BaseTool:
     보여야 해서 다른 관찰 도구와 따로 낸다.
     """
     # 아래 tool 이 closure 로 잡는 것. 되묶는 이유는 `tool_context.py` 에 있다.
-    channel, state, arch = ctx.channel, ctx.state, ctx.arch
-    _answer = ctx.answer
+    arch = ctx.arch
 
     # Both arms of the screen-capture comparison run on one `prompt_version`, so the
     # every-call note is chosen here. `arch_fingerprint` hashes `screen_capture`, so
@@ -138,64 +137,74 @@ def build_capture_tool(ctx: ToolContext) -> BaseTool:
         # What the agent reads is tool_capture_screen.md, not this.
         # Returns the capture as a promise: the image itself is handed to the
         # vision middleware and arrives on the next model call.
-        if state.captures_attempted >= arch.max_captures_per_run:
-            # Refused with the reason, not silently: a run that keeps looking
-            # instead of deciding will reach the deadline with nothing reported.
-            return (
-                f"You have used all {arch.max_captures_per_run} screenshots for this run. "
-                "Judge the remaining steps from the scene text."
-            )
-
-        state.captures_attempted += 1
-        params: list[Any] = [] if target_id is None else [target_id]
-        what = "the screen" if target_id is None else f"element {target_id}"
-        result = await channel.dispatch_actions(
-            [JsonRpcAction(id=1, method="capture_screen", params=params)],
-            f"Capturing {what}",
-            step,
-        )
-        messages = channel.drain_operator_messages()
-
-        if result is None or not result.results:
-            return _answer(
-                "The game did not answer the capture. Try again, or judge from the "
-                "scene text.",
-                messages,
-            )
-
-        item = result.results[0]
-        if not item.success:
-            # Says what to do instead, not just what went wrong. A game built on an SDK
-            # without this action answers "Unsupported method" to every capture, and an
-            # agent told only that failed the step and then the whole run — over a
-            # screenshot it could have done without.
-            return _answer(
-                f"The screen could not be captured — {item.error or 'no reason given'}. "
-                "Judge this step from the scene text instead, and do not capture again "
-                "in this run.",
-                messages,
-            )
-
-        capture = capture_from_action_result(item, what, whole_screen=target_id is None)
-        if capture is None:
-            return _answer(
-                "The game reported a capture but no image to read. Judge from the "
-                "scene text.",
-                messages,
-            )
-
-        state.add_pending_capture(capture)
-        # On the timeline so a reviewer can open exactly what the agent looked at.
-        #
-        # Not what separates a tool capture from an automatic one, though it looks
-        # like it could: a tool capture that fails or times out returns above
-        # without writing this note, so subtracting notes from `capture_screen`
-        # ACTION rows overcounts the automatic ones. What separates them exactly is
-        # `step`. This dispatch always carries one because the tool requires it;
-        # `QaCaptureVisionMiddleware` sends none, so its ACTION rows have
-        # `payload.step` null (ARTEL-868).
-        await channel.note(f"Captured {what}: {capture.url}", LogCategory.OBSERVATION, step)
-
-        return _answer(f"Captured {what}. The image follows.", messages)
+        return await capture_now(ctx, step, target_id)
 
     return capture_screen
+
+async def capture_now(ctx: ToolContext, step: int, target_id: int | None = None) -> str:
+    """화면(또는 한 요소)을 찍어 다음 모델 호출에 그림으로 넘기고, 넘겼다는 한 줄을 돌려준다.
+
+    `capture_screen` 과, 행동 도구의 `capture_after` 가 함께 쓴다. 행동 뒤 화면을 보려고 따로 부르는 호출 하나를
+    줄이려는 것이다 — 런 31 에서 행동 뒤 캡처나 씬 보기만 하는 턴이 78 턴 중 11 턴이었다.
+    """
+    channel, state, arch = ctx.channel, ctx.state, ctx.arch
+    _answer = ctx.answer
+    if state.captures_attempted >= arch.max_captures_per_run:
+        # Refused with the reason, not silently: a run that keeps looking
+        # instead of deciding will reach the deadline with nothing reported.
+        return (
+            f"You have used all {arch.max_captures_per_run} screenshots for this run. "
+            "Judge the remaining steps from the scene text."
+        )
+
+    state.captures_attempted += 1
+    params: list[Any] = [] if target_id is None else [target_id]
+    what = "the screen" if target_id is None else f"element {target_id}"
+    result = await channel.dispatch_actions(
+        [JsonRpcAction(id=1, method="capture_screen", params=params)],
+        f"Capturing {what}",
+        step,
+    )
+    messages = channel.drain_operator_messages()
+
+    if result is None or not result.results:
+        return _answer(
+            "The game did not answer the capture. Try again, or judge from the "
+            "scene text.",
+            messages,
+        )
+
+    item = result.results[0]
+    if not item.success:
+        # Says what to do instead, not just what went wrong. A game built on an SDK
+        # without this action answers "Unsupported method" to every capture, and an
+        # agent told only that failed the step and then the whole run — over a
+        # screenshot it could have done without.
+        return _answer(
+            f"The screen could not be captured — {item.error or 'no reason given'}. "
+            "Judge this step from the scene text instead, and do not capture again "
+            "in this run.",
+            messages,
+        )
+
+    capture = capture_from_action_result(item, what, whole_screen=target_id is None)
+    if capture is None:
+        return _answer(
+            "The game reported a capture but no image to read. Judge from the "
+            "scene text.",
+            messages,
+        )
+
+    state.add_pending_capture(capture)
+    # On the timeline so a reviewer can open exactly what the agent looked at.
+    #
+    # Not what separates a tool capture from an automatic one, though it looks
+    # like it could: a tool capture that fails or times out returns above
+    # without writing this note, so subtracting notes from `capture_screen`
+    # ACTION rows overcounts the automatic ones. What separates them exactly is
+    # `step`. This dispatch always carries one because the tool requires it;
+    # `QaCaptureVisionMiddleware` sends none, so its ACTION rows have
+    # `payload.step` null (ARTEL-868).
+    await channel.note(f"Captured {what}: {capture.url}", LogCategory.OBSERVATION, step)
+
+    return _answer(f"Captured {what}. The image follows.", messages)

@@ -68,7 +68,7 @@ from app.agents.qa.tools.skill_tools import (
     SKILL_BLOCK_START_SUFFIX,
 )
 from app.agents.qa.vision import CAPTURE_MESSAGE_KEY, is_capture_message, without_image
-from app.qa.pulse import PULSE_VIEW_END, PULSE_VIEW_START
+from app.qa.pulse import PULSE_VIEW_END, PULSE_VIEW_START, PULSE_WHOLE_SCENE
 from app.qa.scene import SCENE_VIEW_END, SCENE_VIEW_START_PREFIX, SCENE_VIEW_START_SUFFIX
 
 
@@ -162,6 +162,9 @@ _VIEW_PATTERN = re.compile(
     re.DOTALL,
 )
 
+# `pulse` view 머리 줄(`reading N · frame F · scene S`)의 `reading` 번호.
+_READING_IN_HEAD = re.compile(r"reading (\d+)")
+
 _NEIGHBOUR_PATTERN = re.compile(
     re.escape(NEIGHBOUR_BLOCK_START_PREFIX)
     + r"(?P<of>[^>]*)"
@@ -215,7 +218,10 @@ def _pulse_placeholder(head: str) -> str:
     # 뒤 문장은 `fold` 직후에 오는 도구 결과가 가진 값을 전부 다시 그린다는 뜻이다
     # (`PulseMemory.redraw_all_values_next`). 지운 것을 어디서 다시 찾는지 말해 두지 않으면,
     # agent 는 사라진 값을 지금도 아는 것처럼 행동하거나 같은 것을 다시 묻는다.
-    where = " · ".join(part for part in head.split(" · ") if not part.startswith("frame "))
+    # `whole scene` 표도 뺀다. 접은 자리에서는 씬 전체였는지가 쓸 데 없다.
+    where = " · ".join(
+        part for part in head.split(" · ") if not part.startswith("frame ") and part != PULSE_WHOLE_SCENE.removeprefix(" · ")
+    )
     return (
         f"{FOLDED_PULSE_VIEW_PREFIX}{where} folded — every value it showed is redrawn "
         "by the first tool result after the fold]"
@@ -293,6 +299,9 @@ class FoldCandidate:
     kind: FoldKind
     key: str
     score: int
+    # 씬의 값을 전부 그린 `pulse` view 인가(`PULSE_WHOLE_SCENE`), 그리고 그 view 의 `reading` 번호.
+    whole: bool = False
+    reading: int | None = None
 
 
 @dataclass(frozen=True)
@@ -304,6 +313,21 @@ class ContextFold:
     folded_keys: frozenset[str]
     # 이 호출에서 새로 `fold` 한 block 의 종류. 비어 있으면 앞이 하나도 안 바뀌었다는 뜻이다.
     newly_folded_kinds: frozenset[FoldKind]
+    # `fold` 되지 않은 후보가 처음 나오는 메시지의 자리. 다음 batch 가 고쳐 쓰는 것은 여기부터이고, 그
+    # 앞은 다음 batch 까지 그대로다. 후보가 전부 `fold` 됐거나 없으면 None 이다. 남겨 두는 기준 view 는
+    # 다음 batch 가 고쳐 쓰지 않으므로 세지 않는다.
+    unfolded_from: int | None = None
+    # `anchored` 에서 남겨 둔 기준 view 의 `reading` 번호. 기준 view 가 없으면 None 이다.
+    anchor_reading: int | None = None
+
+
+def scene_views(messages: list[BaseMessage]) -> list[tuple[str, int]]:
+    """`messages` 에 있는 scene view 와 `pulse` view 후보의 `key` 와 글자 수, 앞에서부터."""
+    return [
+        (candidate.key, candidate.score)
+        for message in messages
+        for candidate in _candidates_in(message, frozenset({FoldKind.scene_view}), frozenset())
+    ]
 
 
 def fold_context(
@@ -311,6 +335,8 @@ def fold_context(
     kinds: Iterable[FoldKind],
     already_folded: frozenset[str] = frozenset(),
     threshold_chars: int = DEFAULT_FOLD_THRESHOLD_CHARS,
+    unscored: frozenset[str] = frozenset(),
+    anchored: bool = False,
 ) -> ContextFold:
     """Return `messages` with stale blocks of `kinds` folded, in batches.
 
@@ -330,30 +356,51 @@ def fold_context(
     above a reloaded skill are never touched. An image is the picture on an
     `on_demand` capture turn, and folding it leaves the caption.
 
+    `unscored` 의 block 은 기준을 넘었는지 셀 때만 빠진다. 낡으면 batch 가 올 때 다른 것과 함께
+    `fold` 된다. runner 가 `fold` 직후 값을 전부 다시 그린 view 를 여기에 넣는다 — 그 view 는 혼자서
+    기준을 넘을 만큼 커서, 세면 다음 view 가 오자마자 다시 `fold` 하고 다시 그리기를 되풀이한다.
+
+    `anchored` 면 씬의 값을 전부 그린 view 중 가장 새것 하나(기준 view)를 `fold` 하지도, 세지도 않는다.
+    그 view 는 접어도 다음 view 가 같은 값을 다시 그려야 하므로, 남겨 두고 `cache` 에서 읽는 편이 싸다.
+    새 기준 view 가 오면 옛 기준 view 는 다른 낡은 block 과 같이 센다.
+
     Pure: never mutates `messages` or any message inside it. Messages that need
     no change are the very same objects, and folded ones are copies with new
     content.
     """
     enabled = frozenset(kinds)
     reported = _reported_macro_calls(messages) if FoldKind.macro_result in enabled else frozenset()
-    candidates = [
-        candidate
-        for message in messages
-        for candidate in _candidates_in(message, enabled, reported)
-    ]
-    stale = _stale(candidates)
+    candidates_by_message = [_candidates_in(message, enabled, reported) for message in messages]
+    candidates = [candidate for found in candidates_by_message for candidate in found]
+    anchor = next((candidate for candidate in reversed(candidates) if candidate.whole), None) if anchored else None
+    # 이미 `fold` 한 view 는 기준이 못 된다. 그 자리는 앞의 호출이 `placeholder` 로 보냈다.
+    if anchor is not None and anchor.key in already_folded:
+        anchor = None
+    stale = [candidate for candidate in _stale(candidates) if anchor is None or candidate.key != anchor.key]
 
     pending = [candidate for candidate in stale if candidate.key not in already_folded]
     folded_keys = {candidate.key for candidate in stale if candidate.key in already_folded}
     newly_folded_kinds: frozenset[FoldKind] = frozenset()
-    if pending and sum(candidate.score for candidate in pending) >= threshold_chars:
+    score = sum(candidate.score for candidate in pending if candidate.key not in unscored)
+    if pending and score >= threshold_chars:
         folded_keys |= {candidate.key for candidate in pending}
         newly_folded_kinds = frozenset(candidate.kind for candidate in pending)
 
+    kept = {anchor.key} if anchor is not None else set()
+    unfolded_from = next(
+        (
+            index
+            for index, found in enumerate(candidates_by_message)
+            if any(candidate.key not in folded_keys and candidate.key not in kept for candidate in found)
+        ),
+        None,
+    )
     return ContextFold(
         messages=[_fold_message(message, enabled, folded_keys) for message in messages],
         folded_keys=frozenset(folded_keys),
         newly_folded_kinds=newly_folded_kinds,
+        unfolded_from=unfolded_from,
+        anchor_reading=anchor.reading if anchor is not None else None,
     )
 
 
@@ -424,7 +471,17 @@ def _candidates_in(
             continue
         for ordinal, match in enumerate(pattern.finditer(message.content)):
             key = f"{kind}:{message.tool_call_id}:{ordinal}"
-            candidates.append(FoldCandidate(kind, key, len(match.group(0))))
+            head = match.groupdict().get("head") or ""
+            reading = _READING_IN_HEAD.match(head)
+            candidates.append(
+                FoldCandidate(
+                    kind,
+                    key,
+                    len(match.group(0)),
+                    whole=head.endswith(PULSE_WHOLE_SCENE),
+                    reading=int(reading.group(1)) if reading else None,
+                )
+            )
     return candidates
 
 
