@@ -138,6 +138,20 @@ class QaRunState:
         # 다시 `fold` 해야 프롬프트 앞이 그대로라 `cache` 가 맞는다
         # (`app/agents/qa/runner.py` 의 `_fold_context_for`).
         self.folded_blocks: frozenset[str] = frozenset()
+        # `fold` 직후 값을 전부 다시 그린 view 의 `key`, 그리고 그것을 알아보려고 `fold` 때 둔 view
+        # `key` 들. 다시 그린 view 는 `fold` 기준을 셀 때 빠진다(`_fold_context_for`).
+        self.redraw_view: str | None = None
+        self.views_at_fold: frozenset[str] | None = None
+        # 런 동안 본 가장 큰 view 의 글자 수. `fold_redraw="scaled"` 의 기준이 이것으로 정해진다.
+        self.largest_view = 0
+        # `fold` batch 에서 접은 지난 TC ledger · TC 상세 메시지의 id 와 그때 보낸 내용
+        # (`app/agents/qa/case_context.py` 의 `supersede_case_context`).
+        self.frozen_case_context: dict[str, str] = {}
+        # 지난 호출이 `stable` 로 표시한 메시지의 id. `fold` 한 호출은 이 메시지에 다시 경계를 둬서 지난 `cache` 를
+        # 읽는다(`app/agents/qa/runner.py` 의 `_mark_stable`).
+        self.stable_message_id: str | None = None
+        # 지난 호출까지 접은 TC 상세 수. 이번 호출에 늘었으면 대화 중간을 고쳐 쓴 호출이다.
+        self.frozen_count_seen = 0
         # How many times `finish_run` was reached. The first attempt made with
         # steps still unreported is pushed back on; a second one closes the run
         # regardless, so a game that genuinely cannot go on is never trapped.

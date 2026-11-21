@@ -12,9 +12,10 @@ from langchain_core.tools import BaseTool, tool
 
 from app.agents.qa.reset import reset_game_cheat
 from app.agents.qa.macro.lift import DispatchRecord, lift_call
+from app.agents.qa.tools.observation_tools import capture_now
 from app.agents.qa.tools.tool_context import ToolContext
-from app.qa.acting import PressLanding
 from app.prompts import load_tool_description
+from app.qa.acting import PressLanding
 from app.qa.envelope import JsonRpcAction
 
 # `parse_target` 이 판별하는 두 엄격한 모양. 나머지 전부는 selector 로 읽는다.
@@ -62,13 +63,22 @@ def build_action_tools(ctx: ToolContext) -> list[BaseTool]:
     # 아래 tool 이 closure 로 잡는 것. 되묶는 이유는 `tool_context.py` 에 있다.
     _run = ctx.run
 
+    async def _then_capture(answer: str, step: int, capture_after: bool) -> str:
+        """`capture_after` 면 행동이 끝난 뒤 화면을 찍어 같은 결과에 붙인다. 따로 `capture_screen` 을 부르는 호출을 아낀다."""
+        if not capture_after:
+            return answer
+        if not ctx.arch.vision:
+            return f"{answer}\n\nScreenshots are off in this run; judge from the scene text."
+        return f"{answer}\n\n{await capture_now(ctx, step)}"
+
     @tool(description=load_tool_description("click_button").body)
-    async def click_button(step: int, target_id: int, thought: str) -> str:
-        return await _run(
+    async def click_button(step: int, target_id: int, thought: str, capture_after: bool = False) -> str:
+        answer = await _run(
             [JsonRpcAction(id=1, method="button_click", params=[target_id])],
             f"Clicking {target_id}",
             step,
         )
+        return await _then_capture(answer, step, capture_after)
 
     @tool(description=load_tool_description("enter_text").body)
     async def enter_text(step: int, target_id: int, value: str, thought: str) -> str:
@@ -79,12 +89,15 @@ def build_action_tools(ctx: ToolContext) -> list[BaseTool]:
         )
 
     @tool(description=load_tool_description("press_key").body)
-    async def press_key(step: int, key_code: str, duration_seconds: float, thought: str) -> str:
-        return await _run(
+    async def press_key(
+        step: int, key_code: str, duration_seconds: float, thought: str, capture_after: bool = False
+    ) -> str:
+        answer = await _run(
             [JsonRpcAction(id=1, method="key_click", params=[key_code, duration_seconds])],
             f"Pressing {key_code}",
             step,
         )
+        return await _then_capture(answer, step, capture_after)
 
     @tool(description=load_tool_description("move_pointer").body)
     async def move_pointer(step: int, target: str, thought: str) -> str:
@@ -99,12 +112,12 @@ def build_action_tools(ctx: ToolContext) -> list[BaseTool]:
         )
 
     @tool(description=load_tool_description("click").body)
-    async def click(step: int, target: str, thought: str, button: int = 0) -> str:
+    async def click(step: int, target: str, thought: str, button: int = 0, capture_after: bool = False) -> str:
         try:
             params = parse_target(target)
         except ValueError as error:
             return str(error)
-        return await _run(
+        answer = await _run(
             [
                 # 누르기는 target 을 안 받는다. 포인터가 있는 자리에 떨어지므로 먼저
                 # 옮긴다 — `drag` 가 같은 이유로 같은 순서를 쓴다.
@@ -115,6 +128,7 @@ def build_action_tools(ctx: ToolContext) -> list[BaseTool]:
             f"Clicking {target}",
             step,
         )
+        return await _then_capture(answer, step, capture_after)
 
     @tool(description=load_tool_description("double_click").body)
     async def double_click(step: int, target: str, thought: str, button: int = 0) -> str:
@@ -190,13 +204,14 @@ def build_action_tools(ctx: ToolContext) -> list[BaseTool]:
         to_target: str,
         thought: str,
         button: int = 0,
+        capture_after: bool = False,
     ) -> str:
         try:
             from_params = parse_target(from_target)
             to_params = parse_target(to_target)
         except ValueError as error:
             return str(error)
-        return await _run(
+        answer = await _run(
             [
                 # 누르기는 target 을 안 받는다. 포인터가 있는 자리에 떨어지므로 먼저
                 # from_target 으로 옮긴다.
@@ -208,6 +223,7 @@ def build_action_tools(ctx: ToolContext) -> list[BaseTool]:
             f"Dragging from {from_target} to {to_target}",
             step,
         )
+        return await _then_capture(answer, step, capture_after)
 
     @tool(description=load_tool_description("pause_game_time").body)
     async def pause_game_time(step: int, thought: str) -> str:

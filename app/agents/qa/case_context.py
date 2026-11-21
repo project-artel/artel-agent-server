@@ -121,17 +121,69 @@ def fold_case_details(messages: list[BaseMessage], current_case_id: int | None =
     return result
 
 
+def supersede_case_context(
+    messages: list[BaseMessage], current_case_id: int | None, frozen: dict[str, str], batch: bool
+) -> tuple[list[BaseMessage], int | None]:
+    """이번 호출이 받는 `messages` 에서 지난 TC 상세를 접는다. graph 는 그대로다.
+
+    `fold_context` 의 batch 와 같은 호출에서만 새로 접는다(`batch`). 따로 접으면 그 호출에서 프롬프트를
+    한 번 더 고쳐 써서, 그 뒤가 `cache` 에서 한 번 더 빠진다(로컬 런 136: TC 장부를 접은 호출이 시스템
+    프롬프트까지만 읽었다). 한 번 접은 메시지는 `frozen` 에 그때 내용을 두고 다음 호출에도 같은 내용으로
+    보낸다 — `fold_case_details` 는 지금 TC 에 따라 남길 상세가 달라서, 다시 계산하면 앞이 바뀐다.
+
+    **지난 ledger 는 접지 않는다.** 첫 ledger 가 대화 맨 앞 메시지에 있어서, 접으면 batch 마다 시스템 뒤
+    전부를 다시 썼다(로컬 런 137). ledger 는 하나에 수천 자라 남겨 두고 `cache` 에서 읽는 편이 싸고, 가장 새
+    ledger 가 스스로 앞의 것을 대신한다고 말한다.
+
+    돌려주는 자리는 아직 안 접은 지난 TC 상세가 처음 나오는 메시지다. 다음 batch 는 거기부터 고쳐 쓴다.
+    없으면 None 이다.
+    """
+    if batch:
+        for old, new in zip(messages, fold_case_details(messages, current_case_id)):
+            if new is not old and old.id and old.id not in frozen:
+                frozen[old.id] = new.content
+    sent = [
+        message.model_copy(update={"content": frozen[message.id]}) if message.id in frozen else message
+        for message in messages
+    ]
+    pending = next(
+        (
+            index
+            for index, message in enumerate(sent)
+            if message.id not in frozen
+            and not is_ledger(message)
+            and isinstance(message.content, str)
+            and _foldable_detail(message.content)
+        ),
+        None,
+    )
+    return sent, pending
+
+
+def _foldable_detail(content: str) -> bool:
+    """접힐 수 있는 TC 상세가 있는가. 계획(`plan`) 상세는 일반 호출에서 접지 않으므로 세지 않는다.
+
+    세면 계획 상세가 든 첫 메시지가 늘 "다음 batch 가 고쳐 쓰는 자리" 가 되어, 그 앞에 경계를 둘 자리가 없어
+    `fold` 자리의 `cache` 경계가 한 번도 서지 않았다(로컬 런 138: 15 호출 모두 경계 셋).
+    """
+    return any(match.group("id") != "plan" for match in DETAIL_PATTERN.finditer(content))
+
+
 class QaCaseContextMiddleware(AgentMiddleware):
     """상태가 바뀔 때만 새 ledger 를 덧붙여 graph 에 저장한다.
 
     **지난 ledger 를 지우지 않는다.** 예전에는 지난 것을 지우고 끝에 새로 붙였는데, 대화 중간의 메시지가
-    사라지면 그 뒤가 전부 프롬프트 캐시에서 빠지고 thinking block 도 무효가 된다. 지난 ledger 와 지난 TC
-    상세는 [CONTEXT_FOLD_BATCH] 개가 쌓였을 때 한 번에 접는다.
+    사라지면 그 뒤가 전부 프롬프트 캐시에서 빠지고 thinking block 도 무효가 된다.
+
+    `fold_context` 가 켜진 런이면(`supersede=False`) 덧붙이기만 한다. 지난 ledger 와 지난 TC 상세는
+    `fold_context` 의 batch 가 같은 호출에서 함께 접는다(`supersede_case_context`). 꺼진 런이면 여기서
+    [CONTEXT_FOLD_BATCH] 개가 쌓였을 때 graph 에서 한 번에 접는다.
     """
 
-    def __init__(self, state: "QaRunState", channel: "QaRunChannel") -> None:
+    def __init__(self, state: "QaRunState", channel: "QaRunChannel", supersede: bool = True) -> None:
         self.state = state
         self.channel = channel
+        self.supersede = supersede
 
     async def abefore_model(self, state, runtime):
         messages = state["messages"]
@@ -140,6 +192,8 @@ class QaCaseContextMiddleware(AgentMiddleware):
         appended = None
         if not ledgers or ledgers[-1].content != content:
             appended = HumanMessage(id=f"{TC_LEDGER_ID}-{uuid4().hex[:12]}", content=content)
+        if not self.supersede:
+            return {"messages": [appended]} if appended is not None else None
         # 새 것을 붙이면 지금 가장 새 ledger 도 지난 것이 된다.
         superseded = ledgers if appended is not None else ledgers[:-1]
         stale_ledgers = [message for message in superseded if message.content != SUPERSEDED_LEDGER]
