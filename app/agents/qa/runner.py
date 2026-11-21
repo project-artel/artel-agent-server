@@ -17,6 +17,7 @@ from langchain_core.messages.utils import count_tokens_approximately
 
 from app.agents.qa.arch import ResolvedArch, withheld_skills
 from app.agents.qa.compaction import QaCompactionMiddleware
+from app.agents.qa.scenario_cheats import QaScenarioCheatsMiddleware
 from app.agents.qa.case_context import TC_DETAIL_BUDGET, QaCaseContextMiddleware, detail_block, supersede_case_context
 from app.agents.qa.context import (
     FOLDED_PULSE_VIEW_PREFIX,
@@ -397,6 +398,9 @@ def middleware_names_for(arch: ResolvedArch) -> tuple[str, ...]:
     # (`langchain/agents/factory.py`) 런 중간의 모든 모델 호출은 직전 도구 결과 뒤에 온다 —
     # 꼬리가 메우려던 틈이 애초에 없었다(ARTEL-621).
     #
+    # tool 호출을 감싼다. 모델 호출을 감싸는 위 middleware 와 hook 이 달라 순서가 서로 영향을 주지 않는다.
+    if arch.cheats == "on" and arch.scenario_cheats == "on":
+        names.append("scenario_cheats")
     # 사용량 로깅은 가장 안쪽이다. 실제로 나간 것을 보고해야 한다.
     names += ["log_token_usage"]
     return tuple(names)
@@ -443,6 +447,9 @@ def build_middleware(
         ),
         "latest_pulse_context": lambda: _latest_pulse_context_for(channel, keep_earlier=config.model.startswith("claude/")),
         "capture_vision": lambda: QaCaptureVisionMiddleware(state, channel, arch),
+        "scenario_cheats": lambda: QaScenarioCheatsMiddleware(
+            state, lambda: channel.game_functions.names("cheat"), state.run_cheat
+        ),
         "log_token_usage": lambda: _log_token_usage,
     }
     return [builders[name]() for name in middleware_names_for(arch)]

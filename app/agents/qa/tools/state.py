@@ -95,6 +95,9 @@ class QaRunState:
         # 지난 `report_step` 뒤에 보낸 cheat. 다음 `report_step` 이 `STATUS` 에 싣고 비운다.
         # 보내지 않고 거절한 호출은 안 든다.
         self.used_cheats: list[UsedCheat] = []
+        # `run_cheat` tool 의 본체. 시나리오 단계에 적힌 게임 기능을 엔진이 보낼 때 같은 길(상한, `used_cheats`)을
+        # 지나게 한다(`app/agents/qa/scenario_cheats.py`). cheat 축이 꺼진 run 은 `None` 이다.
+        self.run_cheat = None
         # 상한을 세는 것은 시도다. 게임이 매번 거절해도 루프에 끝이 있어야 한다 — 위
         # `captures_attempted` 와 같은 이유다.
         self.cheats_attempted = 0
