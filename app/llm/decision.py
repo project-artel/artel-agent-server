@@ -21,6 +21,7 @@ LLM 사용량으로 이미 보낸다.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Literal
@@ -41,6 +42,7 @@ JEV_MODEL = "typesafe/jev-1.13"
 TYPESAFE_JEV_MODEL = "jev-1.13.0"
 OPENROUTER_DECISIONS_PATH = "/api/alpha/decisions"
 TYPESAFE_DECISIONS_PATH = "/v1/systemone"
+JEV_FORBIDDEN_RETRY_DELAY_SECONDS = 2.0
 
 PROMPT_AGENT = "decision"
 REASONING_OFF = ReasoningConfig(max_tokens=0)
@@ -114,6 +116,10 @@ async def post_jev_decision(http: Any, body: dict) -> dict:
         payload = {**body, "model": JEV_MODEL}
 
     response = await http.post(url, headers=headers, json=payload)
+    if getattr(response, "status_code", None) == httpx.codes.FORBIDDEN:
+        logger.warning("Jev returned HTTP 403; retrying once in %s seconds", JEV_FORBIDDEN_RETRY_DELAY_SECONDS)
+        await asyncio.sleep(JEV_FORBIDDEN_RETRY_DELAY_SECONDS)
+        response = await http.post(url, headers=headers, json=payload)
     if getattr(response, "status_code", None) == UNAUTHORIZED:
         # 관리자가 key 를 바꿨을 수 있다. 이번 호출은 실패하고 다음 호출이 새 key 를 읽는다.
         keys.invalidate()

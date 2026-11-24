@@ -6,6 +6,7 @@ chat model 은 쓰지 않는다. `structured` 를 바꿔 끼워 schema 를 받�
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -116,6 +117,41 @@ def _keys(openrouter=None, typesafe=None):
         invalidated=invalidated,
     )
     return keys
+
+
+@pytest.mark.parametrize("typesafe", [None, "typesafe-key"])
+@pytest.mark.parametrize("second_status", [200, 401, 403])
+def test_jev_retries_the_same_request_once_after_403(monkeypatch, typesafe, second_status):
+    keys = _keys("or-key", typesafe)
+    monkeypatch.setattr(decision, "get_llm_api_key_provider", lambda: keys)
+    sleep = AsyncMock()
+    monkeypatch.setattr(decision.asyncio, "sleep", sleep)
+    answer = {"answers": {"route": {"choice": "question"}}}
+    post = AsyncMock(side_effect=[FakeResponse({}, 403), FakeResponse(answer, second_status)])
+    request = decision.post_jev_decision(SimpleNamespace(post=post), CHOICE_BODY)
+
+    if second_status == 200:
+        assert asyncio.run(request) == answer
+    else:
+        with pytest.raises(RuntimeError, match=f"HTTP {second_status}"):
+            asyncio.run(request)
+
+    sleep.assert_awaited_once_with(decision.JEV_FORBIDDEN_RETRY_DELAY_SECONDS)
+    first, retry = post.await_args_list
+    assert first == retry
+    assert keys.invalidated == ([True] if second_status == 401 else [])
+
+
+def test_cancellation_during_the_403_delay_stops_the_retry(monkeypatch):
+    monkeypatch.setattr(decision, "get_llm_api_key_provider", lambda: _keys("or-key"))
+    sleep = AsyncMock(side_effect=asyncio.CancelledError)
+    monkeypatch.setattr(decision.asyncio, "sleep", sleep)
+    post = AsyncMock(return_value=FakeResponse({}, 403))
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(decision.post_jev_decision(SimpleNamespace(post=post), CHOICE_BODY))
+
+    post.assert_awaited_once()
 
 
 # ── 누가 답하는가 ─────────────────────────────────────────────────────────────
@@ -351,6 +387,7 @@ def test_a_401_drops_the_key_cache(monkeypatch, openrouter, typesafe) -> None:
     with pytest.raises(RuntimeError, match="401"):
         asyncio.run(decision.decide(http, CHOICE_BODY))
 
+    assert len(http.calls) == 1
     assert keys.invalidated == [True]
 
 
