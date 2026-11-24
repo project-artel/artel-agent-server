@@ -6,6 +6,20 @@
 - 왜 이런 모양인지는 [`docs/adr/`](adr/README.md)
 - 정의는 `app/qa/envelope.py`, 상대쪽은 orchestration 의 `QaAgentInboundRouter.kt`
 
+## Code Mode 실행
+
+QA run의 `arch`에 `{"code_mode": true}`를 지정하면 `agent` 엔진은 모델에 `run_code(step, thought, source)` 하나를 제공한다. 기본값은 `false`다. 코드에서 호출할 수 있는 도구는 `run_config.code_tools`에 기록한다. 각 호출과 결과는 기존 `TOOL`, `TOOL_RESULT` 프레임으로 전송한다.
+
+다음은 현재 step에서 화면을 관찰하고, 화면에 `Inventory`가 보일 때만 오류를 조회하는 `source` 예시다.
+
+```python
+scene = observe_scene()
+if "Inventory" in scene:
+    get_errors()
+```
+
+도구는 keyword argument로 호출한다. `step`과 `thought`는 바깥 호출의 값을 쓴다. 코드 한 번에 최대 16개 도구를 호출할 수 있다. `for _ in range(3)`, `break`, 문자열 포함 여부에 따른 `if`와 `else`를 지원한다. 이름에 저장한 결과는 해당 코드 안에서만 쓸 수 있다. 모델은 마지막으로 실행한 도구의 결과를 받는다. 실행 도중 중단되면 이미 보낸 게임 입력은 그대로 반영된다.
+
 ## 봉투
 
 - 프레임 하나의 모양은 `messageId` · `type` · `qaTryId` · `correlationId` ·

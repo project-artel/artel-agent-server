@@ -31,11 +31,12 @@ import hashlib
 import json
 from enum import StrEnum
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.agents.planner_executer.arch import PlannerExecuterArchSpec
+from app.agents.qa.arch_options import LaunchOption, UnavailableWhen
 from app.config import get_settings
 from app.llm.models import LLMModel, get_model_spec
 
@@ -509,7 +510,8 @@ from app.llm.models import LLMModel, get_model_spec
 # view 이후 움직인 값만 다시 그린다. 다음 `fold` 가 고쳐 쓰는 자리 앞에 Anthropic `cache` 경계를 두고
 # (`fold_cache_boundary`), 지난 TC ledger 도 같은 batch 에서 접는다. 최신 Pulse 요약 머리 줄에 씬 전체
 # view 가 실리던 것도 씬 이름으로 고쳤다.
-QA_ARCH_LABEL = "v60-anchored-scene-view"
+# Code Mode에서는 모델이 run_code 안에서만 개별 도구를 호출한다.
+QA_ARCH_LABEL = "v61-code-mode"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
@@ -625,6 +627,9 @@ class ScreenCaptureMode(StrEnum):
     by_role = "by_role"
 
 
+VISION_REQUIRED_CAPTURE_MODES = tuple(mode for mode in ScreenCaptureMode if mode is not ScreenCaptureMode.on_demand)
+
+
 class PhaseCycleMode(StrEnum):
     """How much of `OBSERVE -> DECIDE -> ACT -> VERIFY -> UPDATE_MEMORY` the run is held to.
 
@@ -713,36 +718,103 @@ class QaArchSpec(BaseModel):
     max_expands_per_run: int = Field(default=MAX_EXPANDS_PER_RUN, ge=0, le=1_000_000)
     max_captures_per_run: int = Field(default=MAX_CAPTURES_PER_RUN, ge=0, le=1_000_000)
     max_issues_per_run: int = Field(default=MAX_ISSUES_PER_RUN, ge=0, le=1_000_000)
-    vision: VisionMode = VisionMode.auto
-    screen_capture: ScreenCaptureMode = ScreenCaptureMode.on_demand
+    vision: Annotated[
+        VisionMode,
+        LaunchOption(
+            "e",
+            ko="모델에 screenshot 을 보여줄지. auto 는 모델에 따릅니다.",
+            en="Whether the model is shown screenshots. auto follows the model.",
+            vision_only_values=("on",),
+        ),
+    ] = VisionMode.auto
+    screen_capture: Annotated[
+        ScreenCaptureMode,
+        LaunchOption(
+            "d",
+            ko="screenshot 이 모델에 전달되는 시점. 요청할 때만(on_demand), 매 호출마다, 또는 역할별로 두 장에서 네 장.",
+            en="When a screenshot reaches the model: only when asked (on_demand), on every call, or two to four pictures by role.",
+            vision_only_values=VISION_REQUIRED_CAPTURE_MODES,
+            unavailable_when=(UnavailableWhen(key="vision", equals=VisionMode.off, values=VISION_REQUIRED_CAPTURE_MODES),),
+        ),
+    ] = ScreenCaptureMode.on_demand
     # `off` is the compatibility value: at it the tool set, every tool schema, the
     # middleware list and every other knob are what they were before this axis
     # existed. It is no longer the default, so that shape has to be asked for by
     # name now — including by a run pinned to a prompt version older than `v18`,
     # which carries no `phase_directive` for the gate's refusals to rest on and is
     # refused in `resolve_run_config` rather than gated in silence.
-    phase_cycle: PhaseCycleMode = PhaseCycleMode.lite
+    phase_cycle: Annotated[
+        PhaseCycleMode,
+        LaunchOption(
+            "a",
+            ko="run 이 OBSERVE → DECIDE → ACT → VERIFY → UPDATE_MEMORY 를 얼마나 엄격하게 따를지. off 는 자유로운 tool loop, lite 는 memory 턴 하나, full 은 decide 턴까지 더합니다.",
+            en="How strictly the run follows OBSERVE → DECIDE → ACT → VERIFY → UPDATE_MEMORY. off is the free tool loop; lite adds a memory turn; full adds a decide turn.",
+        ),
+    ] = PhaseCycleMode.lite
     # `off` keeps every skill inlined in the system prompt, as before. `on_demand`
     # moves the skills behind the `load_skill` tool, which then joins the tool set.
-    skills: Literal["off", "on_demand"] = "off"
+    skills: Annotated[
+        Literal["off", "on_demand"],
+        LaunchOption(
+            "b",
+            ko="off 는 모든 skill 을 system prompt 에 그대로 넣고, on_demand 는 load_skill tool 로 불러옵니다.",
+            en="off inlines every skill in the system prompt; on_demand loads them through a load_skill tool.",
+        ),
+    ] = "off"
     # The six macro tools and the `macro` skill. `off` is the shape every run had
     # before macros (ARTEL-926): no macro tool in the list and no `macro` skill in
     # the prompt or behind `load_skill`, so an A/B on this axis differs by exactly
     # the macros. Withholding the skill matters as much as withholding the tools —
     # left in, the Skills section would tell the `off` arm to load something
     # "before your first `write_macro`", a tool it does not have.
-    macros: Literal["off", "on"] = "on"
-    fold_stale_scenes: bool = True
+    macros: Annotated[
+        Literal["off", "on"],
+        LaunchOption(
+            "c",
+            ko="여섯 개의 macro tool 과 macro skill 을 쓸 수 있는지.",
+            en="Whether the six macro tools and the macro skill are available.",
+        ),
+    ] = "on"
+    code_mode: Annotated[
+        bool,
+        LaunchOption(
+            "n",
+            ko="run_code에서 코드로 QA 도구를 호출합니다.",
+            en="Call the run’s tools from code through run_code.",
+        ),
+    ] = False
+    fold_stale_scenes: Annotated[
+        bool,
+        LaunchOption(
+            "h",
+            ko="오래된 scene view 를 한 줄로 fold 합니다.",
+            en="Fold stale scene views into one line.",
+        ),
+    ] = True
     # Folds the neighbour blocks the search volunteers, and only those (ARTEL-277).
     # Separate from `fold_stale_scenes` because the two are independently useful
     # to turn off: what they fold is recovered by different tools out of
     # different budgets.
-    fold_stale_knowledge: bool = True
+    fold_stale_knowledge: Annotated[
+        bool,
+        LaunchOption(
+            "i",
+            ko="knowledge 검색이 덤으로 가져온 이웃 block 을 fold 합니다.",
+            en="Fold the neighbour blocks a knowledge search volunteered.",
+        ),
+    ] = True
     # Folds every loaded skill but the newest, and only when `skills` is
     # `on_demand`: with `off` the skills are in the system prompt and there is
     # nothing loaded to fold. Separate from the two folds above because what it
     # folds is recovered by a third tool, `load_skill`.
-    fold_stale_skills: bool = True
+    fold_stale_skills: Annotated[
+        bool,
+        LaunchOption(
+            "j",
+            ko="가장 최근 것을 뺀 불러온 skill 을 모두 fold 합니다(on_demand 일 때만).",
+            en="Fold every loaded skill but the newest (on_demand only).",
+        ),
+    ] = True
     # `pulse` view 에서 cosmetic member 를 숨긴다(ARTEL-958). 켜면 run 이 member 타입마다
     # Jev decision model 에 gameplay state 인지 묻고(`app/qa/relevance.py`), 확실히 아니라고
     # 답한 member 를 `PulseMemory.render` 가 빼고 개수만 적는다.
@@ -751,7 +823,14 @@ class QaArchSpec(BaseModel):
     # 생기기 전과 byte 단위로 같다. 그래서 기본 run 의 모양이 안 움직이고 `QA_ARCH_LABEL` 도
     # 그대로다 — `screen_capture` 와 같은 경우다. 두 arm 의 label 은 workspace 의
     # `benchmarks/wordventure/arch/pulse-relevance-*.json` 이 붙인다.
-    pulse_relevance: bool = False
+    pulse_relevance: Annotated[
+        bool,
+        LaunchOption(
+            "f",
+            ko="꾸밈용 member 를 pulse view 에서 숨깁니다. member 종류마다 한 번 decision model 에 묻습니다.",
+            en="Hide cosmetic members from the pulse view, asking the decision model once per member type.",
+        ),
+    ] = False
     # `report_step` 결과에 `pulse` view 를 붙일지(ARTEL-960). 끄면 view 대신 "값이 몇 개
     # 움직였다" 한 줄만 붙는다.
     #
@@ -763,7 +842,14 @@ class QaArchSpec(BaseModel):
     #
     # 기본값이 `True` 인 이유는 `pulse_relevance` 와 같다. 기본 run 의 view 가 그대로라
     # `QA_ARCH_LABEL` 이 안 움직인다.
-    report_step_view: bool = True
+    report_step_view: Annotated[
+        bool,
+        LaunchOption(
+            "g",
+            ko="report_step 결과에 pulse view 를 붙입니다.",
+            en="Attach a pulse view to the report_step result.",
+        ),
+    ] = True
     # 판정마다 기대 항목별 근거(`checks`)를 받고 판독 기록과 대조한다(ARTEL-1133). 켜면
     # `report_step` · `report_case` 가 `checks` 인자를 하나 더 받고, 판정과 항목이 서로 반대면
     # 돌려보내며, 근거마다 기록과 맞는지를 `STATUS` 에 싣는다(`app/qa/verdict_evidence.py`).
@@ -776,11 +862,25 @@ class QaArchSpec(BaseModel):
     # 끝까지 간 `run_macro` 결과를 한 줄로 내고, 호출한 step 이 보고된 뒤 오래된 결과를 한 줄로
     # `fold` 한다(ARTEL-1026). 기본값이 `True` 이고 `QA_ARCH_LABEL` 이 `v26-macro-result-fold` 로
     # 올랐다. 끄면 결과 문장과 `fold` 종류가 v25 그대로다.
-    fold_stale_macro_results: bool = True
+    fold_stale_macro_results: Annotated[
+        bool,
+        LaunchOption(
+            "k",
+            ko="해당 step 을 report 한 뒤 오래된 run_macro 결과를 한 줄로 fold 합니다.",
+            en="Fold old run_macro results into one line once their step is reported.",
+        ),
+    ] = True
     # `fold_context` 가 오래된 block 을 한 번에 `fold` 하는 기준. 낮추면 prompt 를 자주 다시 써서
     # `cache` 를 덜 읽고, 높이면 오래된 block 이 오래 남아 `cache` 에서 읽는 양이 는다. 어느 쪽이
     # 싼지는 재 봐야 해서 실험 축으로 둔다. `0` 은 오래된 block 을 매 호출 `fold` 한다.
-    fold_threshold_chars: int = Field(default=DEFAULT_FOLD_THRESHOLD_CHARS, ge=0, le=10_000_000)
+    fold_threshold_chars: Annotated[
+        int,
+        LaunchOption(
+            "l",
+            ko="오래된 block 이 몇 글자 쌓이면 한 번에 fold 할지. 0 은 매 호출 fold 합니다.",
+            en="How many characters of stale blocks pile up before one fold. 0 folds on every call.",
+        ),
+    ] = Field(default=DEFAULT_FOLD_THRESHOLD_CHARS, ge=0, le=10_000_000)
     # `fold` 직후 값을 다시 그리는 view 를 어떻게 다룰지. 다시 그린 view 는 혼자 기준을 넘을 만큼 커서,
     # 세면 다음 view 가 오자마자 다시 `fold` 하고 다시 그리기를 되풀이한다.
     # - `counted`: 다른 block 과 같이 센다. v58 까지의 동작이다.
@@ -817,7 +917,14 @@ class QaArchSpec(BaseModel):
     # its context, so a run with it and a run without it are two agents even with
     # the same tools. `None` defers to the deployment's own setting, which is what
     # every caller that does not care should send.
-    compaction: bool | None = None
+    compaction: Annotated[
+        bool | None,
+        LaunchOption(
+            "m",
+            ko="run 이 context 의 일정 비율을 넘으면 모델이 읽는 내용을 다시 씁니다.",
+            en="Rewrite what the model reads once the run grows past a fraction of its context.",
+        ),
+    ] = None
     compaction_trigger_fraction: float | None = Field(default=None, gt=0, le=1)
     compaction_keep_messages: int | None = Field(default=None, ge=1, le=200)
     compaction_min_new_messages: int | None = Field(default=None, ge=1, le=100)
@@ -860,6 +967,8 @@ class QaArchSpec(BaseModel):
         The run would then be filed with settings it did not have, which is the wrong-bucket
         failure `resolve_arch` refuses `vision='on'` for.
         """
+        if self.code_mode and self.engine != "agent":
+            raise QaArchError("code_mode requires engine=agent")
         if self.planner is not None and self.engine != "planner_executer":
             raise QaArchError(
                 f"planner applies only to engine='planner_executer', and this run asked for "
@@ -958,6 +1067,7 @@ class ResolvedArch(BaseModel):
     screen_capture: ScreenCaptureMode
     phase_cycle: PhaseCycleMode
     skills: Literal["off", "on_demand"]
+    code_mode: bool = False
     macros: Literal["off", "on"]
     fold_stale_scenes: bool
     fold_stale_knowledge: bool
@@ -1076,7 +1186,7 @@ def resolve_arch(spec: QaArchSpec, model: LLMModel) -> ResolvedArch:
     # `middleware_names_for` only wires `capture_vision` when vision is on, so a
     # downgrade would leave a run labelled `every_call` running with no pictures at
     # all — the wrong-bucket failure the refusal above exists to prevent.
-    if spec.screen_capture is not ScreenCaptureMode.on_demand and not vision:
+    if spec.screen_capture in VISION_REQUIRED_CAPTURE_MODES and not vision:
         raise QaArchError(
             f"screen_capture='{spec.screen_capture.value}' needs vision, and this run "
             f"resolved to vision off (model '{model}', "
@@ -1114,6 +1224,7 @@ def arch_fingerprint(
         "arch": arch.model_dump(
             mode="json",
             exclude={"label", "engine", "planner"}
+            | ({"code_mode"} if not arch.code_mode else set())
             | ({"verdict_evidence"} if arch.verdict_evidence == "off" else set())
             # 실험 축이 기본값인 런은 이 축이 생기기 전과 digest 가 같아야 한다.
             | ({"fold_redraw", "fold_redraw_scale"} if arch.fold_redraw == "counted" else set())
@@ -1163,12 +1274,18 @@ def structure_of(
     # `build_tools` — a `compact_context` that sets a flag nothing reads is worse
     # than an absent one. It still has to be counted here: what the agent can call
     # is part of what the agent is.
-    if arch.compaction:
+    if arch.compaction and not arch.code_mode:
         tools = tools + [build_compact_tool(state)]
     # `load_skill` needs no line here: `build_tools` registers it itself when
     # `arch.skills` is `on_demand`, so the fingerprint reads its real schema.
     names = tuple(tool.name for tool in tools)
     middleware = middleware_names_for(arch)
+    if arch.code_mode:
+        direct = arch.model_copy(update={"code_mode": False})
+        _, _, inner_digest = structure_of(direct, execution_mode, prompt_version)
+        outer_digest = arch_fingerprint(arch, tools, middleware)
+        digest = hashlib.sha256(f"{outer_digest}:{inner_digest}".encode()).hexdigest()[:12]
+        return names, middleware, digest
     return names, middleware, arch_fingerprint(arch, tools, middleware)
 
 

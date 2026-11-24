@@ -38,7 +38,7 @@ from app.llm.cache_boundary import per_call, stable, turn_scoped
 from app.llm.models import get_model_spec
 from app.prompts import load_prompt, load_skill, skill_descriptions, skill_names
 from app.qa.channel import QaCancelled, QaRunChannel
-from app.qa.envelope import LogCategory
+from app.qa.envelope import LogCategory, MessageType
 from app.qa.failure_site import failure_site_of
 from app.qa.provider_error import classify_provider_error
 from app.qa.game_functions import render_catalog
@@ -424,6 +424,7 @@ def build_middleware(
             run_model_max_input_tokens=get_model_spec(config.model).max_input_tokens,
             state=state,
             channel=channel,
+            expose_tool=not arch.code_mode,
             trigger_fraction=arch.compaction_trigger_fraction,
             keep_messages=arch.compaction_keep_messages,
             min_new_messages=arch.compaction_min_new_messages,
@@ -798,6 +799,11 @@ class QaRunner:
             )
         total_steps = len(scenario.steps)
         tools = build_tools(channel, state, arch, prompt.version)
+        if arch.code_mode:
+            system_prompt += (
+                "\nUse run_code for every tool invocation, including reporting and finishing. "
+                "Available tools and their arguments:\n" + state.code_tool_catalog
+            )
         # view 의 function 줄을 1번 step 의 TC 기준으로 둔다. 다음부터는 tool 이 옮긴다.
         if arch.cheats == "on" or arch.behaviors == "on":
             focus(ToolContext(channel, state, arch), 1)
@@ -880,6 +886,9 @@ class QaRunner:
             await self._log_reasoning(channel, update)
             # 종료가 성공한 뒤에는 다음 모델 호출 전에 stream을 끝낸다.
             if state.finished:
+                if state.pending_code_completion is not None:
+                    await channel.emit(MessageType.STATUS, state.pending_code_completion)
+                    state.pending_code_completion = None
                 break
 
     @staticmethod

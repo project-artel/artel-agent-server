@@ -52,6 +52,13 @@ def test_the_response_carries_what_the_run_will_use() -> None:
     assert config["temperature"] == 0.2
 
 
+def test_code_mode_records_model_and_inner_tools_separately() -> None:
+    config = open_session(arch={"code_mode": True})["run_config"]
+    assert config["tools"] == ["run_code"]
+    assert "report_test_case" in config["code_tools"]
+    assert "run_code" not in config["code_tools"]
+
+
 def test_the_prompt_version_comes_back_resolved() -> None:
     """Not the alias. `null` means "the newest", and a run recorded under that
     name stops being attributable the day a new version directory lands."""

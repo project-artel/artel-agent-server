@@ -114,6 +114,14 @@ def build_tools(
     if ctx.arch.behaviors == "on":
         tools = [with_behavior_endings(one, ctx) for one in tools]
     # 한 응답에 여러 tool call이 있어도 사용자 질문 대기 중에는 다음 호출을 실행하지 않는다.
+    if ctx.arch.code_mode:
+        from app.agents.qa.tools.code_mode import build_code_tool
+
+        if ctx.arch.compaction:
+            from app.agents.qa.compaction import build_compact_tool
+
+            tools.append(build_compact_tool(state))
+        tools = [build_code_tool(tools, ctx)]
     execution_lock = asyncio.Lock()
     return [_serialized(one, execution_lock) for one in tools]
 
