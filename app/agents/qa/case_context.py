@@ -2,6 +2,7 @@
 
 import json
 import re
+from itertools import count
 from uuid import uuid4
 from typing import TYPE_CHECKING
 
@@ -86,10 +87,17 @@ def render_case_ledger(state: "QaRunState", channel: "QaRunChannel") -> str:
     return text
 
 
-def fold_case_details(messages: list[BaseMessage], current_case_id: int | None = None, *, for_summary: bool = False) -> list[BaseMessage]:
+def fold_case_details(
+    messages: list[BaseMessage],
+    current_case_id: int | None = None,
+    *,
+    for_summary: bool = False,
+    frozen: set[tuple[str, int]] | None = None,
+    batch: bool = True,
+) -> list[BaseMessage]:
     """오래된 상세만 바꾸고 원래 message와 snapshot은 변경하지 않는다."""
     latest = None
-    if not for_summary:
+    if not for_summary and batch:
         for index, message in enumerate(messages):
             if is_ledger(message) or not isinstance(message.content, str):
                 continue
@@ -106,12 +114,21 @@ def fold_case_details(messages: list[BaseMessage], current_case_id: int | None =
             result.append(message)
             continue
 
+        detail_indices = count()
+
         def replace(match):
             identifier = match.group("id")
             # 작은 초기 계획은 일반 호출에서는 유지하고 summary 입력에서만 제외한다.
             keep = not for_summary and (
                 identifier == "plan" or identifier == str(current_case_id) or latest == (index, match.start())
             )
+            if frozen is not None:
+                if not message.id:
+                    return match.group(0)
+                key = (message.id, next(detail_indices))
+                if batch and not keep:
+                    frozen.add(key)
+                keep = key not in frozen
             if keep:
                 return match.group(0)
             return f"[TC {identifier} details folded; use get_test_case(case_id) for the original snapshot.]"
@@ -122,14 +139,14 @@ def fold_case_details(messages: list[BaseMessage], current_case_id: int | None =
 
 
 def supersede_case_context(
-    messages: list[BaseMessage], current_case_id: int | None, frozen: dict[str, str], batch: bool
+    messages: list[BaseMessage], current_case_id: int | None, frozen: set[tuple[str, int]], batch: bool
 ) -> tuple[list[BaseMessage], int | None]:
     """이번 호출이 받는 `messages` 에서 지난 TC 상세를 접는다. graph 는 그대로다.
 
     `fold_context` 의 batch 와 같은 호출에서만 새로 접는다(`batch`). 따로 접으면 그 호출에서 프롬프트를
     한 번 더 고쳐 써서, 그 뒤가 `cache` 에서 한 번 더 빠진다(로컬 런 136: TC 장부를 접은 호출이 시스템
-    프롬프트까지만 읽었다). 한 번 접은 메시지는 `frozen` 에 그때 내용을 두고 다음 호출에도 같은 내용으로
-    보낸다 — `fold_case_details` 는 지금 TC 에 따라 남길 상세가 달라서, 다시 계산하면 앞이 바뀐다.
+    프롬프트까지만 읽었다). 이미 접은 TC 상세는 메시지 id와 상세 순번으로 기록한다.
+    다음 호출에서는 현재 메시지에 이 기록을 적용해 같은 메시지의 `pulse` view가 다시 나타나지 않게 한다.
 
     **지난 ledger 는 접지 않는다.** 첫 ledger 가 대화 맨 앞 메시지에 있어서, 접으면 batch 마다 시스템 뒤
     전부를 다시 썼다(로컬 런 137). ledger 는 하나에 수천 자라 남겨 두고 `cache` 에서 읽는 편이 싸고, 가장 새
@@ -138,20 +155,12 @@ def supersede_case_context(
     돌려주는 자리는 아직 안 접은 지난 TC 상세가 처음 나오는 메시지다. 다음 batch 는 거기부터 고쳐 쓴다.
     없으면 None 이다.
     """
-    if batch:
-        for old, new in zip(messages, fold_case_details(messages, current_case_id)):
-            if new is not old and old.id and old.id not in frozen:
-                frozen[old.id] = new.content
-    sent = [
-        message.model_copy(update={"content": frozen[message.id]}) if message.id in frozen else message
-        for message in messages
-    ]
+    sent = fold_case_details(messages, current_case_id, frozen=frozen, batch=batch)
     pending = next(
         (
             index
             for index, message in enumerate(sent)
-            if message.id not in frozen
-            and not is_ledger(message)
+            if not is_ledger(message)
             and isinstance(message.content, str)
             and _foldable_detail(message.content)
         ),

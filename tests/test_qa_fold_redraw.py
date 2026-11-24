@@ -291,7 +291,7 @@ def detail(number: int, case_id: int) -> ToolMessage:
 
 def test_지난_ledger_는_fold_batch_에서도_접지_않는다() -> None:
     """첫 ledger 가 대화 맨 앞에 있어서, 접으면 batch 마다 시스템 뒤 전부를 다시 쓴다(로컬 런 137)."""
-    frozen: dict[str, str] = {}
+    frozen: set[tuple[str, int]] = set()
     messages = [ledger(1), delta(1), ledger(2), delta(2)]
 
     sent, pending = supersede_case_context(messages, None, frozen, batch=True)
@@ -301,7 +301,7 @@ def test_지난_ledger_는_fold_batch_에서도_접지_않는다() -> None:
 
 
 def test_지난_TC_상세는_fold_batch_에서_접고_다음_호출에도_같은_내용으로_보낸다() -> None:
-    frozen: dict[str, str] = {}
+    frozen: set[tuple[str, int]] = set()
     messages = [detail(1, 7), detail(2, 8), detail(3, 9)]
 
     quiet, pending = supersede_case_context(messages, 9, frozen, batch=False)
@@ -313,6 +313,26 @@ def test_지난_TC_상세는_fold_batch_에서_접고_다음_호출에도_같은
     assert pending == 0
     assert "details folded" in sent[0].content
     assert later[0].content == sent[0].content
+
+
+def test_TC_상세를_접은_뒤_새_anchor가_생기면_이전_view도_접힌다() -> None:
+    state = QaRunState(total_steps=1)
+    channel = QaRunChannel(qa_try_id=1, send=_swallow)
+    middleware = _fold_context_for(SCENE_VIEW_ONLY, THRESHOLD, state, channel, redraw="anchored", case_context=True)
+    anchor = whole(1)
+    anchor = anchor.model_copy(update={"id": "start-7", "content": detail_block(7, "spec") + "\n" + anchor.content})
+    messages = [anchor, detail(2, 8), *[delta(n) for n in range(3, 9)]]
+
+    first = call(middleware, messages)
+    assert "details folded" in first[0].content
+    assert PULSE_VIEW_START in first[0].content
+
+    messages.append(whole(9))
+    for _ in range(2):
+        sent = call(middleware, messages)
+        assert "details folded" in sent[0].content
+        assert PULSE_VIEW_START not in sent[0].content
+        assert PULSE_VIEW_START in sent[-1].content
 
 
 def test_case_context_가_꺼진_middleware_는_ledger_를_덧붙이기만_한다() -> None:
@@ -361,7 +381,7 @@ def test_그림으로_끝나는_메시지는_그림_앞_block_에_경계가_선�
 
 def test_계획_상세는_다음_batch_가_고쳐_쓰는_자리로_세지_않는다() -> None:
     """첫 메시지의 계획 상세는 접지 않는다. 세면 경계가 늘 0 번 앞이 되어 한 번도 서지 않는다(로컬 런 138)."""
-    frozen: dict[str, str] = {}
+    frozen: set[tuple[str, int]] = set()
     messages = [
         HumanMessage(id="start", content="start\n" + detail_block("plan", "the plan")),
         delta(1),

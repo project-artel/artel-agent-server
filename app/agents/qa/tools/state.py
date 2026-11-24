@@ -144,9 +144,9 @@ class QaRunState:
         self.views_at_fold: frozenset[str] | None = None
         # 런 동안 본 가장 큰 view 의 글자 수. `fold_redraw="scaled"` 의 기준이 이것으로 정해진다.
         self.largest_view = 0
-        # `fold` batch 에서 접은 지난 TC ledger · TC 상세 메시지의 id 와 그때 보낸 내용
+        # `fold` batch 에서 접은 TC 상세의 메시지 id와 메시지 안의 상세 순번
         # (`app/agents/qa/case_context.py` 의 `supersede_case_context`).
-        self.frozen_case_context: dict[str, str] = {}
+        self.frozen_case_context: set[tuple[str, int]] = set()
         # 지난 호출이 `stable` 로 표시한 메시지의 id. `fold` 한 호출은 이 메시지에 다시 경계를 둬서 지난 `cache` 를
         # 읽는다(`app/agents/qa/runner.py` 의 `_mark_stable`).
         self.stable_message_id: str | None = None
