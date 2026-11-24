@@ -153,6 +153,16 @@ def _service(app) -> QaExecutionService:
     return app.state.qa_session_service
 
 
+def _unsupported_frame_detail(raw: object) -> str:
+    fields = raw if isinstance(raw, dict) else {}
+    labels = []
+    for key in ("type", "messageId"):
+        value = fields.get(key)
+        if isinstance(value, str):
+            labels.append(f"{key}={value[:64]!r}")
+    return "Unsupported inbound frame" + (" (" + ", ".join(labels) + ")" if labels else "")
+
+
 def _error_frame(code: str, detail: str, qa_try_id: int = 0) -> dict:
     """A minimal ERROR envelope for connection-level failures.
 
@@ -225,11 +235,18 @@ async def qa_session_ws(websocket: WebSocket, session_id: str) -> None:
     await service.bind_llm_key(session_id)
 
     # The run drives itself; this coroutine only feeds it what arrives.
-    run = asyncio.create_task(service.run(session_id, send))
+    channel_ready = asyncio.Event()
+    run = asyncio.create_task(service.run(session_id, send, channel_ready=channel_ready))
+
+    async def receive_frame() -> dict:
+        frame = await websocket.receive_json()
+        # The SDK can send its only whole PULSE while the first channel is still loading.
+        await channel_ready.wait()
+        return frame
 
     try:
         while not run.done():
-            receive = asyncio.create_task(websocket.receive_json())
+            receive = asyncio.create_task(receive_frame())
             done, _ = await asyncio.wait(
                 {receive, run}, return_when=asyncio.FIRST_COMPLETED
             )
@@ -240,7 +257,7 @@ async def qa_session_ws(websocket: WebSocket, session_id: str) -> None:
             if not isinstance(raw, dict) or not service.deliver(session_id, raw):
                 await send(
                     _error_frame(
-                        "bad_request", f"Unsupported inbound frame: {raw!r}", qa_try_id
+                        "bad_request", _unsupported_frame_detail(raw), qa_try_id
                     )
                 )
     except WebSocketDisconnect:

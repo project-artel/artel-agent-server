@@ -7,7 +7,14 @@ run died exactly this way, on `{"id": 1, "success": true, "error": ""}`.
 """
 
 import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
+import pytest
+from fastapi import WebSocketDisconnect
+
+from app.agents.qa.arch import QaArchSpec
+from app.api.qa_sessions import _unsupported_frame_detail, qa_session_ws
 from app.qa.channel import KNOWLEDGE_SEARCH_TIMEOUT_SECONDS, READING_WAIT_SECONDS
 from app.qa.schemas import QaCaseRef, QaRunScenario, QaScenario, QaStep
 from app.qa.service import QaExecutionService
@@ -31,6 +38,61 @@ def make_scenario() -> QaScenario:
             )
         ],
     )
+
+
+def test_rejected_frame_detail_limits_the_headers_and_omits_the_payload():
+    detail = _unsupported_frame_detail({"type": "PULSE", "messageId": "id", "payload": "secret" * 20000})
+    assert detail == "Unsupported inbound frame (type='PULSE', messageId='id')"
+    detail = _unsupported_frame_detail({"type": "\0" * 100000, "messageId": "가" * 100000})
+    assert len(detail.encode()) < 1024
+    for raw in ["secret" * 20000, {"type": ["secret"], "messageId": {"secret": 1}}]:
+        assert _unsupported_frame_detail(raw) == "Unsupported inbound frame"
+
+
+@pytest.mark.parametrize("startup_fails", [False, True])
+def test_socket_keeps_the_first_pulse_while_loading_macros(monkeypatch, startup_fails):
+    async def play():
+        first_read = asyncio.Event()
+        resume_startup = asyncio.Event()
+        delivered = []
+
+        async def load_macros(*_args):
+            await resume_startup.wait()
+            if startup_fails:
+                raise RuntimeError("macro startup failed")
+            return []
+
+        monkeypatch.setattr("app.qa.service.fetch_developer_macros", load_macros)
+        service = QaExecutionService(store=InMemoryQaSessionStore(), runner_factory=StallingRunner)
+        session, _ = await service.open(
+            qa_run_id=7, game_instance_id=1, arch=QaArchSpec(engine="planner_executer"),
+            scenarios=[QaRunScenario(qa_try_id=7, test_scenario_id=1, scenario=make_scenario())],
+        )
+
+        async def receive():
+            if first_read.is_set():
+                delivered.append(service._channels[session].scene.pulse.scene)
+                raise WebSocketDisconnect()
+            first_read.set()
+            return {"type": "PULSE", "payload": {"type": "PULSE", "seq": 1, "whole": True, "scene": "menu"}}
+
+        socket = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(qa_session_service=service)),
+            accept=AsyncMock(), send_json=AsyncMock(), receive_json=receive, close=AsyncMock(),
+        )
+        task = asyncio.create_task(qa_session_ws(socket, session))
+        await asyncio.wait_for(first_read.wait(), timeout=2)
+        resume_startup.set()
+        if startup_fails:
+            with pytest.raises(RuntimeError, match="macro startup failed"):
+                await asyncio.wait_for(task, timeout=2)
+            assert not delivered
+        else:
+            await asyncio.wait_for(task, timeout=2)
+            assert delivered == ["menu"]
+        assert not any(call.args[0]["type"] == "ERROR" for call in socket.send_json.await_args_list)
+
+    asyncio.run(play())
 
 
 class StallingRunner:
