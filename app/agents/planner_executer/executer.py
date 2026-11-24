@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from app.agents.planner_executer.game_functions import PlannerGameFunctions
+
 from pydantic import BaseModel, Field
 
 from app.agents.planner_executer.arch import PlannerExecuterArchSpec
@@ -409,8 +411,10 @@ class Executer:
         clock: Callable[[], float] = time.monotonic,
         state_reader: StateReader = read_state,
         facts: GameFacts = NO_FACTS,
+        game_functions: "PlannerGameFunctions | None" = None,
     ) -> None:
         self._channel = channel
+        self._game_functions = game_functions
         self._spec = spec
         # 사전 조건을 물을 때만 참이다: Jev 에게 ```observe 로 좁히지 않은 화면 전체를 보인다(pe16).
         self._whole_view = False
@@ -1547,7 +1551,7 @@ class Executer:
     async def _run(self, definition: MacroDefinition, step: int, allowed: frozenset[str] | None = None) -> ActionRun:
         """실패나 pause 전까지 기록된 flags도 실행 결과와 함께 보존한다. `allowed` 가 있으면 그 밖의 대상에 가는 입력은 보내지
         않는다(계약 행동)."""
-        host = ChannelMacroHost(self._channel, self._jev, step, allowed_targets=allowed)
+        host = ChannelMacroHost(self._channel, self._jev, step, allowed_targets=allowed, game_functions=self._game_functions)
         try:
             result = await run_macro(host, definition, {}, step)
         except QaCancelled:

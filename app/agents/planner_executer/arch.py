@@ -117,7 +117,8 @@ from pydantic import BaseModel, ConfigDict, Field
 # - 불성립이면 planner 가 그것을 먼저 맞추도록 한 번 다시 쓴다. planner 는 평소에는 사전 조건을 따로 다루지 않는다.
 # - evaluator 는 `precondition_held` 를 낸다. 거짓이면 통과로 두지 않고 "사전 조건 불충족" 으로 실패와 따로 적는다.
 # pe17: 준비 여부를 알 수 없는 단일 행동도 Jev에 기다림을 물어 실행할지 결정한다.
-PLANNER_EXECUTER_LABEL = "pe17-execute-or-wait"
+# pe18: ORDERED actions can invoke a registered setup or read-only game function permitted at this step.
+PLANNER_EXECUTER_LABEL = "pe18-game-functions"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
 _FINGERPRINT_SCHEME = 2

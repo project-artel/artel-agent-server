@@ -38,6 +38,7 @@ from app.agents.planner_executer.developer_macros import (
     LoadedDeveloperMacros,
 )
 from app.agents.planner_executer.inputs import InputsReader
+from app.agents.planner_executer.game_functions import PlannerGameFunctions
 from app.agents.planner_executer.macros import DeveloperAction, RegisteredMacros, StepMacros, parse_step
 from app.agents.qa.macro.parser import imported_names
 from app.agents.planner_executer.planner import Ask, _text, extract_code, normalize_paths
@@ -80,6 +81,7 @@ class MacroEditor:
         ask: Ask | None = None,
         developer: LoadedDeveloperMacros = NO_DEVELOPER_MACROS,
         inputs: InputsReader | None = None,
+        game_functions: "PlannerGameFunctions | None" = None,
     ) -> None:
         self._config = config
         self._channel = channel
@@ -92,6 +94,7 @@ class MacroEditor:
         # 이 빌드가 읽는 입력(SDK `list_inputs`). editor 는 매크로가 게임을 움직이지 못했을 때 불리고, 그 원인이 게임이 읽지
         # 않는 키일 때가 많다. 그래서 planner 와 같은 절을 다시 쓸 때마다 새로 읽어 싣는다.
         self._inputs_reader = inputs if inputs is not None else InputsReader(channel)
+        self._game_functions = game_functions
         self._inputs: str | None = None
 
     def for_step(self, scenario: QaScenario, step: int) -> Repair:
@@ -225,6 +228,7 @@ class MacroEditor:
             + "\n".join(evidence_lines(shown_turns))
             + "\n\n"
             + (f"{self._inputs}\n\n" if self._inputs else "")
+            + (self._game_functions.guidance(step) if self._game_functions else "")
             + f"Current screen:\n{screen(self._channel.scene.pulse)}\n"
             + (f"\n{feedback}\n" if feedback else "")
         )

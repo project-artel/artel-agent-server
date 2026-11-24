@@ -33,6 +33,7 @@ from app.agents.qa.macro.runner import (
 )
 from app.agents.qa.tools.tool_context import _is_press, _press_landing
 from app.qa.acting import ActionOutcome, ScreenChange
+from app.agents.planner_executer.game_functions import PlannerGameFunctions
 from app.qa.channel import QaRunChannel
 from app.qa.envelope import JsonRpcAction
 from app.qa.jev import JevClient, JevError
@@ -61,7 +62,28 @@ class ChannelMacroHost:
     # 계약 행동이 입력할 수 있는 대상: 바인딩한 객체의 selector 와 body 에 글자로 적은 고정 대상(`[n]` 없는 꼴). `None`
     # 이면 제한하지 않는다(legacy). 정적 검사를 helper·import 로 비켜 가도 여기서 막는다.
     allowed_targets: frozenset[str] | None = None
+    game_functions: "PlannerGameFunctions | None" = None
     contract_violation: str | None = None
+
+    async def call_game_function(self, name: str, arguments: str, target: str) -> tuple[bool, bool, str]:
+        if self.game_functions is None:
+            return False, False, "Game functions cannot run in probes, planning, or predicate evaluation."
+        if target and self.allowed_targets is not None and target not in self.allowed_targets:
+            return False, False, "Game function target is outside the selected action's bound targets."
+        reply = await self.game_functions.call(self.step, name, arguments, target or None)
+        if reply.sent:
+            entry = self.channel.game_functions.entry("cheat", name)
+            # Setup can fill a credential form. Its return text is neither a test observation nor safe to replay.
+            detail = reply.detail[:2000] if entry.read_only else (
+                "Setup request completed; verify its effect in the game." if reply.ok else "The SDK rejected the setup request."
+            )
+            self.sent.append({
+                "kind": "read_only_function" if entry.read_only else "setup_function",
+                "summary": name, "target": target or None,
+                "ok": reply.ok, "value": detail if entry.read_only and reply.ok else None, "error": None if reply.ok else detail,
+            })
+            return True, reply.ok, detail
+        return reply.sent, reply.ok, reply.detail
 
     async def run(self, actions: list[JsonRpcAction], summary: str, step: int) -> ActionOutcome:
         pulse = self.channel.scene.pulse

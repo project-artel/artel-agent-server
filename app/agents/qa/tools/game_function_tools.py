@@ -10,6 +10,7 @@
 tool 결과로만 돌아간다.
 """
 
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from langchain_core.tools import BaseTool, tool
@@ -168,10 +169,88 @@ def build_unified_function_tools(
     return [call_game_function, *behaviors[1:]]
 
 
-def build_cheat_tools(ctx: ToolContext) -> list[BaseTool]:
-    # 아래 tool 이 closure 로 잡는 것. 되묶는 이유는 `tool_context.py` 에 있다.
-    state, arch = ctx.state, ctx.arch
+@dataclass(frozen=True)
+class CheatCall:
+    sent: bool
+    ok: bool
+    detail: str
+    text: str
 
+    @classmethod
+    def refused(cls, reason: str) -> "CheatCall":
+        return cls(False, False, reason, reason)
+
+
+async def invoke_cheat(
+    ctx: ToolContext, step: int, name: str, arguments: dict[str, Any], target: str | None,
+) -> CheatCall:
+    state, arch = ctx.state, ctx.arch
+    focus(ctx, step)
+    read_only = is_read_only(ctx, "cheat", name)
+    case_id = state.current_case_id
+    if read_only and case_id is not None and state.case_id_at(step) != case_id:
+        return CheatCall.refused(f"Step {step} is outside the active test case {case_id}. Nothing was sent.")
+    if state.cheats_attempted >= arch.max_cheats_per_run:
+        return CheatCall.refused(
+            f"You have used all {arch.max_cheats_per_run} cheat calls this run allows. "
+            "Nothing was sent."
+        )
+    refusal = _refusal(ctx, "cheat", name, step)
+    if refusal is not None:
+        return CheatCall.refused(refusal)
+    resolved, why = _resolved_target(ctx, "cheat", name, target)
+    if why is not None:
+        return CheatCall.refused(why)
+    state.cheats_attempted += 1
+    success = False
+    detail = "The game reported no result."
+    payload = {"name": name, "args": dict(arguments), "target": resolved}
+    if read_only:
+        payload["requireReadOnly"] = True
+
+    def description(item: ActionResultItem) -> str:
+        if not item.success:
+            return _failed(item)
+        message = _value(item).get("message")
+        attempt = ctx.channel.evaluation.attempts.get(case_id) if case_id is not None else None
+        if read_only and isinstance(message, str) and 0 < len(message) <= 2000 and attempt is not None:
+            observation = f"query-{state.cheats_attempted}"
+            state.function_observations[observation] = (str(attempt), message)
+            return f"{observation} — {message}"
+        return f"ok — {message}" if message else "ok"
+
+    def record(item: ActionResultItem) -> str:
+        nonlocal success, detail
+        success = item.success
+        detail = description(item)
+        return detail
+
+    outcome = await ctx.act(
+        [
+            JsonRpcAction(
+                id=1,
+                method="invoke_cheat",
+                params=[payload],
+            )
+        ],
+        f"Reading {name}" if read_only else f"Cheat {name}",
+        step,
+        describe=record,
+        observation=read_only,
+    )
+    if not read_only:
+        state.used_cheats.append(
+            UsedCheat(
+                name=name,
+                args=dict(arguments),
+                target=resolved,
+                success=success,
+            )
+        )
+    return CheatCall(True, success, detail, outcome.text)
+
+
+def build_cheat_tools(ctx: ToolContext) -> list[BaseTool]:
     @tool(description=load_tool_description("run_cheat").body)
     async def run_cheat(
         step: int,
@@ -184,63 +263,7 @@ def build_cheat_tools(ctx: ToolContext) -> list[BaseTool]:
         #
         # 인자 이름이 wire 의 `args` 가 아닌 `arguments` 인 이유: `@tool` 이 `args` 라는 인자를
         # `v__args` 로 바꿔 받아서 함수에 닿지 않는다. `run_macro` 도 같은 이름을 쓴다.
-        focus(ctx, step)
-        read_only = is_read_only(ctx, "cheat", name)
-        case_id = state.current_case_id
-        if read_only and case_id is not None and state.case_id_at(step) != case_id:
-            return f"Step {step} is outside the active test case {case_id}. Nothing was sent."
-        if state.cheats_attempted >= arch.max_cheats_per_run:
-            return (
-                f"You have used all {arch.max_cheats_per_run} cheat calls this run allows. "
-                "Nothing was sent."
-            )
-        refusal = _refusal(ctx, "cheat", name, step)
-        if refusal is not None:
-            return refusal
-        resolved, why = _resolved_target(ctx, "cheat", name, target)
-        if why is not None:
-            return why
-        state.cheats_attempted += 1
-        answered: list[ActionResultItem] = []
-        payload = {"name": name, "args": dict(arguments), "target": resolved}
-        if read_only:
-            payload["requireReadOnly"] = True
-
-        def describe(item: ActionResultItem) -> str:
-            answered.append(item)
-            if not item.success:
-                return _failed(item)
-            message = _value(item).get("message")
-            attempt = ctx.channel.evaluation.attempts.get(case_id) if case_id is not None else None
-            if read_only and isinstance(message, str) and 0 < len(message) <= 2000 and attempt is not None:
-                observation = f"query-{state.cheats_attempted}"
-                state.function_observations[observation] = (str(attempt), message)
-                return f"{observation} — {message}"
-            return f"ok — {message}" if message else "ok"
-
-        outcome = await ctx.act(
-            [
-                JsonRpcAction(
-                    id=1,
-                    method="invoke_cheat",
-                    params=[payload],
-                )
-            ],
-            f"Reading {name}" if read_only else f"Cheat {name}",
-            step,
-            describe=describe,
-            observation=read_only,
-        )
-        if not read_only:
-            state.used_cheats.append(
-                UsedCheat(
-                    name=name,
-                    args=dict(arguments),
-                    target=resolved,
-                    success=bool(answered) and answered[0].success,
-                )
-            )
-        return outcome.text
+        return (await invoke_cheat(ctx, step, name, arguments, target)).text
 
     return [run_cheat]
 
