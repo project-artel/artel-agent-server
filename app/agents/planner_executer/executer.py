@@ -988,7 +988,7 @@ class Executer:
                     category=LogCategory.OBSERVATION,
                     message=f"Step {step}: game values read {len(readings(play.evidence))} times",
                     step=step,
-                    evidence={**evidence_log(play.evidence, play.evidence_unknown), "changes": play.changes},
+                    evidence=evidence_log(play.evidence, play.evidence_unknown, play.changes),
                 ),
             )
         play.end_frame = channel.scene.pulse.frame

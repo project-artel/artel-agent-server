@@ -266,6 +266,21 @@ def test_inactive_stale_and_unread_are_kept_as_what_state_set_says() -> None:
     assert reading.complete
 
 
+def test_evidence_log_limits_changes_and_records_omissions_without_mutating_observations() -> None:
+    import json
+    from app.agents.planner_executer.evidence import MAX_EVIDENCE_LOG_BYTES, evidence_log
+
+    changes = [f"적[{i}] 등장" * 20 for i in range(1000)]
+    log = evidence_log([], [], changes)
+    assert len(json.dumps(log, ensure_ascii=False).encode()) <= MAX_EVIDENCE_LOG_BYTES
+    assert 0 < len(log["changes"]) < len(changes)
+    assert len(log["changes"]) + log["changes_left_out"] == len(changes) == 1000
+
+    log = evidence_log([{"at": "end", "error": "오류" * 10000}], ["이름" * 10000], [])
+    assert len(json.dumps(log, ensure_ascii=False).encode()) <= MAX_EVIDENCE_LOG_BYTES
+    assert log["failed_left_out"] == log["unknown_members_left_out"] == 1
+
+
 def test_a_name_missing_from_an_incomplete_reading_is_not_read_not_absent() -> None:
     from app.agents.planner_executer.evidence import evidence_log, points_of
 
@@ -280,7 +295,7 @@ def test_a_name_missing_from_an_incomplete_reading_is_not_read_not_absent() -> N
     play = StepPlay("done", check=StepCheck(paths=("Enemy",)), evidence=read)
     drawn = evidence_text(play)
     assert "readings that could not cover every object" in drawn and "turn 1" in drawn
-    log = evidence_log(read, [])
+    log = evidence_log(read, [], [])
     assert log["series"]["Enemy[0] Enemy.hp"][1] == ["turn 1", "(not read)"]
     assert log["incomplete"] == [{"at": "turn 1", "clipped": 3, "omitted": 0}]
 
