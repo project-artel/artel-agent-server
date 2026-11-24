@@ -1,5 +1,3 @@
-import uuid
-
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from app.agents.scenario.router import JevScenarioRouter, ScenarioRouter
@@ -17,6 +15,7 @@ from app.agents import (
     SceneEdge,
     TestCaseListItem,
 )
+from app.deployment import new_session_id
 from app.llm.credentials import LlmKey, bind_llm_key
 from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig
 from app.llm.usage import set_usage_scope
@@ -69,7 +68,7 @@ class SessionService:
         current_scenarios: list[ScenarioPlan] | None = None,
         llm_key: LlmKey | None = None,
     ) -> str:
-        session_id = uuid.uuid4().hex
+        session_id = new_session_id()
         record = SessionRecord(
             unity_context=unity_context,
             game_context=game_context,

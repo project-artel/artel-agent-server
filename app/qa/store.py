@@ -9,6 +9,8 @@ if TYPE_CHECKING:
 
 
 class QaSessionStore(Protocol):
+    async def has_sessions(self, slot: str) -> bool: ...
+
     async def save(self, session_id: str, record: QaSessionRecord) -> None:
         """Persist a QA session record, refreshing its TTL (sliding expiration)."""
 
@@ -49,6 +51,10 @@ class InMemoryQaSessionStore:
     async def delete(self, session_id: str) -> None:
         self._data.pop(session_id, None)
 
+    async def has_sessions(self, slot: str) -> bool:
+        self._drop_expired()
+        return any(key.startswith(f"{slot}-") for key in self._data)
+
     def _drop_expired(self) -> None:
         now = self._clock()
         for key in [k for k, (_, at) in self._data.items() if at is not None and at <= now]:
@@ -64,6 +70,10 @@ class RedisQaSessionStore:
     def __init__(self, redis: "Redis", ttl_seconds: int) -> None:
         self._redis = redis
         self._ttl = ttl_seconds
+
+    async def has_sessions(self, slot: str) -> bool:
+        keys = self._redis.scan_iter(match=self._key(f"{slot}-*"), count=100)
+        return await anext(keys, None) is not None
 
     @staticmethod
     def _key(session_id: str) -> str:

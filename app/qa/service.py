@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import uuid
 from collections.abc import Awaitable, Callable
 
 from pydantic import ValidationError
@@ -18,6 +17,7 @@ from app.agents.qa.arch import DEFAULT_ARCH, QaArchSpec
 from app.agents.qa.reset import DEFAULT_RESET_POLICY, ResetPolicy
 from app.agents.qa.runner import QaRunner
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage
+from app.deployment import new_session_id
 from app.llm.credentials import LlmKey, bind_llm_key
 from app.llm.models import DEFAULT_MODEL, LLMModel, ReasoningConfig
 from app.llm.usage import set_usage_scope
@@ -156,7 +156,7 @@ class QaExecutionService:
             arch=arch,
             execution_mode=execution_mode,
         )
-        session_id = uuid.uuid4().hex
+        session_id = new_session_id()
         record = QaSessionRecord(
             qa_run_id=qa_run_id,
             game_instance_id=game_instance_id,

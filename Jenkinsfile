@@ -10,6 +10,10 @@ pipeline {
         buildDiscarder(logRotator(numToKeepStr: '30'))
     }
 
+    parameters {
+        choice(name: 'AGENT_ACTION', choices: ['deploy', 'rollback-blue', 'rollback-green'], description: '신규 요청을 보낼 agent 슬롯 선택')
+    }
+
     environment {
         APP_NAME = 'artel-agent-server'
         IMAGE_NAME = 'artel-agent-server'
@@ -72,8 +76,7 @@ pipeline {
                         script {
                             env.TARGET_ENV = resolveTargetEnv(env.BRANCH_NAME)
                             env.CONTAINER_NAME = "${APP_NAME}-${env.TARGET_ENV}"
-                            env.IMAGE_TAG = "${IMAGE_NAME}:${env.TARGET_ENV}-${env.BUILD_NUMBER}"
-                            env.ENV_FILE = ".env.${env.TARGET_ENV}"
+                            env.IMAGE_TAG = "${IMAGE_NAME}:${env.TARGET_ENV}-${env.BUILD_NUMBER}-${env.GIT_COMMIT}"
                         }
 
                         // GIT_SHA and IMAGE_TAG are baked in so a QA run can record which
@@ -91,25 +94,28 @@ pipeline {
 
                 stage('Deploy') {
                     steps {
-                        withCredentials([file(credentialsId: "agent-server-env-${env.TARGET_ENV}", variable: 'ENV_SRC')]) {
-                            sh '''
-                                cp "$ENV_SRC" "$ENV_FILE"
-                                test -f $ENV_FILE
-
-                                docker stop $CONTAINER_NAME || true
-                                docker rm $CONTAINER_NAME || true
-
-                                docker run -d \
-                                  --name $CONTAINER_NAME \
-                                  --restart unless-stopped \
-                                  --network app-net \
-                                  -e APP_ENV=$TARGET_ENV \
-                                  -e APP_PORT=$APP_PORT \
-                                  --env-file "$ENV_FILE" \
-                                  $IMAGE_TAG
-                            '''
+                        lock(resource: "agent-deploy-${env.TARGET_ENV}") {
+                            withCredentials([file(credentialsId: "agent-server-env-${env.TARGET_ENV}", variable: 'ENV_SRC')]) {
+                                script {
+                                    sh 'sh deploy/agent-slots.sh "$AGENT_ACTION"'
+                                }
+                            }
                         }
-
+                        // 대기 중인 배포가 롤백을 가로막지 않도록 확인할 때만 lock을 잡는다.
+                        timeout(time: 6, unit: 'HOURS') {
+                            waitUntil(initialRecurrencePeriod: 10000, quiet: true) {
+                                script {
+                                    def result
+                                    lock(resource: "agent-deploy-${env.TARGET_ENV}") {
+                                        result = sh(script: 'sh deploy/agent-slots.sh collect', returnStatus: true)
+                                    }
+                                    if (result != 0 && result != 75) {
+                                        error "Agent drain check failed (${result})"
+                                    }
+                                    return result == 0
+                                }
+                            }
+                        }
                         // 배포 이미지는 빌드 번호로 태그가 갈려 재사용되지 않는다. 지우지 않으면
                         // 배포할 때마다 앞의 것이 디스크에 영원히 남는다. 셋을 남기는 것은 지금
                         // 도는 것 하나와, 손으로 되돌릴 자리 둘이다.

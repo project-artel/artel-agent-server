@@ -23,6 +23,7 @@ from app.api.specs_v2 import router as specs_v2_router
 from app.api.step_phrasing import router as step_phrasing_router
 from app.api.case_contracts import router as case_contracts_router
 from app.config import get_settings
+from app.deployment import InflightRequests, router as deployment_router
 from app.documents import ExtractionService
 from app.llm import build_embedding_client
 from app.llm.catalog import ModelCatalogUnavailableError
@@ -71,6 +72,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         store = InMemorySessionStore(settings.session_ttl_seconds)
         qa_store = InMemoryQaSessionStore(settings.session_ttl_seconds)
+    app.state.deployment_stores = (store, qa_store)
     app.state.session_service = SessionService(
         store=store,
         history_max_turns=settings.history_max_turns,
@@ -137,6 +139,9 @@ def create_app() -> FastAPI:
     )
     # `/health` only. Outside the prefix on purpose: the container health check
     # and monitoring reach it, and it carries nothing that needs the boundary.
+    app.state.inflight = 0
+    app.add_middleware(InflightRequests)
+    app.include_router(deployment_router, prefix=INTERNAL_PREFIX)
     app.include_router(api_router)
     # Everything else. The prefix is applied at mount time, so the route modules
     # themselves stay free of it — a router does not decide where it is mounted.

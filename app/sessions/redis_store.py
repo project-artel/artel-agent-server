@@ -13,6 +13,10 @@ class RedisSessionStore:
         self._redis = redis
         self._ttl = ttl_seconds
 
+    async def has_sessions(self, slot: str) -> bool:
+        keys = self._redis.scan_iter(match=self._key(f"{slot}-*"), count=100)
+        return await anext(keys, None) is not None
+
     @staticmethod
     def _key(session_id: str) -> str:
         return f"session:{session_id}"

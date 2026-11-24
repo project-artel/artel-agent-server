@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "Artel Agent Server"
+    deployment_slot: Literal["blue", "green"] | None = None
     app_version: str = "0.1.0"
     environment: str = Field(default="local", validation_alias="APP_ENV")
     # 채팅이 말을 거는 곳. **provider 이름을 달지 않는다** — 이 값은 OpenRouter 를
