@@ -10,6 +10,8 @@ class SessionExpired(RuntimeError):
 
 
 class SessionStore(Protocol):
+    async def has_sessions(self, slot: str) -> bool: ...
+
     async def save(self, session_id: str, record: SessionRecord) -> None:
         """Persist a session record, refreshing its TTL (sliding expiration)."""
 
@@ -50,6 +52,10 @@ class InMemorySessionStore:
 
     async def delete(self, session_id: str) -> None:
         self._data.pop(session_id, None)
+
+    async def has_sessions(self, slot: str) -> bool:
+        self._drop_expired()
+        return any(key.startswith(f"{slot}-") for key in self._data)
 
     def _drop_expired(self) -> None:
         now = self._clock()

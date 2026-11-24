@@ -1,0 +1,30 @@
+# active @SLOT@
+# image @IMAGE@
+map $uri $agent_host {
+    default @SERVICE@-@SLOT@;
+    ~^/internal/(?:qa-)?sessions/blue-  @SERVICE@-blue;
+    ~^/internal/(?:qa-)?sessions/green- @SERVICE@-green;
+    ~^/internal/(?:qa-)?sessions/       @SERVICE@;
+}
+map $http_upgrade $agent_connection {
+    default upgrade;
+    '' close;
+}
+server {
+    listen @PORT@;
+    client_max_body_size 0;
+    resolver 127.0.0.11 valid=1s ipv6=off;
+    location = /deployment-active {
+        default_type text/plain;
+        return 200 '@SLOT@';
+    }
+    location / {
+        proxy_pass http://$agent_host:@PORT@;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $agent_connection;
+        proxy_read_timeout 24h;
+        proxy_send_timeout 24h;
+        proxy_buffering off;
+    }
+}

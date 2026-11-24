@@ -186,9 +186,16 @@ docker run --rm -p 8080:8080 -v ${PWD}/.env:/app/.env:ro artel-agent-server:loca
 
 - pull request 빌드는 `CHANGE_ID` 같은 multibranch 변수로 알아냄. Dockerfile 의
   `test` 타깃만 돌리고 runtime 컨테이너는 빌드하지도 배포하지도 않음
-- Jenkins 작업공간이 `.env.stage` 와 `.env.operation` 을 줘야 함. 고른 쪽이
-  컨테이너에 `/app/.env` 로 마운트됨
-- Jenkins 호스트에 Docker 와 `app-net` 네트워크가 있어야 함
+- Jenkins credentials의 파일 `agent-server-env-stage`, `agent-server-env-operation`을 Docker의 `--env-file`로 전달한다.
+- 배포 Job은 같은 환경의 Docker daemon과 `app-net`을 사용한다. Jenkins에 Lockable Resources 플러그인이 필요하다.
+
+### Agent 슬롯 전환과 롤백
+
+첫 배포는 기존 agent를 유지하고 내부 DNS에 라우터를 추가한다. stage에서 라우터의 `/health`를 확인한 뒤 orche의 `ARTEL_AGENT_BASE_URL`과 `ARTEL_AGENT_WS_BASE_URL`을 각각 `http://artel-agent-server-stage-router:8080/internal`, `ws://artel-agent-server-stage-router:8080/internal`로 함께 변경한다. operation도 같은 순서로 이름의 `stage`를 `operation`으로 바꾼다. 이 최초 orche 설정 변경은 orche를 재시작할 때 기존 연결에 미치는 영향을 고려해 진행한다. 기존 주소를 사용하는 호출자와 접두사 없는 세션이 모두 끝난 뒤 기존 컨테이너를 정리한다.
+
+이후 Jenkins의 `deploy`는 다음 슬롯을 준비하고 신규 요청을 전환한다. QA와 작성 세션의 ID에 포함된 `blue-` 또는 `green-`이 후속 요청의 목적지를 결정한다. nginx 설정은 Docker volume에 보관한다. Jenkins는 기존 worker와 요청, 세션이 모두 끝나면 이전 컨테이너를 중지한다. 6시간이 지나도 사용 중이면 컨테이너를 유지하고 Job에 시간 초과를 기록한다.
+
+롤백 시 같은 환경의 Job에서 `AGENT_ACTION`을 복귀할 슬롯(`rollback-blue` 또는 `rollback-green`)으로 선택한다. 중지된 직전 슬롯은 다시 시작해 준비 상태를 확인한다. 전환 전 green에서 시작한 세션은 계속 green으로 간다. 연결 대기 중이거나 실행 중인 세션이 있는 슬롯에 다른 이미지를 배포하면 Jenkins가 중단된다.
 
 ## 문서
 
