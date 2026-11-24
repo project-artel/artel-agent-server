@@ -261,6 +261,7 @@ class QaCompactionMiddleware(SummarizationMiddleware):
         keep_messages: int,
         min_new_messages: int,
         trim_tokens: int,
+        expose_tool: bool = True,
         on_compacted: Callable[[str, int], Awaitable[None]] | None = None,
     ) -> None:
         # The threshold is worked out here rather than handed over as
@@ -297,7 +298,7 @@ class QaCompactionMiddleware(SummarizationMiddleware):
         # Registered here rather than in `build_tools` so that a run without this
         # middleware also has no `compact_context` — a tool that sets a flag
         # nothing reads is worse than an absent one.
-        self.tools = [build_compact_tool(state)]
+        self.tools = [build_compact_tool(state)] if expose_tool else []
 
     def _should_summarize(self, messages: list[AnyMessage], total_tokens: int) -> bool:
         """Whether to compact now.

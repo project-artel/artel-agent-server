@@ -120,6 +120,7 @@ class QaRunState:
         # 스텝마다 미도달이라 돌려보낸 횟수.
         self.unreached_refusals: dict[int, int] = {}
         self.finished = False
+        self.code_tool_catalog = ""
         # run 이 예외나 timeout 으로 멈췄을 때 `run_with_deadline` 이 채운다. 취소와
         # "닫지 않고 멈춤" 은 예외가 아니므로 `None` 으로 남는다.
         self.failure_site: FailureSite | None = None

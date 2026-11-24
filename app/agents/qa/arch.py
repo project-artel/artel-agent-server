@@ -509,7 +509,8 @@ from app.llm.models import LLMModel, get_model_spec
 # view 이후 움직인 값만 다시 그린다. 다음 `fold` 가 고쳐 쓰는 자리 앞에 Anthropic `cache` 경계를 두고
 # (`fold_cache_boundary`), 지난 TC ledger 도 같은 batch 에서 접는다. 최신 Pulse 요약 머리 줄에 씬 전체
 # view 가 실리던 것도 씬 이름으로 고쳤다.
-QA_ARCH_LABEL = "v60-anchored-scene-view"
+# Code Mode에서는 모델이 run_code 안에서만 개별 도구를 호출한다.
+QA_ARCH_LABEL = "v61-code-mode"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
@@ -732,6 +733,7 @@ class QaArchSpec(BaseModel):
     # left in, the Skills section would tell the `off` arm to load something
     # "before your first `write_macro`", a tool it does not have.
     macros: Literal["off", "on"] = "on"
+    code_mode: bool = False
     fold_stale_scenes: bool = True
     # Folds the neighbour blocks the search volunteers, and only those (ARTEL-277).
     # Separate from `fold_stale_scenes` because the two are independently useful
@@ -860,6 +862,8 @@ class QaArchSpec(BaseModel):
         The run would then be filed with settings it did not have, which is the wrong-bucket
         failure `resolve_arch` refuses `vision='on'` for.
         """
+        if self.code_mode and self.engine != "agent":
+            raise QaArchError("code_mode requires engine=agent")
         if self.planner is not None and self.engine != "planner_executer":
             raise QaArchError(
                 f"planner applies only to engine='planner_executer', and this run asked for "
@@ -958,6 +962,7 @@ class ResolvedArch(BaseModel):
     screen_capture: ScreenCaptureMode
     phase_cycle: PhaseCycleMode
     skills: Literal["off", "on_demand"]
+    code_mode: bool = False
     macros: Literal["off", "on"]
     fold_stale_scenes: bool
     fold_stale_knowledge: bool
@@ -1114,6 +1119,7 @@ def arch_fingerprint(
         "arch": arch.model_dump(
             mode="json",
             exclude={"label", "engine", "planner"}
+            | ({"code_mode"} if not arch.code_mode else set())
             | ({"verdict_evidence"} if arch.verdict_evidence == "off" else set())
             # 실험 축이 기본값인 런은 이 축이 생기기 전과 digest 가 같아야 한다.
             | ({"fold_redraw", "fold_redraw_scale"} if arch.fold_redraw == "counted" else set())
@@ -1163,12 +1169,18 @@ def structure_of(
     # `build_tools` — a `compact_context` that sets a flag nothing reads is worse
     # than an absent one. It still has to be counted here: what the agent can call
     # is part of what the agent is.
-    if arch.compaction:
+    if arch.compaction and not arch.code_mode:
         tools = tools + [build_compact_tool(state)]
     # `load_skill` needs no line here: `build_tools` registers it itself when
     # `arch.skills` is `on_demand`, so the fingerprint reads its real schema.
     names = tuple(tool.name for tool in tools)
     middleware = middleware_names_for(arch)
+    if arch.code_mode:
+        direct = arch.model_copy(update={"code_mode": False})
+        _, _, inner_digest = structure_of(direct, execution_mode, prompt_version)
+        outer_digest = arch_fingerprint(arch, tools, middleware)
+        digest = hashlib.sha256(f"{outer_digest}:{inner_digest}".encode()).hexdigest()[:12]
+        return names, middleware, digest
     return names, middleware, arch_fingerprint(arch, tools, middleware)
 
 

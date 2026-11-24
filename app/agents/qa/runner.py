@@ -424,6 +424,7 @@ def build_middleware(
             run_model_max_input_tokens=get_model_spec(config.model).max_input_tokens,
             state=state,
             channel=channel,
+            expose_tool=not arch.code_mode,
             trigger_fraction=arch.compaction_trigger_fraction,
             keep_messages=arch.compaction_keep_messages,
             min_new_messages=arch.compaction_min_new_messages,
@@ -798,6 +799,11 @@ class QaRunner:
             )
         total_steps = len(scenario.steps)
         tools = build_tools(channel, state, arch, prompt.version)
+        if arch.code_mode:
+            system_prompt += (
+                "\nUse run_code for every tool invocation, including reporting and finishing. "
+                "Available tools and their arguments:\n" + state.code_tool_catalog
+            )
         # view 의 function 줄을 1번 step 의 TC 기준으로 둔다. 다음부터는 tool 이 옮긴다.
         if arch.cheats == "on" or arch.behaviors == "on":
             focus(ToolContext(channel, state, arch), 1)
