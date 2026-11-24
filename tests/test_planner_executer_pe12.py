@@ -302,12 +302,14 @@ def test_an_undeclared_single_action_asks_whether_to_wait() -> None:
     from tests.test_planner_executer_pe11 import ONLY_PRESS
     from tests.test_planner_executer_steps import _play
 
-    jev = FakeJev(picks=("press_start",))
+    jev = FakeJev(picks=("none_fits", "press_start"))
     source = ONLY_PRESS.replace('\n\ndef ready_press_start() -> bool:\n    return scene() == "Menu"\n', "")
 
     play = _play(_menu(), jev, source)
 
-    assert len(jev.asked("noul")) == 1 and not jev.asked("choice")
+    assert len(jev.asked("noul")) == 2 and not jev.asked("choice")
+    assert [turn["picked"] for turn in play.turns if "picked" in turn] == ["none_fits", "press_start"]
+    assert play.stopped == "done" and "sent" not in play.turns[0]
     assert play.turns[0]["options"] == ["press_start"] and play.turns[0]["picked_by"] == "jev"
     assert play.turns[0]["wait_asked_because"] == ["press_start"]
 

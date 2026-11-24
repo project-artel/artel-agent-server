@@ -551,26 +551,6 @@ WAVE = '''def wave() -> None:
 '''
 
 
-def test_repeated_action_counts_the_selected_target_before_sending_another_input() -> None:
-    fake = _start_menu()
-    fake.reactions.clear()
-    for target in ("Root/Start", "Root/Quit"):
-        fake.objects[target]["members"] = {"Enemy.hp": 3}
-    start, quit_button = ("developer:strike @ " + path for path in ("Root/Start", "Root/Quit"))
-    jev = FakeJev(picks=(start, start, quit_button, quit_button, quit_button))
-    strike = STRIKE.split('    wait_until(scene() == "Map"')[0]
-    _, failure = _run(
-        fake, Answered(_answer(ONLY_DONE, 'strike(pick("Start", "Quit"))')), (_macro("strike", strike),),
-        jev, max_same_action_in_a_row=2, max_repairs_per_step=0,
-    )
-
-    assert failure is None
-    turns = [frame["payload"]["turn"] for frame in fake.frames("LOG") if frame["payload"].get("kind") == "turn"]
-    assert [turn["picked"] for turn in turns if turn.get("sent")] == [start, start, quit_button, quit_button]
-    assert turns[-1]["picked"] == quit_button and "done() is still false" in turns[-1]["no_progress"]
-    assert "sent" not in turns[-1]
-
-
 def test_only_the_requires_before_the_first_input_are_ready_checks() -> None:
     whole, by_parameter = leading_requires(STRIKE, "strike")
 

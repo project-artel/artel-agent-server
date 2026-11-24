@@ -116,7 +116,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # - TC 가 시작하는 step 에서 play 전에 Jev noul 로 사전 조건 글을 화면 전체와 대조한다(성립 ≥ 0.6, 불성립 ≤ 0.3, 그 사이는 확인 불가).
 # - 불성립이면 planner 가 그것을 먼저 맞추도록 한 번 다시 쓴다. planner 는 평소에는 사전 조건을 따로 다루지 않는다.
 # - evaluator 는 `precondition_held` 를 낸다. 거짓이면 통과로 두지 않고 "사전 조건 불충족" 으로 실패와 따로 적는다.
-# pe17: 준비가 확인되지 않은 행동은 후보 수와 관계없이 기다림을 묻고, 같은 대상과 관측값에서 성공한 입력의 반복을 멈춘다.
+# pe17: 준비 여부를 알 수 없는 단일 행동도 Jev에 기다림을 물어 실행할지 결정한다.
 PLANNER_EXECUTER_LABEL = "pe17-execute-or-wait"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
@@ -168,7 +168,8 @@ class PlannerExecuterArchSpec(BaseModel):
     max_repairs_per_step: int = Field(default=2, ge=0, le=10)
     # action 이 돌았는데 게임에 입력을 하나도 보내지 않은 turn 이 이만큼 이어지면 play 를 멈춘다. 어느 action 이든 센다.
     max_idle_turns_in_a_row: int = Field(default=10, ge=1, le=1_000)
-    # 같은 대상과 관측값에서 성공한 입력이 이만큼 반복되면 다음 입력 전에 복구를 요청하거나 실행을 멈춘다.
+    # 같은 action 을 이만큼 연달아 고르면 진척이 없는 것으로 본다. `repair="planner"` 면 planner 에게 step 을 다시 쓰게 한다.
+    # 그 밖에는 아무것도 하지 않는다 — 행동을 빼지 않는다(pe14).
     max_same_action_in_a_row: int = Field(default=6, ge=2, le=1_000)
     # planner(step 을 쓰거나 다시 쓸 때)와 evaluator(판정할 때)가 화면 한 장을 그림으로 본다. Jev 에게는 보내지 않는다.
     screen_images: Literal["off", "on"] = "on"

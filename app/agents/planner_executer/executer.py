@@ -9,8 +9,8 @@ Each turn:
    checked it false when the plan was written, stops without input (`done_at_start`);
 3. a step bound to its scene (ORDERED) whose scene changed waits `no_action_grace_seconds` without input for those to
    hold, and stops `off_plan` when they do not;
-4. list the options that can run now: actions whose ready condition holds, one per target object. Jev picks among multiple
-   actions or targets. Whether to wait is asked
+4. list the options that can run now: actions whose ready condition holds, one per target object. Jev picks among
+   multiple options. Whether to wait is asked
    only when an option has no ready condition that reads true (`WAIT_QUESTION`); otherwise the ready conditions already
    say the game takes input. The state Jev reads carries the last `RECENT_ACTIONS_SHOWN` action turns;
 5. run the action with the macro runner; `max_failures_in_a_row` failed actions stop play, and so do
@@ -196,52 +196,20 @@ def state_fingerprint(state: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(state, sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest()
 
 
-def progress_fingerprint(state: dict[str, Any], view: dict[str, Any]) -> str:
-    """진척을 가르는 지문: 장면, 선언 fact 값, 객체 경로와 화면 글자.
+def progress_fingerprint(state: dict[str, Any]) -> str:
+    """진척을 가르는 지문: 장면, 선언 fact 값, 객체가 화면에 띄운 글자.
 
     state 전체의 지문은 타이머·좌표 같은 값만으로도 매 turn 바뀌어, 같은 행동의 반복이 늘 처음부터 다시 세어졌다(로컬 run 17
     step 9: 아무것도 기다리지 않는 화면에서 대사 넘기기를 40번 넘게 눌렀다). 대사가 한 줄 넘어가면 글자가 바뀌고, 게임 단계가
     바뀌면 fact 가 바뀐다. 그 밖의 값만 바뀐 것은 진척으로 치지 않는다.
     """
-    # observe가 제한한 객체·멤버에는 이동 좌표 등 목표에 필요한 값이 있다. 그 값의 변화도 진척이다.
-    if view.get("members") or view.get("paths"):
-        basis = {key: state.get(key) for key in ("scene", "facts", "objects")}
-        if view.get("members"):
-            basis["statics"] = state.get("statics")
-        return state_fingerprint(basis)
-    objects = sorted(
-        (str(obj.get("path") or ""), str(obj.get("text") or ""))
+    texts = sorted(
+        str(obj.get("text"))
         for obj in state.get("objects") or []
-        if isinstance(obj, dict)
+        if isinstance(obj, dict) and obj.get("text")
     )
-    basis = {"scene": state.get("scene"), "facts": state.get("facts"), "objects": objects}
-    return state_fingerprint(basis)
-
-
-def repeated_without_progress(play: "StepPlay", action: str, limit: int) -> bool:
-    """마지막 입력 뒤에도 같은 목표·대상·관측값에서 같은 행동을 다시 골랐는지 본다."""
-    if len(play.turns) <= limit:
-        return False
-    current = play.turns[-1]
-    view = current.get("view") or {}
-    fingerprint = progress_fingerprint(current["jev_state"], view)
-    previous = play.turns[-limit - 1:-1]
-    if not all(
-        turn.get("options") == current["options"]
-        and turn.get("picked") == action
-        and turn.get("outcome") == "passed" and turn.get("sent")
-        and turn.get("effect") != "met" and turn.get("result") != "effect_met"
-        and turn.get("goal") == current.get("goal")
-        and turn.get("view") == current.get("view")
-        and progress_fingerprint(turn["jev_state"], view) == fingerprint
-        for turn in previous
-    ):
-        return False
-    # `check`는 Jev의 관측 범위 밖에 있는 좌표나 수량을 볼 수 있다. 그 값이 바뀌면 다음 입력을 허용한다.
-    readings = play.evidence[-limit - 1:]
-    return not readings or all(
-        "values" in sample and sample["values"] == readings[-1].get("values") for sample in readings
-    )
+    basis = {"scene": state.get("scene"), "facts": state.get("facts"), "texts": texts}
+    return hashlib.sha256(json.dumps(basis, sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest()
 
 
 def no_effect_shown(turn: dict) -> bool:
@@ -537,8 +505,16 @@ class Executer:
         play_scene = self._scene()
         left_to: str | None = None
         left_at = 0.0
+        # 같은 action 을 연달아 고른 횟수. Jev 가 읽는 state 가 그 사이 바뀌면 처음부터 센다(ARTEL-1453).
+        same_in_a_row = 0
+        last_picked: str | None = None
+        # 마지막으로 action 을 고른 turn 에 Jev 가 읽은 state 의 지문.
+        picked_on: str | None = None
         # 지금 하위 목표의 순번(```goals). 그 완료 조건이 참이면 다음으로 넘어가고 되돌아가지 않는다.
         goal_index = 0
+        # 지난 action 에 효과 조건이 있었는데 효과가 보이지 않았나. 그랬다면 state 가 바뀌어도 연속 횟수를 이어 센다 — state 는
+        # 타이머 같은 값만으로도 매 turn 바뀐다(try 11 step 7).
+        last_no_effect = False
         # 방금 통과한 action 의 ```after 다음 행동. 다음 turn 의 선택지를 이것으로 좁힌다.
         follow: tuple[str, ...] = ()
         # 이 step 에서 action 마다 실패했거나 입력 없이 끝난 횟수(누적, ARTEL-1298). 연속만 세면 두 action 이 번갈아 헛돌
@@ -625,6 +601,12 @@ class Executer:
                         break
                     left_to = None
                 state = await self._state()
+                fingerprint = progress_fingerprint(state)
+                if picked_on is not None and fingerprint != picked_on and not last_no_effect:
+                    # 지난 선택 뒤로 Jev 가 읽는 state 가 바뀌었다. 같은 action 을 또 골라도 제자리걸음이 아니다. 대사 넘기기처럼
+                    # 효과를 선언하지 않은 action 은 `effect_met` 이 나지 않아, 런 415 에서 대사 11줄을 넘기던 Space 가 6번째에
+                    # 선택지에서 빠졌다(ARTEL-1453).
+                    same_in_a_row, last_picked = 0, None
                 # Jev 가 무엇을 보고 골랐는지는 그 state 가 전부다. 기록에 없으면 "왜 그걸 골랐나" 를 다시 볼 길이 없다
                 # (런 162 step 4: 대사가 없는데 `dismiss_dialogue` 를 다섯 번 골랐다).
                 record["jev_state"] = state
@@ -735,7 +717,7 @@ class Executer:
                 earlier = [{**turn, "earlier_plan": True} for turn in history or []]
                 # 선택지마다 지금 사실을 붙인다(pe9): 대상이 화면에 띄운 글자, 연달아 고른 횟수, 효과 없이 끝난 시도.
                 options = annotate_options(options, earlier + play.turns[:-1], self._shown_words)
-                # 후보 수와 관계없이 준비 조건으로 확인할 수 없는 행동이 있으면 기다림을 묻는다.
+                # 준비 여부가 불확실한 행동이 있으면 후보 수와 관계없이 기다림을 묻는다.
                 # 대상이 여럿인 행동은 행동 하나로 묶어 먼저 묻고, 대상은 그 다음에 정한다(pe14). 카드마다 선택지였을 때 카드 놓기는
                 # 손패 수만큼 쪼개져 '턴 종료' 하나와 한 분포를 나눠 가졌고, 로컬 try 34 step 10 은 턴 종료를 19번 연달아 골랐다.
                 offered, targets_of = group_targets(options, macros, self._shown_words)
@@ -760,7 +742,6 @@ class Executer:
                     record["recent_actions"] = recent
                 choice = await self._pick(record["question"], offered, recent, state, ask_wait=bool(undeclared))
                 record["picked"] = picked = choice.choice
-                # 준비가 확인된 유일한 행동은 Jev 호출 없이 실행한다.
                 record["picked_by"] = "only_option" if len(offered) == 1 and not undeclared else "jev"
                 members = targets_of.get(picked)
                 if members is not None:
@@ -789,19 +770,6 @@ class Executer:
                     record["confidence"] = choice.confidence
                 if choice.probabilities is not None:
                     record["probabilities"] = choice.probabilities
-                if repeated_without_progress(play, picked, spec.max_same_action_in_a_row):
-                    why = f"`{picked}` succeeded {spec.max_same_action_in_a_row} times on the same observed state but done() is still false"
-                    if can_ask_planner:
-                        play.repair_request = {"action": picked, "misses": None, "reason": why}
-                        play.stopped = f"REPAIR: {why}"
-                    elif can_replan:
-                        play.replan_requested = True
-                        play.stopped = f"REPLAN: {why}"
-                    else:
-                        play.stopped = why
-                    record["no_progress"] = why
-                    await self._send(record)
-                    break
                 target = None
                 instance = instances.get(picked)
                 if instance is not None:
@@ -971,6 +939,21 @@ class Executer:
                     # 다음 reading 을 기다려 다시 고른다. 같은 action 의 연속 선택으로도 세지 않는다.
                     await channel.wait_for_reading(IDLE_LOOK_SECONDS)
                     continue
+                if record.get("result") == "effect_met":
+                    # 효과가 난 행동은 제자리걸음이 아니다. 적을 차례로 겨누거나 대사를 넘기는 반복이 여기서 끊겼다.
+                    same_in_a_row, last_picked = 0, None
+                else:
+                    same_in_a_row = same_in_a_row + 1 if picked == last_picked else 1
+                    last_picked = picked
+                picked_on = fingerprint
+                last_no_effect = no_effect_shown(record)
+                if same_in_a_row >= spec.max_same_action_in_a_row and can_ask_planner:
+                    # 같은 행동을 연달아 고르면 planner 에게 다시 쓰게 할 수 있다(`repair="planner"`). 그 밖에는 빼지 않는다(pe13):
+                    # 빼면 그 step 이 끝날 때까지 돌아오지 않아, 로컬 try 33 step 9 는 시전 뒤 뜬 대사를 넘길 행동이 없어 멈췄다.
+                    repeated = f"`{picked}` was picked {same_in_a_row} times in a row"
+                    play.repair_request = {"action": picked, "misses": None, "reason": f"{repeated} without the step moving on"}
+                    play.stopped = f"REPAIR: {repeated}"
+                    break
                 if not sent:
                     # 보낸 것이 없으면 화면도 그대로다. 다음 reading 을 기다려 같은 화면에 바로 다시
                     # 묻지 않는다. 보낸 것이 있으면 `act_and_look` 이 이미 기다렸다.
@@ -1799,8 +1782,6 @@ def _turn_log(record: dict) -> TurnLogPayload:
         parts.append(("ran the only option " if record.get("picked_by") == "only_option" else "picked ") + str(record["picked"]))
     if "outcome" in record:
         parts.append(record["outcome"] + (f": {record['reason']}" if record.get("reason") else ""))
-    if "no_progress" in record:
-        parts.append(record["no_progress"])
     if "repair" in record:
         parts.append("macros " + ("rewritten" if record["repair"]["replaced"] else "rewrite refused"))
     body = json.loads(json.dumps(record, default=str))

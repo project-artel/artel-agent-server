@@ -4,7 +4,7 @@
 쓰게 한 뒤 이어서 play 한다. evaluator 는 step 의 play 를 전부 이어 붙여 읽는다.
 """
 
-from app.agents.planner_executer.executer import StepPlay, merge_plays, repeated_without_progress
+from app.agents.planner_executer.executer import StepPlay, merge_plays
 from app.agents.planner_executer.runner import repair_brief
 from tests.planner_executer_fakes import FakeGame
 from tests.test_planner_executer_steps import (
@@ -12,7 +12,6 @@ from tests.test_planner_executer_steps import (
     Asked,
     FakeJev,
     _judge,
-    _play,
     _run,
     _verdicts,
 )
@@ -168,66 +167,14 @@ def _repeat_play(can_ask_planner: bool) -> StepPlay:
     return asyncio.run(go())
 
 
-SOLE_ACTION = PATIENT.split("\n\n\ndef look_around")[0] + '\n\ndef done() -> bool:\n    return scene() == "Map"\n'
-
-
-def test_an_uncertain_action_waits_without_sending_input_for_one_or_multiple_candidates() -> None:
-    for source in (SOLE_ACTION, PATIENT):
-        fake = _slow_menu()
-        play = _play(fake, FakeJev(picks=("none_fits",)), source)
-        assert not fake.actions
-        assert play.stopped == "no action fit for 0.2s"
-        assert all(turn["picked"] == "none_fits" and turn["picked_by"] == "jev" for turn in play.turns)
-
-
-def test_successful_sole_action_stops_when_done_and_the_observed_state_stay_unchanged() -> None:
-    fake = _slow_menu()
-    play = _play(fake, FakeJev(), SOLE_ACTION, max_same_action_in_a_row=3)
-    assert sum(turn.get("outcome") == "passed" for turn in play.turns) == 3
-    assert "succeeded 3 times on the same observed state but done() is still false" in play.stopped
-    assert play.turns[-1]["picked"] == "press_start" and "sent" not in play.turns[-1]
-    assert play.turns[-1]["done"] is False
-
-
-def test_last_allowed_input_can_still_complete_the_step() -> None:
-    fake = _slow_menu()
-    presses = 0
-
-    def open_map(game: FakeGame) -> None:
-        nonlocal presses
-        presses += 1
-        if presses == 3:
-            game.scene = "Map"
-
-    fake.reactions[("press", "Root/Start")] = open_map
-    # 클릭 뒤에도 Menu를 기다리는 예제 대신 입력만 보낸다.
-    source = SOLE_ACTION.replace('    wait_until(scene() == "Menu", 1, "Not on the menu.")\n', '')
-    play = _play(fake, FakeJev(), source, max_same_action_in_a_row=3)
-    assert presses == 3 and play.stopped == "done"
-
-
-def test_changing_position_in_check_evidence_keeps_a_sole_movement_action_available() -> None:
-    turn = {"goal": "move", "picked": "walk", "options": ["walk"], "jev_state": {},
-            "outcome": "passed", "sent": ["press D"]}
-    play = StepPlay("", turns=[turn, turn, {"options": turn["options"], "goal": "move", "jev_state": {}}],
-                    evidence=[{"values": {"player world x": x}} for x in (1, 2, 3)])
-    assert not repeated_without_progress(play, "walk", 2)
-
-
-def test_repeated_action_stops_before_another_input_when_no_repair_is_left() -> None:
+def test_without_a_repair_left_an_action_picked_six_times_in_a_row_stays_on_offer() -> None:
+    """복구 예산이 없어도 같은 행동을 연달아 고른 것만으로 빼지 않는다(pe13). 뺀 행동은 그 step 이 끝날 때까지 돌아오지 않아, 로컬
+    try 33 step 9 는 시전 뒤 뜬 대사를 넘길 행동이 없어 멈췄다."""
     play = _repeat_play(can_ask_planner=False)
-    assert sum(bool(turn.get("sent")) for turn in play.turns) == 6
-    assert play.turns[-1]["no_progress"] == play.stopped and play.repair_request is None
 
-
-def test_an_observed_position_is_progress_even_without_a_check_or_fact() -> None:
-    turn = {"goal": "move", "picked": "walk", "options": ["walk"], "view": {"members": ["Player.x"]},
-            "outcome": "passed", "sent": ["press D"]}
-    play = StepPlay("", turns=[
-        {**turn, "jev_state": {"objects": [{"path": "Player", "members": {"Player.x": x}}]}}
-        for x in range(7)
-    ])
-    assert not repeated_without_progress(play, "walk", 6)
+    picked = [turn.get("picked") for turn in play.turns]
+    assert picked.count("press_start") > 6
+    assert not any("dropped" in turn for turn in play.turns)
 
 
 def test_the_same_action_repeated_while_the_screen_keeps_changing_is_not_dropped() -> None:
@@ -301,10 +248,10 @@ def test_the_same_action_picked_six_times_in_a_row_asks_the_planner_with_what_wa
     play.turns[-1]["jev_state"] = {"hidden": {"objects": {"MeleeRock(Clone)": 3, "Word": 3}, "statics": ["Player.Hp"]}}
 
     assert play.repair_request == {
-        "action": "press_start", "misses": None, "reason": "`press_start` succeeded 6 times on the same observed state but done() is still false",
+        "action": "press_start", "misses": None, "reason": "`press_start` was picked 6 times in a row without the step moving on",
     }
     reason, _ = repair_brief(play)
-    assert reason.startswith("`press_start` succeeded 6 times on the same observed state but done() is still false.")
+    assert reason.startswith("`press_start` was picked 6 times in a row without the step moving on.")
     assert "Hidden from the decision model by your ```observe block when play stopped: objects MeleeRock(Clone) ×3, Word ×3; static values Player.Hp" in reason
 
 
@@ -437,7 +384,7 @@ def test_after_an_action_passes_the_next_turn_offers_only_what_follows_it() -> N
     play = asyncio.run(go())
 
     # 둘째 turn에는 `after`가 지정한 행동의 준비 여부만 묻는다.
-    first = jev.asked("choice")[0]
+    (first,) = jev.asked("choice")
     assert "press_start" in first["questions"]["answer"]["criteria"]
     assert play.turns[1]["options"] == ["look_around"] and play.turns[1]["picked_by"] == "jev"
     assert play.turns[1]["after"] == ["look_around"] and play.turns[1]["picked"] == "look_around"
@@ -583,5 +530,5 @@ def test_a_repeat_that_only_moves_numbers_on_screen_still_counts_as_no_progress(
     play = asyncio.run(go())
 
     # 숫자만 바뀐 반복은 진척이 아니라서 연속 횟수가 쌓이고, 복구 예산이 있으면 planner 에게 넘긴다. 행동을 빼지는 않는다(pe13).
-    assert play.repair_request is not None and "succeeded 6 times" in play.repair_request["reason"]
+    assert play.repair_request is not None and "picked 6 times in a row" in play.repair_request["reason"]
     assert not any("dropped" in turn for turn in play.turns)
