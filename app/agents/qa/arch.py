@@ -511,7 +511,10 @@ from app.llm.models import LLMModel, get_model_spec
 # (`fold_cache_boundary`), 지난 TC ledger 도 같은 batch 에서 접는다. 최신 Pulse 요약 머리 줄에 씬 전체
 # view 가 실리던 것도 씬 이름으로 고쳤다.
 # Code Mode에서는 모델이 run_code 안에서만 개별 도구를 호출한다.
-QA_ARCH_LABEL = "v61-code-mode"
+# v62는 판정이 없는 시나리오 단계에 "게임 기능 `name(key=value)`" 로 적힌 호출을 모델 대신 엔진이 보낸다
+# (`scenario_cheats` middleware). `planner_executer` 와 같은 규칙이라, 같은 시나리오가 두 엔진에서 같은 상태로
+# 시작한다. agent 가 tool 에 넘기는 `step` 이 그 단계에 닿을 때 먼저 보내고, tool 결과 앞에 보낸 것을 적는다.
+QA_ARCH_LABEL = "v62-engine-runs-scenario-cheats"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
@@ -908,6 +911,9 @@ class QaArchSpec(BaseModel):
     # 실을 때만 `on` 으로 보낸다. `off` 면 tool 도, 첫 message 의 catalog 도, view 의 줄도,
     # `STATUS` 의 두 필드도 없다 — v26 의 run 그대로다.
     cheats: Literal["off", "on"] = "off"
+    # 판정이 없는 시나리오 단계에 적힌 게임 기능 호출을 엔진이 보낸다(`app/agents/qa/scenario_cheats.py`).
+    # `cheats` 가 꺼진 run 에서는 아무 일도 하지 않는다.
+    scenario_cheats: Literal["off", "on"] = "on"
     behaviors: Literal["off", "on"] = "off"
     max_cheats_per_run: int = Field(default=MAX_CHEATS_PER_RUN, ge=0, le=1_000_000)
     max_behavior_calls_per_run: int = Field(
@@ -1083,6 +1089,7 @@ class ResolvedArch(BaseModel):
     pulse_quiet_unchanged: bool
     pulse_compact: bool
     cheats: Literal["off", "on"]
+    scenario_cheats: Literal["off", "on"]
     behaviors: Literal["off", "on"]
     max_cheats_per_run: int
     max_behavior_calls_per_run: int

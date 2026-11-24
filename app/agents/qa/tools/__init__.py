@@ -93,6 +93,8 @@ def build_tools(
     # 종전 그대로다. `run_cheat` 와 `start_behavior` 는 게임을 움직이므로 `phase.py` 표에서 `ACT`
     # 이고, `stop_behavior` 와 `extend_behavior` 는 표에 없어 아래 gate 를 지나간다.
     cheats = build_cheat_tools(ctx) if ctx.arch.cheats == "on" else []
+    # 감싸기 전의 본체다. phase gate 를 지나지 않아야 엔진이 보내는 시나리오 호출이 phase 와 상관없이 나간다.
+    state.run_cheat = cheats[0].coroutine if cheats else None
     behaviors = build_behavior_tools(ctx) if ctx.arch.behaviors == "on" else []
     if (cheats or behaviors) and uses_unified_functions(prompt_version):
         tools.extend(build_unified_function_tools(ctx, cheats, behaviors, prompt_version))

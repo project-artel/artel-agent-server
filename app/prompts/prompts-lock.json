@@ -2131,6 +2131,7 @@
     "scenario_writer/v3/system": "cf70a8cd64d8e16ea3bd297041f0f9d7e1fe42a4b9677b624dbfa140a721c210",
     "scenario_writer/v4/system": "a565ef93fff5fff12a91a22fd4dddd723e1d61ba64d096df31fa9f79b742c2ce",
     "scenario_writer/v5/system": "8ddeca31a806db28ca89a487477ef8c8260a01b4010d3726182a568c45e67c81",
+    "scenario_writer/v6/system": "d72dcdb1874fb77be3de701015df57a606ae003060498460d3fc9ce8df09e6e8",
     "screen_name/v1/human": "d82486c2e8dd6bb6566efe6b30ae07bd79d93b4af2cb5746d777dc9ab0b92e04",
     "screen_name/v1/system": "d7970ecbc06996262ddb8ac5108799d99e0c868090dbc19a11083808fb34e7c9",
     "screen_verdict/v1/human": "f1958dff017ff23e6a46560d2feb7cf221ab44033148248b2bc43749f5f4f401",
