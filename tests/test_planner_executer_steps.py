@@ -85,7 +85,7 @@ class FakeJev:
         return [body for body in self.bodies if body["questions"]["answer"]["type"] == kind]
 
 
-_CONTROL = {"none_fits", "EXPAND_STATE", "REPLAN"}
+_CONTROL = {"none_fits", "EXPAND_STATE", "REPLAN", "return plan"}
 
 
 class Asked:
@@ -361,14 +361,14 @@ def test_jev_is_told_what_the_last_action_turns_did_when_it_picks_again() -> Non
 
     play = _play(fake, jev)
 
-    (first,) = jev.asked("choice")
+    first, second = jev.asked("choice")
+    assert "return plan" in second["questions"]["answer"]["criteria"]
     # 첫 turn 에는 지난 action 이 없어 state 가 전과 같다.
     assert "recent_actions" not in first["state"]
-    # 입력 없이 끝난 `look_around` 가 잠시 빠져 둘째 turn 은 선택지가 하나다. 고르기도 기다림도 묻지 않는다(pe13). 지난 action 은
-    # turn 기록에 남는다.
+    # 둘째 turn에는 `look_around`가 빠지고 남은 행동을 실행하거나 계획을 돌려보낼 수 있다.
     assert jev.asked("noul") == []
     assert play.turns[1]["recent_actions"] == ["turn 0: look_around → passed, sent no input to the game"]
-    assert play.turns[1]["picked_by"] == "only_option"
+    assert play.turns[1]["picked_by"] == "jev"
     assert play.stopped == "done"
 
 
@@ -781,7 +781,7 @@ def test_two_actions_that_take_turns_doing_nothing_are_dropped_and_play_stops() 
     # 연속 규칙은 어느 것도 걸리지 않았다: 실패 사이에 입력 없는 통과가, 입력 없는 turn 사이에 실패가 끼었다. `press_start` 가
     # 빠진 뒤에는 선택지가 하나라 Jev 가 고르지 않는다(pe11).
     dropped_at = max(index for index, name in enumerate(picked) if name == "press_start")
-    assert all(turn.get("picked_by") == "only_option" for turn in play.turns[dropped_at + 1:] if turn.get("picked"))
+    assert all(turn.get("picked_by") == "jev" for turn in play.turns[dropped_at + 1:] if turn.get("picked"))
 
 
 def test_a_run_pinned_to_v3_is_not_asked_for_game_insight() -> None:

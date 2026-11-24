@@ -9,8 +9,8 @@ Each turn:
    checked it false when the plan was written, stops without input (`done_at_start`);
 3. a step bound to its scene (ORDERED) whose scene changed waits `no_action_grace_seconds` without input for those to
    hold, and stops `off_plan` when they do not;
-4. list the options that can run now: actions whose ready condition holds, one per target object. One option runs
-   without asking Jev. Two or more go to Jev, which picks the one that serves the current goal. Whether to wait is asked
+4. list the options that can run now: actions whose ready condition holds, one per target object. Jev can reject a
+   sole action and return the plan. A single target for a chosen action needs no second choice. Whether to wait is asked
    only when an option has no ready condition that reads true (`WAIT_QUESTION`); otherwise the ready conditions already
    say the game takes input. The state Jev reads carries the last `RECENT_ACTIONS_SHOWN` action turns;
 5. run the action with the macro runner; `max_failures_in_a_row` failed actions stop play, and so do
@@ -37,7 +37,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from app.agents.planner_executer.arch import PlannerExecuterArchSpec
+from app.agents.planner_executer.arch import RETURN_PLAN, PlannerExecuterArchSpec
 from app.agents.planner_executer.contract import READY_PREFIX
 from app.agents.planner_executer.target import StepTarget, target_state
 from app.agents.planner_executer.evidence import evidence_log, readings
@@ -210,6 +210,35 @@ def progress_fingerprint(state: dict[str, Any]) -> str:
     )
     basis = {"scene": state.get("scene"), "facts": state.get("facts"), "texts": texts}
     return hashlib.sha256(json.dumps(basis, sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest()
+
+
+RETURN_PLAN_DESCRIPTION = (
+    "Reject the current plan if its action or completion condition cannot reach the goal from this screen. "
+    "Choose the game action if trying it can still make progress, even when its outcome is uncertain."
+)
+
+
+def repeated_sole_action(play: "StepPlay", action: str, limit: int) -> bool:
+    """마지막 입력 뒤에도 같은 목표·대상·관측값에서 같은 행동만 남았는지 본다."""
+    if len(play.turns) <= limit:
+        return False
+    current = play.turns[-1]
+    previous = play.turns[-limit - 1:-1]
+    if not all(
+        turn.get("options") == current["options"]
+        and turn.get("picked") == action
+        and turn.get("outcome") == "passed" and turn.get("sent")
+        and turn.get("effect") != "met" and turn.get("result") != "effect_met"
+        and turn.get("goal") == current.get("goal")
+        and turn.get("jev_state") == current["jev_state"]
+        for turn in previous
+    ):
+        return False
+    # `check`는 Jev의 관측 범위 밖에 있는 좌표나 수량을 볼 수 있다. 그 값이 바뀌면 다음 입력을 허용한다.
+    readings = play.evidence[-limit - 1:]
+    return not readings or all(
+        "values" in sample and sample["values"] == readings[-1].get("values") for sample in readings
+    )
 
 
 def no_effect_shown(turn: dict) -> bool:
@@ -453,6 +482,8 @@ class Executer:
         finished_earlier: str | None = None,
         scene_bound: bool = False,
         can_replan_scene: bool = False,
+        repairs_used: int = 0,
+        allow_plan_return_repair: bool = False,
     ) -> StepPlay:
         """Play step `step` (`action` is its text) with `macros` until it stops.
 
@@ -495,7 +526,8 @@ class Executer:
         await self._read_evidence(play, "start")
         started = clock()
         none_since: float | None = None
-        failures = idle_turns = repairs = unobserved = 0
+        failures = idle_turns = unobserved = 0
+        repairs = repairs_used
         # 이 play 가 묶음의 뒤 step 을 맡았나: 그 step 번호와 완료 probe. 이 play 안에서 거짓으로 읽은 적이 있는 것만 "참이 됐다" 로
         # 센다. 계획 검사를 거친 play 는 처음부터 거짓으로 읽은 셈이다.
         later = sorted((number, probe) for number, (_goals, probe, _actions) in getattr(macros, "segment", {}).items()
@@ -717,9 +749,7 @@ class Executer:
                 earlier = [{**turn, "earlier_plan": True} for turn in history or []]
                 # 선택지마다 지금 사실을 붙인다(pe9): 대상이 화면에 띄운 글자, 연달아 고른 횟수, 효과 없이 끝난 시도.
                 options = annotate_options(options, earlier + play.turns[:-1], self._shown_words)
-                # 준비됐다고 알 수 없는 선택지. 둘 이상 중에서 고를 때만 같은 요청에 기다림을 묻는다. 선택지가 하나면 묻지 않고
-                # 실행한다(pe13): try 26~33 의 기다림 답 422개 중 기준(0.7)을 넘은 것이 없었고, 대사를 넘기는 동안 turn 마다
-                # Jev 호출이 하나씩 붙었다.
+                # 준비 여부가 불확실한 행동이 여러 개면 같은 요청에 기다림도 묻는다. 단일 행동은 실행과 계획 반려만 묻는다.
                 # 대상이 여럿인 행동은 행동 하나로 묶어 먼저 묻고, 대상은 그 다음에 정한다(pe14). 카드마다 선택지였을 때 카드 놓기는
                 # 손패 수만큼 쪼개져 '턴 종료' 하나와 한 분포를 나눠 가졌고, 로컬 try 34 step 10 은 턴 종료를 19번 연달아 골랐다.
                 offered, targets_of = group_targets(options, macros, self._shown_words)
@@ -741,14 +771,17 @@ class Executer:
                 record["question"] = asked + (
                     f"\nHow to play it: {macros.guidance}" if macros.guidance else ""
                 ) + blocked_actions_line(not_ready, options, macros)
+                sole_action = next(iter(offered)) if len(offered) == 1 else None
+                if sole_action is not None:
+                    offered[RETURN_PLAN] = RETURN_PLAN_DESCRIPTION
                 record["options"] = list(offered)
                 recent = recent_action_lines(earlier + play.turns[:-1])
                 if recent:
                     record["recent_actions"] = recent
+                can_return_for_repair = can_ask_planner or (allow_plan_return_repair and repairs < spec.max_repairs_per_step)
                 choice = await self._pick(record["question"], offered, recent, state, ask_wait=bool(undeclared))
                 record["picked"] = picked = choice.choice
-                # 선택지가 하나면 Jev 는 고르지 않았다.
-                record["picked_by"] = "only_option" if len(offered) == 1 else "jev"
+                record["picked_by"] = "jev"
                 members = targets_of.get(picked)
                 if members is not None:
                     # 묶은 행동을 골랐다. 대상이 하나면 그것이다. 여럿이면 planner 의 `prefer_` 가 참인 대상으로 좁히고, 그래도
@@ -776,6 +809,16 @@ class Executer:
                     record["confidence"] = choice.confidence
                 if choice.probabilities is not None:
                     record["probabilities"] = choice.probabilities
+                if sole_action is not None and picked != RETURN_PLAN and repeated_sole_action(
+                    play, picked, spec.max_same_action_in_a_row
+                ):
+                    why = (
+                        f"`{picked}` succeeded {spec.max_same_action_in_a_row} times on the same observed state "
+                        "but done() is still false"
+                    )
+                    self._return_plan(play, record, why, can_replan, can_return_for_repair)
+                    await self._send(record)
+                    break
                 target = None
                 instance = instances.get(picked)
                 if instance is not None:
@@ -791,6 +834,11 @@ class Executer:
                     record["state_version"] = self._state_version
                 if self._omitted:
                     record["omitted_objects"] = self._omitted
+                if picked == RETURN_PLAN:
+                    why = f"Jev rejected the sole action `{sole_action}` for this step and requested a new plan"
+                    self._return_plan(play, record, why, can_replan, can_return_for_repair)
+                    await self._send(record)
+                    break
                 if picked == NONE_FITS:
                     await self._send(record)
                     none_since = none_since or now
@@ -953,7 +1001,7 @@ class Executer:
                     last_picked = picked
                 picked_on = fingerprint
                 last_no_effect = no_effect_shown(record)
-                if same_in_a_row >= spec.max_same_action_in_a_row and can_ask_planner:
+                if same_in_a_row >= spec.max_same_action_in_a_row and can_ask_planner and sole_action is None:
                     # 같은 행동을 연달아 고르면 planner 에게 다시 쓰게 할 수 있다(`repair="planner"`). 그 밖에는 빼지 않는다(pe13):
                     # 빼면 그 step 이 끝날 때까지 돌아오지 않아, 로컬 try 33 step 9 는 시전 뒤 뜬 대사를 넘길 행동이 없어 멈췄다.
                     repeated = f"`{picked}` was picked {same_in_a_row} times in a row"
@@ -998,6 +1046,18 @@ class Executer:
         play.ended_at = _now()
         play.seconds = round(clock() - started, 1)
         return play
+
+    @staticmethod
+    def _return_plan(play: StepPlay, record: dict, why: str, can_replan: bool, can_repair: bool) -> None:
+        if can_replan:
+            play.replan_requested = True
+            play.stopped = f"REPLAN: {why}"
+        elif can_repair:
+            play.repair_request = {"action": None, "misses": None, "reason": why}
+            play.stopped = f"REPAIR: {why}"
+        else:
+            play.stopped = f"no plan rewrite left: {why}"
+        record["plan_return"] = play.stopped
 
     async def _done(self, probe: MacroDefinition, step: int) -> tuple[bool, str | None]:
         """`done()` on the current screen, through the probe entry (`macros.PROBE`)."""
@@ -1788,6 +1848,8 @@ def _turn_log(record: dict) -> TurnLogPayload:
         parts.append(("ran the only option " if record.get("picked_by") == "only_option" else "picked ") + str(record["picked"]))
     if "outcome" in record:
         parts.append(record["outcome"] + (f": {record['reason']}" if record.get("reason") else ""))
+    if "plan_return" in record:
+        parts.append(record["plan_return"])
     if "repair" in record:
         parts.append("macros " + ("rewritten" if record["repair"]["replaced"] else "rewrite refused"))
     body = json.loads(json.dumps(record, default=str))

@@ -4,7 +4,7 @@
 쓰게 한 뒤 이어서 play 한다. evaluator 는 step 의 play 를 전부 이어 붙여 읽는다.
 """
 
-from app.agents.planner_executer.executer import StepPlay, merge_plays
+from app.agents.planner_executer.executer import StepPlay, merge_plays, repeated_sole_action
 from app.agents.planner_executer.runner import repair_brief
 from tests.planner_executer_fakes import FakeGame
 from tests.test_planner_executer_steps import (
@@ -12,6 +12,7 @@ from tests.test_planner_executer_steps import (
     Asked,
     FakeJev,
     _judge,
+    _play,
     _run,
     _verdicts,
 )
@@ -165,6 +166,69 @@ def _repeat_play(can_ask_planner: bool) -> StepPlay:
         )
 
     return asyncio.run(go())
+
+
+SOLE_ACTION = PATIENT.split("\n\n\ndef look_around")[0] + '\n\ndef done() -> bool:\n    return scene() == "Map"\n'
+
+
+def test_rejecting_the_only_action_without_a_rewrite_left_sends_no_game_input() -> None:
+    fake = _slow_menu()
+    jev = FakeJev(picks=("return plan",))
+    play = _play(fake, jev, SOLE_ACTION)
+    assert fake.actions == []
+    assert play.stopped.startswith("no plan rewrite left: Jev rejected")
+    assert play.turns[0]["picked_by"] == "jev" and play.turns[0]["picked"] == "return plan"
+    assert play.turns[0]["plan_return"] == play.stopped
+
+
+def test_successful_sole_action_stops_when_done_and_the_observed_state_stay_unchanged() -> None:
+    fake = _slow_menu()
+    play = _play(fake, FakeJev(), SOLE_ACTION, max_same_action_in_a_row=3)
+    assert sum(turn.get("outcome") == "passed" for turn in play.turns) == 3
+    assert "succeeded 3 times on the same observed state but done() is still false" in play.stopped
+    assert play.turns[-1]["picked"] == "press_start" and "sent" not in play.turns[-1]
+    assert play.turns[-1]["done"] is False
+
+
+def test_last_allowed_input_can_still_complete_the_step() -> None:
+    fake = _slow_menu()
+    presses = 0
+
+    def open_map(game: FakeGame) -> None:
+        nonlocal presses
+        presses += 1
+        if presses == 3:
+            game.scene = "Map"
+
+    fake.reactions[("press", "Root/Start")] = open_map
+    # 클릭 뒤에도 Menu를 기다리는 예제 대신 입력만 보낸다.
+    source = SOLE_ACTION.replace('    wait_until(scene() == "Menu", 1, "Not on the menu.")\n', '')
+    play = _play(fake, FakeJev(), source, max_same_action_in_a_row=3)
+    assert presses == 3 and play.stopped == "done"
+
+
+def test_changing_position_in_check_evidence_keeps_a_sole_movement_action_available() -> None:
+    turn = {"goal": "move", "picked": "walk", "options": ["walk", "return plan"], "jev_state": {},
+            "outcome": "passed", "sent": ["press D"]}
+    play = StepPlay("", turns=[turn, turn, {"options": turn["options"], "goal": "move", "jev_state": {}}],
+                    evidence=[{"values": {"player world x": x}} for x in (1, 2, 3)])
+    assert not repeated_sole_action(play, "walk", 2)
+
+
+def test_plan_return_uses_the_remaining_repair_budget_once() -> None:
+    fake = _slow_menu()
+    judge, _ = _judge({"passed": False, "reason": "The map never opened.", "state_detail": "", "insight": ""})
+    asked = Verbatim(
+        "```python\n" + SOLE_ACTION + "```",
+        '```changes\n{"base": 1}\n```\n```python\ndef done() -> bool:\n    return scene() == "Battle"\n```',
+    )
+    _, failure = _run(fake, asked, judge, FakeJev(picks=("return plan",)), max_repairs_per_step=1, analysis="off")
+    assert failure is None and fake.actions == []
+    assert len(asked.calls) == 2
+    assert "Jev rejected the sole action" in asked.calls[1][1]
+    stopped = [turn["payload"]["turn"]["plan_return"] for turn in fake.frames("LOG")
+               if "plan_return" in turn["payload"].get("turn", {})]
+    assert len(stopped) == 2 and stopped[0].startswith("REPAIR:") and stopped[1].startswith("no plan rewrite left:")
 
 
 def test_without_a_repair_left_an_action_picked_six_times_in_a_row_stays_on_offer() -> None:
@@ -383,10 +447,10 @@ def test_after_an_action_passes_the_next_turn_offers_only_what_follows_it() -> N
 
     play = asyncio.run(go())
 
-    # 둘째 turn 은 `after` 로 좁혀 선택지가 하나라 Jev 를 부르지 않는다(pe11).
-    (first,) = jev.asked("choice")
+    # 둘째 turn에는 `after`가 지정한 행동 하나와 계획 반려가 남는다.
+    first = jev.asked("choice")[0]
     assert "press_start" in first["questions"]["answer"]["criteria"]
-    assert play.turns[1]["options"] == ["look_around"] and play.turns[1]["picked_by"] == "only_option"
+    assert play.turns[1]["options"] == ["look_around", "return plan"] and play.turns[1]["picked_by"] == "jev"
     assert play.turns[1]["after"] == ["look_around"] and play.turns[1]["picked"] == "look_around"
 
 

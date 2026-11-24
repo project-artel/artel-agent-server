@@ -116,10 +116,13 @@ from pydantic import BaseModel, ConfigDict, Field
 # - TC 가 시작하는 step 에서 play 전에 Jev noul 로 사전 조건 글을 화면 전체와 대조한다(성립 ≥ 0.6, 불성립 ≤ 0.3, 그 사이는 확인 불가).
 # - 불성립이면 planner 가 그것을 먼저 맞추도록 한 번 다시 쓴다. planner 는 평소에는 사전 조건을 따로 다루지 않는다.
 # - evaluator 는 `precondition_held` 를 낸다. 거짓이면 통과로 두지 않고 "사전 조건 불충족" 으로 실패와 따로 적는다.
-PLANNER_EXECUTER_LABEL = "pe16-precondition-check"
+# pe17: 행동이 하나여도 Jev가 실행과 계획 반려 중 하나를 고른다. 같은 행동이 성공해도 관측값과
+# 완료 조건이 그대로면 추가 입력을 멈춘다. Survivors #449에서 hover 입력만 480초간 반복됐다.
+PLANNER_EXECUTER_LABEL = "pe17-single-action-plan-return"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
-_FINGERPRINT_SCHEME = 1
+_FINGERPRINT_SCHEME = 2
+RETURN_PLAN = "return plan"
 
 
 class PlannerExecuterArchSpec(BaseModel):
@@ -163,12 +166,12 @@ class PlannerExecuterArchSpec(BaseModel):
     # 한 action 이 이만큼 연달아 실패하거나 입력 없이 끝나면 editor 를 부른다. `max_failures_in_a_row` 와 같은 수면
     # 실패 셋째에 멈춤보다 고침이 먼저다.
     repair_after: int = Field(default=3, ge=1, le=50)
-    # step 하나에서 editor 를 부르는 횟수. 거절로 끝난 호출도 센다.
+    # step 하나의 복구 예산. editor 호출과 planner에 돌려보낸 복구 요청을 함께 센다.
     max_repairs_per_step: int = Field(default=2, ge=0, le=10)
     # action 이 돌았는데 게임에 입력을 하나도 보내지 않은 turn 이 이만큼 이어지면 play 를 멈춘다. 어느 action 이든 센다.
     max_idle_turns_in_a_row: int = Field(default=10, ge=1, le=1_000)
-    # 같은 action 을 이만큼 연달아 고르면 진척이 없는 것으로 본다. `repair="planner"` 면 planner 에게 step 을 다시 쓰게 한다.
-    # 그 밖에는 아무것도 하지 않는다 — 행동을 빼지 않는다(pe14).
+    # 단일 행동이 같은 관측값·대상에서 이 횟수만큼 성공하고도 완료 조건이 거짓이면 추가 입력 전에 멈춘다.
+    # 여러 행동 중 하나가 연속으로 선택되면 `repair="planner"`에서만 복구한다.
     max_same_action_in_a_row: int = Field(default=6, ge=2, le=1_000)
     # planner(step 을 쓰거나 다시 쓸 때)와 evaluator(판정할 때)가 화면 한 장을 그림으로 본다. Jev 에게는 보내지 않는다.
     screen_images: Literal["off", "on"] = "on"
@@ -223,6 +226,7 @@ def planner_executer_fingerprint(spec: PlannerExecuterArchSpec, functions: tuple
     facts = {
         "scheme": _FINGERPRINT_SCHEME,
         "kind": "planner-executer",
+        "sole_action_alternative": RETURN_PLAN,
         "planner": spec.model_dump(mode="json", exclude={"label"}),
         "functions": sorted(functions),
     }

@@ -270,10 +270,9 @@ def test_a_parameterless_developer_macro_is_picked_by_jev_and_runs_in_a_step_wit
     state, failure = _run(fake, Answered(_answer(ONLY_DONE, "tap_start")), (_macro("tap_start", TAP_START),), jev)
 
     assert failure is None and state.step_results[0].passed
-    # 선택지가 하나라 Jev 는 고르지 않는다. 준비 조건이 없어 기다림만 묻는다(pe11).
-    assert jev.asked("choice") == [] and jev.asked("noul") == []
+    assert len(jev.asked("choice")) == 1 and jev.asked("noul") == []
     turn = next(f["payload"]["turn"] for f in fake.frames("LOG") if f["payload"].get("kind") == "turn")
-    assert turn["options"] == ["developer:tap_start"] and turn["picked_by"] == "only_option"
+    assert turn["options"] == ["developer:tap_start", "return plan"] and turn["picked_by"] == "jev"
     plan = next(f["payload"] for f in fake.frames("LOG") if f["payload"].get("kind") == "step_macros")
     assert plan["decision"]["descriptions"]["developer:tap_start"].startswith("Press Start on the title screen.")
     assert fake.frames("MACRO_READ") == []
@@ -489,7 +488,9 @@ def test_a_picked_argument_becomes_one_option_per_object_on_screen_and_runs_on_t
     state, failure = _run(fake, Answered(answer), (_macro("press", PRESS),), jev)
 
     assert failure is None and state.step_results[0].passed
-    options = jev.asked("choice")[0]["questions"]["answer"]["criteria"]
+    pick_action, pick_target = jev.asked("choice")
+    assert set(pick_action["questions"]["answer"]["criteria"]) == {"developer:press", "return plan"}
+    options = pick_target["questions"]["answer"]["criteria"]
     assert {"developer:press @ Root/Start", "developer:press @ Root/Quit"} <= set(options)
     assert "developer:press" not in options
     # pe9: 대상이 화면에 띄운 글자를 주소 뒤에 붙인다.
@@ -551,6 +552,26 @@ WAVE = '''def wave() -> None:
 '''
 
 
+def test_unchanged_sole_action_counts_the_selected_target_before_sending_another_input() -> None:
+    fake = _start_menu()
+    fake.reactions.clear()
+    for target in ("Root/Start", "Root/Quit"):
+        fake.objects[target]["members"] = {"Enemy.hp": 3}
+    start, quit_button = ("developer:strike @ " + path for path in ("Root/Start", "Root/Quit"))
+    jev = FakeJev(picks=(start, start, quit_button, quit_button, quit_button))
+    strike = STRIKE.split('    wait_until(scene() == "Map"')[0]
+    _, failure = _run(
+        fake, Answered(_answer(ONLY_DONE, 'strike(pick("Start", "Quit"))')), (_macro("strike", strike),),
+        jev, max_same_action_in_a_row=2, max_repairs_per_step=0,
+    )
+
+    assert failure is None
+    turns = [frame["payload"]["turn"] for frame in fake.frames("LOG") if frame["payload"].get("kind") == "turn"]
+    assert [turn["picked"] for turn in turns if turn.get("sent")] == [start, start, quit_button, quit_button]
+    assert turns[-1]["picked"] == quit_button and "no plan rewrite left" in turns[-1]["plan_return"]
+    assert "sent" not in turns[-1]
+
+
 def test_only_the_requires_before_the_first_input_are_ready_checks() -> None:
     whole, by_parameter = leading_requires(STRIKE, "strike")
 
@@ -572,9 +593,9 @@ def test_a_target_its_macro_would_refuse_is_no_option_and_an_action_off_its_scre
 
     assert failure is None and state.step_results[0].passed
     turn = next(f["payload"]["turn"] for f in fake.frames("LOG") if f["payload"].get("kind") == "turn")
-    # 남은 선택지는 하나라 Jev 를 부르지 않고 실행한다(pe11).
-    assert turn["options"] == ["developer:strike"] and turn["target_options"] == ["developer:strike @ Root/Start"]
-    assert jev.asked("choice") == []
+    assert turn["target_picked_by"] == "only_option"
+    assert turn["options"] == ["developer:strike", "return plan"] and turn["target_options"] == ["developer:strike @ Root/Start"]
+    assert len(jev.asked("choice")) == 1
     assert turn["not_ready"] == ["developer:wave"]
     assert turn["not_ready_targets"] == ["developer:strike @ Root/Quit (unmet)"]
     assert turn["target"] == "Root/Start"

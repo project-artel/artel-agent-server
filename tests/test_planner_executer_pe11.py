@@ -65,14 +65,16 @@ def test_one_option_without_a_ready_condition_brings_the_wait_question_back() ->
     assert play.turns[0]["wait_asked_because"] == ["look_around"]
 
 
-def test_a_single_ready_option_runs_without_any_jev_call() -> None:
+def test_jev_can_choose_the_sole_ready_action_or_return_its_plan() -> None:
     fake = _menu()
     jev = FakeJev(picks=("press_start",))
 
     play = _play(fake, jev, ONLY_PRESS)
 
-    assert jev.bodies == []
-    assert play.turns[0]["picked"] == "press_start" and play.turns[0]["picked_by"] == "only_option"
+    (request,) = jev.asked("choice")
+    assert list(request["questions"]["answer"]["criteria"]) == ["press_start", "return plan"]
+    assert set(request["questions"]) == {"answer"}
+    assert play.turns[0]["picked"] == "press_start" and play.turns[0]["picked_by"] == "jev"
     assert play.stopped == "done" and fake.scene == "Map"
 
 
