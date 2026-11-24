@@ -5,6 +5,7 @@ from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, field_validator, model_validator
 
 from app.agents.qa.arch import DEFAULT_ARCH, QaArchSpec, resolve_arch
+from app.agents.qa.arch_options import ArchOptions, launch_options
 from app.agents.planner_executer.identities import GameIdentitySnapshot
 from app.agents.scenario import DEFAULT_LANGUAGE, OutputLanguage
 from app.llm.chat_model import key_service_of
@@ -166,6 +167,11 @@ def _error_frame(code: str, detail: str, qa_try_id: int = 0) -> dict:
         sequence=0,
         payload=ErrorPayload(message=detail, code=code),
     )
+
+
+@router.get("/qa-arch-options", response_model_exclude_none=True)
+def qa_arch_options() -> ArchOptions:
+    return launch_options(QaArchSpec)
 
 
 @router.post("/qa-sessions", response_model=OpenQaSessionResponse)

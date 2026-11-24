@@ -143,6 +143,7 @@ class RunConfig(BaseModel):
     agent_fingerprint: str
     arch: ResolvedArch
     tools: list[str]
+    code_tools: list[str] | None = None
     # Whether this build's `report_step` can report which knowledge a verdict
     # rested on (ARTEL-293/294).
     #
@@ -306,6 +307,9 @@ def resolve_run_config(
         agent_fingerprint=fingerprint,
         arch=resolved_arch,
         tools=list(tools),
+        code_tools=list(structure_of(
+            resolved_arch.model_copy(update={"code_mode": False}), execution_mode, prompt.version
+        )[0]) if resolved_arch.code_mode else None,
         citation_reporting=CITATION_REPORTING,
         compaction_model=compaction_model,
         compaction_prompt_version=compaction_prompt.version if compaction_prompt else None,
