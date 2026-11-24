@@ -85,7 +85,7 @@ class FakeJev:
         return [body for body in self.bodies if body["questions"]["answer"]["type"] == kind]
 
 
-_CONTROL = {"none_fits", "EXPAND_STATE", "REPLAN", "return plan"}
+_CONTROL = {"none_fits", "EXPAND_STATE", "REPLAN"}
 
 
 class Asked:
@@ -361,13 +361,11 @@ def test_jev_is_told_what_the_last_action_turns_did_when_it_picks_again() -> Non
 
     play = _play(fake, jev)
 
-    first, second = jev.asked("choice")
-    assert "return plan" in second["questions"]["answer"]["criteria"]
+    (first,) = jev.asked("choice")
     # 첫 turn 에는 지난 action 이 없어 state 가 전과 같다.
     assert "recent_actions" not in first["state"]
-    # 둘째 turn에는 `look_around`가 빠지고 남은 행동을 실행하거나 계획을 돌려보낼 수 있다.
-    assert jev.asked("noul") == []
-    assert play.turns[1]["recent_actions"] == ["turn 0: look_around → passed, sent no input to the game"]
+    (wait,) = jev.asked("noul")
+    assert wait["state"]["recent_actions"] == ["turn 0: look_around → passed, sent no input to the game"]
     assert play.turns[1]["picked_by"] == "jev"
     assert play.stopped == "done"
 

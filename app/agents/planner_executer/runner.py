@@ -754,10 +754,7 @@ class PlannerExecuterRunner:
                 finished_earlier=finished if not plays else None,
                 scene_bound=True,
                 can_replan_scene=scene_replans < spec.max_scene_replans_per_step,
-                repairs_used=repairs,
-                allow_plan_return_repair=spec.editor == "on",
             )
-            repairs += sum("repair" in turn for turn in play.turns)
             plays.append(play)
             self._ledger.record(step, play, macros, self._developer)
             if play.repair_request is not None:

@@ -298,7 +298,7 @@ def test_every_declared_fact_goes_to_jev_with_the_planner_s_choice_first(tmp_pat
     assert [name for name, _scope, _member in chosen] == ["player_hp"] + [name for name in every if name != "player_hp"]
 
 
-def test_an_undeclared_single_action_offers_plan_return_without_a_wait_question() -> None:
+def test_an_undeclared_single_action_asks_whether_to_wait() -> None:
     from tests.test_planner_executer_pe11 import ONLY_PRESS
     from tests.test_planner_executer_steps import _play
 
@@ -307,11 +307,9 @@ def test_an_undeclared_single_action_offers_plan_return_without_a_wait_question(
 
     play = _play(_menu(), jev, source)
 
-    (request,) = jev.asked("choice")
-    assert set(request["questions"]) == {"answer"}
-    assert play.turns[0]["options"] == ["press_start", "return plan"]
-    assert play.turns[0]["picked_by"] == "jev"
-    assert "wait_asked_because" not in play.turns[0]
+    assert len(jev.asked("noul")) == 1 and not jev.asked("choice")
+    assert play.turns[0]["options"] == ["press_start"] and play.turns[0]["picked_by"] == "jev"
+    assert play.turns[0]["wait_asked_because"] == ["press_start"]
 
 
 def test_an_action_with_several_targets_is_one_option_listing_them() -> None:
