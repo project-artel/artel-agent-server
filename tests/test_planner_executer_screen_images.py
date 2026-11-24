@@ -10,6 +10,8 @@ from app.agents.planner_executer import planner as planner_module
 from app.agents.planner_executer import runner as runner_module
 from app.agents.planner_executer.screen_capture import ScreenImage
 from app.llm.chat_model import prompt_messages
+from tests.test_planner_executer_pe8 import SEGMENT_ANSWER, _two_steps
+from tests.test_planner_executer_pe11 import _run as run_segment
 from tests.test_planner_executer_steps import (
     MACROS,
     PLAYED,
@@ -53,6 +55,23 @@ def test_the_planner_and_the_evaluator_each_take_one_picture_and_the_ids_reach_t
     (verdict,) = _verdicts(fake)
     assert verdict["verdict"]["screen_capture_id"] == "cap-7"
     assert "A picture of the screen when play stopped is attached." in seen[0][1]
+
+
+def test_final_step_of_segment_includes_a_picture_in_its_final_verdict(monkeypatch) -> None:
+    why = _captures(monkeypatch)
+    fake = _menu()
+
+    async def ask(system, user):
+        return SEGMENT_ANSWER.replace("1: open_map | press_start", "1: stay |").replace(
+            "2: stay | look_around", "2: open_map | press_start"
+        ).replace('def done() -> bool:\n    return scene() == "Map"', 'def done() -> bool:\n    return scene() == "Menu"')
+
+    state, failure = run_segment(fake, ask, FakeJev(), _two_steps(), screen_images="on")
+
+    assert failure is None and state.finished
+    assert "Step 2: capturing the screen to check the expected results" in why
+    assert "Step 2: capturing the screen for the evaluator" in why
+    assert _verdicts(fake)[-1]["verdict"]["screen_capture_id"] == IMAGE.capture_id
 
 
 def test_with_screen_images_off_nothing_is_captured(monkeypatch) -> None:
