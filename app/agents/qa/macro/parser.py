@@ -42,6 +42,7 @@ from app.agents.qa.macro.grammar import (
     FIND_REQUIRED_KEYWORDS,
     FLAG,
     FORBIDDEN_TOOLS,
+    GAME_FUNCTION,
     IMPORT_MODULE,
     MAX_CALL_DEPTH,
     MAX_LOOP_PASSES,
@@ -341,6 +342,8 @@ def macro_definition_from_source(
     name: str,
     source: str,
     imports: Mapping[str, MacroDefinition] | None = None,
+    *,
+    game_functions: bool = False,
 ) -> MacroDefinition:
     """macro 텍스트 하나를 통과시켜 정의로 만든다. 못 통과하면 `MacroRejection`.
 
@@ -377,7 +380,7 @@ def macro_definition_from_source(
     entry: MacroFunction | None = None
     helpers: list[MacroFunction] = []
     for node in functions:
-        reader = _FunctionReader(signatures, node.name, lines, imported_signatures)
+        reader = _FunctionReader(signatures, node.name, lines, imported_signatures, game_functions)
         docstring, body_nodes = _split_docstring(node)
         built = MacroFunction(
             name=node.name,
@@ -861,8 +864,10 @@ class _FunctionReader:
         name: str,
         lines: list[str],
         imported: dict[str, _Signature] | None = None,
+        game_functions: bool = False,
     ) -> None:
         self.signatures = signatures
+        self.game_functions = game_functions
         # `from macros import ...` 로 가져온 macro 의 entry. helper 처럼 statement 로만
         # 부른다. predicate 는 가져올 수 없다 — entry 는 언제나 `-> None` 이다.
         self.imported = imported or {}
@@ -2262,8 +2267,8 @@ class _FunctionReader:
             raise MacroRejection(_ASK_ONLY_AS_CONDITION, node.lineno)
         _reject_jev_call(node)
 
-        if name in TOOLS_BY_NAME:
-            spec = TOOLS_BY_NAME[name]
+        spec = GAME_FUNCTION if self.game_functions and name == GAME_FUNCTION.name else TOOLS_BY_NAME.get(name)
+        if spec is not None:
             return MacroActionStatement(
                 source=written,
                 callee=name,
