@@ -313,6 +313,31 @@ def test_컨텍스트_분해가_런을_죽이지_않는다():
     asyncio.run(_log_token_usage.awrap_model_call(object(), handler))
 
 
+def test_code_mode_records_inner_and_outer_results_before_completion(monkeypatch):
+    source = (
+        "report_test_case(case_id=1, verdict='PASSED', message='observed')\n"
+        "finish_run(passed=True, summary='complete')"
+    )
+    model = ScriptedModel(turns=[{"tool_calls": [{
+        "name": "run_code", "args": {"step": 1, "thought": "report", "source": source}, "id": "code"
+    }]}])
+    monkeypatch.setattr("app.agents.qa.runner.build_chat_model", lambda *args, **kwargs: model)
+    channel, frames = make_channel()
+    state = QaRunState(total_steps=1)
+    configure_attempts(channel, state)
+    asyncio.run(channel.evaluation.start(1))
+    runner = QaRunner(resolve_run_config(arch=QaArchSpec(code_mode=True, phase_cycle="off")))
+    asyncio.run(runner.run(channel, scenario(), state))
+
+    assert state.finished
+    assert frames[-1]["type"] == "STATUS"
+    calls = {frame["messageId"] for frame in frames if frame["type"] == "TOOL"}
+    results = {frame["correlationId"] for frame in frames if frame["type"] == "TOOL_RESULT"}
+    assert len(calls) == 3
+    assert calls == results
+    assert len(model.received) == 1
+
+
 def test_finish_run_뒤로는_모델을_다시_부르지_않는다(monkeypatch: pytest.MonkeyPatch) -> None:
     """끝낸 뒤 마무리 글을 받으려고 대화 전체를 한 번 더 보내지 않는다(런 60: 9만 토큰, 8초)."""
     model, _channel, _sent = scripted_run(monkeypatch)
