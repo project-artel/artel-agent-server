@@ -863,7 +863,7 @@ class Executer:
                         record["unseen_selectors"] = unseen
                         play.unseen_selectors = sorted(set(play.unseen_selectors) | set(unseen))
                 failures = failures + 1 if outcome == "failed" else 0
-                idle = outcome == "passed" and not sent
+                idle = outcome in ("passed", "paused") and not sent
                 idle_turns = idle_turns + 1 if idle else 0
                 if sent:
                     parked.clear()
