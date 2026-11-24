@@ -116,10 +116,11 @@ from pydantic import BaseModel, ConfigDict, Field
 # - TC 가 시작하는 step 에서 play 전에 Jev noul 로 사전 조건 글을 화면 전체와 대조한다(성립 ≥ 0.6, 불성립 ≤ 0.3, 그 사이는 확인 불가).
 # - 불성립이면 planner 가 그것을 먼저 맞추도록 한 번 다시 쓴다. planner 는 평소에는 사전 조건을 따로 다루지 않는다.
 # - evaluator 는 `precondition_held` 를 낸다. 거짓이면 통과로 두지 않고 "사전 조건 불충족" 으로 실패와 따로 적는다.
-PLANNER_EXECUTER_LABEL = "pe16-precondition-check"
+# pe17: 준비 여부를 알 수 없는 단일 행동도 Jev에 기다림을 물어 실행할지 결정한다.
+PLANNER_EXECUTER_LABEL = "pe17-execute-or-wait"
 
 # Which facts `planner_executer_fingerprint` hashes. Bump when that set changes.
-_FINGERPRINT_SCHEME = 1
+_FINGERPRINT_SCHEME = 2
 
 
 class PlannerExecuterArchSpec(BaseModel):

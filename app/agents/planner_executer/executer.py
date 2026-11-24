@@ -9,8 +9,8 @@ Each turn:
    checked it false when the plan was written, stops without input (`done_at_start`);
 3. a step bound to its scene (ORDERED) whose scene changed waits `no_action_grace_seconds` without input for those to
    hold, and stops `off_plan` when they do not;
-4. list the options that can run now: actions whose ready condition holds, one per target object. One option runs
-   without asking Jev. Two or more go to Jev, which picks the one that serves the current goal. Whether to wait is asked
+4. list the options that can run now: actions whose ready condition holds, one per target object. Jev picks among
+   multiple options. Whether to wait is asked
    only when an option has no ready condition that reads true (`WAIT_QUESTION`); otherwise the ready conditions already
    say the game takes input. The state Jev reads carries the last `RECENT_ACTIONS_SHOWN` action turns;
 5. run the action with the macro runner; `max_failures_in_a_row` failed actions stop play, and so do
@@ -717,16 +717,11 @@ class Executer:
                 earlier = [{**turn, "earlier_plan": True} for turn in history or []]
                 # 선택지마다 지금 사실을 붙인다(pe9): 대상이 화면에 띄운 글자, 연달아 고른 횟수, 효과 없이 끝난 시도.
                 options = annotate_options(options, earlier + play.turns[:-1], self._shown_words)
-                # 준비됐다고 알 수 없는 선택지. 둘 이상 중에서 고를 때만 같은 요청에 기다림을 묻는다. 선택지가 하나면 묻지 않고
-                # 실행한다(pe13): try 26~33 의 기다림 답 422개 중 기준(0.7)을 넘은 것이 없었고, 대사를 넘기는 동안 turn 마다
-                # Jev 호출이 하나씩 붙었다.
+                # 준비 여부가 불확실한 행동이 있으면 후보 수와 관계없이 기다림을 묻는다.
                 # 대상이 여럿인 행동은 행동 하나로 묶어 먼저 묻고, 대상은 그 다음에 정한다(pe14). 카드마다 선택지였을 때 카드 놓기는
                 # 손패 수만큼 쪼개져 '턴 종료' 하나와 한 분포를 나눠 가졌고, 로컬 try 34 step 10 은 턴 종료를 19번 연달아 골랐다.
                 offered, targets_of = group_targets(options, macros, self._shown_words)
-                undeclared = (
-                    [key for key in offered if not any(member in declared for member in targets_of.get(key, [key]))]
-                    if len(offered) > 1 else []
-                )
+                undeclared = [key for key in offered if not any(member in declared for member in targets_of.get(key, [key]))]
                 if undeclared:
                     record["wait_asked_because"] = undeclared
                 goal_text = None
@@ -747,8 +742,7 @@ class Executer:
                     record["recent_actions"] = recent
                 choice = await self._pick(record["question"], offered, recent, state, ask_wait=bool(undeclared))
                 record["picked"] = picked = choice.choice
-                # 선택지가 하나면 Jev 는 고르지 않았다.
-                record["picked_by"] = "only_option" if len(offered) == 1 else "jev"
+                record["picked_by"] = "only_option" if len(offered) == 1 and not undeclared else "jev"
                 members = targets_of.get(picked)
                 if members is not None:
                     # 묶은 행동을 골랐다. 대상이 하나면 그것이다. 여럿이면 planner 의 `prefer_` 가 참인 대상으로 좁히고, 그래도

@@ -298,17 +298,20 @@ def test_every_declared_fact_goes_to_jev_with_the_planner_s_choice_first(tmp_pat
     assert [name for name, _scope, _member in chosen] == ["player_hp"] + [name for name in every if name != "player_hp"]
 
 
-def test_a_single_option_runs_without_asking_jev_anything() -> None:
+def test_an_undeclared_single_action_asks_whether_to_wait() -> None:
     from tests.test_planner_executer_pe11 import ONLY_PRESS
     from tests.test_planner_executer_steps import _play
 
-    jev = FakeJev(picks=("press_start",))
+    jev = FakeJev(picks=("none_fits", "press_start"))
     source = ONLY_PRESS.replace('\n\ndef ready_press_start() -> bool:\n    return scene() == "Menu"\n', "")
 
     play = _play(_menu(), jev, source)
 
-    assert jev.bodies == [] and play.turns[0]["picked_by"] == "only_option"
-    assert "wait_asked_because" not in play.turns[0]
+    assert len(jev.asked("noul")) == 2 and not jev.asked("choice")
+    assert [turn["picked"] for turn in play.turns if "picked" in turn] == ["none_fits", "press_start"]
+    assert play.stopped == "done" and "sent" not in play.turns[0]
+    assert play.turns[0]["options"] == ["press_start"] and play.turns[0]["picked_by"] == "jev"
+    assert play.turns[0]["wait_asked_because"] == ["press_start"]
 
 
 def test_an_action_with_several_targets_is_one_option_listing_them() -> None:

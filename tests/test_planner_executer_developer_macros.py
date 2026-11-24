@@ -271,9 +271,9 @@ def test_a_parameterless_developer_macro_is_picked_by_jev_and_runs_in_a_step_wit
 
     assert failure is None and state.step_results[0].passed
     # 선택지가 하나라 Jev 는 고르지 않는다. 준비 조건이 없어 기다림만 묻는다(pe11).
-    assert jev.asked("choice") == [] and jev.asked("noul") == []
+    assert jev.asked("choice") == [] and len(jev.asked("noul")) == 1
     turn = next(f["payload"]["turn"] for f in fake.frames("LOG") if f["payload"].get("kind") == "turn")
-    assert turn["options"] == ["developer:tap_start"] and turn["picked_by"] == "only_option"
+    assert turn["options"] == ["developer:tap_start"] and turn["picked_by"] == "jev"
     plan = next(f["payload"] for f in fake.frames("LOG") if f["payload"].get("kind") == "step_macros")
     assert plan["decision"]["descriptions"]["developer:tap_start"].startswith("Press Start on the title screen.")
     assert fake.frames("MACRO_READ") == []
