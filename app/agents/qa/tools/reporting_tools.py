@@ -221,8 +221,13 @@ def build_reporting_tools(ctx: ToolContext) -> list[BaseTool]:
                 "Record each verdict with report_test_case. Use INCONCLUSIVE when evidence is insufficient."
             )
         state.finished = True
-        await channel.emit(MessageType.STATUS, StatusPayload(status=StepStatus.COMPLETED,
-            result=RunResult.PASSED if passed else RunResult.FAILED, message=summary, summary=state.build_summary()))
+        completion = StatusPayload(status=StepStatus.COMPLETED,
+            result=RunResult.PASSED if passed else RunResult.FAILED, message=summary, summary=state.build_summary())
+        if arch.code_mode:
+            # 종료 STATUS가 도착하면 orchestration이 이후 TOOL_RESULT를 저장하지 않는다.
+            state.pending_code_completion = completion
+        else:
+            await channel.emit(MessageType.STATUS, completion)
         return "The QA run is closed."
 
     @tool(description=load_tool_description("reply_to_operator").body)

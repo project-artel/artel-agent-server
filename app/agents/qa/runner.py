@@ -38,7 +38,7 @@ from app.llm.cache_boundary import per_call, stable, turn_scoped
 from app.llm.models import get_model_spec
 from app.prompts import load_prompt, load_skill, skill_descriptions, skill_names
 from app.qa.channel import QaCancelled, QaRunChannel
-from app.qa.envelope import LogCategory
+from app.qa.envelope import LogCategory, MessageType
 from app.qa.failure_site import failure_site_of
 from app.qa.provider_error import classify_provider_error
 from app.qa.game_functions import render_catalog
@@ -886,6 +886,9 @@ class QaRunner:
             await self._log_reasoning(channel, update)
             # 종료가 성공한 뒤에는 다음 모델 호출 전에 stream을 끝낸다.
             if state.finished:
+                if state.pending_code_completion is not None:
+                    await channel.emit(MessageType.STATUS, state.pending_code_completion)
+                    state.pending_code_completion = None
                 break
 
     @staticmethod
