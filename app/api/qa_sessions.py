@@ -225,11 +225,18 @@ async def qa_session_ws(websocket: WebSocket, session_id: str) -> None:
     await service.bind_llm_key(session_id)
 
     # The run drives itself; this coroutine only feeds it what arrives.
-    run = asyncio.create_task(service.run(session_id, send))
+    channel_ready = asyncio.Event()
+    run = asyncio.create_task(service.run(session_id, send, channel_ready=channel_ready))
+
+    async def receive_frame() -> dict:
+        frame = await websocket.receive_json()
+        # The SDK can send its only whole PULSE while the first channel is still loading.
+        await channel_ready.wait()
+        return frame
 
     try:
         while not run.done():
-            receive = asyncio.create_task(websocket.receive_json())
+            receive = asyncio.create_task(receive_frame())
             done, _ = await asyncio.wait(
                 {receive, run}, return_when=asyncio.FIRST_COMPLETED
             )

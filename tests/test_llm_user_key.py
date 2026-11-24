@@ -657,8 +657,9 @@ class _ProbingService(QaExecutionService):
         # Binds to a loop on first use, not here, so the server's loop can own it.
         self._delivered = asyncio.Event()
 
-    async def run(self, session_id: str, send) -> None:
+    async def run(self, session_id: str, send, *, channel_ready: asyncio.Event) -> None:
         self.seen["run"] = bound_llm_key()
+        channel_ready.set()
         await self._delivered.wait()
 
     def deliver(self, session_id: str, raw: dict) -> bool:

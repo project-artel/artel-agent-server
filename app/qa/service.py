@@ -210,7 +210,7 @@ class QaExecutionService:
 
     # --- the run --------------------------------------------------------------
 
-    async def run(self, session_id: str, send: Send) -> None:
+    async def run(self, session_id: str, send: Send, *, channel_ready: asyncio.Event | None = None) -> None:
         """Drive the run's scenarios in order, resetting the game between them.
 
         One session is one QA_Run. Each scenario runs on its own channel (stamped
@@ -252,6 +252,8 @@ class QaExecutionService:
             set_usage_scope("QA_RUN", item.qa_try_id)
             channel = QaRunChannel(qa_try_id=item.qa_try_id, send=send)
             self._channels[session_id] = channel
+            if index == 0 and channel_ready is not None:
+                channel_ready.set()
             # 시나리오마다 새로 세운다. 판정기는 상태를 안 들지만 도는 task 를 들고,
             # 그 task 는 자기를 띄운 시나리오의 채널로 답한다 — 시나리오가 바뀌면 그
             # 채널은 이미 남의 것이다.
