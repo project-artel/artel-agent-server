@@ -151,6 +151,7 @@ def build_code_tool(tools: list[BaseTool], ctx: ToolContext) -> BaseTool:
                     variables[statement.targets[0].id] = result
                 stopped = (
                     entry.name in {"capture_screen", "compact_context", "ask_user"}
+                    or arguments.get("capture_after") is True
                     or ctx.state.finished or ctx.state.paused_macro is not None
                     or (cycle is not None and cycle.refusals != refusals)
                     or len(ctx.channel.operator_instructions) != instructions

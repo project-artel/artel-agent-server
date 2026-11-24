@@ -74,6 +74,37 @@ def test_phase_refusal_returns_control_before_retry():
     assert sum(frame["type"] == "TOOL" for frame in frames) == 1
 
 
+def test_scene_result_selects_game_input_and_returns_its_outcome():
+    from tests.test_qa_tools import actions, make, scene
+
+    async def play():
+        channel, state, _, frames = make()
+        channel.on_game_state(scene({"Score": {"value": 0}}))
+        arch = resolve_arch(QaArchSpec(code_mode=True, phase_cycle="off"), "openai/gpt-6-luna")
+        code, = build_tools(channel, state, arch)
+        source = "view = observe_scene(current_scene=True)\nif 'Score' in view:\n    click_button(target_id=42)"
+
+        async def answer_input():
+            while not actions(frames):
+                await asyncio.sleep(0)
+            channel.on_action_result({
+                "correlationId": actions(frames)[0]["messageId"],
+                "payload": {"results": [{"id": 1, "success": True}]},
+            })
+
+        result, _ = await asyncio.wait_for(asyncio.gather(
+            code.ainvoke({"step": 1, "thought": "Read score and click", "source": source}),
+            answer_input(),
+        ), timeout=3)
+        assert "button_click: ok" in result
+        assert [frame["payload"]["tool"] for frame in frames if frame["type"] == "TOOL"] == [
+            "observe_scene", "click_button",
+        ]
+        assert actions(frames)[0]["payload"]["actions"][0]["params"] == [42]
+
+    asyncio.run(play())
+
+
 def test_call_limit_stops_a_sequence_after_sixteen_calls():
     tool, frames, _, _ = setup_code()
     result = invoke(tool, "for _ in range(16):\n    start_test_case(case_id=1)\nstart_test_case(case_id=2)")
