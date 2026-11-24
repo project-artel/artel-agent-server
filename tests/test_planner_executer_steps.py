@@ -530,6 +530,37 @@ def test_without_a_repair_idle_turns_stop_play() -> None:
     assert play.stopped.startswith("no progress: 3 actions in a row")
 
 
+def test_a_checkpoint_without_input_counts_toward_the_idle_limit() -> None:
+    source = '''def prepare_single_shot() -> None:
+    """Prepare one shot."""
+    checkpoint("Waiting for a gun")
+
+def done() -> bool:
+    return scene() == "Map"
+'''
+    play = _play(_menu(), FakeJev(), source, max_idle_turns_in_a_row=3, max_turns_per_step=5)
+
+    assert play.stopped.startswith("no progress: 3 actions in a row")
+    assert [(turn["outcome"], turn["sent"]) for turn in play.turns] == [("paused", [])] * 3
+
+
+def test_a_checkpoint_after_input_allows_the_next_done_check() -> None:
+    source = '''def press_start() -> None:
+    """Open the map."""
+    start: object = find(name="Start")
+    click(start)
+    checkpoint("Inspect the map")
+
+def done() -> bool:
+    return scene() == "Map"
+'''
+    play = _play(_menu(), FakeJev(), source, max_idle_turns_in_a_row=1)
+
+    assert play.stopped == "done"
+    assert play.turns[0]["outcome"] == "paused" and play.turns[0]["sent"]
+    assert play.turns[1]["done"] is True
+
+
 def test_play_stops_at_the_turn_cap() -> None:
     play = _play(_menu(), FakeJev(picks=("look_around",)), max_turns_per_step=2)
 
