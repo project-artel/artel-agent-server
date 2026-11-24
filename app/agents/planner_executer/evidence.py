@@ -50,7 +50,7 @@ def points_of(name: str, read: list[dict]) -> list[tuple[str, str]]:
     return points
 
 
-def evidence_log(evidence: list[dict], unknown: list[str], changes: list[str]) -> dict[str, Any]:
+def evidence_log(evidence: list[dict], unknown: list[str], changes: list[str] | None = None) -> dict[str, Any]:
     """`evidence` 로그의 본문: 이름마다 바뀐 지점, 읽은 수, 완전하지 않았던 기록, 읽지 못한 기록. 한 frame 에 안 들어가면
     뒤의 이름부터 빼고 뺀 수를 적는다."""
     read = readings(evidence)
@@ -64,7 +64,7 @@ def evidence_log(evidence: list[dict], unknown: list[str], changes: list[str]) -
         ],
         "failed": [{"at": entry["at"], "error": entry["error"]} for entry in evidence if "error" in entry],
         "unknown_members": unknown,
-        "changes": changes,
+        "changes": changes or [],
     }
     def fits() -> bool:
         return len(json.dumps(body, ensure_ascii=False).encode()) <= MAX_EVIDENCE_LOG_BYTES
