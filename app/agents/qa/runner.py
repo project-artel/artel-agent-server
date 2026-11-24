@@ -12,18 +12,19 @@ import re
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import wrap_model_call
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
 from app.agents.qa.arch import ResolvedArch, withheld_skills
 from app.agents.qa.compaction import QaCompactionMiddleware
-from app.agents.qa.case_context import TC_DETAIL_BUDGET, QaCaseContextMiddleware, detail_block
+from app.agents.qa.case_context import TC_DETAIL_BUDGET, QaCaseContextMiddleware, detail_block, supersede_case_context
 from app.agents.qa.context import (
     FOLDED_PULSE_VIEW_PREFIX,
     FOLDED_VIEW_PREFIX,
     FoldKind,
     count_full_views,
     fold_context,
+    scene_views,
 )
 from app.agents.qa.prompt import LANGUAGE_DIRECTIVES
 from app.agents.qa.question_policy import ORDERED_ACTION_POLICY, USER_QUESTION_POLICY
@@ -33,7 +34,7 @@ from app.agents.qa.tools.tool_context import ToolContext
 from app.agents.qa.vision import QaCaptureVisionMiddleware
 from app.config import get_settings
 from app.llm.chat_model import build_chat_model
-from app.llm.cache_boundary import per_call
+from app.llm.cache_boundary import per_call, stable, turn_scoped
 from app.llm.models import get_model_spec
 from app.prompts import load_prompt, load_skill, skill_descriptions, skill_names
 from app.qa.channel import QaCancelled, QaRunChannel
@@ -410,7 +411,8 @@ def build_middleware(
 ) -> list:
     """The middleware named by `middleware_names_for`, in that order."""
     builders = {
-        "case_context": lambda: QaCaseContextMiddleware(state, channel),
+        # `fold` 의 `cache` 경계가 켜진 런이면 지난 ledger 를 `fold_context` 의 batch 가 함께 접는다.
+        "case_context": lambda: QaCaseContextMiddleware(state, channel, supersede=not _folds_case_context(arch)),
         "compaction": lambda: QaCompactionMiddleware(
             # Not the run's model, and not `cache_prompt`: summarizing is one
             # call over a prefix nothing will send again, so caching it would pay
@@ -429,19 +431,50 @@ def build_middleware(
             on_compacted=on_compacted,
         ),
         "fold_context": lambda: _fold_context_for(
-            fold_kinds_for(arch), arch.fold_threshold_chars, state, channel
+            fold_kinds_for(arch),
+            arch.fold_threshold_chars,
+            state,
+            channel,
+            redraw=arch.fold_redraw,
+            redraw_scale=arch.fold_redraw_scale,
+            cache_boundary=arch.fold_cache_boundary,
+            case_context=_folds_case_context(arch),
         ),
-        "latest_pulse_context": lambda: _latest_pulse_context_for(channel),
+        "latest_pulse_context": lambda: _latest_pulse_context_for(channel, keep_earlier=config.model.startswith("claude/")),
         "capture_vision": lambda: QaCaptureVisionMiddleware(state, channel, arch),
         "log_token_usage": lambda: _log_token_usage,
     }
     return [builders[name]() for name in middleware_names_for(arch)]
 
 
-def _latest_pulse_context_for(channel: QaRunChannel):
+def _folds_case_context(arch: ResolvedArch) -> bool:
+    """지난 TC ledger · TC 상세를 `fold_context` 의 batch 가 접는가. 아니면 `QaCaseContextMiddleware` 가 접는다."""
+    return bool(fold_kinds_for(arch)) and arch.fold_cache_boundary
+
+
+def _latest_pulse_context_for(channel: QaRunChannel, keep_earlier: bool = False):
+    """매 호출 끝에 최신 Pulse 요약을 붙인다.
+
+    `keep_earlier`(Claude 런)면 지난 호출의 요약을 지우지 않고 그 자리에 다시 넣고, 모두 그 턴에만 보이는 안내로 표시한다
+    (`turn_scoped`). 지우면 대화 기록을 고친 것이라 Claude 가 그 자리부터 `cache` 를 다시 쓰고 그 뒤 thinking 을 버린다
+    — 문서가 권하는 대로 지난 것은 남겨 두고 비운다(https://platform.claude.com/docs/en/build-with-claude/prompt-caching).
+    지난 요약은 그때 대화 끝이던 메시지의 id 뒤에 다시 넣는다. 그 메시지가 압축으로 사라졌으면 그 요약도 넣지 않는다.
+    """
+    earlier: list[tuple[str, str]] = []
+
     @wrap_model_call(name="latest_pulse_context")
     async def latest_pulse_context(request, handler):
         content = channel.scene.pulse.render_latest_context()
+        if keep_earlier:
+            messages = list(request.messages)
+            for anchor, text in earlier:
+                at = next((i for i, message in enumerate(messages) if message.id == anchor), None)
+                if at is not None:
+                    messages.insert(at + 1, turn_scoped(HumanMessage(content=text)))
+            if content is not None and messages and messages[-1].id:
+                earlier.append((messages[-1].id, content))
+                messages.append(per_call(turn_scoped(HumanMessage(content=content))))
+            return await handler(request.override(messages=messages))
         if content is not None:
             # 끝에 붙인다. 요약은 행동마다 바뀌어서, 앞에 두면 그 뒤 대화 전체가 매 호출 `cache` 에서
             # 빠지고 다시 쓰인다. 저장하지 않는 이번 호출만의 메시지라 `per_call` 로 표시해, Anthropic
@@ -453,7 +486,14 @@ def _latest_pulse_context_for(channel: QaRunChannel):
 
 
 def _fold_context_for(
-    kinds: frozenset[FoldKind], threshold_chars: int, state: QaRunState, channel: QaRunChannel
+    kinds: frozenset[FoldKind],
+    threshold_chars: int,
+    state: QaRunState,
+    channel: QaRunChannel,
+    redraw: str = "anchored",
+    redraw_scale: float = 1.5,
+    cache_boundary: bool = True,
+    case_context: bool = False,
 ):
     """Fold stale blocks out of what one model call actually receives, in batches.
 
@@ -464,19 +504,49 @@ def _fold_context_for(
     런마다 만든다. 지난 호출까지 `fold` 한 block 을 `state.folded_blocks` 에 두었다가 이번 호출에
     다시 `fold` 해야 프롬프트 앞이 그대로이고, 새 batch 에 view 가 들었으면 그 런의
     `PulseMemory` 에 말해야 한다.
+
+    `redraw` 와 `cache_boundary` 는 `QaArchSpec.fold_redraw` · `fold_cache_boundary` 다. 기본값도 같다.
+    `case_context` 면 지난 TC ledger · TC 상세도 같은 batch 에서 접는다(`supersede_case_context`).
     """
 
     @wrap_model_call(name="_fold_context")
     async def fold_context_middleware(request, handler):
+        # `fold` 뒤 처음 나타난 view 가 값을 전부 다시 그린 view 다. 그 view 는 혼자서 기준을 넘을 만큼
+        # 커서, 세면 다음 view 가 오자마자 다시 `fold` 하고 다시 그리기를 되풀이한다(로컬 런 116 에서
+        # 두 호출마다 약 115,000 token 을 새로 썼다). `unscored` 는 그 view 를 셀 때만 빼고, `scaled` 는
+        # 기준을 그 view 보다 크게 올린다. `anchored` 는 씬을 전부 그린 view 하나를 아예 남겨 둬서, 다시
+        # 그릴 것이 그 뒤에 움직인 값뿐이다.
+        views = scene_views(request.messages) if FoldKind.scene_view in kinds else []
+        unscored: frozenset[str] = frozenset()
+        threshold = threshold_chars
+        if redraw == "unscored":
+            if state.views_at_fold is not None and state.redraw_view is None:
+                state.redraw_view = next((key for key, _ in views if key not in state.views_at_fold), None)
+            unscored = frozenset({state.redraw_view}) if state.redraw_view else frozenset()
+        elif redraw == "scaled":
+            # 가장 큰 view 가 전부 그린 view(첫 판독, 씬 전환, `fold` 뒤 다시 그리기)다. 런 동안 본 것 중
+            # 가장 큰 것을 쥔다 — 기준이 호출마다 내려가면 이미 넘긴 batch 를 다시 세게 된다.
+            state.largest_view = max([state.largest_view, *(size for _, size in views)])
+            threshold = max(threshold_chars, int(redraw_scale * state.largest_view))
         fold = fold_context(
-            request.messages, kinds, state.folded_blocks, threshold_chars=threshold_chars
+            request.messages,
+            kinds,
+            state.folded_blocks,
+            threshold_chars=threshold,
+            unscored=unscored,
+            anchored=redraw == "anchored",
         )
         # 새 batch 에 view 가 들었다. 지금 모델이 받는 것은 가장 새 view 하나와 `placeholder` 뿐이고,
         # 그 view 는 델타라 지워진 view 에서 한 번 말하고 가만히 있던 값이 어디에도 없다. 그래서
-        # 다음 도구 결과의 `pulse` view 가 가진 값을 전부 다시 그리게 한다. 이 호출 한 번은 그
-        # 값 없이 판단하고, 그 다음 도구 결과부터 돌아온다.
+        # 다음 도구 결과의 `pulse` view 가 그 값을 다시 그리게 한다. 기준 view 를 남겼으면 그 뒤에 움직인
+        # 값만, 아니면 전부다. 이 호출 한 번은 그 값 없이 판단하고, 그 다음 도구 결과부터 돌아온다.
         if FoldKind.scene_view in fold.newly_folded_kinds:
-            channel.scene.pulse.redraw_all_values_next()
+            if fold.anchor_reading is not None:
+                channel.scene.pulse.redraw_values_since(fold.anchor_reading)
+            else:
+                channel.scene.pulse.redraw_all_values_next()
+            state.views_at_fold = frozenset(key for key, _ in views)
+            state.redraw_view = None
         state.folded_blocks = fold.folded_keys
         # `claude/` 모델에서는 앞의 도구 결과를 `placeholder` 로 고쳐 쓰는 순간, 그 뒤 assistant
         # turn 의 thinking block 이 무효가 된다.
@@ -484,9 +554,53 @@ def _fold_context_for(
         # (2026-08-31 이후 만든 계정). `ClaudeApiChat`(`app/llm/claude_api.py`)이 그런 block 을
         # 그 요청에서 빼므로 400 은 나지 않지만, 바뀐 지점 뒤 turn 들의 추론은 다음 호출에 넘어가지
         # 않는다.
-        return await handler(request.override(messages=fold.messages))
+        messages, unfolded_from = fold.messages, fold.unfolded_from
+        if case_context:
+            messages, pending = supersede_case_context(
+                messages, state.current_case_id, state.frozen_case_context, batch=bool(fold.newly_folded_kinds)
+            )
+            unfolded_from = min((at for at in (unfolded_from, pending) if at is not None), default=None)
+        if cache_boundary:
+            rewrote = bool(fold.newly_folded_kinds) or (case_context and pending_changed(state))
+            messages = _mark_stable(messages, unfolded_from, state, keep_previous=rewrote)
+        return await handler(request.override(messages=messages))
 
     return fold_context_middleware
+
+
+def pending_changed(state: QaRunState) -> bool:
+    """이번 호출에 TC 상세를 새로 접었는가. 접었으면 그 자리부터 고쳐 쓴 호출이다."""
+    changed = len(state.frozen_case_context) != state.frozen_count_seen
+    state.frozen_count_seen = len(state.frozen_case_context)
+    return changed
+
+
+def _mark_stable(messages, unfolded_from: int | None, state: QaRunState | None = None, keep_previous: bool = False):
+    """다음 `fold` batch 가 고쳐 쓰는 자리 바로 앞 메시지를 `stable` 로 표시한다.
+
+    그 앞은 다음 batch 까지 그대로라, Anthropic 모델은 거기 둔 `cache` 경계로 `fold` 뒤에도 그 앞을
+    읽는다(`app/llm/cache_boundary.py`). 답 메시지는 건너뛴다 — 마지막 block 이 경계를 받지 못하는
+    thinking 일 수 있다.
+
+    `fold` 한 그 호출(`keep_previous`)에는 지난 호출이 표시한 메시지에 그대로 표시한다. Anthropic 은 요청의 각 경계에서
+    앞으로 20 block 안에서만 쓴 `cache` 를 찾는다. `fold` 뒤 새 자리에 경계를 옮기면 지난 경계는 그보다 수십 block
+    앞이라 닿지 않고, 그 호출은 시스템까지만 읽었다(로컬 런 161: 경계가 97,597 자에 있었는데 시스템까지만 읽음).
+    새 자리는 다음 호출부터 쓴다.
+    """
+    if keep_previous and state is not None and state.stable_message_id is not None:
+        at = next((i for i, message in enumerate(messages) if message.id == state.stable_message_id), None)
+        if at is not None:
+            return [*messages[:at], stable(messages[at]), *messages[at + 1 :]]
+    if unfolded_from is None:
+        return messages
+    index = unfolded_from - 1
+    while index >= 0 and isinstance(messages[index], AIMessage):
+        index -= 1
+    if index < 0:
+        return messages
+    if state is not None:
+        state.stable_message_id = messages[index].id
+    return [*messages[:index], stable(messages[index]), *messages[index + 1 :]]
 
 
 def _context_shape(messages) -> str:
@@ -946,6 +1060,8 @@ class QaRunner:
             ]
             state.unreached_judge = UnreachedJudge()
         deadline = self._config.arch.deadline_seconds
+        channel.scene.pulse.quiet_unchanged = self._config.arch.pulse_quiet_unchanged
+        channel.scene.pulse.compact = self._config.arch.pulse_compact
         # `pulse_relevance` 가 켜진 run 만 판정기를 단다(ARTEL-958). 이미 도착한 reading 이
         # 있을 수 있어서 한 번 바로 부른다 — 다음 reading 까지 기다리면 첫 화면이 판정 없이
         # 지나간다. 여기서 다는 것은 아래 `finally` 가 run 이 어떻게 끝나든 닫게 하려는 것이다.

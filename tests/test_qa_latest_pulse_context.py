@@ -42,6 +42,22 @@ def test_latest_context_distinguishes_snapshot_omissions_and_inactive_objects():
     assert "Reported gone:" not in context
 
 
+def test_latest_context_names_the_scene_and_does_not_carry_the_whole_view():
+    """머리줄의 씬은 이름이다. 쥔 값 전부를 그린 view 가 실리면 요약이 매 호출 그 view 만큼 커진다(로컬 런 136)."""
+    pulse = PulseMemory()
+    for object_id in range(200):
+        pulse.apply(PulseReading(reading=1, scene="Battle", whole=True, active=[enemy(100, object_id=object_id)]))
+    drawn = pulse.drawn
+
+    context = pulse.render_latest_context()
+
+    assert context.splitlines()[0] == "Latest Pulse observations · scene Battle · reading 1"
+    assert "<<pulse>>" not in context
+    assert len(context) <= 7_000
+    # 요약은 다음 도구 결과의 view 가 어디서부터 그릴지를 건드리지 않는다.
+    assert pulse.drawn == drawn
+
+
 def test_latest_context_is_appended_once_to_each_request_after_the_stored_conversation():
     pulse = PulseMemory()
     channel = SimpleNamespace(scene=SimpleNamespace(pulse=pulse))
@@ -64,3 +80,31 @@ def test_latest_context_is_appended_once_to_each_request_after_the_stored_conver
     assert isinstance(second[-1], HumanMessage)
     assert "100 → 80" in second[-1].content
     assert second[-1].additional_kwargs[PER_CALL_KEY] is True
+
+
+def test_claude_런은_지난_요약을_지우지_않고_그_자리에_다시_넣는다():
+    """지우면 대화 기록을 고친 것이라 그 자리부터 cache 를 다시 쓴다. 그 턴에만 보이게 표시해 남긴다."""
+    from langchain_core.messages import AIMessage
+
+    from app.llm.cache_boundary import TURN_SCOPED_KEY
+
+    pulse = PulseMemory()
+    channel = SimpleNamespace(scene=SimpleNamespace(pulse=pulse))
+    middleware = _latest_pulse_context_for(channel, keep_earlier=True)
+
+    async def capture(call):
+        return call.messages
+
+    pulse.apply(PulseReading(reading=1, scene="Battle", active=[enemy(100)]))
+    first_stored = [ToolMessage(content="first", tool_call_id="a", id="t1")]
+    first = asyncio.run(middleware.awrap_model_call(SimpleNamespace(messages=first_stored, override=lambda **f: SimpleNamespace(**f)), capture))
+    pulse.apply(PulseReading(reading=2, scene="Battle", active=[enemy(80)]))
+    second_stored = [*first_stored, AIMessage(content="", id="a1"), ToolMessage(content="second", tool_call_id="b", id="t2")]
+    second = asyncio.run(middleware.awrap_model_call(SimpleNamespace(messages=second_stored, override=lambda **f: SimpleNamespace(**f)), capture))
+
+    # 요청에 실리는 내용은 같다. 표시(per_call)는 가장 새 요약에만 남는다 — 저장된 대화 끝 경계가 그 앞에 선다.
+    assert [message.content for message in second[:2]] == [message.content for message in first]
+    assert [message.id for message in second[2:4]] == ["a1", "t2"]
+    assert all(message.additional_kwargs.get(TURN_SCOPED_KEY) for message in (second[1], second[4]))
+    assert second[4].additional_kwargs[PER_CALL_KEY] is True
+    assert PER_CALL_KEY not in second[1].additional_kwargs

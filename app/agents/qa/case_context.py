@@ -2,6 +2,7 @@
 
 import json
 import re
+from itertools import count
 from uuid import uuid4
 from typing import TYPE_CHECKING
 
@@ -86,10 +87,17 @@ def render_case_ledger(state: "QaRunState", channel: "QaRunChannel") -> str:
     return text
 
 
-def fold_case_details(messages: list[BaseMessage], current_case_id: int | None = None, *, for_summary: bool = False) -> list[BaseMessage]:
+def fold_case_details(
+    messages: list[BaseMessage],
+    current_case_id: int | None = None,
+    *,
+    for_summary: bool = False,
+    frozen: set[tuple[str, int]] | None = None,
+    batch: bool = True,
+) -> list[BaseMessage]:
     """오래된 상세만 바꾸고 원래 message와 snapshot은 변경하지 않는다."""
     latest = None
-    if not for_summary:
+    if not for_summary and batch:
         for index, message in enumerate(messages):
             if is_ledger(message) or not isinstance(message.content, str):
                 continue
@@ -106,12 +114,21 @@ def fold_case_details(messages: list[BaseMessage], current_case_id: int | None =
             result.append(message)
             continue
 
+        detail_indices = count()
+
         def replace(match):
             identifier = match.group("id")
             # 작은 초기 계획은 일반 호출에서는 유지하고 summary 입력에서만 제외한다.
             keep = not for_summary and (
                 identifier == "plan" or identifier == str(current_case_id) or latest == (index, match.start())
             )
+            if frozen is not None:
+                if not message.id:
+                    return match.group(0)
+                key = (message.id, next(detail_indices))
+                if batch and not keep:
+                    frozen.add(key)
+                keep = key not in frozen
             if keep:
                 return match.group(0)
             return f"[TC {identifier} details folded; use get_test_case(case_id) for the original snapshot.]"
@@ -121,17 +138,61 @@ def fold_case_details(messages: list[BaseMessage], current_case_id: int | None =
     return result
 
 
+def supersede_case_context(
+    messages: list[BaseMessage], current_case_id: int | None, frozen: set[tuple[str, int]], batch: bool
+) -> tuple[list[BaseMessage], int | None]:
+    """이번 호출이 받는 `messages` 에서 지난 TC 상세를 접는다. graph 는 그대로다.
+
+    `fold_context` 의 batch 와 같은 호출에서만 새로 접는다(`batch`). 따로 접으면 그 호출에서 프롬프트를
+    한 번 더 고쳐 써서, 그 뒤가 `cache` 에서 한 번 더 빠진다(로컬 런 136: TC 장부를 접은 호출이 시스템
+    프롬프트까지만 읽었다). 이미 접은 TC 상세는 메시지 id와 상세 순번으로 기록한다.
+    다음 호출에서는 현재 메시지에 이 기록을 적용해 같은 메시지의 `pulse` view가 다시 나타나지 않게 한다.
+
+    **지난 ledger 는 접지 않는다.** 첫 ledger 가 대화 맨 앞 메시지에 있어서, 접으면 batch 마다 시스템 뒤
+    전부를 다시 썼다(로컬 런 137). ledger 는 하나에 수천 자라 남겨 두고 `cache` 에서 읽는 편이 싸고, 가장 새
+    ledger 가 스스로 앞의 것을 대신한다고 말한다.
+
+    돌려주는 자리는 아직 안 접은 지난 TC 상세가 처음 나오는 메시지다. 다음 batch 는 거기부터 고쳐 쓴다.
+    없으면 None 이다.
+    """
+    sent = fold_case_details(messages, current_case_id, frozen=frozen, batch=batch)
+    pending = next(
+        (
+            index
+            for index, message in enumerate(sent)
+            if not is_ledger(message)
+            and isinstance(message.content, str)
+            and _foldable_detail(message.content)
+        ),
+        None,
+    )
+    return sent, pending
+
+
+def _foldable_detail(content: str) -> bool:
+    """접힐 수 있는 TC 상세가 있는가. 계획(`plan`) 상세는 일반 호출에서 접지 않으므로 세지 않는다.
+
+    세면 계획 상세가 든 첫 메시지가 늘 "다음 batch 가 고쳐 쓰는 자리" 가 되어, 그 앞에 경계를 둘 자리가 없어
+    `fold` 자리의 `cache` 경계가 한 번도 서지 않았다(로컬 런 138: 15 호출 모두 경계 셋).
+    """
+    return any(match.group("id") != "plan" for match in DETAIL_PATTERN.finditer(content))
+
+
 class QaCaseContextMiddleware(AgentMiddleware):
     """상태가 바뀔 때만 새 ledger 를 덧붙여 graph 에 저장한다.
 
     **지난 ledger 를 지우지 않는다.** 예전에는 지난 것을 지우고 끝에 새로 붙였는데, 대화 중간의 메시지가
-    사라지면 그 뒤가 전부 프롬프트 캐시에서 빠지고 thinking block 도 무효가 된다. 지난 ledger 와 지난 TC
-    상세는 [CONTEXT_FOLD_BATCH] 개가 쌓였을 때 한 번에 접는다.
+    사라지면 그 뒤가 전부 프롬프트 캐시에서 빠지고 thinking block 도 무효가 된다.
+
+    `fold_context` 가 켜진 런이면(`supersede=False`) 덧붙이기만 한다. 지난 ledger 와 지난 TC 상세는
+    `fold_context` 의 batch 가 같은 호출에서 함께 접는다(`supersede_case_context`). 꺼진 런이면 여기서
+    [CONTEXT_FOLD_BATCH] 개가 쌓였을 때 graph 에서 한 번에 접는다.
     """
 
-    def __init__(self, state: "QaRunState", channel: "QaRunChannel") -> None:
+    def __init__(self, state: "QaRunState", channel: "QaRunChannel", supersede: bool = True) -> None:
         self.state = state
         self.channel = channel
+        self.supersede = supersede
 
     async def abefore_model(self, state, runtime):
         messages = state["messages"]
@@ -140,6 +201,8 @@ class QaCaseContextMiddleware(AgentMiddleware):
         appended = None
         if not ledgers or ledgers[-1].content != content:
             appended = HumanMessage(id=f"{TC_LEDGER_ID}-{uuid4().hex[:12]}", content=content)
+        if not self.supersede:
+            return {"messages": [appended]} if appended is not None else None
         # 새 것을 붙이면 지금 가장 새 ledger 도 지난 것이 된다.
         superseded = ledgers if appended is not None else ledgers[:-1]
         stale_ledgers = [message for message in superseded if message.content != SUPERSEDED_LEDGER]

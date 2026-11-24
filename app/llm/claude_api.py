@@ -48,6 +48,7 @@
 
 The scenario agent loop (`app/agents/scenario/agent.py`) only appends to its
 history, so it is not affected.
+
 """
 
 from __future__ import annotations
@@ -60,11 +61,21 @@ from collections.abc import AsyncIterator, Iterator, Sequence
 from typing import Any
 
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    SystemMessage,
+)
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from pydantic import PrivateAttr
 
-from app.llm.cache_boundary import first_per_call, with_breakpoint
+from app.llm.cache_boundary import (
+    TURN_SCOPED_KEY,
+    first_per_call,
+    last_stable,
+    with_breakpoint,
+)
 
 THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 
@@ -177,7 +188,7 @@ class ClaudeApiChat(ChatAnthropic):
                 ):
                     message = _without_thinking(message)
                 prepared.append(message)
-        return _with_stored_breakpoint(_with_system_breakpoint(prepared)), hashes[-1]
+        return _with_stored_breakpoint(_with_stable_breakpoint(_with_system_breakpoint(prepared))), hashes[-1]
 
     def _invalidated(self, message: AIMessage, prefix_hash: str) -> bool:
         for signature in _signatures(message):
@@ -196,6 +207,11 @@ class ClaudeApiChat(ChatAnthropic):
                 self._bound.move_to_end(signature)
             while len(self._bound) > MAX_REMEMBERED_SIGNATURES:
                 self._bound.popitem(last=False)
+
+    def _get_request_payload(self, input_, *, stop=None, **kwargs):  # type: ignore[override]
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        _with_turn_scoped_system_messages(payload, self._convert_input(input_).to_messages())
+        return payload
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         prepared, request_hash = self._prepare(messages, kwargs)
@@ -236,6 +252,44 @@ class ClaudeApiChat(ChatAnthropic):
             self._remember(answer, request_hash)
 
 
+# 그 턴에만 보이고 대화에 남는 system 메시지(`clear_at`). Sonnet 5.5 · Opus 5.5 · Fable 5.1 등.
+CLEAR_AT_BETA = "mid-conversation-system-clear-at-2026-08-21"
+
+
+def _with_turn_scoped_system_messages(payload: dict[str, Any], messages: Sequence[BaseMessage]) -> None:
+    """`turn_scoped` 메시지를 `clear_at: "next_user_message"` 인 대화 중간 system 메시지로 바꾼다.
+
+    langchain 은 이어지는 사람 · 도구 메시지를 user 메시지 하나로 합치므로, 그 안의 해당 글 block 을 꺼내 그 user
+    메시지 바로 뒤에 system 메시지로 둔다. 다음은 늘 답 메시지라 API 의 자리 규칙(user 뒤, 답 앞이나 맨 끝)을 지킨다.
+    `cache_control` 은 system 메시지에 달 수 없으므로, 경계는 앞의 user 메시지에 둔 저장된 대화 끝 경계가 맡는다.
+    """
+    texts = {message.content for message in messages if message.additional_kwargs.get(TURN_SCOPED_KEY) and isinstance(message.content, str)}
+    sent = payload.get("messages")
+    if not texts or not isinstance(sent, list):
+        return
+    rebuilt: list[dict[str, Any]] = []
+    for message in sent:
+        if message.get("role") != "user":
+            rebuilt.append(message)
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            if content in texts:
+                rebuilt.append({"role": "system", "content": content, "clear_at": "next_user_message"})
+            else:
+                rebuilt.append(message)
+            continue
+        kept = [block for block in content if not (isinstance(block, dict) and block.get("type") == "text" and block.get("text") in texts)]
+        pulled = [block["text"] for block in content if isinstance(block, dict) and block.get("type") == "text" and block.get("text") in texts]
+        if kept:
+            rebuilt.append({**message, "content": kept})
+        rebuilt.extend({"role": "system", "content": text, "clear_at": "next_user_message"} for text in pulled)
+    payload["messages"] = rebuilt
+    betas = list(payload.get("betas") or [])
+    if CLEAR_AT_BETA not in betas:
+        payload["betas"] = [*betas, CLEAR_AT_BETA]
+
+
 def _with_system_breakpoint(messages: list[BaseMessage]) -> list[BaseMessage]:
     """시스템 프롬프트 끝에 캐시 경계를 하나 둔다.
 
@@ -257,6 +311,20 @@ def _with_system_breakpoint(messages: list[BaseMessage]) -> list[BaseMessage]:
     else:
         return messages
     return [messages[0].model_copy(update={"content": blocks}), *messages[1:]]
+
+
+def _with_stable_breakpoint(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """다음 `fold` batch 까지 바뀌지 않는 앞부분의 끝(`stable`)에 cache 경계를 하나 둔다.
+
+    이유는 `app.llm.cache_boundary`. 답 메시지에는 달지 않는다 — runner 가 답 메시지에 표시를 두지 않는다.
+    """
+    index = last_stable(messages)
+    if index is None or isinstance(messages[index], (SystemMessage, AIMessage)):
+        return messages
+    content = with_breakpoint(messages[index].content)
+    if content is None:
+        return messages
+    return [*messages[:index], messages[index].model_copy(update={"content": content}), *messages[index + 1 :]]
 
 
 def _with_stored_breakpoint(messages: list[BaseMessage]) -> list[BaseMessage]:
