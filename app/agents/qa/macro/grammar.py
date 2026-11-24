@@ -360,6 +360,17 @@ TOOLS: tuple[ToolSpec, ...] = (
 )
 
 TOOLS_BY_NAME: dict[str, ToolSpec] = {spec.name: spec for spec in TOOLS}
+
+# Dispatched by a live planner action host, never expanded into raw SDK actions.
+GAME_FUNCTION = ToolSpec(
+    "call_game_function",
+    (
+        ToolParameter("name", MacroType.string),
+        ToolParameter("arguments", MacroType.string, default="{}", required=False),
+        ToolParameter("target", MacroType.string, default="", required=False),
+    ),
+    (),
+)
 TOOL_NAMES: tuple[str, ...] = tuple(spec.name for spec in TOOLS)
 
 # 목록에도 helper 에도 없는 이름을 거절할 때 쓰는 문구.

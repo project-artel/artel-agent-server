@@ -17,7 +17,7 @@ from app.agents.planner_executer.prompts import (
     static_pieces,
 )
 from app.agents.qa.arch import QaArchError, ResolvedArch
-from app.agents.qa.macro.grammar import TOOL_NAMES
+from app.agents.qa.macro.grammar import GAME_FUNCTION, TOOL_NAMES
 from app.agents.scenario import OutputLanguage
 from app.config import get_settings
 from app.llm.chat_model import TEMPERATURE
@@ -101,4 +101,4 @@ def resolve_planner_executer_config(
 
 def step_module_functions() -> tuple[str, ...]:
     """planner 의 macro 가 보낼 수 있는 tool (`macro.<name>`)."""
-    return tuple(f"macro.{name}" for name in TOOL_NAMES)
+    return tuple(f"macro.{name}" for name in (*TOOL_NAMES, GAME_FUNCTION.name))

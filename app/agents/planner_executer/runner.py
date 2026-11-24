@@ -71,6 +71,8 @@ from app.agents.planner_executer.free import (
     same_scene,
 )
 from app.agents.planner_executer.inputs import InputsReader
+from app.agents.planner_executer.game_functions import PlannerGameFunctions
+from app.agents.qa.tools.tool_context import ToolContext
 from app.agents.planner_executer.macros import RegisteredMacros, StepMacros, step_of_segment
 from app.agents.planner_executer.observe import watch
 from app.agents.planner_executer.planner import Ask, Planner, Written
@@ -179,6 +181,7 @@ class PlannerExecuterRunner:
             step_meta=_step_plan(scenario),
             step_texts=[step_text(step) for step in scenario.steps],
             execution_mode=scenario.execution_mode,
+            step_functions=[step.case.functions if step.case is not None else None for step in scenario.steps],
         )
         jev = self._jev or JevClient()
         deadline = self._config.arch.deadline_seconds
@@ -206,21 +209,22 @@ class PlannerExecuterRunner:
         self._ledger = ActionLedger()
         # 이 빌드가 읽는 입력(SDK `list_inputs`). planner 와 editor 가 나눠 써서, 옛 SDK 의 거절을 한 번만 듣는다.
         inputs = InputsReader(channel)
+        game_functions = PlannerGameFunctions(ToolContext(channel, state, self._config.arch))
         planner = Planner(
             self._config, channel, self._spec, registered, ask=self._ask, developer=self._developer, ledger=self._ledger,
-            facts=self._facts, inputs=inputs,
+            facts=self._facts, inputs=inputs, game_functions=game_functions,
         )
         # 앞 step 이 도는 동안 다음 step 을 미리 쓰는 planner(pe9 `plan_ahead`). 본 planner 와 계획을 나누지 않아, 앞 step 의
         # 재계획이 미리 쓰는 계획을 덮지 않는다.
         self._ahead_planner = (
             Planner(
                 self._config, channel, self._spec, registered, ask=self._ask, developer=self._developer,
-                ledger=self._ledger, facts=self._facts, inputs=inputs, ahead=True,
+                ledger=self._ledger, facts=self._facts, inputs=inputs, ahead=True, game_functions=game_functions,
             )
             if self._spec.plan_ahead == "on"
             else None
         )
-        executer = Executer(channel, self._spec, jev, facts=self._facts)
+        executer = Executer(channel, self._spec, jev, facts=self._facts, game_functions=game_functions)
         if self._spec.facts == "on":
             await note_decision(
                 channel, "game_facts",
@@ -233,7 +237,8 @@ class PlannerExecuterRunner:
             await watch_facts(channel, self._facts)
         # 런 중 macro 수정(ARTEL-1288). `editor="off"` 면 executer 는 멈춤 규칙만 더한 채 돈다.
         self._editor = MacroEditor(
-            self._config, channel, self._spec, registered, ask=self._ask, developer=self._developer, inputs=inputs
+            self._config, channel, self._spec, registered, ask=self._ask, developer=self._developer, inputs=inputs,
+            game_functions=game_functions,
         ) if (
             self._spec.editor == "on"
         ) else None

@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from app.agents.planner_executer.game_functions import PlannerGameFunctions
+
 from pydantic import BaseModel, Field
 
 from app.agents.planner_executer.arch import PlannerExecuterArchSpec
@@ -409,8 +411,10 @@ class Executer:
         clock: Callable[[], float] = time.monotonic,
         state_reader: StateReader = read_state,
         facts: GameFacts = NO_FACTS,
+        game_functions: "PlannerGameFunctions | None" = None,
     ) -> None:
         self._channel = channel
+        self._game_functions = game_functions
         self._spec = spec
         # 사전 조건을 물을 때만 참이다: Jev 에게 ```observe 로 좁히지 않은 화면 전체를 보인다(pe16).
         self._whole_view = False
@@ -1547,7 +1551,7 @@ class Executer:
     async def _run(self, definition: MacroDefinition, step: int, allowed: frozenset[str] | None = None) -> ActionRun:
         """실패나 pause 전까지 기록된 flags도 실행 결과와 함께 보존한다. `allowed` 가 있으면 그 밖의 대상에 가는 입력은 보내지
         않는다(계약 행동)."""
-        host = ChannelMacroHost(self._channel, self._jev, step, allowed_targets=allowed)
+        host = ChannelMacroHost(self._channel, self._jev, step, allowed_targets=allowed, game_functions=self._game_functions)
         try:
             result = await run_macro(host, definition, {}, step)
         except QaCancelled:
@@ -1746,6 +1750,14 @@ def blocked_actions_line(not_ready: list[str], options: dict[str, str], macros: 
     return BLOCKED_ACTIONS_LINE.format(actions="; ".join(described))
 
 
+def read_only_observations(turn: dict) -> list[str]:
+    return [
+        f"observed {item['summary']}: {item['value']}"
+        for item in turn.get("sent") or []
+        if isinstance(item, dict) and item.get("kind") == "read_only_function" and item.get("ok") and item.get("value")
+    ]
+
+
 def recent_action_lines(turns: list[dict], limit: int = RECENT_ACTIONS_SHOWN) -> list[str]:
     """The last `RECENT_ACTIONS_SHOWN` turns that ran an action, one line each, oldest first.
 
@@ -1759,6 +1771,8 @@ def recent_action_lines(turns: list[dict], limit: int = RECENT_ACTIONS_SHOWN) ->
         sent = turn.get("sent") or []
         line = ("before the new plan, " if turn.get("earlier_plan") else "") + f"turn {turn.get('turn')}: {turn['picked']} → {turn['outcome']}, "
         line += f"sent {len(sent)} input{'s' if len(sent) != 1 else ''} to the game" if sent else "sent no input to the game"
+        for observation in read_only_observations(turn):
+            line += f"; {observation}"
         if turn.get("reason"):
             line += f" ({str(turn['reason'])[:MAX_REASON_CHARS]})"
         if effect_missed(turn):

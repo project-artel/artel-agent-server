@@ -97,6 +97,7 @@ from app.agents.qa.macro.grammar import (
     NONE_FITS_DESCRIPTION,
     NUMBER_RETURNS,
     TOOLS_BY_NAME,
+    GAME_FUNCTION,
     ToolParameter,
     ToolSpec,
 )
@@ -1487,6 +1488,19 @@ class _Runner:
     async def _action(
         self, frame: _Frame, place: MacroPlace, statement: MacroActionStatement
     ) -> bool:
+        if statement.callee == GAME_FUNCTION.name:
+            invoke = getattr(self.host, "call_game_function", None)
+            if invoke is None:
+                raise MacroFailure(ACTION_REJECTED, "Game functions require a live planner action.")
+            values = _argument_values(GAME_FUNCTION, statement, frame, self)
+            called, ok, detail = await invoke(**values)
+            if called:
+                self.result.applied.append(place)
+                self.read_members_asked.clear()
+            self.result.outcomes.append(detail)
+            if not ok:
+                raise MacroFailure(ACTION_REJECTED, detail)
+            return True
         spec = TOOLS_BY_NAME[statement.callee]
         values = _argument_values(spec, statement, frame, self)
         actions = _actions(spec, values)

@@ -26,7 +26,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, field_validator
 
 from app.agents.planner_executer.evidence import names_of, points_of, readings
-from app.agents.planner_executer.executer import StepPlay
+from app.agents.planner_executer.executer import StepPlay, read_only_observations
 from app.agents.planner_executer.target import evaluator_note
 from app.agents.planner_executer.prompts import (
     EVALUATOR_ROLE,
@@ -558,6 +558,7 @@ def turn_line(turn: dict) -> str:
         parts.append(f"→ {turn['outcome']}" + (f": {turn['reason']}" if turn.get("reason") else ""))
         sent = turn.get("sent") or []
         parts.append(f"sent {len(sent)} input{'s' if len(sent) != 1 else ''}" if sent else "sent no input")
+        parts.extend(read_only_observations(turn))
         if turn.get("effect"):
             parts.append(f"its effect: {turn['effect']}")
         if turn.get("result"):

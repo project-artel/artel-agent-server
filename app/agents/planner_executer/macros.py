@@ -224,7 +224,7 @@ class _ImportResolver:
         entry, source, problem = await self._source(name)
         if source is not None:
             try:
-                definition = await self.parse(entry, source, importing)
+                definition = await self.parse(entry, source, importing, game_functions=False)
             except MacroRejection as rejection:
                 problem = f"It is registered but no longer parses: {rejection.render()}"
             else:
@@ -234,7 +234,7 @@ class _ImportResolver:
         return None, problem
 
     async def parse(
-        self, name: str, source: str, importing: tuple[str, ...] = ()
+        self, name: str, source: str, importing: tuple[str, ...] = (), *, game_functions: bool = True,
     ) -> MacroDefinition:
         """`source` 를 `name` 이 진입점인 macro 로 파싱한다. 못 하면 `MacroRejection`."""
         imports: dict[str, MacroDefinition] = {}
@@ -251,7 +251,7 @@ class _ImportResolver:
                     f"`{imported}` is imported but cannot be found. {problem} {self._missing_hint}"
                 )
             imports[imported] = definition
-        return macro_definition_from_source(name, source, imports=imports)
+        return macro_definition_from_source(name, source, imports=imports, game_functions=game_functions)
 
 
 class RegisteredMacros(_ImportResolver):
