@@ -573,5 +573,5 @@ def test_a_repeat_that_only_moves_numbers_on_screen_still_counts_as_no_progress(
     play = asyncio.run(go())
 
     # 숫자만 바뀐 반복은 진척이 아니라서 연속 횟수가 쌓이고, 복구 예산이 있으면 planner 에게 넘긴다. 행동을 빼지는 않는다(pe13).
-    assert play.repair_request is not None and "picked 6 times in a row" in play.repair_request["reason"]
+    assert play.repair_request is not None and "succeeded 6 times" in play.repair_request["reason"]
     assert not any("dropped" in turn for turn in play.turns)

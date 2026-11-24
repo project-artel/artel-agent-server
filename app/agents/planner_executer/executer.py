@@ -197,18 +197,18 @@ def state_fingerprint(state: dict[str, Any]) -> str:
 
 
 def progress_fingerprint(state: dict[str, Any]) -> str:
-    """진척을 가르는 지문: 장면, 선언 fact 값, 객체가 화면에 띄운 글자.
+    """진척을 가르는 지문: 장면, 선언 fact 값, 객체 경로와 화면 글자.
 
     state 전체의 지문은 타이머·좌표 같은 값만으로도 매 turn 바뀌어, 같은 행동의 반복이 늘 처음부터 다시 세어졌다(로컬 run 17
     step 9: 아무것도 기다리지 않는 화면에서 대사 넘기기를 40번 넘게 눌렀다). 대사가 한 줄 넘어가면 글자가 바뀌고, 게임 단계가
     바뀌면 fact 가 바뀐다. 그 밖의 값만 바뀐 것은 진척으로 치지 않는다.
     """
-    texts = sorted(
-        str(obj.get("text"))
+    objects = sorted(
+        (str(obj.get("path") or ""), str(obj.get("text") or ""))
         for obj in state.get("objects") or []
-        if isinstance(obj, dict) and obj.get("text")
+        if isinstance(obj, dict)
     )
-    basis = {"scene": state.get("scene"), "facts": state.get("facts"), "texts": texts}
+    basis = {"scene": state.get("scene"), "facts": state.get("facts"), "objects": objects}
     return hashlib.sha256(json.dumps(basis, sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -217,6 +217,7 @@ def repeated_without_progress(play: "StepPlay", action: str, limit: int) -> bool
     if len(play.turns) <= limit:
         return False
     current = play.turns[-1]
+    fingerprint = progress_fingerprint(current["jev_state"])
     previous = play.turns[-limit - 1:-1]
     if not all(
         turn.get("options") == current["options"]
@@ -224,10 +225,7 @@ def repeated_without_progress(play: "StepPlay", action: str, limit: int) -> bool
         and turn.get("outcome") == "passed" and turn.get("sent")
         and turn.get("effect") != "met" and turn.get("result") != "effect_met"
         and turn.get("goal") == current.get("goal")
-        and (
-            turn.get("jev_state") == current["jev_state"]
-            or (no_effect_shown(turn) and progress_fingerprint(turn["jev_state"]) == progress_fingerprint(current["jev_state"]))
-        )
+        and progress_fingerprint(turn["jev_state"]) == fingerprint
         for turn in previous
     ):
         return False
