@@ -220,6 +220,16 @@ def test_repeated_action_stops_before_another_input_when_no_repair_is_left() -> 
     assert play.turns[-1]["no_progress"] == play.stopped and play.repair_request is None
 
 
+def test_an_observed_position_is_progress_even_without_a_check_or_fact() -> None:
+    turn = {"goal": "move", "picked": "walk", "options": ["walk"], "view": {"members": ["Player.x"]},
+            "outcome": "passed", "sent": ["press D"]}
+    play = StepPlay("", turns=[
+        {**turn, "jev_state": {"objects": [{"path": "Player", "members": {"Player.x": x}}]}}
+        for x in range(7)
+    ])
+    assert not repeated_without_progress(play, "walk", 6)
+
+
 def test_the_same_action_repeated_while_the_screen_keeps_changing_is_not_dropped() -> None:
     """ARTEL-1453. 대사를 한 줄씩 넘기는 반복은 화면이 바뀌므로 제자리걸음이 아니다. 런 415 에서 대사 11줄을 넘기던 Space 가
     효과를 선언하지 않았다는 이유로 6번째에 선택지에서 빠졌다."""
