@@ -505,7 +505,11 @@ from app.llm.models import LLMModel, get_model_spec
 # v58은 v56의 최신 Pulse 요약을 대화 앞이 아니라 끝에 붙인다. 내용은 같다. 앞에 두면 요약이 바뀔 때마다
 # 그 뒤 대화 전체가 `cache` 에서 빠져, Claude 에서는 매 호출 대화 전체를 다시 썼다.
 # v59는 `reset_game` 도구에서 저장소 옵션을 제거하고 SDK 내장 치트를 호출한다.
-QA_ARCH_LABEL = "v59-built-in-reset-cheat"
+# v60은 씬을 전부 그린 가장 새 `pulse` view 를 접지 않고 남기고(`fold_redraw="anchored"`), 접은 뒤에는 그
+# view 이후 움직인 값만 다시 그린다. 다음 `fold` 가 고쳐 쓰는 자리 앞에 Anthropic `cache` 경계를 두고
+# (`fold_cache_boundary`), 지난 TC ledger 도 같은 batch 에서 접는다. 최신 Pulse 요약 머리 줄에 씬 전체
+# view 가 실리던 것도 씬 이름으로 고쳤다.
+QA_ARCH_LABEL = "v60-anchored-scene-view"
 
 # Which facts the fingerprint is computed from. Bump when that set changes, so
 # a digest from the old scheme is never mistaken for one from the new.
@@ -777,6 +781,29 @@ class QaArchSpec(BaseModel):
     # `cache` 를 덜 읽고, 높이면 오래된 block 이 오래 남아 `cache` 에서 읽는 양이 는다. 어느 쪽이
     # 싼지는 재 봐야 해서 실험 축으로 둔다. `0` 은 오래된 block 을 매 호출 `fold` 한다.
     fold_threshold_chars: int = Field(default=DEFAULT_FOLD_THRESHOLD_CHARS, ge=0, le=10_000_000)
+    # `fold` 직후 값을 다시 그리는 view 를 어떻게 다룰지. 다시 그린 view 는 혼자 기준을 넘을 만큼 커서,
+    # 세면 다음 view 가 오자마자 다시 `fold` 하고 다시 그리기를 되풀이한다.
+    # - `counted`: 다른 block 과 같이 센다. v58 까지의 동작이다.
+    # - `unscored`: `fold` 뒤 처음 나타난 view 를 다시 그린 view 로 보고, 기준을 셀 때만 뺀다.
+    # - `scaled`: 기준을 `max(fold_threshold_chars, fold_redraw_scale × 지금까지 본 가장 큰 view)` 로 올린다.
+    # - `anchored`: 씬의 값을 전부 그린 가장 새 view 를 접지도 세지도 않고, 접은 뒤에는 그 view 이후 움직인
+    #   값만 다시 그린다. 새 씬의 전부 그린 view 가 오면 옛 것은 다른 낡은 block 과 같이 센다.
+    #
+    # 기본값이 `anchored` 인 이유: `counted` 로 돈 로컬 런 134·136(`claude/claude-sonnet-5-5`, 튜토리얼
+    # 시나리오)에서 씬 전체 view 가 19만 자라, 접을 때마다 같은 씬 전체를 다시 그려 그 뒤를 `cache` 에 다시 썼다.
+    # 접은 뒤 필요한 것은 어차피 그 씬 전체라서 접지 않고 남겨 두면 `cache` 에서 읽힌다.
+    fold_redraw: Literal["counted", "unscored", "scaled", "anchored"] = "anchored"
+    fold_redraw_scale: float = Field(default=1.5, ge=1.0, le=10.0)
+    # 다음 `fold` batch 가 고쳐 쓰는 자리 바로 앞에 Anthropic `cache` 경계를 둔다. 끄면 `fold` 한 번에
+    # 시스템 뒤 대화 전체를 다시 쓴다.
+    fold_cache_boundary: bool = True
+    # 안 바뀐 조작 줄과 화면 글자를 매 `pulse` view 다시 그리지 않고 한 줄로 줄인다(`PulseMemory.quiet_unchanged`).
+    # 처음 그린 view, 씬 전체 view, `fold` 뒤 다시 그리는 view 에는 그대로 다 그린다. 끄면 v58 까지처럼 매번 그린다.
+    # 기본은 끔: 켠 런 30 에서 에이전트가 씬 전체를 36 번 다시 봐(끈 런 31 은 18 번) 호출이 늘었다.
+    pulse_quiet_unchanged: bool = False
+    # 판독 목록을 묶고 statics 는 바뀐 것만 그린다(`PulseMemory.compact`). 조작 줄 · 값 · 좌표는 그대로다.
+    # 기본은 끔: 켠 런 33 에서 에이전트가 도구를 덜 묶어 불러(턴당 2.1 → 1.7) 호출이 늘었다.
+    pulse_compact: bool = False
     # 게임이 등록한 cheat 와 behavior (ARTEL-1054). orchestration 이 session open 에 catalog 를
     # 실을 때만 `on` 으로 보낸다. `off` 면 tool 도, 첫 message 의 catalog 도, view 의 줄도,
     # `STATUS` 의 두 필드도 없다 — v26 의 run 그대로다.
@@ -940,6 +967,11 @@ class ResolvedArch(BaseModel):
     verdict_evidence: Literal["off", "on"]
     fold_stale_macro_results: bool
     fold_threshold_chars: int
+    fold_redraw: Literal["counted", "unscored", "scaled", "anchored"]
+    fold_redraw_scale: float
+    fold_cache_boundary: bool
+    pulse_quiet_unchanged: bool
+    pulse_compact: bool
     cheats: Literal["off", "on"]
     behaviors: Literal["off", "on"]
     max_cheats_per_run: int
@@ -1081,7 +1113,13 @@ def arch_fingerprint(
         # default run's digest the day it was added, filing one structure under two.
         "arch": arch.model_dump(
             mode="json",
-            exclude={"label", "engine", "planner"} | ({"verdict_evidence"} if arch.verdict_evidence == "off" else set()),
+            exclude={"label", "engine", "planner"}
+            | ({"verdict_evidence"} if arch.verdict_evidence == "off" else set())
+            # 실험 축이 기본값인 런은 이 축이 생기기 전과 digest 가 같아야 한다.
+            | ({"fold_redraw", "fold_redraw_scale"} if arch.fold_redraw == "counted" else set())
+            | ({"fold_cache_boundary"} if not arch.fold_cache_boundary else set())
+            | ({"pulse_quiet_unchanged"} if not arch.pulse_quiet_unchanged else set())
+            | ({"pulse_compact"} if not arch.pulse_compact else set()),
         ),
         "tools": sorted(
             (tool.name, json.dumps(tool.args, sort_keys=True, default=str))

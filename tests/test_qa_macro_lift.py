@@ -400,4 +400,4 @@ def test_recording_does_not_change_what_the_model_is_offered(macros: str) -> Non
     """기록하는 wrapper 가 tool 의 이름과 `args` 를 그대로 둔다 — fingerprint 가 안 움직인다."""
     _state, tools = make(macros)
 
-    assert set(tools["click"].args) == {"step", "target", "thought", "button"}
+    assert set(tools["click"].args) == {"step", "target", "thought", "button", "capture_after"}

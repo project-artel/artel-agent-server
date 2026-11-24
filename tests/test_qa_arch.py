@@ -515,7 +515,7 @@ def test_load_skill_joins_the_tool_set_only_when_skills_are_on_demand() -> None:
 # the first time someone changes a tool and forgets to bump it." This pair
 # exists so the next such change fails a test instead of silently filing two
 # structures under one name.
-_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v59-built-in-reset-cheat"
+_LABEL_THIS_STRUCTURE_WAS_PINNED_UNDER = "v60-anchored-scene-view"
 
 # The five knobs `_resolved()` in `arch.py` otherwise fills in from
 # `get_settings()`: `compaction`, `compaction_trigger_fraction`,
@@ -655,7 +655,7 @@ _EXPECTED_DEFAULT_TOOL_NAMES = (
 # `max_behavior_calls_per_run` (ARTEL-1054) joined `QaArchSpec` and the label moved to
 # `v27-game-functions`. Both axes default to `off`, so the default tool set is unchanged; the
 # digest moved because `arch.model_dump()` gained four keys.
-_EXPECTED_DEFAULT_FINGERPRINT = "c73d4ead1048"
+_EXPECTED_DEFAULT_FINGERPRINT = "5e1f04e4305a"
 
 
 def test_the_default_structure_is_pinned_to_the_label_that_names_it() -> None:

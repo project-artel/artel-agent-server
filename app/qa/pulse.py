@@ -241,6 +241,9 @@ def changed_type_key(changed: str) -> str | None:
 
 PULSE_VIEW_START = "<<pulse>>"
 PULSE_VIEW_END = "<<end pulse>>"
+# 씬의 값을 전부 그린 view 의 머리 줄 끝. `fold_context` 가 이것으로 기준 view 를 알아본다
+# (`app/agents/qa/context.py`).
+PULSE_WHOLE_SCENE = " · whole scene"
 
 
 class PulseMember(BaseModel):
@@ -562,6 +565,11 @@ class _HeldObject(BaseModel):
     # 조각마다 마지막으로 도착한 판독 번호와 마지막으로 그린 판독 번호. 멤버의 `at`·`shown` 과 같다.
     fragments_at: dict[str, int] = Field(default_factory=dict)
     fragments_shown: dict[str, int] = Field(default_factory=dict)
+    # 조작 줄(주소 · 조준값 · 할 수 있는 것)의 마지막 모양, 그 모양이 바뀐 판독 번호, 마지막으로 그린 모양.
+    # `PulseMemory.quiet_unchanged` 런은 그린 모양과 같으면 다시 그리지 않는다.
+    offer_sig: str | None = None
+    offer_changed_at: int = 0
+    offer_drawn: str | None = None
 
     def fragments(self) -> dict[str, Any]:
         """있는 조각만, 이름 → 조각."""
@@ -661,6 +669,16 @@ class PulseMemory(BaseModel):
     #
     # `None` 이면 넘긴 적이 없다. 기본 run 은 늘 `None` 이라 view 가 그대로다.
     deferred_since: int | None = None
+    # 안 바뀐 조작 줄과 화면 글자를 매 view 다시 그리지 않는다(`QaArchSpec.pulse_quiet_unchanged`). 켜면 이미 그린
+    # 것은 "앞의 view 에 있다" 는 한 줄로 줄인다. 로컬 런 136 에서 변경분 view 3.5만 자 중 2.4만 자가 매번 같은 조작
+    # 줄이었다.
+    quiet_unchanged: bool = False
+    # 판독 목록과 statics 를 줄인다(`QaArchSpec.pulse_compact`). 판독 목록은 같은 변화가 이어진 판독을 한 줄로 묶고
+    # 이름을 마지막 경로 조각으로 줄인다. statics 는 바뀐 것만 그리고 나머지는 개수만 적는다 — 씬 전체 view 와
+    # `fold` 뒤 첫 view 는 전부 그린다. 로컬 런 31 에서 두 절이 새 도구 결과의 26% 였다.
+    compact: bool = False
+    # 다음 view 가 화면 글자를 이 판독 뒤에 바뀐 것부터 다시 그린다. `fold` 로 앞의 view 가 지워졌을 때 쓴다.
+    text_floor: int | None = None
     # `PULSE.functions` 의 entry 를 `kind|name|target` 으로(ARTEL-1054). `removed` 가 온 key 는
     # 지운다 — 그 instance 가 사라졌다.
     functions: dict[str, FunctionPulseEntry] = Field(default_factory=dict)
@@ -973,6 +991,8 @@ class PulseMemory(BaseModel):
                         setattr(held, name, getattr(was, name))
                 # 말한 기록도 이어받는다. 여기서 잃으면 이미 말한 값을 매 턴 다시 말한다.
                 held.shown = dict(was.shown) if was else {}
+                if was is not None:
+                    held.offer_sig, held.offer_changed_at, held.offer_drawn = was.offer_sig, was.offer_changed_at, was.offer_drawn
                 for member in obj.members:
                     held.members[member.key] = member
                     held.at[member.key] = now
@@ -1025,7 +1045,9 @@ class PulseMemory(BaseModel):
         if not self.seen:
             return None
         lines = [
-            f"Latest Pulse observations · scene {self.current_scene() or '(unknown)'} · reading {self.clock()}",
+            # 씬 이름이다. `current_scene()` 은 쥔 값 전부를 그린 view 라, 여기 쓰면 그 view(로컬 런 136 에서
+            # 약 17만 자)가 매 호출 끝에 실려 Claude 에서 호출마다 약 9만 token 을 `cache` 에 새로 썼다.
+            f"Latest Pulse observations · scene {self.scene or '(unknown)'} · reading {self.clock()}",
             "Value sequences show observed changes in order. Use this view for current state.",
         ]
         removed = sorted(self.gone_at.keys() - self.held.keys(), key=lambda key: (-self.gone_at[key], key))
@@ -1119,6 +1141,8 @@ class PulseMemory(BaseModel):
             head += f" · frame {self.frame}"
         if self.scene:
             head += f" · scene {self.scene}"
+        if since == 0:
+            head += PULSE_WHOLE_SCENE
         lines.append(head)
         if self.unwatchable:
             # Said out loud so "nothing moved" is not read as "nothing is there".
@@ -1163,6 +1187,8 @@ class PulseMemory(BaseModel):
             elif len(window) > 2 and not members and cosmetic and not any(e.whole for e in window):
                 # 전부 cosmetic 이면 같은 줄이 창 길이만큼 반복된다. 그것도 한 줄로 접는다.
                 lines.append(f"  {len(window)} readings, only cosmetic values moved ({cosmetic})")
+            elif self.compact:
+                lines.extend(self._grouped_log_lines(window))
             else:
                 for entry in window:
                     lines.append(f"  {entry.reading} ({self._log_line(entry)})")
@@ -1224,6 +1250,17 @@ class PulseMemory(BaseModel):
             # `silent` 이 멤버 값에만 걸리기 때문이라, 거르는 것은 이쪽 몫이다.
             if held.live and (held.text or "").strip()
         ]
+        quiet = self.quiet_unchanged and since != 0
+        static_floor = self.text_floor
+        unchanged_labels = 0
+        if quiet and readable:
+            floor = news_since if self.text_floor is None else min(news_since, self.text_floor)
+            unchanged_labels = sum(1 for _, held in readable if held.text_at <= floor)
+            readable = [(key, held) for key, held in readable if held.text_at > floor]
+        if advance and not self.compact:
+            self.text_floor = None
+        if unchanged_labels:
+            lines.append(f"the screen also shows {unchanged_labels} unchanged labels (see the earlier view)")
         if readable:
             readable.sort(key=self._reading_order)
             shown = readable
@@ -1277,6 +1314,11 @@ class PulseMemory(BaseModel):
         # static 은 `inspect_object` 가 받는 주소가 없어서, 이름을 모르면 꺼낼 길이 없다.
         # `PulseStatic.key` 가 `Declaring::Member` 라 member 의 `type_key` 와 같은 꼴이다.
         shown_statics = [key for key in sorted(self.statics) if not self.is_cosmetic(key)]
+        quiet_statics = 0
+        if self.compact and since != 0:
+            floor = news_since if static_floor is None else min(news_since, static_floor)
+            quiet_statics = sum(1 for key in shown_statics if self.static_at.get(key, 0) <= floor)
+            shown_statics = [key for key in shown_statics if self.static_at.get(key, 0) > floor]
         hidden_statics = [key for key in sorted(self.statics) if self.is_cosmetic(key)]
         if shown_statics:
             lines.append("statics:")
@@ -1287,6 +1329,8 @@ class PulseMemory(BaseModel):
                 # 무엇이 소식인지 스스로 찾아야 하고, 그것이 창이 하라고 있는 일이다.
                 news = "  (changed)" if self.static_at.get(key, 0) > news_since else ""
                 lines.append(f"  {name} = {observed_text(entry.observed)}{news}{self._moved(key)}")
+        if quiet_statics:
+            lines.append(f"statics: {quiet_statics} unchanged since the earlier view (inspect_object with the name shows one)")
         if hidden_statics:
             names = ", ".join(self._static_name(self.statics[key]) for key in hidden_statics)
             lines.append(
@@ -1294,6 +1338,7 @@ class PulseMemory(BaseModel):
                 "(inspect_object with the name shows one)"
             )
 
+        quiet_actionables = 0
         objects = sorted(self.held.items())
         for key, obj in objects:
             # 꺼진 것은 그리지 않는다. 화면에 없고 누를 수도 없어 조준 후보가 아니고,
@@ -1345,6 +1390,15 @@ class PulseMemory(BaseModel):
             # 조작할 수 있다는 것은 **무엇을 할지 아는 것**이다. id 는 거의 모든 객체에
             # 실리므로 그것으로 가르면 아무것도 안 걸러진다 — offers 가 그 선이다.
             actionable = bool(obj.offers)
+            where = obj.selector or obj.path or key
+            offered = self._offered(obj)
+            signature = f"{where}{self._aim(obj)}|{offered}" if actionable else None
+            if signature != obj.offer_sig:
+                obj.offer_sig, obj.offer_changed_at = signature, self.clock()
+            # 이미 같은 모양으로 그린 조작 줄은 다시 그리지 않는다. 값이 움직였으면 아래에서 그대로 그린다.
+            muted = quiet and actionable and obj.offer_drawn == signature
+            if muted:
+                actionable = False
 
             # 이번 창에 아무 말도 없고, 아직 안 말한 값도 없고, 누를 수도 없는 객체는
             # 건너뛴다. 독자가 이미 아는 것을 다시 적는 자리다.
@@ -1355,13 +1409,14 @@ class PulseMemory(BaseModel):
             # 글자는 이 판단에 안 든다. 화면의 글자 절이 창과 무관하게 전부 그리므로,
             # 글자만 든 객체는 여기서 블록을 안 만드는 것이 맞다(ARTEL-690).
             if not fresh and not owed and not fresh_fragments and not owed_fragments and not actionable:
+                quiet_actionables += muted
                 continue
 
-            where = obj.selector or obj.path or key
             lines.append(f"{where}{self._aim(obj)}:")
-            offered = self._offered(obj)
             if offered:
                 lines.append(f"  {offered}")
+            if advance and signature is not None:
+                obj.offer_drawn = signature
             for member_key in fresh + owed:
                 member = obj.members[member_key]
                 name = f"{(member.on or '').split('.')[-1]}.{member.member}"
@@ -1386,6 +1441,13 @@ class PulseMemory(BaseModel):
                 if advance:
                     obj.fragments_shown[name] = self.clock()
 
+        if quiet_actionables:
+            lines.append(
+                f"{quiet_actionables} more objects can be acted on as listed in an earlier view "
+                "(unchanged since; observe_scene lists them all again)"
+            )
+        if advance and self.compact:
+            self.text_floor = None
         if hidden_values:
             lines.append(
                 f"hidden as cosmetic: {hidden_values} values on {hidden_objects} objects "
@@ -1556,6 +1618,28 @@ class PulseMemory(BaseModel):
         """
         for held in self.held.values():
             held.shown = {}
+            held.offer_drawn = None
+        self.text_floor = 0
+
+    def redraw_values_since(self, reading: int) -> None:
+        """다음 `pulse` view 가 `reading` 뒤에 도착한 값을 다시 그리게 한다. 그 앞의 값은 그대로 둔다.
+
+        `fold_context` 가 기준 view(씬의 값을 전부 그린 가장 새 view)를 남기고 그 뒤의 view 만 접었을
+        때 runner 가 부른다. `reading` 은 기준 view 의 번호다. 그때 그대로인 값은 기준 view 에 있으니
+        다시 그릴 것은 그 뒤에 움직인 값뿐이다 — [redraw_all_values_next] 처럼 전부 그리면 기준 view 와
+        같은 것을 한 번 더 싣는다(로컬 런 136: 19만 자).
+
+        사라짐과 꺼짐도 그 자리부터 다시 말한다. 기준 view 에는 아직 있는 것으로 남아 있다.
+        """
+        for held in self.held.values():
+            held.shown = {k: v for k, v in held.shown.items() if held.at.get(k, 0) <= reading}
+            if held.offer_changed_at > reading:
+                held.offer_drawn = None
+            held.fragments_shown = {
+                name: v for name, v in held.fragments_shown.items() if held.fragments_at.get(name, 0) <= reading
+            }
+        self.deferred_since = reading if self.deferred_since is None else min(self.deferred_since, reading)
+        self.text_floor = reading if self.text_floor is None else min(self.text_floor, reading)
 
     @staticmethod
     def _aim(obj: "_HeldObject") -> str:
@@ -1662,6 +1746,34 @@ class PulseMemory(BaseModel):
         """`statics:` 절에 적히는 이름. `TurnBattleSystem.Instance` 꼴. holder 가 여럿이면 `State.hp@1`."""
         return f"{(entry.declaring or '').split('.')[-1]}.{entry.member}{entry.suffix}"
 
+    @classmethod
+    def _grouped_log_lines(cls, window: list[ReadingLog]) -> list[str]:
+        """같은 것이 움직인 판독이 이어지면 한 줄로 묶는다. 이름은 마지막 경로 조각과 member 로 줄인다.
+
+        애니메이션 타이머 · 파티클처럼 판독마다 같은 것이 움직이면, 묶지 않을 때 같은 긴 이름 목록이 판독 수만큼
+        반복됐다(로컬 런 32: 3805~3808 네 줄이 같은 목록). 값 자체는 오브젝트 블록에 따로 실린다.
+        """
+        out: list[str] = []
+        group: list[ReadingLog] = []
+
+        def flush() -> None:
+            if not group:
+                return
+            first, last = group[0], group[-1]
+            body = cls._log_line(first.model_copy(update={"changed": [_short_key(k) for k in first.changed]}))
+            if len(group) == 1:
+                out.append(f"  {first.reading} ({body})")
+            else:
+                out.append(f"  {first.reading}–{last.reading} ({len(group)} readings, each {body})")
+            group.clear()
+
+        for entry in window:
+            if group and (entry.whole or group[-1].whole or entry.changed != group[-1].changed):
+                flush()
+            group.append(entry)
+        flush()
+        return out
+
     @staticmethod
     def _log_line(entry: ReadingLog) -> str:
         """로그 한 줄의 본문.
@@ -1721,3 +1833,9 @@ class PulseMemory(BaseModel):
             if count and count > 1:
                 return f"  [moved in {count} readings]"
         return ""
+
+
+def _short_key(key: str) -> str:
+    """`씬/경로/오브젝트|Type::member` 를 `오브젝트|Type::member` 로 줄인다. 판독 목록에서만 쓴다."""
+    where, _, member = key.rpartition("|")
+    return f"{where.rsplit('/', 1)[-1]}|{member}" if where else key

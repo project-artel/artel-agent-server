@@ -254,7 +254,7 @@ def held_channel() -> QaRunChannel:
 def test_a_new_batch_makes_the_next_pulse_view_redraw_everything() -> None:
     channel = held_channel()
     state = QaRunState(total_steps=1)
-    middleware = _fold_context_for(SCENE_VIEW_ONLY, DEFAULT_FOLD_THRESHOLD_CHARS, state, channel)
+    middleware = _fold_context_for(SCENE_VIEW_ONLY, DEFAULT_FOLD_THRESHOLD_CHARS, state, channel, redraw="counted")
     messages = messages_reaching_the_default_threshold()
 
     sent = run_fold_middleware(middleware, messages)
@@ -267,7 +267,7 @@ def test_a_new_batch_makes_the_next_pulse_view_redraw_everything() -> None:
 def test_no_redraw_without_a_new_batch() -> None:
     channel = held_channel()
     state = QaRunState(total_steps=1)
-    middleware = _fold_context_for(SCENE_VIEW_ONLY, DEFAULT_FOLD_THRESHOLD_CHARS, state, channel)
+    middleware = _fold_context_for(SCENE_VIEW_ONLY, DEFAULT_FOLD_THRESHOLD_CHARS, state, channel, redraw="counted")
     batch = messages_reaching_the_default_threshold()
 
     # 기준에 못 미치는 동안은 `fold` 가 없다.
