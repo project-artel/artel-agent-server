@@ -14,7 +14,7 @@ import pytest
 from fastapi import WebSocketDisconnect
 
 from app.agents.qa.arch import QaArchSpec
-from app.api.qa_sessions import qa_session_ws
+from app.api.qa_sessions import _unsupported_frame_detail, qa_session_ws
 from app.qa.channel import KNOWLEDGE_SEARCH_TIMEOUT_SECONDS, READING_WAIT_SECONDS
 from app.qa.schemas import QaCaseRef, QaRunScenario, QaScenario, QaStep
 from app.qa.service import QaExecutionService
@@ -38,6 +38,15 @@ def make_scenario() -> QaScenario:
             )
         ],
     )
+
+
+def test_rejected_frame_detail_limits_the_headers_and_omits_the_payload():
+    detail = _unsupported_frame_detail({"type": "PULSE", "messageId": "id", "payload": "secret" * 20000})
+    assert detail == "Unsupported inbound frame (type='PULSE', messageId='id')"
+    detail = _unsupported_frame_detail({"type": "\0" * 100000, "messageId": "가" * 100000})
+    assert len(detail.encode()) < 1024
+    for raw in ["secret" * 20000, {"type": ["secret"], "messageId": {"secret": 1}}]:
+        assert _unsupported_frame_detail(raw) == "Unsupported inbound frame"
 
 
 @pytest.mark.parametrize("startup_fails", [False, True])

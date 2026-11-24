@@ -153,6 +153,16 @@ def _service(app) -> QaExecutionService:
     return app.state.qa_session_service
 
 
+def _unsupported_frame_detail(raw: object) -> str:
+    fields = raw if isinstance(raw, dict) else {}
+    labels = []
+    for key in ("type", "messageId"):
+        value = fields.get(key)
+        if isinstance(value, str):
+            labels.append(f"{key}={value[:64]!r}")
+    return "Unsupported inbound frame" + (" (" + ", ".join(labels) + ")" if labels else "")
+
+
 def _error_frame(code: str, detail: str, qa_try_id: int = 0) -> dict:
     """A minimal ERROR envelope for connection-level failures.
 
@@ -247,7 +257,7 @@ async def qa_session_ws(websocket: WebSocket, session_id: str) -> None:
             if not isinstance(raw, dict) or not service.deliver(session_id, raw):
                 await send(
                     _error_frame(
-                        "bad_request", f"Unsupported inbound frame: {raw!r}", qa_try_id
+                        "bad_request", _unsupported_frame_detail(raw), qa_try_id
                     )
                 )
     except WebSocketDisconnect:
