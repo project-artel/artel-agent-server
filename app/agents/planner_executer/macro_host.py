@@ -68,9 +68,7 @@ class ChannelMacroHost:
     async def call_game_function(self, name: str, arguments: str, target: str) -> tuple[bool, bool, str]:
         if self.game_functions is None:
             return False, False, "Game functions cannot run in probes, planning, or predicate evaluation."
-        if target and self.allowed_targets is not None and target not in self.allowed_targets:
-            return False, False, "Game function target is outside the selected action's bound targets."
-        reply = await self.game_functions.call(self.step, name, arguments, target or None)
+        reply = await self.game_functions.call(self.step, name, arguments, target or None, self.allowed_targets)
         if reply.sent:
             entry = self.channel.game_functions.entry("cheat", name)
             # Setup can fill a credential form. Its return text is neither a test observation nor safe to replay.

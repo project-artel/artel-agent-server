@@ -2,6 +2,8 @@ import asyncio
 
 import pytest
 
+from app.agents.evaluator.verdict import turn_line
+from app.agents.planner_executer.executer import recent_action_lines
 from app.agents.planner_executer.game_functions import PlannerGameFunctions
 from app.agents.planner_executer.macro_host import ChannelMacroHost
 from app.agents.qa.macro.errors import MacroRejection
@@ -127,4 +129,29 @@ def test_failed_setup_redacts_sdk_text_and_read_only_success_keeps_observation()
         assert (await query.call_game_function("query", "{}", ""))[:2] == (True, True)
         await reply
         assert query.sent[0]["kind"] == "read_only_function" and "hp=4" in query.sent[0]["value"]
+        turn = {"turn": 1, "picked": "observe", "outcome": "passed", "sent": setup.sent + query.sent}
+        for line in [*recent_action_lines([turn]), turn_line(turn)]:
+            assert "observed query:" in line and "hp=4" in line
+            assert "observed give_gold" not in line
+    asyncio.run(play())
+
+
+def test_contract_checks_and_sends_the_resolved_instance_when_target_is_omitted():
+    async def play():
+        channel, state, _, sent, arch = make()
+        functions = PlannerGameFunctions(ToolContext(channel, state, arch))
+        host = ChannelMacroHost(channel, None, 1, allowed_targets=frozenset([PLAYER]), game_functions=functions)
+        assert not (await host.call_game_function("heal", "{}", ""))[0]
+        for instance in [OTHER_PLAYER, PLAYER]:
+            pulse(channel, whole=True, functions={"whole": True, "entries": [
+                {"kind": "cheat", "name": "heal", "target": instance},
+            ]})
+            if instance == OTHER_PLAYER:
+                assert not (await host.call_game_function("heal", "{}", ""))[0]
+                assert not actions(sent)
+            else:
+                reply = answer(channel, sent, {"id": 1, "success": True})
+                assert (await host.call_game_function("heal", "{}", ""))[:2] == (True, True)
+                await reply
+                assert actions(sent)[0]["payload"]["actions"][0]["params"][0]["target"] == PLAYER
     asyncio.run(play())

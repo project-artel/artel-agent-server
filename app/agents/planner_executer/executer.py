@@ -1750,6 +1750,14 @@ def blocked_actions_line(not_ready: list[str], options: dict[str, str], macros: 
     return BLOCKED_ACTIONS_LINE.format(actions="; ".join(described))
 
 
+def read_only_observations(turn: dict) -> list[str]:
+    return [
+        f"observed {item['summary']}: {item['value']}"
+        for item in turn.get("sent") or []
+        if isinstance(item, dict) and item.get("kind") == "read_only_function" and item.get("ok") and item.get("value")
+    ]
+
+
 def recent_action_lines(turns: list[dict], limit: int = RECENT_ACTIONS_SHOWN) -> list[str]:
     """The last `RECENT_ACTIONS_SHOWN` turns that ran an action, one line each, oldest first.
 
@@ -1763,6 +1771,8 @@ def recent_action_lines(turns: list[dict], limit: int = RECENT_ACTIONS_SHOWN) ->
         sent = turn.get("sent") or []
         line = ("before the new plan, " if turn.get("earlier_plan") else "") + f"turn {turn.get('turn')}: {turn['picked']} → {turn['outcome']}, "
         line += f"sent {len(sent)} input{'s' if len(sent) != 1 else ''} to the game" if sent else "sent no input to the game"
+        for observation in read_only_observations(turn):
+            line += f"; {observation}"
         if turn.get("reason"):
             line += f" ({str(turn['reason'])[:MAX_REASON_CHARS]})"
         if effect_missed(turn):

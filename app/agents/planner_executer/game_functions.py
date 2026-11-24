@@ -42,7 +42,9 @@ class PlannerGameFunctions:
             "A setup response is never evidence that the tested action passed. Observe the actual outcome.\n\n"
         )
 
-    async def call(self, step: int, name: str, arguments: str, target: str | None) -> CheatCall:
+    async def call(
+        self, step: int, name: str, arguments: str, target: str | None, allowed_targets: frozenset[str] | None = None,
+    ) -> CheatCall:
         entry = next((item for item in self.available(step) if item.name == name), None)
         if entry is None:
             return CheatCall.refused(f"Step {step} does not permit game function {name!r}. Nothing was sent.")
@@ -50,11 +52,18 @@ class PlannerGameFunctions:
                 if item.kind == "cheat" and item.name == name]
         if not entry.is_static and not target and len(live) > 1:
             return CheatCall.refused("Several instances provide this function. Specify the target. Nothing was sent.")
+        if not entry.is_static and allowed_targets is not None and not target:
+            target = live[0].target if live else None
+            if not target:
+                return CheatCall.refused("No live instance to check against the selected action's bound targets.")
         if target and not entry.is_static:
             path, error = resolve_target(target, [item.target for item in live if item.target])
             if error:
                 return CheatCall.refused(error)
-            live = [item for item in live if item.target == path]
+            target = path
+            if allowed_targets is not None and target not in allowed_targets:
+                return CheatCall.refused("Game function target is outside the selected action's bound targets.")
+            live = [item for item in live if item.target == target]
         if live and not any(item.available for item in live):
             return CheatCall.refused(f"{name} is currently unavailable. Nothing was sent.")
         try:
