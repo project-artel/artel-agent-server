@@ -394,8 +394,8 @@ class PlannerExecuterRunner:
                         ahead.clear()
                     if not ahead:
                         ended_through = None
-                    # `done()` 자리에서 이미 판정을 받았고 묶음이 이어지지 않으면 그 판정을 쓴다. 화면도 그때 찍었다(pe12).
-                    reuse = getattr(play, "judged", None) is not None and not ahead
+                    # 단독 step만 `done()` 판정을 재사용한다. 앞 step이 기다리는 묶음도 최종 판정에 이 화면이 필요하다.
+                    reuse = play.judged is not None and not ahead and not held
                     image = (
                         await capture_screen(channel, f"Step {step}: capturing the screen for the evaluator", step)
                         if self._spec.screen_images == "on" and not reuse
